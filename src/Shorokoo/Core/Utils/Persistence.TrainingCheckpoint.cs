@@ -82,11 +82,11 @@ namespace Shorokoo
         }
 
         /// <summary>
-        /// Serializes one training-state <see cref="TensorDataStruct"/> to safetensors bytes, keyed
-        /// by struct field name (no section prefix — each kind is its own data entry). Fields must be
+        /// The safetensors records of one training-state <see cref="TensorDataStruct"/>, keyed by
+        /// struct field name (no section prefix — each kind is its own data entry). Fields must be
         /// plain tensors; a nested-struct field fails loudly, mirroring the flat writer.
         /// </summary>
-        internal static byte[] SerializeTrainingKind(TensorDataStruct data, string kindLabel)
+        internal static List<SafeTensor> TrainingKindTensors(TensorDataStruct data, string kindLabel)
         {
             var tensors = new List<SafeTensor>(data.Definition.Fields.Length);
             foreach (var fieldDef in data.Definition.Fields)
@@ -98,9 +98,25 @@ namespace Shorokoo
                 tensors.Add(new SafeTensor(
                     fieldDef.Name, td, SafeTensorLoader.DTypeToSafeTensorDType(td.DType), td.Shape.Dims));
             }
-            using var buffer = new MemoryStream();
-            SafeTensorLoader.SaveSafeTensorsToStream(buffer, tensors);
-            return buffer.ToArray();
+            return tensors;
+        }
+
+        /// <summary>
+        /// One safetensors data entry of a <c>.skpt</c>, as it is stored. Uncompressed, it is
+        /// produced straight out of the tensors' own storage as the archive is written, so writing
+        /// it costs no managed copy of those tensors (Shorokoo/Shorokoo#402); the entry is aligned. With
+        /// a Zstd <paramref name="zstdLevel"/>, the safetensors bytes are built once and wrapped in
+        /// a single Zstd frame, and the entry skips the alignment a compressed entry cannot use.
+        /// </summary>
+        internal static (SkptFileFormat.EntryPayload Stored, string Compression, bool Align) SafeTensorsDataEntry(
+            List<SafeTensor> tensors, int? zstdLevel)
+        {
+            void Produce(Stream s) => SafeTensorLoader.SaveSafeTensorsToStream(s, tensors);
+            return zstdLevel is int level
+                ? (SkptFileFormat.EntryPayload.Of(
+                       CompressedFormatUtils.Compress(SkptFileFormat.EntryPayload.ProduceBytes(Produce), level)),
+                   SkptFileFormat.CompressionZstd, false)
+                : (SkptFileFormat.EntryPayload.Produced(Produce), SkptFileFormat.CompressionNone, true);
         }
 
         // ---- Load ----
@@ -664,9 +680,9 @@ namespace Shorokoo
             if (string.IsNullOrWhiteSpace(filePath))
                 throw new ArgumentException("Checkpoint path cannot be null or empty.", nameof(filePath));
             // The entries are built INSIDE the write callback, as the flat save builds its tensors
-            // (TrainingCheckpoint.Save). Building them is the bulk of a .skpt save — it binds the
-            // inference weights, serializes every state kind to safetensors bytes, compresses, and
-            // SHA-256s each entry — so building them outside would leave all of it out of the
+            // (TrainingCheckpoint.Save). Building them is much of a .skpt save — it binds the
+            // inference weights, serializes the model graphs, and measures and SHA-256s each state
+            // entry (compressing it when asked) — so building them outside would leave it out of the
             // measured cost: the report would name a few milliseconds of zip framing for a call that
             // took fifty, and a loop subtracting it would still charge the rest to its training rate,
             // which is the very miscount #338 is about.
@@ -751,14 +767,8 @@ namespace Shorokoo
             // Serialize each training-state kind to safetensors (keyed by field name). The trainable
             // entry carries every trainable field (the authoritative source for reconstruction); the
             // model/optimizer state entries are written only when their struct is non-empty.
-            var trainableBytes = Persistence.SerializeTrainingKind(_checkpoint.TrainableParams, "trainable");
             var modelBytes = CompressedFormatUtils.SaveFastGraphToBinary(
                 CheckpointBuilder.StripWeights(source, weightNodes), GraphKind.ConcreteModel, compressed: true);
-
-            (byte[] Stored, string Compression, bool Align) EncodeDataEntry(byte[] rawBytes)
-                => _zstdDataCompressionLevel is int level
-                    ? (CompressedFormatUtils.Compress(rawBytes, level), SkptFileFormat.CompressionZstd, false)
-                    : (rawBytes, SkptFileFormat.CompressionNone, true);
 
             var dataEntries = new Dictionary<string, SkptDataEntry>(StringComparer.Ordinal);
             var bodyEntries = new List<SkptFileFormat.ZipEntrySpec>
@@ -766,37 +776,34 @@ namespace Shorokoo
                 new(SkptFileFormat.ModelEntryPath, modelBytes, Align: false),
             };
 
-            void AddDataEntry(string dataKey, string entryPath, byte[] rawBytes)
+            void AddDataEntry(string dataKey, string entryPath, List<SafeTensor> tensors)
             {
-                var (stored, compression, align) = EncodeDataEntry(rawBytes);
+                var (stored, compression, align) = Persistence.SafeTensorsDataEntry(tensors, _zstdDataCompressionLevel);
                 dataEntries[dataKey] = new SkptDataEntry
                 {
                     Entry = entryPath,
                     Format = SkptFileFormat.DataFormatSafeTensors,
                     Compression = compression,
-                    Sha256 = SkptFileFormat.Sha256Hex(stored),
+                    Sha256 = stored.Sha256,
                 };
                 bodyEntries.Add(new(entryPath, stored, Align: align));
             }
 
-            AddDataEntry(SkptFileFormat.TrainableDataKey, SkptFileFormat.TrainableEntryPath, trainableBytes);
+            AddDataEntry(SkptFileFormat.TrainableDataKey, SkptFileFormat.TrainableEntryPath,
+                Persistence.TrainingKindTensors(_checkpoint.TrainableParams, "trainable"));
             if (_checkpoint.ModelState.Definition.Fields.Length > 0)
                 AddDataEntry(SkptFileFormat.ModelStateDataKey, SkptFileFormat.ModelStateEntryPath,
-                    Persistence.SerializeTrainingKind(_checkpoint.ModelState, "model state"));
+                    Persistence.TrainingKindTensors(_checkpoint.ModelState, "model state"));
             if (_checkpoint.OptimizerState.Definition.Fields.Length > 0)
                 AddDataEntry(SkptFileFormat.OptimizerStateDataKey, SkptFileFormat.OptimizerStateEntryPath,
-                    Persistence.SerializeTrainingKind(_checkpoint.OptimizerState, "optimizer state"));
+                    Persistence.TrainingKindTensors(_checkpoint.OptimizerState, "optimizer state"));
             // The history, one tensor per column, as its own data entry — only when it has entries.
             if (_checkpoint.History.Count > 0)
-            {
-                var historyTensors = TrainingHistoryColumns.Write(_checkpoint.History)
-                    .Select(c => new SafeTensor(
-                        c.Name, c.Data, SafeTensorLoader.DTypeToSafeTensorDType(c.Data.DType), c.Data.Shape.Dims))
-                    .ToList();
-                using var historyBuffer = new MemoryStream();
-                SafeTensorLoader.SaveSafeTensorsToStream(historyBuffer, historyTensors);
-                AddDataEntry(SkptFileFormat.HistoryDataKey, SkptFileFormat.HistoryEntryPath, historyBuffer.ToArray());
-            }
+                AddDataEntry(SkptFileFormat.HistoryDataKey, SkptFileFormat.HistoryEntryPath,
+                    TrainingHistoryColumns.Write(_checkpoint.History)
+                        .Select(c => new SafeTensor(
+                            c.Name, c.Data, SafeTensorLoader.DTypeToSafeTensorDType(c.Data.DType), c.Data.Shape.Dims))
+                        .ToList());
 
             // Optimizer-state tensor mapping (issue #184): one entry per (trainable parameter ×
             // state slot) instance, keyed by the composite identifier — the parameter's full

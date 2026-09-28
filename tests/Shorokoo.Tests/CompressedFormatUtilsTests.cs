@@ -1070,6 +1070,52 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
     }
 
     [Fact]
+    public void TestSkptZipWriterStreamsProducedEntriesAndRefusesOnesThatChange()
+    {
+        byte[] digits = "123456789"u8.ToArray();
+        byte[] ramp = [.. Enumerable.Range(0, 1000).Select(i => (byte)(i * 7 % 251))];
+        Assert.Equal(0xCBF43926u, SkptFileFormat.EntryPayload.Of(digits).Crc32);
+        Assert.Equal(0x04DA8651u, SkptFileFormat.EntryPayload.Produced(s => s.Write(ramp)).Crc32);
+        Assert.Equal(SkptFileFormat.Sha256Hex(ramp), SkptFileFormat.EntryPayload.Produced(s => s.Write(ramp)).Sha256);
+        Assert.Equal(ramp, SkptFileFormat.EntryPayload.ProduceBytes(s => { s.Write(ramp, 0, 500); s.Write(ramp.AsSpan(500)); }));
+
+        using var zip = new MemoryStream();
+        SkptFileFormat.WriteStoredZip(zip,
+        [
+            new("a", digits, Align: false),
+            new("data/b", SkptFileFormat.EntryPayload.Produced(s => s.Write(ramp)), Align: true),
+        ], DateTime.UtcNow);
+        zip.Position = 0;
+        using (var archive = new ZipArchive(zip, ZipArchiveMode.Read, leaveOpen: true))
+        {
+            using var read = new MemoryStream();
+            archive.GetEntry("data/b")!.Open().CopyTo(read);
+            Assert.Equal(ramp, read.ToArray());
+        }
+        Assert.Equal(0, ParseLocalZipHeaders(zip.ToArray())[1].DataOffset % SkptFileFormat.DataAlignment);
+
+        int runs = 0;
+        var drifting = SkptFileFormat.EntryPayload.Produced(s => s.Write(ramp.AsSpan(0, 10 + runs++)));
+        Assert.Throws<InvalidOperationException>(() =>
+            SkptFileFormat.WriteStoredZip(Stream.Null, [new("c", drifting, Align: false)], DateTime.UtcNow));
+        Assert.Throws<InvalidOperationException>(() =>
+            SkptFileFormat.EntryPayload.ProduceBytes(s => s.Write(ramp.AsSpan(0, 10 + runs++))));
+    }
+
+    [Fact]
+    public void TestSkptEntryLargerThanTheReaderReadsIsRefusedAtSave()
+    {
+        byte[] mebibyte = new byte[1 << 20];
+        void TwoGibibytesAndOne(Stream s)
+        {
+            for (int i = 0; i <= 2048; i++) s.Write(mebibyte);
+        }
+
+        Assert.Throws<NotSupportedException>(() => SkptFileFormat.EntryPayload.Produced(TwoGibibytesAndOne));
+        Assert.Throws<NotSupportedException>(() => SkptFileFormat.EntryPayload.ProduceBytes(TwoGibibytesAndOne));
+    }
+
+    [Fact]
     public void TestSkptRoundTripConcreteModelBuilderGatesAndAtomicSave()
     {
         var (model, numOut, input) = BuildSkptModel();

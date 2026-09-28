@@ -702,7 +702,7 @@ namespace Shorokoo.Core.Utils
             {
                 using var fs = new FileStream(
                     resolvedPaths[i], FileMode.CreateNew, FileAccess.Write, FileShare.None);
-                fs.Write(entries[i].Data);
+                entries[i].Payload.WriteTo(fs, entries[i].Name);
                 fs.Flush(flushToDisk: true);
             }
         }
@@ -711,10 +711,180 @@ namespace Shorokoo.Core.Utils
 
         /// <summary>One entry to be written into a .skpt archive.</summary>
         /// <param name="Name">Archive path (forward slashes, ASCII).</param>
-        /// <param name="Data">Entry bytes; always STORED verbatim.</param>
+        /// <param name="Payload">Entry bytes; always STORED verbatim.</param>
         /// <param name="Align">Pad the local header (via a zipalign-style extra field) so the
         /// entry's payload starts at a <see cref="DataAlignment"/>-byte file offset.</param>
-        internal readonly record struct ZipEntrySpec(string Name, byte[] Data, bool Align);
+        internal readonly record struct ZipEntrySpec(string Name, EntryPayload Payload, bool Align)
+        {
+            /// <summary>An entry whose bytes are already in hand.</summary>
+            public ZipEntrySpec(string Name, byte[] Data, bool Align)
+                : this(Name, EntryPayload.Of(Data), Align)
+            {
+            }
+        }
+
+        /// <summary>
+        /// The bytes of one entry: either held, or produced on demand by a writer. A produced
+        /// entry is never held whole. Its writer runs into sinks that measure it — its length, then
+        /// its CRC-32 and SHA-256, which the manifest and the zip headers need before its first
+        /// byte is written — and once more into the destination. Writing an entry therefore costs
+        /// no managed copy of what it carries, however large that is.
+        /// </summary>
+        internal sealed class EntryPayload
+        {
+            /// <summary>The largest entry a .skpt reader reads, in either form; a produced entry
+            /// larger than this is refused when it is measured.</summary>
+            public const long MaxEntryLength = int.MaxValue;
+
+            private readonly byte[]? _bytes;
+            private readonly Action<Stream>? _produce;
+            private uint? _crc32;
+            private string? _sha256;
+
+            private EntryPayload(byte[]? bytes, Action<Stream>? produce, long length, uint? crc32, string? sha256)
+            {
+                _bytes = bytes;
+                _produce = produce;
+                Length = length;
+                _crc32 = crc32;
+                _sha256 = sha256;
+            }
+
+            /// <summary>An entry over bytes already in hand.</summary>
+            public static EntryPayload Of(byte[] bytes)
+                => new(bytes ?? throw new ArgumentNullException(nameof(bytes)), null, bytes.Length, null, null);
+
+            /// <summary>An entry produced by <paramref name="produce"/>, which must write the same
+            /// bytes every time it runs. It runs here twice: once to count its bytes, which refuses
+            /// an entry larger than <see cref="MaxEntryLength"/> before any of it is hashed, and once
+            /// to hash them.</summary>
+            public static EntryPayload Produced(Action<Stream> produce)
+            {
+                if (produce is null) throw new ArgumentNullException(nameof(produce));
+                CountedLength(produce);
+                using var sink = new MeasuringStream(destination: null, hash: true, MaxEntryLength, TooLarge);
+                produce(sink);
+                return new(null, produce, sink.Length, sink.Crc32, sink.Sha256Hex());
+            }
+
+            /// <summary>Runs <paramref name="produce"/> into an array of exactly the size it writes —
+            /// counted first, so the bytes are copied once and the array never regrows.</summary>
+            public static byte[] ProduceBytes(Action<Stream> produce)
+            {
+                if (produce is null) throw new ArgumentNullException(nameof(produce));
+                long length = CountedLength(produce);
+                var bytes = new byte[length];
+                using (var buffer = new MemoryStream(bytes))
+                    new EntryPayload(null, produce, length, null, null).WriteTo(buffer, "<in-memory entry>");
+                return bytes;
+            }
+
+            private static long CountedLength(Action<Stream> produce)
+            {
+                using var sink = new MeasuringStream(destination: null, hash: false, MaxEntryLength, TooLarge);
+                produce(sink);
+                return sink.Length;
+            }
+
+            private static Exception TooLarge(long length)
+                => new NotSupportedException(
+                    $"A .skpt entry would be at least {length} bytes; an entry holds at most " +
+                    $"{MaxEntryLength} bytes, the most a .skpt reader reads.");
+
+            /// <summary>The entry's size in bytes.</summary>
+            public long Length { get; }
+
+            /// <summary>The zip CRC-32 of the entry's bytes.</summary>
+            public uint Crc32 => _crc32 ??= SkptFileFormat.Crc32(_bytes!);
+
+            /// <summary>Lowercase hex SHA-256 of the entry's bytes, as a manifest records it.</summary>
+            public string Sha256 => _sha256 ??= Sha256Hex(_bytes!);
+
+            /// <summary>Writes the entry's bytes to <paramref name="destination"/>. A produced entry
+            /// is held to the length it measured at: one that writes more or fewer bytes has changed
+            /// under the save, and is refused rather than written into an archive whose headers and
+            /// manifest describe other bytes. Only the length is checked — a producer that writes
+            /// other bytes of the same length is not detected here, and fails its SHA-256 check on
+            /// load.</summary>
+            public void WriteTo(Stream destination, string entryName)
+            {
+                if (_bytes is not null)
+                {
+                    destination.Write(_bytes);
+                    return;
+                }
+                Exception Changed(long written) => new InvalidOperationException(
+                    $"The .skpt entry '{entryName}' wrote {written} bytes, but measured " +
+                    $"{Length} bytes moments earlier: its content changed while it was being saved.");
+                using var counted = new MeasuringStream(destination, hash: false, Length, Changed);
+                _produce!(counted);
+                if (counted.Length != Length) throw Changed(counted.Length);
+            }
+        }
+
+        /// <summary>A write-only stream that counts, and optionally CRC-32s and SHA-256s, what is
+        /// written through it, forwarding it to <c>destination</c> when there is one. A write that
+        /// would take it past <c>limit</c> bytes throws <c>overrun</c>'s exception before any of that
+        /// write is hashed or forwarded.</summary>
+        private sealed class MeasuringStream : Stream
+        {
+            private readonly Stream? _destination;
+            private readonly IncrementalHash? _sha256;
+            private readonly long _limit;
+            private readonly Func<long, Exception> _overrun;
+            private uint _crc = 0xFFFFFFFFu;
+
+            public MeasuringStream(Stream? destination, bool hash, long limit, Func<long, Exception> overrun)
+            {
+                _destination = destination;
+                _limit = limit;
+                _overrun = overrun;
+                if (hash) _sha256 = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+            }
+
+            public override long Length => _length;
+            private long _length;
+
+            public uint Crc32 => _crc ^ 0xFFFFFFFFu;
+
+            public string Sha256Hex() => Convert.ToHexString(_sha256!.GetHashAndReset()).ToLowerInvariant();
+
+            public override void Write(ReadOnlySpan<byte> buffer)
+            {
+                if (_length + buffer.Length > _limit) throw _overrun(_length + buffer.Length);
+                _length += buffer.Length;
+                if (_sha256 is not null)
+                {
+                    _sha256.AppendData(buffer);
+                    _crc = Crc32Update(_crc, buffer);
+                }
+                _destination?.Write(buffer);
+            }
+
+            public override void Write(byte[] buffer, int offset, int count)
+                => Write(buffer.AsSpan(offset, count));
+
+            public override void WriteByte(byte value) => Write([value]);
+
+            public override bool CanRead => false;
+            public override bool CanSeek => false;
+            public override bool CanWrite => true;
+            public override long Position
+            {
+                get => _length;
+                set => throw new NotSupportedException();
+            }
+            public override void Flush() => _destination?.Flush();
+            public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+            public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+            public override void SetLength(long value) => throw new NotSupportedException();
+
+            protected override void Dispose(bool disposing)
+            {
+                if (disposing) _sha256?.Dispose();
+                base.Dispose(disposing);
+            }
+        }
 
         // The zip writer is hand-rolled because System.IO.Compression.ZipArchive cannot pad
         // local headers, and payload alignment is a container rule. Writing STORED-only zip
@@ -733,8 +903,9 @@ namespace Shorokoo.Core.Utils
         /// Writes <paramref name="entries"/> as a STORED-only zip archive. Every entry is
         /// method-0 (no compression); entries flagged <see cref="ZipEntrySpec.Align"/> get a
         /// padding extra field so their payload starts at a <see cref="DataAlignment"/>-byte
-        /// offset. Entry sizes are capped below the Zip64 threshold — large-tensor streaming
-        /// is out of scope for this format version.
+        /// offset. The whole archive is capped below the Zip64 threshold. Each entry's payload is
+        /// written straight from its <see cref="EntryPayload"/>, so a produced entry streams into
+        /// the archive without ever being held whole.
         /// </summary>
         internal static void WriteStoredZip(Stream stream, IReadOnlyList<ZipEntrySpec> entries, DateTime timestampUtc)
         {
@@ -743,10 +914,10 @@ namespace Shorokoo.Core.Utils
 
             (ushort dosTime, ushort dosDate) = ToDosDateTime(timestampUtc);
 
+            // Lay the archive out before writing any of it: every entry's size is known up front,
+            // so an archive too large for this format is refused before a byte of it is written.
             long offset = 0;
-            var records = new List<(ZipEntrySpec Entry, byte[] NameBytes, uint Crc, long HeaderOffset)>(entries.Count);
-
-            using var writer = new BinaryWriter(stream, Encoding.ASCII, leaveOpen: true);
+            var records = new List<(ZipEntrySpec Entry, byte[] NameBytes, int ExtraLength, long HeaderOffset)>(entries.Count);
             foreach (var entry in entries)
             {
                 var nameBytes = Encoding.ASCII.GetBytes(entry.Name);
@@ -763,37 +934,15 @@ namespace Shorokoo.Core.Utils
                     if (extraLength is > 0 and < 4) extraLength += DataAlignment;
                 }
 
-                uint crc = Crc32(entry.Data);
-                records.Add((entry, nameBytes, crc, offset));
-
-                writer.Write(LocalFileHeaderSignature);
-                writer.Write(ZipVersionStored);           // version needed to extract
-                writer.Write((ushort)0);                  // general purpose flags
-                writer.Write((ushort)0);                  // method 0 = STORED
-                writer.Write(dosTime);
-                writer.Write(dosDate);
-                writer.Write(crc);
-                writer.Write((uint)entry.Data.Length);    // compressed size (== uncompressed)
-                writer.Write((uint)entry.Data.Length);    // uncompressed size
-                writer.Write((ushort)nameBytes.Length);
-                writer.Write((ushort)extraLength);
-                writer.Write(nameBytes);
-                if (extraLength > 0)
-                {
-                    writer.Write(AlignmentExtraFieldId);
-                    writer.Write((ushort)(extraLength - 4));
-                    writer.Write(new byte[extraLength - 4]);
-                }
-                writer.Write(entry.Data);
-
-                offset += LocalFileHeaderSize + nameBytes.Length + extraLength + entry.Data.Length;
+                records.Add((entry, nameBytes, extraLength, offset));
+                offset += LocalFileHeaderSize + nameBytes.Length + extraLength + entry.Payload.Length;
             }
 
             long centralDirectoryOffset = offset;
-            // Local-header offsets and the central-directory offset are stored as 32-bit
-            // fields (a header offset is always < centralDirectoryOffset, so this one check
-            // bounds them all). Beyond 4 GiB the format needs Zip64, which this version does
-            // not write — fail loudly here rather than silently truncate an offset and emit a
+            // Local-header offsets, the central-directory offset and entry sizes are stored as
+            // 32-bit fields (every one of them is at most centralDirectoryOffset, so this one
+            // check bounds them all). Beyond 4 GiB the format needs Zip64, which this version
+            // does not write — fail loudly here rather than silently truncate a field and emit a
             // corrupt archive. The count field is likewise 16-bit.
             if (centralDirectoryOffset > uint.MaxValue)
                 throw new NotSupportedException(
@@ -804,7 +953,32 @@ namespace Shorokoo.Core.Utils
                     $"The .skpt archive has {records.Count} entries; more than {ushort.MaxValue} need Zip64, " +
                     "which this .skpt version does not write.");
 
-            foreach (var (entry, nameBytes, crc, headerOffset) in records)
+            using var writer = new BinaryWriter(stream, Encoding.ASCII, leaveOpen: true);
+            foreach (var (entry, nameBytes, extraLength, _) in records)
+            {
+                writer.Write(LocalFileHeaderSignature);
+                writer.Write(ZipVersionStored);           // version needed to extract
+                writer.Write((ushort)0);                  // general purpose flags
+                writer.Write((ushort)0);                  // method 0 = STORED
+                writer.Write(dosTime);
+                writer.Write(dosDate);
+                writer.Write(entry.Payload.Crc32);
+                writer.Write((uint)entry.Payload.Length); // compressed size (== uncompressed)
+                writer.Write((uint)entry.Payload.Length); // uncompressed size
+                writer.Write((ushort)nameBytes.Length);
+                writer.Write((ushort)extraLength);
+                writer.Write(nameBytes);
+                if (extraLength > 0)
+                {
+                    writer.Write(AlignmentExtraFieldId);
+                    writer.Write((ushort)(extraLength - 4));
+                    writer.Write(new byte[extraLength - 4]);
+                }
+                writer.Flush();
+                entry.Payload.WriteTo(stream, entry.Name);
+            }
+
+            foreach (var (entry, nameBytes, _, headerOffset) in records)
             {
                 writer.Write(CentralDirectoryHeaderSignature);
                 writer.Write(ZipVersionStored);           // version made by
@@ -813,9 +987,9 @@ namespace Shorokoo.Core.Utils
                 writer.Write((ushort)0);                  // method 0 = STORED
                 writer.Write(dosTime);
                 writer.Write(dosDate);
-                writer.Write(crc);
-                writer.Write((uint)entry.Data.Length);
-                writer.Write((uint)entry.Data.Length);
+                writer.Write(entry.Payload.Crc32);
+                writer.Write((uint)entry.Payload.Length);
+                writer.Write((uint)entry.Payload.Length);
                 writer.Write((ushort)nameBytes.Length);
                 writer.Write((ushort)0);                  // extra length (central copy carries none)
                 writer.Write((ushort)0);                  // comment length
@@ -845,27 +1019,45 @@ namespace Shorokoo.Core.Utils
             return (time, date);
         }
 
-        private static readonly uint[] Crc32Table = BuildCrc32Table();
+        // Slicing-by-8 CRC-32 (the zip polynomial): eight table lookups per eight bytes rather
+        // than one per byte, since every byte of a checkpoint's state passes through it.
+        private static readonly uint[][] Crc32Tables = BuildCrc32Tables();
 
-        private static uint[] BuildCrc32Table()
+        private static uint[][] BuildCrc32Tables()
         {
-            var table = new uint[256];
+            var tables = new uint[8][];
+            for (int t = 0; t < 8; t++) tables[t] = new uint[256];
             for (uint i = 0; i < 256; i++)
             {
                 uint c = i;
                 for (int k = 0; k < 8; k++)
                     c = (c & 1) != 0 ? 0xEDB88320u ^ (c >> 1) : c >> 1;
-                table[i] = c;
+                tables[0][i] = c;
             }
-            return table;
+            for (int i = 0; i < 256; i++)
+                for (int t = 1; t < 8; t++)
+                    tables[t][i] = (tables[t - 1][i] >> 8) ^ tables[0][tables[t - 1][i] & 0xFF];
+            return tables;
         }
 
         private static uint Crc32(ReadOnlySpan<byte> data)
+            => Crc32Update(0xFFFFFFFFu, data) ^ 0xFFFFFFFFu;
+
+        private static uint Crc32Update(uint c, ReadOnlySpan<byte> data)
         {
-            uint c = 0xFFFFFFFFu;
-            foreach (byte b in data)
-                c = Crc32Table[(c ^ b) & 0xFF] ^ (c >> 8);
-            return c ^ 0xFFFFFFFFu;
+            var t = Crc32Tables;
+            uint[] t0 = t[0], t1 = t[1], t2 = t[2], t3 = t[3], t4 = t[4], t5 = t[5], t6 = t[6], t7 = t[7];
+            int i = 0;
+            for (; i + 8 <= data.Length; i += 8)
+            {
+                uint lo = c ^ System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(data.Slice(i, 4));
+                uint hi = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(data.Slice(i + 4, 4));
+                c = t7[lo & 0xFF] ^ t6[(lo >> 8) & 0xFF] ^ t5[(lo >> 16) & 0xFF] ^ t4[lo >> 24]
+                  ^ t3[hi & 0xFF] ^ t2[(hi >> 8) & 0xFF] ^ t1[(hi >> 16) & 0xFF] ^ t0[hi >> 24];
+            }
+            for (; i < data.Length; i++)
+                c = t0[(c ^ data[i]) & 0xFF] ^ (c >> 8);
+            return c;
         }
 
         #endregion

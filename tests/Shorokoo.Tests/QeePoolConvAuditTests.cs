@@ -154,7 +154,8 @@ public class QeePoolConvAuditTests
             expected: [0, 0, 2, 2, 3, 4]));
     }
 
-    [Fact]
+    // #426: ONNX Runtime's MaxPool gives a window of only -inf the lowest finite value instead of -inf
+    [Fact(Skip = "#426: ONNX Runtime's MaxPool gives a window of only -inf the lowest finite value instead of -inf")]
     public void TestMaxPoolWithoutIndicesGivesANegativeInfinityWindowNegativeInfinity()
     {
         Assert.True(PlainMaxPool(DType.Float16, AsFloat16, [N, N, L, N], N, L, L));

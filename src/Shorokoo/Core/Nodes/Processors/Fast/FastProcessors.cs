@@ -57,11 +57,12 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// session computed rather than to the result — alive for as long as the result is
         /// referenced. Nothing reclaims it: the value is genuinely reachable, so a forced
         /// collection does not help, and the arena outlives the session's own disposal. Retaining
-        /// N such results therefore costs N arenas. Measured on one caller
-        /// (<c>FastInitializeModelParams</c>, initializing a 12 x [384, 384] model on a session
-        /// per parameter): 379-481 MiB still live after a forced collection, for 6.75 MiB of actual
-        /// parameter, against 10-32 MiB with this copy. See Shorokoo/Shorokoo#180 for the
-        /// general ownership question this sidesteps rather than settles.</para>
+        /// N such results therefore costs as many arenas as there were sessions. Measured on one
+        /// caller (<c>FastInitializeModelParams</c>, initializing a 12 x [384, 384] model): 131 MiB
+        /// of native memory still live after a forced collection with the results left on their
+        /// session, for 6.75 MiB of actual parameter, against 16-23 MiB with this copy. See
+        /// Shorokoo/Shorokoo#180 for the general ownership question this sidesteps rather than
+        /// settles.</para>
         ///
         /// <para>The copy is the part that frees the arena — it makes the backend tensor
         /// unreachable. Disposing the source as well makes the release deterministic instead of

@@ -69,7 +69,7 @@ internal static class RigScalingStack
 /// peak initializing the large table needs over the small one, so the fixed process floor cancels
 /// and what remains is the per-element law — machine-independent in a way a wall clock is not.
 /// Around initialization rather than a whole rig build, whose own fixed peaks — composing the
-/// training step — now sit above anything a table's draw adds and would flatten the difference
+/// training step — sit above anything a table's draw adds and would flatten the difference
 /// to nothing.</para>
 ///
 /// <para><b>Cost per trainable parameter.</b> Initializing every parameter in one session makes

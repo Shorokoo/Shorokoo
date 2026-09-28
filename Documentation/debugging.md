@@ -155,10 +155,17 @@ so the `Where`s the reduction and pool rewrites emit are covered by the last row
 | `AveragePool`, `LpPool`, `MaxPool` | `SAME_UPPER`/`SAME_LOWER` with a dilation above 1 or a stride above the kernel; explicit pads as large as the kernel | `Pad`, a pool with padding ONNX Runtime accepts, and `Slice` | [#379](https://github.com/Shorokoo/Shorokoo/issues/379), [#408](https://github.com/Shorokoo/Shorokoo/issues/408) |
 | `Col2Im` | One spatial axis | `Col2Im` over two axes, the second of extent 1, then `Squeeze` | [#381](https://github.com/Shorokoo/Shorokoo/issues/381) |
 | `Resize` | `tf_crop_and_resize` along an axis whose length the resize leaves unchanged | That axis resized to `2L−1` under the same `roi`, every second element kept | [#380](https://github.com/Shorokoo/Shorokoo/issues/380) |
-| `Resize` | Cubic rank-4 `tf_crop_and_resize` with scale 1 on axes 0 and 3 and not on axis 1 | The input regrouped as `[N·W, 1, C, H]`, resized over its last two axes, regrouped back | [#421](https://github.com/Shorokoo/Shorokoo/issues/421) |
-| `Resize` | An `axes` attribute naming a subset of the axes | Written out over every axis | [#429](https://github.com/Shorokoo/Shorokoo/issues/429) |
+| `Resize` | Cubic rank-4 `tf_crop_and_resize` with scale 1 on axes 0 and 3 and not on axis 1 | The input regrouped as `[N·W, 1, C, H]`, resized over its last two axes (a `not_larger`/`not_smaller` policy kept over the regrouped axes), regrouped back | [#421](https://github.com/Shorokoo/Shorokoo/issues/421) |
+| `Resize` | An `axes` attribute: the transpose optimizer misreads its per-axis operands, and the kernel refuses negative axes | Written out over every axis; a `not_larger`/`not_smaller` policy over a subset of the axes keeps its axes, counted from the front, behind an `OptionalGetElement(Optional(x))` the optimizer cannot move a `Transpose` through | [#429](https://github.com/Shorokoo/Shorokoo/issues/429) |
 | `Where` | int8, int16, uint16, uint32, uint64, bfloat16 or bool values (no kernel) | bool: `Or(And(c, x), And(Not(c), y))`; others: selected through int32, int64 or float32 and cast back | [#423](https://github.com/Shorokoo/Shorokoo/issues/423) |
 
 A call whose input is a nonempty `Constant` cannot hit the empty-input rows and is left alone. Where
 only the input's shape at run time decides whether a call is affected, the rewrite is an `If` that
 takes the plain call for every other input.
+
+Two ONNX Runtime faults have no workaround, and a model that meets one gets ONNX Runtime's result:
+
+- `MaxPool` without an `Indices` output gives a window of only −inf the type's lowest finite value
+  instead of −inf ([#426](https://github.com/Shorokoo/Shorokoo/issues/426)).
+- A model that returns a `Range` as an output beside a `Gather` the `Range` drives fails to load:
+  ONNX Runtime's full graph optimization drops the `Range` from the outputs ([#432](https://github.com/Shorokoo/Shorokoo/issues/432)).

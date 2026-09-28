@@ -235,7 +235,7 @@ Boolean/integer outputs are non-differentiable, hence N/A.
 | NonZero | 🟡 [6] | ✅ [7] | N/A [2] |
 | OneHot | ✅ | ✅ | N/A [8] |
 | Pad | ✅ | ✅ | 🟡 [9] |
-| Range | ✅ | ✅ | N/A [2] |
+| Range | 🟡 [19] | ✅ | N/A [2] |
 | Reshape | ✅ | ✅ | ✅ |
 | ReverseSequence | 🟡 [10] | ✅ | ✅ |
 | Scatter | ❌ [11] | N/A | N/A |
@@ -297,6 +297,10 @@ Boolean/integer outputs are non-differentiable, hence N/A.
     `k` wired but unknown, the shape is rank-only with bounds.
 18. The flatten form computes all four outputs for small tensors (both `sorted`
     modes); the `axis` form is shape-only, with a data-dependent unique count.
+19. A model that returns a `Range` as an output beside a `Gather` the `Range`
+    drives fails on ONNX Runtime: its full graph optimization drops the `Range`
+    from the outputs, and the session fails to load. Not worked around
+    ([#432](https://github.com/Shorokoo/Shorokoo/issues/432)).
 
 ## Convolution & pooling
 
@@ -447,7 +451,7 @@ Boolean/integer outputs are non-differentiable, hence N/A.
 | GridSample | ✅ | 🟡 [1] | 🟡 [4] |
 | ImageDecoder | 🟡 [13] | 🟡 [5] | N/A |
 | NonMaxSuppression | ✅ | 🟡 [6] | N/A (index output) |
-| Resize | 🟡 [7] [15] | 🟡 [8] | 🟡 [9] |
+| Resize | ✅ [7] [15] | 🟡 [8] | 🟡 [9] |
 | RoiAlign | ✅ | 🟡 [1] | 🟡 [10] |
 | Upsample | ✅ [11] | 🟡 [1] | 🟡 [12] |
 
@@ -459,8 +463,9 @@ Boolean/integer outputs are non-differentiable, hence N/A.
 5. Shape/dtype only; output is rank-3 uint8.
 6. Exact `[0, 3]` when `max_output_boxes_per_class` is absent or 0, otherwise rank
    plus an upper bound.
-7. ONNX Runtime's CPU kernel rejects negative `axes` entries (spec-legal since
-   opset 18); QEE handles them.
+7. Negative `axes` entries (spec-legal since opset 18) run on every backend and in
+   QEE. ONNX Runtime's kernel refuses them, so on that backend the `axes` rewrite
+   in note 15 counts them from the front.
 8. Full shape inference (scales/sizes, `axes`, `keep_aspect_ratio_policy`, all
    modes); values not computed.
 9. Nearest mode with the asymmetric coordinate transform only; others throw.
@@ -488,9 +493,22 @@ Boolean/integer outputs are non-differentiable, hence N/A.
     - A cubic rank-4 `tf_crop_and_resize` whose scales for axes 0 and 3 are 1 and
       for axis 1 is not: ONNX Runtime's channels-last route places out-of-roi
       `extrapolation_value`s at the wrong elements. The input is regrouped so the
-      resize runs over its last two axes, and the result regrouped back
+      resize runs over its last two axes, and the result regrouped back. A
+      `keep_aspect_ratio_policy` of `not_larger` or `not_smaller` is kept, over
+      the regrouped positions of the axes it names; one that names axis 0 or 3
+      never takes the channels-last route and is left as it stands
       ([#421](https://github.com/Shorokoo/Shorokoo/issues/421)).
-    - A `Resize` with an `axes` attribute is written out over every axis
+    - A `Resize` with an `axes` attribute: ONNX Runtime's transpose optimizer
+      moves a `Transpose` through it as though its `roi`, `scales` and `sizes`
+      held one entry per input axis, so the session fails, or reorders them
+      wrongly when the named axes are all of them out of order; its kernel also
+      refuses negative axes. The call is written out over every axis, each axis
+      it does not name taking scale 1, its own extent as size and the `roi`
+      `[0, 1]`. A `not_larger` or `not_smaller` policy over a subset of the axes
+      takes its common scale over those axes alone, which no call over every axis
+      reproduces, so such a call keeps its axes, counted from the front, and reads
+      its input through `OptionalGetElement(Optional(x))` — the same tensor,
+      which the transpose optimizer cannot move a `Transpose` through
       ([#429](https://github.com/Shorokoo/Shorokoo/issues/429)).
 
 ## Random

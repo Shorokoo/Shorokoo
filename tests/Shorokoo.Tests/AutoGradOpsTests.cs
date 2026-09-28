@@ -366,6 +366,8 @@ public class AutoGradIndexingOpsCoverageTests
         Run<AutoGradGatherNonZeroAxisOneDimIndicesCheck>(3f);
         Run<AutoGradGatherNonZeroAxisOneDimIndicesUnknownRankCheck>(3f);
         Run<AutoGradGatherNonZeroAxisMultiDimIndicesCheck>(4f);
+        Run<AutoGradGatherNonZeroAxisUnknownRankZeroLeadCheck>(3f);
+        Run<AutoGradGatherNonZeroAxisMultiDimIndicesZeroLeadCheck>(3f);
         Run<AutoGradGatherNDCheck>(4f);
         Run<AutoGradGatherNDDuplicateIndicesCheck>(2f);
         Run<AutoGradGatherNDWithScaleCheck>(3f);
@@ -419,6 +421,8 @@ public class AutoGradMatrixPoolingAndConvOpsCoverageTests
         Run<AutoGradGemmTransBCheck>(2f);
         Run<AutoGradMatMulKnownRankCheck>(2f);
         Run<AutoGradMatMulUnknownRankBatchedCheck>(2f);
+        Run<AutoGradMatMulUnknownRankNoRowsCheck>(2f);
+        Run<AutoGradMatMulUnknownRankRank4NoRowsCheck>(2f);
         RunSmall<AutoGradMatMulBatchTimesMatrixCheck>([2L, 3L, 4L]);
         RunSmall<AutoGradMatMulMatrixTimesMatrixCheck>([3L, 4L]);
         RunSmall<AutoGradMatMulVectorTimesMatrixCheck>([4L]);

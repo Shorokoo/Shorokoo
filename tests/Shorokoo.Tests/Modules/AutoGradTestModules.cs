@@ -2950,6 +2950,37 @@ namespace Shorokoo.Tests.Modules
     }
 
     /// <summary>
+    /// An unknown-rank batched MatMul with no rows, <c>expand(a, lhs)</c> times
+    /// <c>expand(a, rhs)</c>: the product is empty, so dL/da = 0 through the rank-agnostic
+    /// last-two-dims transpose of a zero-sized operand.
+    /// </summary>
+    internal static class AutoGradMatMulUnknownRankEmpty
+    {
+        internal static Scalar<bit> Check(Scalar<float32> a, long[] lhs, long[] rhs)
+        {
+            var A = (Tensor<float32>)OnnxOp.Expand(a, Vector(lhs));
+            var B = (Tensor<float32>)OnnxOp.Expand(a, Vector(rhs));
+            var loss = ((Tensor<float32>)OnnxOp.MatMul(A, B)).Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+            var grad = Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(a, loss);
+            return grad.Abs() < Scalar(1e-5f);
+        }
+    }
+
+    [Module]
+    public partial class AutoGradMatMulUnknownRankNoRowsCheck
+    {
+        public static Scalar<bit> Inline(Scalar<float32> a)
+            => AutoGradMatMulUnknownRankEmpty.Check(a, [2L, 0L, 3L], [2L, 3L, 2L]);
+    }
+
+    [Module]
+    public partial class AutoGradMatMulUnknownRankRank4NoRowsCheck
+    {
+        public static Scalar<bit> Inline(Scalar<float32> a)
+            => AutoGradMatMulUnknownRankEmpty.Check(a, [1L, 2L, 0L, 3L], [1L, 2L, 3L, 2L]);
+    }
+
+    /// <summary>
     /// Unknown-rank batched MatMul: no Identity rank stamp, so the operands' Rank is
     /// null and the MatMul gradient takes the rank-agnostic last-two-dims transpose
     /// fallback (collapse leading dims → swap → restore) instead of the static perm.
@@ -4062,6 +4093,42 @@ namespace Shorokoo.Tests.Modules
             var loss = gathered.Reduce(ReduceKind.Sum, keepDims: false).Scalar();
             var grad = Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(a, loss);
             return (grad - Scalar(2f)).Abs() < Scalar(1e-5f);
+        }
+    }
+
+    /// <summary>
+    /// Column 1 of an unknown-rank [0, 3] table: nothing is gathered, so dL/da = 0 through the
+    /// rank-agnostic collapse-to-3-D scatter with a zero-sized leading dim.
+    /// </summary>
+    [Module]
+    public partial class AutoGradGatherNonZeroAxisUnknownRankZeroLeadCheck
+    {
+        public static Scalar<bit> Inline(Scalar<float32> a)
+        {
+            var data = (Tensor<float32>)OnnxOp.Expand(a, Vector(0L, 3L));
+            var gathered = (Tensor<float32>)OnnxOp.Gather(data, Vector(1L), axis: 1);
+            var loss = gathered.Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+            var grad = Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(a, loss);
+            return grad.Abs() < Scalar(1e-5f);
+        }
+    }
+
+    /// <summary>
+    /// Column 1 of a static-rank [0, 3] table at [1, 1] indices: nothing is gathered, so dL/da = 0
+    /// through the multi-dim-index flatten with a zero-sized leading dim.
+    /// </summary>
+    [Module]
+    public partial class AutoGradGatherNonZeroAxisMultiDimIndicesZeroLeadCheck
+    {
+        public static Scalar<bit> Inline(Scalar<float32> a)
+        {
+            var data = (Tensor<float32>)OnnxOp.Identity(OnnxOp.Expand(a, Vector(0L, 3L)), rank: 2);
+            var indices = (Tensor<int64>)OnnxOp.Identity(
+                OnnxOp.Reshape(Vector(1L), Vector(1L, 1L), allowZero: false), rank: 2);
+            var gathered = (Tensor<float32>)OnnxOp.Gather(data, indices, axis: 1);
+            var loss = gathered.Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+            var grad = Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(a, loss);
+            return grad.Abs() < Scalar(1e-5f);
         }
     }
 

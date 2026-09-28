@@ -417,6 +417,95 @@ namespace Shorokoo.Tests.Modules
         }
     }
 
+    /// <summary>Whether the gradient of <c>sum(pool(x)^2)</c> matches its two-sided directional
+    /// derivative along that gradient.</summary>
+    public static class PoolGradientCheck
+    {
+        public static Scalar<bit> Holds(Tensor<float32> x, Func<Tensor<float32>, Variable> pool)
+        {
+            Scalar<float32> Loss(Tensor<float32> v)
+            {
+                var y = (Tensor<float32>)pool(v);
+                return (y * y).Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+            }
+            var grad = (Tensor<float32>)Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(x, Loss(x));
+            var h = Scalar(1e-3f);
+            var deriv = (Loss(x + h * grad) - Loss(x - h * grad)) / (Scalar(2f) * h);
+            var gradNormSq = (grad * grad).Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+            return (deriv - gradNormSq).Abs() < Scalar(1e-3f) * (gradNormSq.Abs() + Scalar(1f));
+        }
+    }
+
+    [Module]
+    public partial class AutoGradAvgPool1DStrideAboveKernel
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x)
+            => PoolGradientCheck.Holds(x, v => OnnxOp.AveragePool(v, AutoPad.NotSet, false, true, null, [2L], null, [3L]));
+    }
+
+    [Module]
+    public partial class AutoGradMaxPoolPadsReachingTheKernel
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x)
+            => PoolGradientCheck.Holds(x, v => OnnxOp.MaxPool(v, AutoPad.NotSet, false, [3L], [2L], [2L, 1L], 0L, [1L]));
+    }
+
+    [Module]
+    public partial class AutoGradAvgPoolIncludingPadsReachingTheKernel
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x)
+            => PoolGradientCheck.Holds(x, v => OnnxOp.AveragePool(v, AutoPad.NotSet, false, true, [3L], [2L], [2L, 1L], [1L]));
+    }
+
+    [Module]
+    public partial class AutoGradAvgPoolExcludingPadsReachingTheKernel
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x)
+            => PoolGradientCheck.Holds(x, v => OnnxOp.AveragePool(v, AutoPad.NotSet, false, false, [3L], [2L], [2L, 1L], [1L]));
+    }
+
+    [Module]
+    public partial class AutoGradAvgPoolSameDilated
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x)
+            => PoolGradientCheck.Holds(x, v => OnnxOp.AveragePool(v, AutoPad.SameUpper, false, true, [2L], [2L], null, [2L]));
+    }
+
+    [Module]
+    public partial class AutoGradLpPoolPadsReachingTheKernel
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x)
+            => PoolGradientCheck.Holds(x, v => OnnxOp.LpPool(v, AutoPad.NotSet, false, [3L], [2L], 2L, [2L, 1L], [1L]));
+    }
+
+    [Module]
+    public partial class AutoGradLpPoolDilated
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x)
+            => PoolGradientCheck.Holds(x, v => OnnxOp.LpPool(v, AutoPad.NotSet, false, [2L], [2L], 2L, [1L, 0L], [1L]));
+    }
+
+    [Module]
+    public partial class AutoGradLpPoolSameDilated
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x)
+            => PoolGradientCheck.Holds(x, v => OnnxOp.LpPool(v, AutoPad.SameUpper, false, [2L], [2L], 2L, null, [2L]));
+    }
+
+    [Module]
+    public partial class AutoGradLpPoolSameLower
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x)
+            => PoolGradientCheck.Holds(x, v => OnnxOp.LpPool(v, AutoPad.SameLower, false, null, [3L], 2L, null, [2L]));
+    }
+
+    [Module]
+    public partial class AutoGradLpPoolCeilMode
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x)
+            => PoolGradientCheck.Holds(x, v => OnnxOp.LpPool(v, AutoPad.NotSet, true, null, [2L], 2L, [0L, 1L], [2L]));
+    }
+
     /// <summary>
     /// AutoGrad through 2D AveragePool. Self-checking via two-sided directional
     /// derivative. Exercises <c>AveragePoolGradient</c> in <c>AutoDiffs.Batch5.cs</c>

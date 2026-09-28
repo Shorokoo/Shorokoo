@@ -49,7 +49,7 @@ public static partial class OnnxOp
 
     public static Variable AveragePool(Variable x, AutoPad? autoPad, bool? ceilMode, bool? countIncludePad, 
         long[]? dilations, long[] kernelShape, long[]? pads, long[]? strides)
-        => NeedsWrittenPadding(autoPad, dilations, kernelShape, pads)
+        => NeedsWrittenPadding(autoPad, dilations, kernelShape, pads, strides)
             ? PaddedPool(x, countIncludePad == true ? PoolKind.AverageIncludingPad : PoolKind.AverageExcludingPad,
                 autoPad, ceilMode, dilations, kernelShape, pads, strides, null,
                 (input, p, s, ceil, includePad) => [AveragePool(input, null, ceil, includePad, dilations, kernelShape, p, s)])[0]
@@ -122,26 +122,29 @@ public static partial class OnnxOp
         => NodeBuilder.BuildNodeSingleOut(CLIP, [input, min, max], []);
 
     /// <summary>
-    /// ONNX <c>Col2Im</c>. A call over one spatial axis with non-zero pads is built as the same
-    /// <c>Col2Im</c> over two axes, the second of extent 1, followed by a <c>Squeeze</c> of that
-    /// axis: ONNX Runtime's kernel computes the one-axis padded form wrongly, and differently from
-    /// run to run, and computes the two-axis form as the spec does. The two are equal element for
-    /// element — a unit block along a unit axis with no pads and unit stride and dilation covers
-    /// exactly one position, so the column layout <c>[N, C·K, L]</c> reads the same either way.
-    /// Every other call is the plain operator.
+    /// ONNX <c>Col2Im</c>. A call over one spatial axis is built as the same <c>Col2Im</c> over
+    /// two axes, the second of extent 1, followed by a <c>Squeeze</c> of that axis: ONNX Runtime's
+    /// kernel computes the one-axis form wrongly for some strides and pads, padded or not, and
+    /// differently from run to run, and computes the two-axis form as the spec does. The two are
+    /// equal element for element — a unit block along a unit axis with no pads and unit stride and
+    /// dilation covers exactly one position, so the column layout <c>[N, C·K, L]</c> reads the
+    /// same either way. A call is over one axis when <c>blockShape</c> is known to hold one
+    /// element or <c>pads</c>, <c>dilations</c> or <c>strides</c> name one axis, and none names
+    /// more. Every other call is the plain operator.
     /// </summary>
     public static Variable Col2Im(Variable input, Variable imageShape, Variable blockShape,
         long[] dilations, long[] pads, long[] strides)
     {
-        bool paddedOneAxis = pads is { Length: 2 } && pads.Any(p => p != 0)
-            && dilations is null or { Length: 1 } && strides is null or { Length: 1 };
-        if (!paddedOneAxis)
+        bool oneAxis = (blockShape.TensorDims is [{ Size: 1 }]
+                || pads is { Length: 2 } || dilations is { Length: 1 } || strides is { Length: 1 })
+            && pads is null or { Length: 2 } && dilations is null or { Length: 1 } && strides is null or { Length: 1 };
+        if (!oneAxis)
             return NodeBuilder.BuildNodeSingleOut(COL2IM, [input, imageShape, blockShape],
                 [(AttrDilations, dilations), (AttrPads, pads), (AttrStrides, strides)]);
 
         var unit = Globals.Vector(1L);
         long[] liftedDilations = [dilations?[0] ?? 1L, 1L];
-        long[] liftedPads = [pads![0], 0L, pads[1], 0L];
+        long[] liftedPads = [pads?[0] ?? 0L, 0L, pads?[1] ?? 0L, 0L];
         long[] liftedStrides = [strides?[0] ?? 1L, 1L];
         var lifted = NodeBuilder.BuildNodeSingleOut(COL2IM,
             [input, Concat([imageShape, unit], 0), Concat([blockShape, unit], 0)],

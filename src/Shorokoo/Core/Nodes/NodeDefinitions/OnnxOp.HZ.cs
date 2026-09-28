@@ -52,7 +52,7 @@ public static partial class OnnxOp
 
     public static Variable LpPool(Variable x, AutoPad? autoPad, bool? ceilMode,
         long[]? dilations, long[] kernelShape, long? p, long[]? pads, long[]? strides)
-        => NeedsWrittenPadding(autoPad, dilations, kernelShape, pads)
+        => NeedsWrittenPadding(autoPad, dilations, kernelShape, pads, strides)
             ? PaddedPool(x, PoolKind.Lp, autoPad, ceilMode, dilations, kernelShape, pads, strides, null,
                 (input, explicitPads, s, ceil, _) => [LpPool(input, null, ceil, dilations, kernelShape, p, explicitPads, s)])[0]
             : NodeBuilder.BuildNodeSingleOut(LP_POOL, [x], [
@@ -79,7 +79,7 @@ public static partial class OnnxOp
     public static Variable MaxPool(Variable x, AutoPad? autoPad = null, bool? ceilMode = null,
         long[]? dilations = null, long[]? kernelShape = null, long[]? pads = null,
         long? storageOrder = null, long[]? strides = null)
-        => NeedsWrittenPadding(autoPad, dilations, kernelShape, pads)
+        => NeedsWrittenPadding(autoPad, dilations, kernelShape, pads, strides)
             ? PaddedPool(x, PoolKind.Max, autoPad, ceilMode, dilations, kernelShape!, pads, strides, storageOrder,
                 (input, p, s, ceil, _) => [MaxPool(input, null, ceil, dilations, kernelShape, p, storageOrder, s)])[0]
             : NodeBuilder.BuildNodeSingleOut(MAX_POOL, [x], [
@@ -96,7 +96,7 @@ public static partial class OnnxOp
         long[]? dilations = null, long[]? kernelShape = null, long[]? pads = null,
         long? storageOrder = null, long[]? strides = null)
     {
-        if (NeedsWrittenPadding(autoPad, dilations, kernelShape, pads))
+        if (NeedsWrittenPadding(autoPad, dilations, kernelShape, pads, strides))
         {
             var padded = PaddedPool(x, PoolKind.Max, autoPad, ceilMode, dilations, kernelShape!, pads, strides, storageOrder,
                 (input, p, s, ceil, _) =>

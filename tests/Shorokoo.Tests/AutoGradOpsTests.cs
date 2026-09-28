@@ -22,6 +22,11 @@ internal static class AutoGradOpsRunners
         Assert.True(AutoTest.AdvancedTestGraph<TModule>(
             [], [TensorDataWithSmallVals(DType.Float32, shape)]));
 
+    internal static void RunTensorNoQee<TModule>(long[] dims, params float[] vals) =>
+        Assert.True(AutoTest.AdvancedTestGraph<TModule>(
+            [], [TensorData(DType.Float32, dims, [.. vals.Select(v => (object)v)])],
+            testQuickEngineExecution: false));
+
     internal static void RunSmallNoQee<TModule>(long[] shape) =>
         Assert.True(AutoTest.AdvancedTestGraph<TModule>(
             [], [TensorDataWithSmallVals(DType.Float32, shape)],
@@ -433,6 +438,29 @@ public class AutoGradMatrixPoolingAndConvOpsCoverageTests
         Assert.True(AutoTest.AdvancedTestGraph<AutoGradGemmTrans>(
             [], [TensorDataWithSmallVals(DType.Float32, [3L, 2L]),
                  TensorDataWithSmallVals(DType.Float32, [4L, 3L])]));
+    }
+
+    private static readonly float[] Wave18 = [0.3f, -1.2f, 2.5f, 0.7f, -0.4f, 1.9f, -2.2f, 0.1f, 1.4f,
+        -0.9f, 0.6f, 2.1f, -1.7f, 0.2f, 1.1f, -0.5f, 2.8f, -1.3f];
+
+    [Fact]
+    public void TestAutoGradOneAxisAndWrittenPaddingPoolGradients()
+    {
+        RunTensorNoQee<AutoGradAvgPool1DStrideAboveKernel>([1L, 2L, 5L], [.. Wave18[..10]]);
+        RunTensorNoQee<AutoGradMaxPoolPadsReachingTheKernel>([1L, 2L, 9L], Wave18);
+        RunTensorNoQee<AutoGradAvgPoolIncludingPadsReachingTheKernel>([1L, 2L, 9L], Wave18);
+        RunTensorNoQee<AutoGradAvgPoolExcludingPadsReachingTheKernel>([1L, 2L, 9L], Wave18);
+        RunTensorNoQee<AutoGradAvgPoolSameDilated>([1L, 2L, 9L], Wave18);
+        RunTensorNoQee<AutoGradLpPoolPadsReachingTheKernel>([1L, 2L, 9L], Wave18);
+    }
+
+    [Fact]
+    public void TestAutoGradLpPoolGradientsFollowDilationsAutoPadAndCeilMode()
+    {
+        RunTensorNoQee<AutoGradLpPoolDilated>([1L, 2L, 9L], Wave18);
+        RunTensorNoQee<AutoGradLpPoolSameDilated>([1L, 2L, 9L], Wave18);
+        RunTensorNoQee<AutoGradLpPoolSameLower>([1L, 2L, 9L], Wave18);
+        RunTensorNoQee<AutoGradLpPoolCeilMode>([1L, 2L, 9L], Wave18);
     }
 }
 

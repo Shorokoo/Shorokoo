@@ -212,4 +212,10 @@ public class QeeImageRandomRnnAuditTests
         => Assert.True(AutoTest.AdvancedTestGraph<Col2Im1DPaddedValues>([],
             [F32([1L, 3L, 4L], [.. Enumerable.Range(0, 12).Select(i => (float)i)])],
             expected: [4, 9, 5, 11, 6, 13, 7, 11]));
+
+    [Fact]
+    public void TestCol2ImOverOneSpatialAxisWithoutPads()
+        => Assert.True(AutoTest.AdvancedTestGraph<Col2Im1DUnpaddedValues>([],
+            [F32([1L, 4L, 2L], [.. Enumerable.Range(1, 8).Select(i => (float)i)])],
+            expected: [1, 5, 4, 5, 13, 8, 1, 5, 2, 6, 3, 7, 4, 8, 1, 7, 9, 11, 8, 1, 2, 8, 10, 7, 8]));
 }

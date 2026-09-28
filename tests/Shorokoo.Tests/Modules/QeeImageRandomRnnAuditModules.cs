@@ -1041,4 +1041,19 @@ namespace Shorokoo.Tests.Modules
         public static Tensor<float32> Inline(Tensor<float32> cols)
             => (Tensor<float32>)OnnxOp.Col2Im(cols, Vector(8L), Vector(3L), dilations: [1L], pads: [1L, 1L], strides: [2L]);
     }
+
+    /// <summary>Unpadded 1-D Col2Im: C 2 at stride 1, then the same columns as C 1, L 4 at stride 2,
+    /// stride 1 and dilation 2. Input cols is [1,4,2].</summary>
+    [Module]
+    public partial class Col2Im1DUnpaddedValues
+    {
+        public static Tensor<float32> Inline(Tensor<float32> cols)
+        {
+            var wide = (Tensor<float32>)OnnxOp.Reshape(cols, Vector(1L, 2L, 4L), false);
+            return ((Tensor<float32>)OnnxOp.Reshape(OnnxOp.Col2Im(cols, Vector(3L), Vector(2L), [1L], [0L, 0L], [1L]), Vector(1L, 1L, 6L), false))
+                .Concat(2L, (Tensor<float32>)OnnxOp.Col2Im(wide, Vector(8L), Vector(2L), [1L], [0L, 0L], [2L]))
+                .Concat(2L, (Tensor<float32>)OnnxOp.Col2Im(wide, Vector(5L), Vector(2L), [1L], [0L, 0L], [1L]))
+                .Concat(2L, (Tensor<float32>)OnnxOp.Col2Im(wide, Vector(6L), Vector(2L), [2L], [0L, 0L], [1L]));
+        }
+    }
 }

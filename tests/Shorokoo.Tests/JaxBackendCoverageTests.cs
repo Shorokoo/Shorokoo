@@ -103,10 +103,14 @@ public class JaxBackendCoverageTests
     [Fact]
     public void TestWhereSelectsOnEveryIntegerTypeAndBoolOnJax() => WhereSelectsOnEveryIntegerTypeAndBool(new ComputeContext(Jax));
 
-    // #441: XLA replaces a constant equal to an iota with the iota, losing the sign of a -0
-    [Fact(Skip = "#441: XLA replaces a constant equal to an iota with the iota, losing the sign of a -0")]
-    public void TestANegativeZeroInAConstantEqualToAnIotaKeepsItsSignOnJax()
-        => Assert.True(AutoTest.AdvancedTestGraph<NegativeZeroInAnIotaConstantCheck>([], [QeeAudit.Bits([2L], true, true)], context: new ComputeContext(Jax)));
+    [Fact]
+    public void TestANegativeZeroInAConstantEqualToAnIotaLosesItsSignOnJaxAndKeepsItOnOnnxRuntime()
+    {
+        Assert.True(AutoTest.AdvancedTestGraph<NegativeZeroInAnIotaConstantReciprocalSigns>([], [QeeAudit.Bits([2L], true, true)],
+            context: new ComputeContext(Jax), expected: [1, 1]));
+        Assert.True(AutoTest.AdvancedTestGraph<NegativeZeroInAnIotaConstantReciprocalSigns>([], [QeeAudit.Bits([2L], true, true)],
+            expected: [-1, 1]));
+    }
 
     [Fact]
     public void TestAnAutoGradNodeIsJaxsGradientOfItsLoss()

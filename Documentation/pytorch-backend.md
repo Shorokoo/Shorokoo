@@ -273,6 +273,11 @@ so the per-session settings map only partly:
   changes case by Unicode's full mappings in every locale (`ß` upper-cases to `SS`, `Σ`
   lower-cases to `σ`), where ONNX Runtime leaves what its locale does not map, which in the C
   locale is everything beyond ASCII.
+- **`MaxPool` can index the padding of a window whose maximum is −inf.** The backend pads the
+  input with −inf itself and lets torch's pooling take each window's first maximum, so where a
+  padded position comes before the input element holding a −inf maximum, the `Indices` output
+  names the padding: −1, or in general a position outside the window. The values are right.
+  Accepted as the backend's behaviour ([#425](https://github.com/Shorokoo/Shorokoo/issues/425)).
 - **Linux x64 and Windows x64 only**, the platforms there are lock files for. A backend can be
   constructed anywhere; elsewhere it refuses to start with `PythonEnvironmentFailure.UnsupportedPlatform`.
 - **Device memory is torch's, per process** — see [Runs](#runs) for what a context's settings

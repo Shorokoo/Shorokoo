@@ -165,7 +165,8 @@ Boolean/integer outputs are non-differentiable, hence N/A.
    keep the `Where` ([#423](https://github.com/Shorokoo/Shorokoo/issues/423)).
    Every selected value comes out exact, with one exception: ONNX Runtime's
    float32, float64 and float16 `Where` gives +0 where it selects −0 from `x`
-   (a −0 from `y` keeps its sign), and the float32 path of bfloat16 inherits it
+   (a −0 from `y` keeps its sign), and the float32 path of bfloat16 inherits it.
+   Accepted as ONNX Runtime's behaviour
    ([#439](https://github.com/Shorokoo/Shorokoo/issues/439)).
 3. The condition is non-differentiable; both branches get broadcast-aware
    gradients.
@@ -284,6 +285,10 @@ shape and type.
 | Unsqueeze | ✅ | ✅ | ✅ |
 
 1. The `sparse_value` attribute is unsupported; all dense value variants work.
+   On the [JAX backend](jax-backend.md#limitations), XLA replaces a float
+   constant that compares equal to an iota, such as `[-0.0, 1.0]`, with an iota,
+   so its −0 becomes +0. Accepted as XLA's behaviour
+   ([#441](https://github.com/Shorokoo/Shorokoo/issues/441)).
 2. Index/shape/count output: non-differentiable.
 3. Float tensors only; the spec allows all tensor types.
 4. A negative `axis` requires a statically known input rank.
@@ -326,9 +331,10 @@ shape and type.
 18. The flatten form computes all four outputs for small tensors (both `sorted`
     modes); the `axis` form is shape-only, with a data-dependent unique count.
 19. A model that returns a `Range` as an output beside a `Gather` the `Range`
-    drives fails on ONNX Runtime: its full graph optimization drops the `Range`
-    from the outputs, and the session fails to load. Not worked around
-    ([#432](https://github.com/Shorokoo/Shorokoo/issues/432)).
+    drives fails on ONNX Runtime: its graph optimization fuses the `Gather` and
+    removes the `Range` although it is an output, and reading the model's outputs
+    throws `UnsupportedDTypeException` (`OU002`). Accepted as ONNX Runtime's
+    behaviour ([#432](https://github.com/Shorokoo/Shorokoo/issues/432)).
 
 ## Convolution & pooling
 
@@ -371,11 +377,21 @@ shape and type.
      back ([#420](https://github.com/Shorokoo/Shorokoo/issues/420)).
    - Not rewritten: ONNX Runtime's float16, float32 and float64 `MaxPool` gives a
      window whose maximum is at or below the type's lowest finite value (for
-     float16, a window of only −inf) a wrong index and value
+     float16, which it pools in float32, a window of only −inf) a wrong index —
+     −1 in a single-channel pool over one axis, another number elsewhere — and,
+     for float32 and float64, the lowest finite value in place of −inf. Accepted
+     as ONNX Runtime's behaviour
      ([#437](https://github.com/Shorokoo/Shorokoo/issues/437)).
-   - Not rewritten: ONNX Runtime's `MaxPool` without an `Indices` output gives a
-     window of only −inf the type's lowest finite value instead of −inf
-     ([#426](https://github.com/Shorokoo/Shorokoo/issues/426)).
+   - Not rewritten: ONNX Runtime's float32 and float64 `MaxPool` without an
+     `Indices` output gives a window of only −inf the type's lowest finite value
+     instead of −inf; float16, pooled in float32, gives float32's lowest finite
+     value or −inf, depending on what reads the pool. Accepted as ONNX Runtime's
+     behaviour ([#426](https://github.com/Shorokoo/Shorokoo/issues/426)).
+   - On the [PyTorch backend](pytorch-backend.md#limitations), which pads the
+     input with −inf itself, a window whose maximum is −inf takes a padded
+     position before the input element holding it as its first maximum: its
+     index names the padding, such as −1. The values are right. Accepted as the
+     backend's behaviour ([#425](https://github.com/Shorokoo/Shorokoo/issues/425)).
 10. With `SAME_UPPER`/`SAME_LOWER` and a stride above the kernel's extent plus
     `output_padding`, the output is `in · stride` long and reaches past the full
     transposed convolution, where it holds the bias alone. ONNX Runtime gives the
@@ -392,7 +408,7 @@ shape and type.
 | GroupNormalization | ✅ | 🟡 [5] | ✅ |
 | InstanceNormalization | ✅ | 🟡 [5] | ✅ |
 | LRN | ✅ | 🟡 [5] | ✅ |
-| LayerNormalization | ✅ | 🟡 [5] | ✅ [6] |
+| LayerNormalization | ✅ [8] | 🟡 [5] | ✅ [6] |
 | LpNormalization | ✅ | 🟡 [5] | ✅ |
 | MeanVarianceNormalization | ✅ | 🟡 [5] | ✅ |
 | NegativeLogLikelihoodLoss | ✅ | 🟡 [5] | ✅ |
@@ -414,6 +430,14 @@ shape and type.
 7. Lowers inline to opset-21 primitives
    (`y = x / sqrt(mean(x², suffix axes) + epsilon) * scale`, via
    `ReduceMean`/`Sqrt`/`Div`/`Mul`), so it runs on any execution provider.
+8. ONNX Runtime's CPU kernel takes the variance as `E[x²] − E[x]²`, which
+   cancels catastrophically for float32 rows whose mean is large next to their
+   spread: rows of mean 100 and spread 0.1 come out off by tens, and a spread of
+   0.01 gives NaN. The operator's function body centres the input before
+   squaring it, `E[(x − E[x])²]`, and the PyTorch backend computes that form;
+   subtracting each row's mean before the call gives the same result without
+   the loss. Accepted as ONNX Runtime's behaviour
+   ([#384](https://github.com/Shorokoo/Shorokoo/issues/384)).
 
 ## MatMul & linear algebra
 

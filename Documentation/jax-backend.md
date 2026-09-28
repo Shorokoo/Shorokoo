@@ -173,6 +173,11 @@ operands are never rounded to TensorFloat-32.
   forms, `Bernoulli`, `Multinomial` and a training-mode `Dropout` draw from JAX's generator, with a
   fresh key every run (a node with a `seed` draws the same values every run). Shorokoo's own keyed
   draws are integer arithmetic and agree with ONNX Runtime exactly.
+- **A float constant equal to an iota loses the sign of a −0.** XLA's simplifier replaces a
+  constant that compares equal to an iota, such as `[-0.0, 1.0]`, with an iota, so the −0 becomes
+  +0: `1 / c` gives `[inf, 1]` where the constant says `[-inf, 1]`. A constant that is not an iota,
+  such as `[-0.0, 5.0]`, keeps its sign. Accepted as XLA's behaviour
+  ([#441](https://github.com/Shorokoo/Shorokoo/issues/441)).
 - **Compilation takes time.** The first run of each input-shape signature pays XLA's compilation; a
   session keeps the programs of its 16 most recent signatures.
 - **Device memory is JAX's, per process**, and a context's per-session memory settings do not reach

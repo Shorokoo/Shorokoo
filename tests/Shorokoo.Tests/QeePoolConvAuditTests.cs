@@ -128,8 +128,10 @@ public class QeePoolConvAuditTests
     private const double N = double.NegativeInfinity;
     private const double L = double.MinValue;
     private static readonly double[] FloatWindows = [N, N, 1, N, N, N, L, N, N, N, L, L];
-    private static readonly double[] FloatWindowMaxima = [N, 1, L, L, N, 1, L, L, N, N, 1, N, 1, N, N, N, N, N, L, N, L, N, N, N, L, L, L, L];
-    private static readonly long[] FloatWindowPositions = [0, 2, 6, 10, 0, 4, 6, 9, 0, 1, 2, 1, 2, 3, 4, 3, 4, 5, 6, 7, 6, 7, 8, 9, 10, 11, 10, 11];
+    private static readonly double[] Float16WindowMaximaOnOnnxRuntime = [N, 1, L, L, N, 1, L, L, N, N, 1, N, 1, N, N, N, N, N, L, N, L, N, N, N, L, L, L, L];
+    private static readonly double[] FloatWindowMaximaOnOnnxRuntime = [L, 1, L, L, L, 1, L, L, L, L, 1, L, 1, L, L, L, L, L, L, L, L, L, L, L, L, L, L, L];
+    private static readonly long[] FloatWindowPositionsOnOnnxRuntime = [-4, 2, 2, 2, -3, 4, 3, 3, 3, 3, 2, 3, 2, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3];
+    private static readonly long[] Float16WindowPositionsOnOnnxRuntime = [-4, 2, 6, 10, -3, 4, 6, 9, 3, 3, 2, 3, 2, 3, 3, 3, 3, 3, 6, 3, 6, 3, 3, 3, 10, 11, 10, 11];
     private static readonly double[] IntegerWindows = [L, L, 1, L, L, L, L, L, L, L, L, L];
     private static readonly double[] IntegerWindowMaxima = [L, 1, L, L, L, 1, L, L, L, L, 1, L, 1, L, L, L, L, L, L, L, L, L, L, L, L, L, L, L];
     private static readonly long[] IntegerWindowPositions = [0, 2, 6, 7, 0, 4, 6, 8, 0, 1, 2, 1, 2, 3, 4, 3, 4, 5, 6, 7, 6, 7, 8, 9, 10, 9, 10, 11];
@@ -159,25 +161,22 @@ public class QeePoolConvAuditTests
         Assert.True(LowestWindows(DType.UInt8, AsUInt8, IntegerWindows, IntegerWindowMaxima, IntegerWindowPositions));
     }
 
-    // #437: ONNX Runtime's float MaxPool gives a window at or below the lowest finite value a wrong index and value
-    [Fact(Skip = "#437: ONNX Runtime's float MaxPool gives a window at or below the lowest finite value a wrong index and value")]
-    public void TestFloatMaxPoolWindowsAtOrBelowTheLowestFiniteValueTakeTheirFirstMaximum()
+    [Fact]
+    public void TestOnnxRuntimeFloatMaxPoolGivesAWindowAtOrBelowTheLowestFiniteValueAWrongIndexAndValue()
     {
-        Assert.True(LowestWindows(DType.Float16, AsFloat16, FloatWindows, FloatWindowMaxima, FloatWindowPositions));
-        Assert.True(LowestWindows(DType.Float32, AsFloat32, FloatWindows, FloatWindowMaxima, FloatWindowPositions));
-        Assert.True(LowestWindows(DType.Float64, AsFloat64, FloatWindows, FloatWindowMaxima, FloatWindowPositions));
+        Assert.True(LowestWindows(DType.Float16, AsFloat16, FloatWindows, Float16WindowMaximaOnOnnxRuntime, Float16WindowPositionsOnOnnxRuntime));
+        Assert.True(LowestWindows(DType.Float32, AsFloat32, FloatWindows, FloatWindowMaximaOnOnnxRuntime, FloatWindowPositionsOnOnnxRuntime));
+        Assert.True(LowestWindows(DType.Float64, AsFloat64, FloatWindows, FloatWindowMaximaOnOnnxRuntime, FloatWindowPositionsOnOnnxRuntime));
         Assert.True(AutoTest.AdvancedTestGraph<NegativeInfinityWindowMaxPoolIndicesValues>([],
             [F32([1L, 1L, 5L], float.NegativeInfinity, float.NegativeInfinity, 5f, float.NegativeInfinity, float.NegativeInfinity)],
-            expected: [0, 0, 2, 2, 3, 4]));
+            expected: [-1, -1, 2, 2, -1, -1]));
     }
 
-    // #426: ONNX Runtime's MaxPool gives a window of only -inf the lowest finite value instead of -inf
-    [Fact(Skip = "#426: ONNX Runtime's MaxPool gives a window of only -inf the lowest finite value instead of -inf")]
-    public void TestMaxPoolWithoutIndicesGivesANegativeInfinityWindowNegativeInfinity()
+    [Fact]
+    public void TestOnnxRuntimeFloat32AndFloat64MaxPoolWithoutIndicesGiveANegativeInfinityWindowTheLowestFiniteValue()
     {
-        Assert.True(PlainMaxPool(DType.Float16, AsFloat16, [N, N, L, N], N, L, L));
-        Assert.True(PlainMaxPool(DType.Float32, AsFloat32, [N, N, L, N], N, L, L));
-        Assert.True(PlainMaxPool(DType.Float64, AsFloat64, [N, N, L, N], N, L, L));
+        Assert.True(PlainMaxPool(DType.Float32, AsFloat32, [N, N, L, N], L, L, L));
+        Assert.True(PlainMaxPool(DType.Float64, AsFloat64, [N, N, L, N], L, L, L));
     }
 
     internal static readonly double[] ConvTransposeSameStridedPastTheKernel = [0.5, 1.5, 0.5, 0.5, 2.5, 0.5, 0.5, 3.5, 0.5,

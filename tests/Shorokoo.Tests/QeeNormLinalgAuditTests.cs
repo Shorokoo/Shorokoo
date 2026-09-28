@@ -89,13 +89,16 @@ public class QeeNormLinalgAuditTests
         return [.. model.Graph.Nodes.Where(n => n.OpType == OpCodes.DEQUANTIZE_LINEAR).Select(n => n.Inputs.Count(i => i.Length > 0))];
     }
 
-    // ONNX Runtime's float32 LayerNormalization takes the variance as E[x²] − E[x]², which cancels catastrophically:
-    // https://github.com/Shorokoo/Shorokoo/issues/384
-    [Fact(Skip = "Shorokoo/Shorokoo#384: ONNX Runtime's LayerNormalization loses a large-mean row's variance to cancellation")]
-    public void TestLayerNormalizationOfRowsWithALargeMeanAgreesWithItsFunctionBody()
-        => Assert.True(AutoTest.AdvancedTestGraph<LayerNormalizationOfALargeMeanCheck>([], LargeMeanRows));
+    [Fact]
+    public void TestOnnxRuntimeLayerNormalizationOfRowsWithALargeMeanIsFarFromItsFunctionBodyOrNaN()
+    {
+        Assert.True(AutoTest.AdvancedTestGraph<LayerNormalizationOfALargeMeanFarFromItsFunctionBodyCheck>([], LargeMeanRows));
+        Assert.True(AutoTest.AdvancedTestGraph<LayerNormalizationOfALargeMeanFarFromItsFunctionBodyCheck>([], RowsAroundAHundred(0.01f)));
+    }
 
-    internal static TensorData[] LargeMeanRows =>
-        [F32([4L, 256L], [.. Enumerable.Range(0, 1024).Select(i => 100f + 0.1f * MathF.Sin(1.7f * i))]),
+    internal static TensorData[] LargeMeanRows => RowsAroundAHundred(0.1f);
+
+    private static TensorData[] RowsAroundAHundred(float spread) =>
+        [F32([4L, 256L], [.. Enumerable.Range(0, 1024).Select(i => 100f + spread * MathF.Sin(1.7f * i))]),
          F32([256L], [.. Enumerable.Repeat(1f, 256)])];
 }

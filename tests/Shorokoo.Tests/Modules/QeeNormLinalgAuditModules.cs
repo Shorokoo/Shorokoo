@@ -549,6 +549,20 @@ namespace Shorokoo.Tests.Modules
         }
     }
 
+    /// <summary>LayerNormalization over the last axis lies more than 1 from its function body, or is NaN,
+    /// somewhere on rows whose mean is large next to their spread.</summary>
+    [Module]
+    public partial class LayerNormalizationOfALargeMeanFarFromItsFunctionBodyCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x, Tensor<float32> scale)
+        {
+            var centered = x - x.Reduce(ReduceKind.Mean, Vector(-1L), keepDims: true);
+            var twoPass = centered / ((centered * centered).Reduce(ReduceKind.Mean, Vector(-1L), keepDims: true) + Scalar(1e-5f)).Sqrt();
+            var far = (Tensor<bit>)OnnxOp.Not(((Tensor<float32>)NN.LayerNormalization(x, scale) - twoPass).Abs() <= Scalar(1f));
+            return far.Cast<int64>().Reduce(ReduceKind.Sum, keepDims: false).Scalar() > Scalar(0L);
+        }
+    }
+
     /// <summary>DequantizeLinear of an int32 [3] tensor with no zero point and a one-element scale at
     /// the default axis — per tensor, since the scale has one element — read as it is and through
     /// a Reshape: [1000, −6, 2] × 0.5 = [500, −3, 1].</summary>

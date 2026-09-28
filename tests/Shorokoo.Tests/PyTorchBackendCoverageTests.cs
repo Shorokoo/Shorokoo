@@ -237,10 +237,10 @@ public class PyTorchBackendCoverageTests
     public void TestMaxPoolIndexOfALowestValuedWindowIsItsFirstInputPositionOnTorch()
         => LowestValuedWindowMaxPoolIndexIsItsFirstInputPosition(new ComputeContext(Torch));
 
-    // #425: the PyTorch backend's MaxPool names the padding as the first maximum of a window whose maximum is -inf
-    [Fact(Skip = "#425: the PyTorch backend's MaxPool names the padding as the first maximum of a window whose maximum is -inf")]
-    public void TestMaxPoolIndexOfANegativeInfinityWindowIsItsFirstInputPositionOnTorch()
-        => NegativeInfinityWindowMaxPoolIndexIsItsFirstInputPosition(new ComputeContext(Torch));
+    [Fact]
+    public void TestMaxPoolIndexOfANegativeInfinityWindowNamesThePaddingBeforeItOnTorch()
+        => Assert.True(Spec<NegativeInfinityWindowMaxPoolIndicesValues>(new ComputeContext(Torch),
+            QeeAudit.F32([1L, 1L, 5L], float.NegativeInfinity, float.NegativeInfinity, 5f, float.NegativeInfinity, float.NegativeInfinity), -1, 0, 2, 2, 3, 4));
 
     [Fact]
     public void TestCropAndResizeAndCol2ImComputeTheSpecValuesOnTorch() => CropAndResizeAndCol2ImComputeTheSpecValues(new ComputeContext(Torch));

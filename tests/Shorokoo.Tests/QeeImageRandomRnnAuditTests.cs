@@ -263,11 +263,10 @@ public class QeeImageRandomRnnAuditTests
         => Assert.True(AutoTest.AdvancedTestGraph<ResizePolicyOverNegativeAxesCheck>([],
             [F32([1L, 3L, 4L, 5L], [.. Enumerable.Range(0, 60).Select(i => (float)i)])]));
 
-    // #432: ONNX Runtime drops a Range returned beside the Gather it drives from the outputs at full optimization
-    [Fact(Skip = "#432: ONNX Runtime drops a Range returned beside the Gather it drives from the outputs at full optimization")]
-    public void TestRangeReturnedBesideTheGatherItDrivesIsReturned()
-        => Assert.True(AutoTest.AdvancedTestGraph<RangeReturnedBesideTheGatherItDrivesValues>([],
-            [F32([3L, 2L], 0f, 1f, 2f, 3f, 4f, 5f)], expected: [0, 1, 2, 0, 1, 2, 3, 4, 5]));
+    [Fact]
+    public void TestOnnxRuntimeFailsToReturnARangeReturnedBesideTheGatherItDrives()
+        => Assert.Equal(ErrorCodes.OU002, Assert.Throws<UnsupportedDTypeException>(
+            () => AutoTest.AdvancedTestGraph<RangeReturnedBesideTheGatherItDrivesValues>([], [F32([3L, 2L], 0f, 1f, 2f, 3f, 4f, 5f)])).ErrorCode);
 
     [Fact]
     public void TestCol2ImOverOneSpatialAxisWithPadsAndStride()

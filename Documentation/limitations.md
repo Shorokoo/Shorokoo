@@ -582,8 +582,9 @@ the other reductions (since 18), and `split` of `Split` (since 13; a `Split`
 with no sizes gets `num_outputs`, required since 18). Other operands that moved
 the same way — `Slice`'s `starts`/`ends`/`axes` before opset 10, `Pad`'s `pads`
 and `Clip`'s `min`/`max` before 11, among others — are not rewritten yet, so a
-model that uses those forms fails when it is compiled. Export, however, stamps models at the **opset-21 baseline**,
-and the exporter auto-raises each model's opset stamp only as far as the
+model that uses those forms fails when it is compiled.
+
+Export, however, stamps models at the **opset-21 baseline**, and the exporter auto-raises each model's opset stamp only as far as the
 graph actually requires.
 
 The exporter holds a floor for each post-21 operator (`RMSNormalization` and

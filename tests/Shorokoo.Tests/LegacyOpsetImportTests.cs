@@ -56,5 +56,28 @@ public class LegacyOpsetImportTests
         Assert.Equal([3f, 6f], Run(17, "ReduceMax", [2, 3], [2, 1], Ints("axes", 1)));
         Assert.Equal([1f, 4f], Run(11, "Split", [2, 3], [2, 1], Int("axis", 1), Ints("split", 1, 2)));
         Assert.Equal([1f, 2f, 3f], Run(11, "Unsqueeze", "y__axes", [3], [1, 3], Ints("axes", 0)));
+        Assert.Equal([1f, 2f, 5f, 6f], Run(13, "Split", [2, 4], [2, 2], Int("axis", 1)));
+        Assert.Equal([21f], Run(11, "ReduceSum", [2, 3], [], Int("keepdims", 0)));
+        Assert.Equal([6f, 15f], Run(11, "ReduceSum", [2, 3], [2], Int("axes", 1), Int("keepdims", 0)));
+    }
+
+    [Fact]
+    public void AFunctionsOwnInputIsNeverTakenByANewConstant()
+    {
+        var node = new NodeProto { OpType = "Unsqueeze", Name = "n0" };
+        node.Inputs.Add("x");
+        node.Outputs.Add("y");
+        node.Attributes.Add(Ints("axes", 0));
+        var function = new FunctionProto { Name = "f", Domain = "local" };
+        function.Inputs.AddRange(["x", "y__axes"]);
+        function.Outputs.Add("y");
+        function.Nodes.Add(node);
+        var model = new ModelProto { IrVersion = 7, Graph = new GraphProto { Name = "g" } };
+        model.OpsetImports.Add(new OperatorSetIdProto { Domain = "", Version = 11 });
+        model.Functions.Add(function);
+
+        Shorokoo.Onnx.OnnxLegacyOperands.Upgrade(model);
+
+        Assert.NotEqual("y__axes", node.Inputs[1]);
     }
 }

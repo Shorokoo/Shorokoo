@@ -49,7 +49,11 @@ namespace Shorokoo.Onnx
             if (model.Graph is { } g)
                 CollectNames(g, names);
             foreach (var function in model.Functions)
+            {
+                names.UnionWith(function.Inputs);
+                names.UnionWith(function.ValueInfoes.Select(v => v.Name));
                 CollectNodeNames(function.Nodes, names);
+            }
             if (model.Graph is { } graph && modelOpset is { } opset)
                 UpgradeNodes(graph.Nodes, opset, names);
             foreach (var function in model.Functions)
@@ -68,6 +72,8 @@ namespace Shorokoo.Onnx
                 names.Add(input.Name);
             foreach (var initializer in graph.Initializers)
                 names.Add(initializer.Name);
+            foreach (var info in graph.ValueInfoes)
+                names.Add(info.Name);
             CollectNodeNames(graph.Nodes, names);
         }
 
@@ -119,7 +125,9 @@ namespace Shorokoo.Onnx
                         node.Inputs.Add("");
                     node.Inputs[1] = name;
                     node.Attributes.Remove(operand);
-                    nodes.Insert(i, Constant(name, operand.Ints ?? []));
+                    // A single INT is how some exporters wrote a one-axis list; read it as one.
+                    long[] values = operand.Type == AttributeProto.AttributeType.Int ? [operand.I] : operand.Ints ?? [];
+                    nodes.Insert(i, Constant(name, values));
                     i++;
                 }
                 else if (node.OpType == "Split" && opset < SplitNumOutputsSince

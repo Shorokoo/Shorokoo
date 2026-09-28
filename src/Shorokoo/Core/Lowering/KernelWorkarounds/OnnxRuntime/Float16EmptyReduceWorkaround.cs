@@ -32,7 +32,7 @@ internal sealed class Float16EmptyReduceWorkaround : KernelWorkaround
     {
         var x = inputs[0]!;
         var inFloat32 = Cast(Reductions.Rebuild(site, Cast(x, null, DType.Float32), null), null, DType.Float16);
-        if (site.ConstantOf(0) is not null) return [inFloat32];
+        if (site.ConstantShapeOf(0) is not null) return [inFloat32];
         return [Ops.IfElse(Reductions.IsEmpty(x), inFloat32, Reductions.Rebuild(site, x, null))];
     }
 }

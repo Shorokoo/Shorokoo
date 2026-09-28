@@ -33,14 +33,14 @@ internal sealed class ReduceNoopEmptyAxesWorkaround : KernelWorkaround
     public override bool Applies(WorkaroundSite site)
         => site.Attributes.GetBoolVal(AttrNoopWithEmptyAxes) == true
            && site.RankOf(0) != 0
-           && (!site.IsPresent(1) || site.ConstantOf(1) is not { } axes || axes.Shape.Dims.Contains(0))
+           && (!site.IsPresent(1) || site.ConstantShapeOf(1) is not { } axes || axes.Dims.Contains(0))
            && Reductions.InputMayBeEmpty(site);
 
     public override Variable?[] Rewrite(WorkaroundSite site, Variable?[] inputs)
     {
         var x = inputs[0]!;
-        var axes = site.IsPresent(1) && site.ConstantOf(1) is null ? inputs[1] : null;
-        if (axes is null && site.ConstantOf(0) is not null) return [Identity(x, null)];
+        var axes = site.IsPresent(1) && site.ConstantShapeOf(1) is null ? inputs[1] : null;
+        if (axes is null && site.ConstantShapeOf(0) is not null) return [Identity(x, null)];
         var shape = Shape(x);
 
         if (site.ShapesAreConcrete)

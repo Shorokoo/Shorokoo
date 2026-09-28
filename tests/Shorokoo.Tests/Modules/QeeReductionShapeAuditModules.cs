@@ -543,7 +543,7 @@ namespace Shorokoo.Tests.Modules
 
         private static Tensor<int64> Flat<T>(Tensor<T> t) where T : IVarType => t.Cast<int64>().Reshape(Vector(-1L));
 
-        internal static Tensor<bit> Is(Tensor<int64> actual, params long[] expected)
+        private static Tensor<bit> Is(Tensor<int64> actual, params long[] expected)
             => OnnxOp.Concat([actual.TShape == Vector((long)expected.Length), actual == Vector(expected)], 0);
     }
 

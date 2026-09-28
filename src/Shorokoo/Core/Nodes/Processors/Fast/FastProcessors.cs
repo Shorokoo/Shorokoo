@@ -5533,8 +5533,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// for the two that can turn a declined loop into a build error. Decline only where
     /// cloning would actually be wrong.
     /// <list type="bullet">
-    ///   <item>The <c>maxIter</c> producer is a <c>CONSTANT</c> with a non-negative
-    ///     int64 scalar value.</item>
+    ///   <item>The <c>maxIter</c> producer is a <c>CONSTANT</c> int64 scalar. A negative
+    ///     trip count runs the body zero times, exactly as a count of zero does.</item>
     ///   <item>A matching <c>LOOP_CLOSE</c> exists after the <c>LOOP_OPEN</c> (checked
     ///     by <see cref="Process"/> rather than the eligibility gate).</item>
     ///   <item>The loop-variable and scan-variable counts agree between the
@@ -5637,7 +5637,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     if (!producerByOutput.TryGetValue(maxIterKey, out var maxIterProducer)) continue;
                     if (maxIterProducer.OpCode != OpCodes.CONSTANT) continue;
                     var v = ReadConstantLong(maxIterProducer);
-                    if (v is null || v.Value < 0) continue;
+                    if (v is null) continue;
 
                     // Locate the matching CLOSE by scanning forward.
                     FastNode? candidateClose = null;
@@ -5661,7 +5661,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
                     openNode = n; openIdx = i;
                     closeNode = candidateClose; closeIdx = candidateCloseIdx;
-                    iterCount = v.Value;
+                    iterCount = Math.Max(0L, v.Value);
                     break;
                 }
 
@@ -5718,7 +5718,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             if (openInputs.Count > 0 && openInputs[0] is FastTensorKey miKey && !miKey.IsEmpty
                 && producerByOutput.TryGetValue(miKey, out var miProducer)
                 && miProducer.OpCode == OpCodes.CONSTANT
-                && ReadConstantLong(miProducer) is long mi) iterCountPreview = mi;
+                && ReadConstantLong(miProducer) is long mi) iterCountPreview = Math.Max(0L, mi);
             if (iterCountPreview == 0 && nScan > 0) return false;
 
             // (2c) The "cond chain is dynamic" signal lives in CLOSE.Inputs[0] — the
@@ -6592,9 +6592,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 if (op == InternalOpCodes.MODEL_PARAM
                     || op.EndsWith("#OPEN") || op.EndsWith("#CLOSE"))
                 {
-                    // For IF_OPEN, the condition input drives FoldConstantConditionBranches;
-                    // mark it as a required constant if foldable.
-                    if (op == OpCodes.IF_OPEN)
+                    // For IF_OPEN, the condition input drives FoldConstantConditionBranches, and
+                    // for LOOP_OPEN, the trip count drives FoldConstantIterationLoops, which only
+                    // unrolls a loop whose trip count is a CONSTANT node; mark either as a required
+                    // constant if foldable.
+                    if (op == OpCodes.IF_OPEN || op == OpCodes.LOOP_OPEN)
                     {
                         var inputs = node.Inputs;
                         if (inputs.Count > 0 && inputs[0] is FastTensorKey cond

@@ -1,4 +1,5 @@
 using System.Linq;
+using Shorokoo.Modules.Initializers;
 
 namespace Shorokoo.Tests;
 
@@ -162,6 +163,30 @@ public partial class ScanOfInvariantGateLayer
     }
 }
 
+/// <summary>A layer stack whose trip count is a difference of hypers, as when a stack is split
+/// into leading and trailing layers.</summary>
+[Module]
+public partial class ParamLayersPerHyperDifference
+{
+    public static Tensor<float32> Inline(Tensor<float32> x, [Hyper] Scalar<int64> a, [Hyper] Scalar<int64> b)
+    {
+        foreach (var ctx in LoopAPI.Iterate(a - b))
+            x = x.MatMul(Ones.Init([Scalar(4L), Scalar(4L)]));
+        return x.MatMul(Ones.Init([Scalar(4L), Scalar(4L)]));
+    }
+}
+
+[Module]
+public partial class ParamLayersPerHyper
+{
+    public static Tensor<float32> Inline(Tensor<float32> x, [Hyper] Scalar<int64> n)
+    {
+        foreach (var ctx in LoopAPI.Iterate(n))
+            x = x.MatMul(Ones.Init([Scalar(4L), Scalar(4L)]));
+        return x.MatMul(Ones.Init([Scalar(4L), Scalar(4L)]));
+    }
+}
+
 [Trait("Domain", "Core")]
 [Trait("Purpose", "Coverage")]
 public class LoopSemanticsTests
@@ -224,4 +249,21 @@ public class LoopSemanticsTests
         => Assert.True(AutoTest.AdvancedTestGraph<ScanOfTheIterationIndex>(
             hyperparamInputs: [], runtimeInputs: [TensorData(DType.Int64, [], 3L)],
             expected: [0d, 1d, 2d]));
+
+    static int TrainableParams(ComputationGraph family, params long[] hypers)
+        => family.Specialize(family.FromOrderedInputs([.. hypers.Select(h => (TensorData)TensorData([], h))]))
+            .ToInternal().ToConcreteArchitecture([TensorData([2L, 4L], new float[8])])
+            .GetConcreteModelParamInfos().ParamInfos.Length;
+
+    [Fact]
+    public void TestAZeroTripLoopCreatesNoParamsWhetherItsTripCountIsAHyperOrComputedFromHypers()
+    {
+        Assert.Equal(1, TrainableParams(ParamLayersPerHyperDifference.ComputationGraph, 1L, 1L));
+        Assert.Equal(1, TrainableParams(ParamLayersPerHyperDifference.ComputationGraph, 1L, 3L));
+        Assert.Equal(2, TrainableParams(ParamLayersPerHyperDifference.ComputationGraph, 2L, 1L));
+        Assert.Equal(3, TrainableParams(ParamLayersPerHyperDifference.ComputationGraph, 3L, 1L));
+        Assert.Equal(1, TrainableParams(ParamLayersPerHyper.ComputationGraph, 0L));
+        Assert.Equal(1, TrainableParams(ParamLayersPerHyper.ComputationGraph, -1L));
+        Assert.Equal(3, TrainableParams(ParamLayersPerHyper.ComputationGraph, 2L));
+    }
 }

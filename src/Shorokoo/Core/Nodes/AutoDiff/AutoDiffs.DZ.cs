@@ -275,16 +275,19 @@ namespace Shorokoo.Core.Nodes.AutoDiff
             // leading dims. The shapes are read at runtime via Shape, so this needs no
             // static rank. Operands always have rank >= 2 here — a matmul never contracts a
             // statically-rank-<2 operand, so that degenerate case does not reach this point.
+            // Every dim is stated, and allowzero keeps a zero-sized one: a -1 cannot be inferred
+            // beside a zero, and without allowzero a 0 would copy whatever dim sits at its position.
             Tensor<int64> lastTwo = OnnxOp.Shape(tensor, start: -2);                      // [M, N]
-            Tensor<int64> collapsedShape = OnnxOp.Concat([Vector(-1L), lastTwo], axis: 0); // [-1, M, N]
-            Tensor<T> collapsed = OnnxOp.Reshape(tensor, collapsedShape, allowZero: false); // (B', M, N)
+            Tensor<int64> batch = OnnxOp.ReduceProd(OnnxOp.Shape(tensor, end: -2), keepdims: true); // [B']
+            Tensor<int64> collapsedShape = OnnxOp.Concat([batch, lastTwo], axis: 0);      // [B', M, N]
+            Tensor<T> collapsed = OnnxOp.Reshape(tensor, collapsedShape, allowZero: true); // (B', M, N)
             var swapped = collapsed.Transpose(0L, 2L, 1L);                                      // (B', N, M)
 
             Tensor<int64> leading = OnnxOp.Shape(tensor, end: -2);                         // [d0 .. d_{r-3}]
             Tensor<int64> mDim = OnnxOp.Shape(tensor, start: -2, end: -1);                 // [M]
             Tensor<int64> nDim = OnnxOp.Shape(tensor, start: -1);                          // [N]
             Tensor<int64> restoredShape = OnnxOp.Concat([leading, nDim, mDim], axis: 0);   // [..., N, M]
-            return OnnxOp.Reshape(swapped, restoredShape, allowZero: false);
+            return OnnxOp.Reshape(swapped, restoredShape, allowZero: true);
         }
 
         // ===== Identity Operation =====

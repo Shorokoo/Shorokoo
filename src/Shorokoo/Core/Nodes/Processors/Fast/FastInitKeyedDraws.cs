@@ -83,8 +83,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// collapse into one.</param>
         /// <param name="streamName">The parameter a refusal names.</param>
         /// <param name="algorithm">The RNG algorithm's registry name.</param>
+        /// <param name="chunkPositions">The stream positions each draw computes per chunk (see
+        /// <see cref="Shorokoo.Core.Rng.RngAlgorithms.GetChunkedFunction"/>): the draw's values do not
+        /// depend on it, only its working memory and the trips its loop takes.</param>
         public static Function? BuildKeyedDraws(
-            Function fn, string name, string streamName, string algorithm)
+            Function fn, string name, string streamName, string algorithm, long chunkPositions)
         {
             // Flatten so a draw factored into a called initializer becomes a top-level node the
             // substitution below can intercept. Shipping initializers contain no calls, so their
@@ -210,7 +213,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                         Definitions.NodeDefinitions[InternalOpCodes.SHRK_RNG_BITS].AttributeDefs);
                     node.FullInputs = new Dictionary<string, List<FastTensorKey?>>
                     {
-                        [""] = new List<FastTensorKey?> { keyKey, substreamIndexKey, shapeInput }
+                        [""] = new List<FastTensorKey?> { keyKey, substreamIndexKey, shapeInput, ChunkKey(chunkPositions, newNodes) }
                     };
                     FastLowerRandomOps.LowerKeyedRngToFunctionCall(node, chunked: true);
                     newNodes.Add(node);
@@ -245,7 +248,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     Definitions.NodeDefinitions[newOp].AttributeDefs);
                 node.FullInputs = new Dictionary<string, List<FastTensorKey?>>
                 {
-                    [""] = new List<FastTensorKey?> { keyKey, substreamIndexKey, shapeInput, aKey, bKey }
+                    [""] = new List<FastTensorKey?> { keyKey, substreamIndexKey, shapeInput, aKey, bKey, ChunkKey(chunkPositions, newNodes) }
                 };
                 FastLowerRandomOps.LowerKeyedRngToFunctionCall(node, chunked: true);
                 newNodes.Add(node);
@@ -275,6 +278,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 friendlyName: name,
                 fn.StateOwnership);
         }
+
+        /// <summary>The chunked draw's positions-per-chunk input, as a constant.</summary>
+        private static FastTensorKey ChunkKey(long chunkPositions, List<FastNode> newNodes)
+            => AppendConstant(Shorokoo.Globals.TensorData([], chunkPositions).MoveToAttribute(), newNodes);
 
         private static FastTensorKey AppendConstant(TensorAttribute data, List<FastNode> newNodes)
         {

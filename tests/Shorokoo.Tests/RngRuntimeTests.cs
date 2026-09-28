@@ -1501,19 +1501,52 @@ public class RngRuntimeTests
         Assert.Equal(underSeed1, Run());   // re-binding is exact, not approximate
     }
 
-    private static byte[] Drawn(Variable draw)
-        => ComputeContext.Default.Execute(new InternalComputationGraph([], [draw]))[0].ToTensorData().CopyRawMemory();
+    private static byte[][] Drawn(params Variable[] draws)
+        => [.. ComputeContext.Default.Execute(new InternalComputationGraph([], [.. draws])).Select(o => o.ToTensorData().CopyRawMemory())];
+
+    private const long ChunkedN = 23;
+    private static readonly Scalar<int64> TestChunk = Scalar(5L);
 
     [Fact]
-    public void TestAChunkedDrawIsTheWholeDrawBitForBitAcrossChunkBoundaries()
+    public void TestAChunkedNormalIsTheWholeNormalBitForBitAcrossChunkBoundaries()
     {
-        const long n = 23, chunk = 5;
         var (key, sub) = (Scalar(NormalKey), Scalar(5UL));
-        Assert.Equal(Drawn(RuntimeRng.Normal(Vector(3L, n), key, sub, Scalar(0f), Scalar(1f), Threefry2x32.Rounds13)), Drawn(RuntimeRng.NormalChunked(Vector(3L, n), key, sub, Scalar(0f), Scalar(1f), Threefry2x32.Rounds13, chunk)));
-        Assert.Equal(Drawn(RuntimeRng.Uniform(Vector(n), key, sub, Scalar(-1f), Scalar(3f))), Drawn(RuntimeRng.UniformChunked(Vector(n), key, sub, Scalar(-1f), Scalar(3f), chunkPositions: chunk)));
-        Assert.Equal(Drawn(RuntimeRng.BitsU8(Vector(8 * n + 5), key, sub)), Drawn(RuntimeRng.BitsU8Chunked(Vector(8 * n + 5), key, sub, chunkPositions: chunk)));
-        Assert.Equal(Drawn(RuntimeRng.BitsU64(Vector(n), key, sub)), Drawn(RuntimeRng.BitsU64Chunked(Vector(n), key, sub, chunkPositions: chunk)));
-        Assert.Empty(Drawn(RuntimeRng.NormalChunked(Vector(0L, 4L), key, sub, Scalar(0f), Scalar(1f), chunkPositions: chunk)));
+        Assert.Equal(
+            Drawn(
+                RuntimeRng.Normal(Vector(3L, ChunkedN), key, sub, Scalar(0f), Scalar(1f), Threefry2x32.Rounds13),
+                RuntimeRng.Normal(Vector(20L), key, sub, Scalar(0f), Scalar(1f)),
+                RuntimeRng.Normal(Vector(1L), key, sub, Scalar(0f), Scalar(1f)),
+                RuntimeRng.Normal(Vector(3L), key, sub, Scalar(0f), Scalar(1f)),
+                RuntimeRng.Normal(Vector(0L, 4L), key, sub, Scalar(0f), Scalar(1f))),
+            Drawn(
+                RuntimeRng.NormalChunked(Vector(3L, ChunkedN), key, sub, Scalar(0f), Scalar(1f), TestChunk, Threefry2x32.Rounds13),
+                RuntimeRng.NormalChunked(Vector(20L), key, sub, Scalar(0f), Scalar(1f), TestChunk),
+                RuntimeRng.NormalChunked(Vector(1L), key, sub, Scalar(0f), Scalar(1f), TestChunk),
+                RuntimeRng.NormalChunked(Vector(3L), key, sub, Scalar(0f), Scalar(1f), TestChunk),
+                RuntimeRng.NormalChunked(Vector(0L, 4L), key, sub, Scalar(0f), Scalar(1f), TestChunk)));
+    }
+
+    [Fact]
+    public void TestAChunkedUniformAndBitsDrawAreTheWholeDrawsBitForBitAcrossChunkBoundaries()
+    {
+        var (key, sub) = (Scalar(NormalKey), Scalar(5UL));
+        Assert.Equal(
+            Drawn(
+                RuntimeRng.Uniform(Vector(ChunkedN), key, sub, Scalar(-1f), Scalar(3f)),
+                RuntimeRng.Uniform(Vector(4L, 0L), key, sub, Scalar(0f), Scalar(1f)),
+                RuntimeRng.BitsU8(Vector(8 * ChunkedN + 5), key, sub),
+                RuntimeRng.BitsU8(Vector(0L), key, sub),
+                RuntimeRng.BitsU16(Vector(4 * ChunkedN + 1), key, sub),
+                RuntimeRng.BitsU32(Vector(2 * ChunkedN + 1), key, sub),
+                RuntimeRng.BitsU64(Vector(ChunkedN), key, sub)),
+            Drawn(
+                RuntimeRng.UniformChunked(Vector(ChunkedN), key, sub, Scalar(-1f), Scalar(3f), TestChunk),
+                RuntimeRng.UniformChunked(Vector(4L, 0L), key, sub, Scalar(0f), Scalar(1f), TestChunk),
+                RuntimeRng.BitsU8Chunked(Vector(8 * ChunkedN + 5), key, sub, TestChunk),
+                RuntimeRng.BitsU8Chunked(Vector(0L), key, sub, TestChunk),
+                RuntimeRng.BitsU16Chunked(Vector(4 * ChunkedN + 1), key, sub, TestChunk),
+                RuntimeRng.BitsU32Chunked(Vector(2 * ChunkedN + 1), key, sub, TestChunk),
+                RuntimeRng.BitsU64Chunked(Vector(ChunkedN), key, sub, TestChunk)));
     }
 
     [Fact]

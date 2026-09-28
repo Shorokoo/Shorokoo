@@ -141,8 +141,8 @@ internal static class RngAlgorithms
     private static readonly Dictionary<(string algorithm, string kind, DType? bitsDtype), Function> ChunkedCache = new();
 
     /// <summary>
-    /// The draw function of <see cref="GetFunction"/>'s kind — same inputs, same values, bit for
-    /// bit — computed a chunk of stream positions at a time (see <c>RuntimeRng.ChunkedDraw</c>),
+    /// The draw function of <see cref="GetFunction"/>'s kind — same inputs and one more, the
+    /// stream positions per chunk; same values, bit for bit — computed a chunk at a time (see <c>RuntimeRng.ChunkedDraw</c>),
     /// so its working memory is bounded by a chunk rather than by the draw. For a draw that runs
     /// once and is thrown away, which is parameter initialization: its graphs are built, run and
     /// dropped, never saved or exported, so this function never reaches a model. Tagged as an RNG
@@ -168,11 +168,11 @@ internal static class RngAlgorithms
             Delegate body = kind switch
             {
                 KindUniform => r13
-                    ? (Func<Scalar<uint64>, Scalar<uint64>, Vector<int64>, Scalar<float32>, Scalar<float32>, Tensor<float32>>)UniformChunked13Impl
-                    : (Func<Scalar<uint64>, Scalar<uint64>, Vector<int64>, Scalar<float32>, Scalar<float32>, Tensor<float32>>)UniformChunkedImpl,
+                    ? (Func<Scalar<uint64>, Scalar<uint64>, Vector<int64>, Scalar<float32>, Scalar<float32>, Scalar<int64>, Tensor<float32>>)UniformChunked13Impl
+                    : (Func<Scalar<uint64>, Scalar<uint64>, Vector<int64>, Scalar<float32>, Scalar<float32>, Scalar<int64>, Tensor<float32>>)UniformChunkedImpl,
                 KindNormal => r13
-                    ? (Func<Scalar<uint64>, Scalar<uint64>, Vector<int64>, Scalar<float32>, Scalar<float32>, Tensor<float32>>)NormalChunked13Impl
-                    : (Func<Scalar<uint64>, Scalar<uint64>, Vector<int64>, Scalar<float32>, Scalar<float32>, Tensor<float32>>)NormalChunkedImpl,
+                    ? (Func<Scalar<uint64>, Scalar<uint64>, Vector<int64>, Scalar<float32>, Scalar<float32>, Scalar<int64>, Tensor<float32>>)NormalChunked13Impl
+                    : (Func<Scalar<uint64>, Scalar<uint64>, Vector<int64>, Scalar<float32>, Scalar<float32>, Scalar<int64>, Tensor<float32>>)NormalChunkedImpl,
                 _ => ChunkedBitsBody(r13, bitsDtype!),
             };
 
@@ -191,28 +191,28 @@ internal static class RngAlgorithms
 
     private static Delegate ChunkedBitsBody(bool r13, DType dtype)
     {
-        if (dtype == DType.UInt8)  return r13 ? (Func<Scalar<uint64>, Scalar<uint64>, Vector<int64>, Tensor<uint8>>)BitsU8Chunked13Impl   : BitsU8ChunkedImpl;
-        if (dtype == DType.UInt16) return r13 ? (Func<Scalar<uint64>, Scalar<uint64>, Vector<int64>, Tensor<uint16>>)BitsU16Chunked13Impl : BitsU16ChunkedImpl;
-        if (dtype == DType.UInt32) return r13 ? (Func<Scalar<uint64>, Scalar<uint64>, Vector<int64>, Tensor<uint32>>)BitsU32Chunked13Impl : BitsU32ChunkedImpl;
-        return r13 ? (Func<Scalar<uint64>, Scalar<uint64>, Vector<int64>, Tensor<uint64>>)BitsU64Chunked13Impl : BitsU64ChunkedImpl;
+        if (dtype == DType.UInt8)  return r13 ? (Func<Scalar<uint64>, Scalar<uint64>, Vector<int64>, Scalar<int64>, Tensor<uint8>>)BitsU8Chunked13Impl   : BitsU8ChunkedImpl;
+        if (dtype == DType.UInt16) return r13 ? (Func<Scalar<uint64>, Scalar<uint64>, Vector<int64>, Scalar<int64>, Tensor<uint16>>)BitsU16Chunked13Impl : BitsU16ChunkedImpl;
+        if (dtype == DType.UInt32) return r13 ? (Func<Scalar<uint64>, Scalar<uint64>, Vector<int64>, Scalar<int64>, Tensor<uint32>>)BitsU32Chunked13Impl : BitsU32ChunkedImpl;
+        return r13 ? (Func<Scalar<uint64>, Scalar<uint64>, Vector<int64>, Scalar<int64>, Tensor<uint64>>)BitsU64Chunked13Impl : BitsU64ChunkedImpl;
     }
 
-    private static Tensor<float32> UniformChunkedImpl(Scalar<uint64> key, Scalar<uint64> substreamIndex, Vector<int64> shape, Scalar<float32> low, Scalar<float32> high)
-        => RuntimeRng.UniformChunked(shape, key, substreamIndex, low, high, Threefry2x32.Rounds);
-    private static Tensor<float32> UniformChunked13Impl(Scalar<uint64> key, Scalar<uint64> substreamIndex, Vector<int64> shape, Scalar<float32> low, Scalar<float32> high)
-        => RuntimeRng.UniformChunked(shape, key, substreamIndex, low, high, Threefry2x32.Rounds13);
-    private static Tensor<float32> NormalChunkedImpl(Scalar<uint64> key, Scalar<uint64> substreamIndex, Vector<int64> shape, Scalar<float32> mean, Scalar<float32> scale)
-        => RuntimeRng.NormalChunked(shape, key, substreamIndex, mean, scale, Threefry2x32.Rounds);
-    private static Tensor<float32> NormalChunked13Impl(Scalar<uint64> key, Scalar<uint64> substreamIndex, Vector<int64> shape, Scalar<float32> mean, Scalar<float32> scale)
-        => RuntimeRng.NormalChunked(shape, key, substreamIndex, mean, scale, Threefry2x32.Rounds13);
-    private static Tensor<uint8>  BitsU8ChunkedImpl  (Scalar<uint64> key, Scalar<uint64> substreamIndex, Vector<int64> shape) => RuntimeRng.BitsU8Chunked(shape, key, substreamIndex, Threefry2x32.Rounds);
-    private static Tensor<uint16> BitsU16ChunkedImpl (Scalar<uint64> key, Scalar<uint64> substreamIndex, Vector<int64> shape) => RuntimeRng.BitsU16Chunked(shape, key, substreamIndex, Threefry2x32.Rounds);
-    private static Tensor<uint32> BitsU32ChunkedImpl (Scalar<uint64> key, Scalar<uint64> substreamIndex, Vector<int64> shape) => RuntimeRng.BitsU32Chunked(shape, key, substreamIndex, Threefry2x32.Rounds);
-    private static Tensor<uint64> BitsU64ChunkedImpl (Scalar<uint64> key, Scalar<uint64> substreamIndex, Vector<int64> shape) => RuntimeRng.BitsU64Chunked(shape, key, substreamIndex, Threefry2x32.Rounds);
-    private static Tensor<uint8>  BitsU8Chunked13Impl (Scalar<uint64> key, Scalar<uint64> substreamIndex, Vector<int64> shape) => RuntimeRng.BitsU8Chunked(shape, key, substreamIndex, Threefry2x32.Rounds13);
-    private static Tensor<uint16> BitsU16Chunked13Impl(Scalar<uint64> key, Scalar<uint64> substreamIndex, Vector<int64> shape) => RuntimeRng.BitsU16Chunked(shape, key, substreamIndex, Threefry2x32.Rounds13);
-    private static Tensor<uint32> BitsU32Chunked13Impl(Scalar<uint64> key, Scalar<uint64> substreamIndex, Vector<int64> shape) => RuntimeRng.BitsU32Chunked(shape, key, substreamIndex, Threefry2x32.Rounds13);
-    private static Tensor<uint64> BitsU64Chunked13Impl(Scalar<uint64> key, Scalar<uint64> substreamIndex, Vector<int64> shape) => RuntimeRng.BitsU64Chunked(shape, key, substreamIndex, Threefry2x32.Rounds13);
+    private static Tensor<float32> UniformChunkedImpl(Scalar<uint64> key, Scalar<uint64> substreamIndex, Vector<int64> shape, Scalar<float32> low, Scalar<float32> high, Scalar<int64> chunkPositions)
+        => RuntimeRng.UniformChunked(shape, key, substreamIndex, low, high, chunkPositions, rounds: Threefry2x32.Rounds);
+    private static Tensor<float32> UniformChunked13Impl(Scalar<uint64> key, Scalar<uint64> substreamIndex, Vector<int64> shape, Scalar<float32> low, Scalar<float32> high, Scalar<int64> chunkPositions)
+        => RuntimeRng.UniformChunked(shape, key, substreamIndex, low, high, chunkPositions, rounds: Threefry2x32.Rounds13);
+    private static Tensor<float32> NormalChunkedImpl(Scalar<uint64> key, Scalar<uint64> substreamIndex, Vector<int64> shape, Scalar<float32> mean, Scalar<float32> scale, Scalar<int64> chunkPositions)
+        => RuntimeRng.NormalChunked(shape, key, substreamIndex, mean, scale, chunkPositions, rounds: Threefry2x32.Rounds);
+    private static Tensor<float32> NormalChunked13Impl(Scalar<uint64> key, Scalar<uint64> substreamIndex, Vector<int64> shape, Scalar<float32> mean, Scalar<float32> scale, Scalar<int64> chunkPositions)
+        => RuntimeRng.NormalChunked(shape, key, substreamIndex, mean, scale, chunkPositions, rounds: Threefry2x32.Rounds13);
+    private static Tensor<uint8>  BitsU8ChunkedImpl  (Scalar<uint64> key, Scalar<uint64> substreamIndex, Vector<int64> shape, Scalar<int64> chunkPositions) => RuntimeRng.BitsU8Chunked(shape, key, substreamIndex, chunkPositions, rounds: Threefry2x32.Rounds);
+    private static Tensor<uint16> BitsU16ChunkedImpl (Scalar<uint64> key, Scalar<uint64> substreamIndex, Vector<int64> shape, Scalar<int64> chunkPositions) => RuntimeRng.BitsU16Chunked(shape, key, substreamIndex, chunkPositions, rounds: Threefry2x32.Rounds);
+    private static Tensor<uint32> BitsU32ChunkedImpl (Scalar<uint64> key, Scalar<uint64> substreamIndex, Vector<int64> shape, Scalar<int64> chunkPositions) => RuntimeRng.BitsU32Chunked(shape, key, substreamIndex, chunkPositions, rounds: Threefry2x32.Rounds);
+    private static Tensor<uint64> BitsU64ChunkedImpl (Scalar<uint64> key, Scalar<uint64> substreamIndex, Vector<int64> shape, Scalar<int64> chunkPositions) => RuntimeRng.BitsU64Chunked(shape, key, substreamIndex, chunkPositions, rounds: Threefry2x32.Rounds);
+    private static Tensor<uint8>  BitsU8Chunked13Impl (Scalar<uint64> key, Scalar<uint64> substreamIndex, Vector<int64> shape, Scalar<int64> chunkPositions) => RuntimeRng.BitsU8Chunked(shape, key, substreamIndex, chunkPositions, rounds: Threefry2x32.Rounds13);
+    private static Tensor<uint16> BitsU16Chunked13Impl(Scalar<uint64> key, Scalar<uint64> substreamIndex, Vector<int64> shape, Scalar<int64> chunkPositions) => RuntimeRng.BitsU16Chunked(shape, key, substreamIndex, chunkPositions, rounds: Threefry2x32.Rounds13);
+    private static Tensor<uint32> BitsU32Chunked13Impl(Scalar<uint64> key, Scalar<uint64> substreamIndex, Vector<int64> shape, Scalar<int64> chunkPositions) => RuntimeRng.BitsU32Chunked(shape, key, substreamIndex, chunkPositions, rounds: Threefry2x32.Rounds13);
+    private static Tensor<uint64> BitsU64Chunked13Impl(Scalar<uint64> key, Scalar<uint64> substreamIndex, Vector<int64> shape, Scalar<int64> chunkPositions) => RuntimeRng.BitsU64Chunked(shape, key, substreamIndex, chunkPositions, rounds: Threefry2x32.Rounds13);
 
     /// <summary>The bits draw delegate for a width and round count (a non-capturing static method,
     /// as <see cref="GraphBuilder.BuildInternalComputationGraphFromDelegate"/> requires).</summary>

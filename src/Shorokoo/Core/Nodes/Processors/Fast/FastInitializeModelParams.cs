@@ -102,6 +102,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             // site passes its own parameter's stream key, through a graph input of its own, so
             // same-shaped parameters slice to the same session (see ChunkFor).
             var keyedByInitializer = new Dictionary<Function, Function?>(ReferenceEqualityComparer.Instance);
+            // Settled at the first initializer to key, which is the first point that needs the
+            // context's device: a graph with nothing to draw resolves no backend.
+            long? chunkPositions = null;
             var keyInputNodes = new List<FastNode>();
             var keyByInput = new Dictionary<FastTensorKey, ulong>();
 
@@ -160,7 +163,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                         if (!keyedByInitializer.TryGetValue(initFn, out var keyed))
                             keyedByInitializer[initFn] = keyed = FastInitKeyedDraws.BuildKeyedDraws(
                                 initFn, $"{initFn.DefaultName}__rng{keyedByInitializer.Count}",
-                                info.ToShorokooIdString(), Core.Rng.RngAlgorithms.NameOf(rngConfig!.Algorithm));
+                                info.ToShorokooIdString(), Core.Rng.RngAlgorithms.NameOf(rngConfig!.Algorithm),
+                                chunkPositions ??= ChunkPositionsOn(computeContext ?? ComputeContext.Default));
                         if (keyed is not null)
                         {
                             // Stream key = init master folded along the parameter's ModelId path —
@@ -301,6 +305,17 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             double total = elements.Sum(e => (double)e);
             return elements.Max() * 2.0 <= total;
         }
+
+        /// <summary>
+        /// The stream positions a keyed draw computes per chunk on <paramref name="compute"/>'s
+        /// device: a cache-sized chunk on the CPU, and a far larger one on a card, where each trip
+        /// of the chunk loop costs a launch per pass (see <c>RuntimeRng.DeviceChunkPositions</c>).
+        /// The values are the same whichever it is.
+        /// </summary>
+        private static long ChunkPositionsOn(ComputeContext compute)
+            => compute.Backend.Device == ComputeDevice.Cpu
+                ? Core.Rng.RuntimeRng.CpuChunkPositions
+                : Core.Rng.RuntimeRng.DeviceChunkPositions;
 
         [System.ThreadStatic] private static bool? _sideBySide;
 

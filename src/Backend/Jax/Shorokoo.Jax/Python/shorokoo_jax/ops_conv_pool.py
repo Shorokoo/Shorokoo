@@ -21,14 +21,18 @@ _NARROW_FLOATS = (np.dtype(np.float16), _rt.jax_dtype(16))
 
 # ---- geometry --------------------------------------------------------------------------------
 
-def _pads(sizes, kernel, strides, dilations, pads, auto_pad):
-    """(begins, ends): the explicit pads, or those auto_pad resolves to."""
+def _pads(sizes, kernel, strides, dilations, pads, auto_pad, negative=False):
+    """(begins, ends): the explicit pads, or those auto_pad resolves to. A SAME padding
+    the windows overshoot is zero, or with `negative` stays negative and crops the input, as the
+    pooling operators' formula has it."""
     n = len(sizes)
     if auto_pad in ("SAME_UPPER", "SAME_LOWER"):
         begins, ends = [], []
         for size, k, s, d in zip(sizes, kernel, strides, dilations):
             out = -(-size // s)
-            total = max(0, (out - 1) * s + (k - 1) * d + 1 - size)
+            total = (out - 1) * s + (k - 1) * d + 1 - size
+            if not negative:
+                total = max(0, total)
             small = total // 2
             if auto_pad == "SAME_UPPER":
                 begins.append(small)
@@ -66,7 +70,7 @@ def _windows(x, kernel_shape, strides, dilations, pads, auto_pad, ceil_mode):
     kernel = list(kernel_shape)
     strides = list(strides) if strides else [1] * n
     dilations = list(dilations) if dilations else [1] * n
-    begins, ends = _pads(sizes, kernel, strides, dilations, pads, auto_pad)
+    begins, ends = _pads(sizes, kernel, strides, dilations, pads, auto_pad, negative=True)
     outs = [_pool_out(*g, ceil_mode) for g in zip(sizes, kernel, strides, dilations, begins, ends)]
     fits = [(o - 1) * s + (k - 1) * d + 1 - b - size
             for o, s, k, d, b, size in zip(outs, strides, kernel, dilations, begins, sizes)]

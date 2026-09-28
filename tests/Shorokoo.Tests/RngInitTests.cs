@@ -1,5 +1,6 @@
 using System;
 using System.Linq;
+using Shorokoo.Core.Backends;
 using Shorokoo.Core.Rng;
 using Shorokoo.Modules.Initializers;
 using Shorokoo.Modules.Layers;
@@ -140,6 +141,28 @@ public partial class RngKaimingGainRuntimeGain
 /// initialization is reproducible for a config, the master seed re-randomizes everything, and
 /// Params overrides must match a real parameter.
 /// </summary>
+[Module]
+public partial class RngInitSameShapeStack2
+{
+    public static Tensor<float32> Inline(Tensor<float32> x) => RngInitSameShapeStack.Chain(x, 2);
+}
+
+[Module]
+public partial class RngInitSameShapeStack8
+{
+    public static Tensor<float32> Inline(Tensor<float32> x) => RngInitSameShapeStack.Chain(x, 8);
+}
+
+internal static class RngInitSameShapeStack
+{
+    internal static Tensor<float32> Chain(Tensor<float32> x, int layers)
+    {
+        for (int i = 0; i < layers; i++)
+            x = x.MatMul(NormalDist.Init(Vector(4L, 4L), Scalar(0f), Scalar(0.02f)));
+        return x;
+    }
+}
+
 [Trait("Domain", "Core")]
 [Trait("Purpose", "Coverage")]
 public class RngInitTests
@@ -178,6 +201,19 @@ public class RngInitTests
             .SelectMany(td => td.As<uint32>().AccessMemory().ToArray())
             .ToArray();
     }
+
+    private static int InitSessions(ComputationGraph model)
+    {
+        var arch = model.ToConcreteArchitecture([TensorData([1L, 4L], new float[4])]);
+        var backend = new SessionCountingBackend(DefaultBackend.Instance);
+        using var ctx = new ComputeContext(backend);
+        arch.InitializeTrainableParams(computeContext: ctx);
+        return backend.Sessions;
+    }
+
+    [Fact]
+    public void TestSameShapedParametersShareTheirInitializationSessions()
+        => Assert.Equal(InitSessions(RngInitSameShapeStack2.ComputationGraph), InitSessions(RngInitSameShapeStack8.ComputationGraph));
 
     [Fact]
     public void TestSameShapeParamsDifferAndInitIsReproducibleMasterSeededAndInKaimingBound()
@@ -239,6 +275,43 @@ public class RngInitTests
 
         Assert.False(baseline[0].SequenceEqual(overridden[0]));   // re-seeded
         Assert.Equal(baseline[1], overridden[1]);                 // untouched
+    }
+
+    private sealed class SessionCountingBackend(IShorokooBackend inner) : IShorokooBackend
+    {
+        internal int Sessions;
+
+        public BackendDescription Description => inner.Description;
+        public MemorySpace MemorySpace => inner.MemorySpace;
+        public object RuntimeIdentity => inner.RuntimeIdentity;
+        public bool CanAddress(MemoryLocation location) => inner.CanAddress(location);
+        public bool AcceptsTrainingFormat(string format) => inner.AcceptsTrainingFormat(format);
+        public void Release(IShorokooTensorValue value) => inner.Release(value);
+
+        public IShorokooSession CreateSession(
+            ReadOnlyMemory<byte> modelBytes, ShorokooGraphOptimization graphOptimization,
+            ShorokooLogSeverity logSeverity, DeviceMemorySettings deviceMemory)
+        {
+            Sessions++;
+            return inner.CreateSession(modelBytes, graphOptimization, logSeverity, deviceMemory);
+        }
+
+        public IShorokooTensorValue CreateTensor<T>(T[] data, long[] shape) where T : unmanaged
+            => inner.CreateTensor(data, shape);
+        public IShorokooTensorValue CreateTensorFromRawBytes(
+            ShorokooTensorElementType elementType, byte[] data, long[] shape)
+            => inner.CreateTensorFromRawBytes(elementType, data, shape);
+        public IShorokooTensorValue CreateStringTensor(IReadOnlyList<string> data, long[] shape)
+            => inner.CreateStringTensor(data, shape);
+        public IShorokooTensorValue CreateSequence(IReadOnlyList<IShorokooTensorValue> values)
+            => inner.CreateSequence(values);
+        public byte[] CopyTensorToHost(IShorokooTensorValue value) => inner.CopyTensorToHost(value);
+        public IShorokooTensorValue CreateTensorInBackendMemory(
+            ShorokooTensorElementType elementType, byte[] data, long[] shape)
+            => inner.CreateTensorInBackendMemory(elementType, data, shape);
+        public IShorokooTensorValue CreateUninitializedTensorInBackendMemory(
+            ShorokooTensorElementType elementType, long[] shape)
+            => inner.CreateUninitializedTensorInBackendMemory(elementType, shape);
     }
 }
 

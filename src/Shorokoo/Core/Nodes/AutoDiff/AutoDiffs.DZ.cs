@@ -150,31 +150,25 @@ namespace Shorokoo.Core.Nodes.AutoDiff
             return [expandedGrad, null];
         }
 
-        [AutoDiff(REDUCE_MEAN)]
-        public static Variable?[] ReduceMean<T1, T2>(Tensor<T1> data, Tensor<T2>? axes, Tensor<T1> grad, bool? keepdims, bool? noopWithEmptyAxes) 
+        [AutoDiff(REDUCE_MEAN, UsesOutputs = true)]
+        public static Variable?[] ReduceMean<T1, T2>(Tensor<T1> data, Tensor<T2>? axes, Tensor<T1> output, Tensor<T1> grad, bool? keepdims, bool? noopWithEmptyAxes) 
             where T1 : IVarType
             where T2 : IVarType
         {
             // Gradient of ReduceMean: broadcast grad / N back to original shape, N the size of
-            // each group. noop_with_empty_axes with no axes, or an empty axes tensor, makes every
-            // element a group of its own (N = 1); without it an empty axes tensor reduces every
-            // element (N = the element count).
+            // each group. noop_with_empty_axes with no axes makes every element a group of its own
+            // (N = 1). With axes, N is the input's element count over the output's, which covers an
+            // empty axes tensor either way: every element one group without noop_with_empty_axes,
+            // each element its own under it. The output's count is floored at 1 so an empty output
+            // (whose gradient is empty) never divides by zero.
             var expandedGrad = ExpandGradToOriginalShape(grad, data, axes, keepdims);
-            bool noOp = noopWithEmptyAxes == true;
-            if (!axes.HasValue && noOp) return [expandedGrad, null];
+            if (!axes.HasValue && noopWithEmptyAxes == true) return [expandedGrad, null];
 
-            Tensor<int64> fullShape = OnnxOp.Shape(data);
-            Tensor<int64> total = OnnxOp.ReduceProd(fullShape, keepdims: false);
-            Tensor<int64> reducedCount = total;
+            Tensor<int64> reducedCount = OnnxOp.ReduceProd(OnnxOp.Shape(data), keepdims: false);
             if (axes.HasValue)
             {
-                Tensor<int64> gatheredDims = OnnxOp.Gather(fullShape, axes, axis: 0);
-                reducedCount = OnnxOp.ReduceProd(gatheredDims, keepdims: false);
-                if (!noOp)
-                {
-                    Tensor<int64> axisCount = OnnxOp.ReduceProd(OnnxOp.Shape(axes), keepdims: false);
-                    reducedCount = OnnxOp.Where(OnnxOp.Equal(axisCount, Scalar(0L)), total, reducedCount);
-                }
+                Tensor<int64> groups = OnnxOp.ReduceProd(OnnxOp.Shape(output), keepdims: false);
+                reducedCount = reducedCount / OnnxOp.Max(groups, Scalar(1L));
             }
             Tensor<T1> reducedCountTyped = OnnxOp.Cast(reducedCount, saturate: null, to: data.Type);
 

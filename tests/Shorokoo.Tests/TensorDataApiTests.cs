@@ -102,6 +102,17 @@ public class TensorDataApiCoverageTests
         Assert.Contains("less than shape size", ex.Message);
     }
 
+    [Fact]
+    public void TestHostTensorRefusesAnElementTypeOtherThanItsStorageType()
+    {
+        var f32 = TensorData([2L], 1.5f, 2.5f).As<float32>();
+        Assert.ThrowsAny<Exception>(() => f32.CopyMemory<double>());
+        Assert.ThrowsAny<Exception>(() => f32.CopyMemory<int>());
+        Assert.ThrowsAny<Exception>(() => f32.ValueAt<int>(0));
+        Assert.ThrowsAny<Exception>(() => f32.WriteMemory<long>(_ => { }));
+        Assert.Equal(2.5f, f32.ValueAt<float>(1));
+    }
+
     /// <summary>
     /// A raw-byte tensor is exactly its shape's worth of the buffer it was handed. The backend
     /// allocator enforced that by construction — it allocated to the shape and copied into what it

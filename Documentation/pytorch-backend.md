@@ -91,7 +91,7 @@ Console.WriteLine(environment);             // "/home/me/.cache/shorokoo/python-
 
 On CUDA, a tensor moved to the context (`TensorData.To(context)`) is on the card and read
 there. Outputs come back in host memory, except those a resident run keeps on the card
-(`IsHostAccessible` is false) until copied home.
+(`TensorData.IsHostResident` is false) until copied home.
 
 **One environment per process.** The process gets whichever environment the first torch
 backend started. The CUDA build of PyTorch also runs on the CPU; the CPU build cannot run on

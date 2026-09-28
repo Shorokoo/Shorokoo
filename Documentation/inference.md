@@ -85,7 +85,7 @@ A `[Module]`'s output (from `Foo.Call(...)` or `Foo.Model().Call(...)`) can carr
 un-lowered module-invoke node. Every eager-evaluation entry point — `OnnxEngine.Eval`,
 `ComputeContext.Eval`, `tensor.Eval()`, `inputs.Eval(outputs).With(...)` — refuses such an
 output with an `InvalidOperationException`, as do `ComputeContext.Execute`/`Run`/`Compile`
-for a module graph. For example:
+and `QuickExecutionEngine` for a module graph. For example:
 
 > `OnnxEngine.Eval requires a concretized graph (a 'concrete-architecture' or
 > 'concrete-model'), but this graph is a 'module'. It still carries module machinery
@@ -94,9 +94,10 @@ for a module graph. For example:
 > — ToConcreteArchitecture(inputHints) then ToConcreteModel() — and execute that,
 > passing a value for each of its inputs in order ([Hyper] parameters come first). …`
 
-Values go in the graph's input order, `[Hyper]` parameters first. An initializer may not
-create or reference a model; building one that does is refused with `FW055` (see
-*Writing your own* in [nn-library.md](nn-library.md#initializers-shorokoomodulesinitializers)).
+Values go in the graph's input order, `[Hyper]` parameters first. An initializer's output
+never carries module machinery: an initializer may not create or reference a model, and
+building one that does is refused with `FW055` (see *Writing your own* in
+[nn-library.md](nn-library.md#initializers-shorokoomodulesinitializers)).
 
 Concretize the module's `ComputationGraph` against the input first, then execute:
 
@@ -405,8 +406,9 @@ CUDA provider on device 0, the CPU ones ORT's default provider.
 If `DefaultBackend.Instance` is never assigned, its first read resolves and caches a backend:
 
 1. If one of the four backend assemblies targeting the running OS is **already loaded** and
-   exposes a backend, it is used. (Naming a backend type in any method your program runs can
-   load it.) Backends loaded by `IsolatedBackend.Load` are never candidates.
+   exposes a backend, it is used, and the folder is never probed — so a deployment carrying
+   several backends can run without being refused. (Naming a backend type in any method your
+   program runs can load it.) Backends loaded by `IsolatedBackend.Load` are never candidates.
 2. Otherwise the folder next to `Shorokoo.dll` is probed for the known
    `Shorokoo.{Platform}.dll` files targeting the running OS. Nothing else is searched.
    Referencing a package suffices: it copies its DLL to your output folder.
@@ -734,7 +736,7 @@ var onHost = cpu.Execute(graph, input.Shared());   // the host, reading input an
 var onCard = cuda.Execute(graph, input);           // the same graph, the same input, the card
 ```
 
-Both run the same compiled model. `ComputeContext.Backend` and `CompiledGraph.Backend` name
+Both run the same model, one C# build; each context compiles its own session. `ComputeContext.Backend` and `CompiledGraph.Backend` name
 the backend. Tensors you build (allocating backend `HostBackend.Instance`) are tied to no
 runtime, so building and exporting needs none and either context accepts them. A tensor not
 readable in place is copied per run when consumed, or once per (tensor, runtime) when fed

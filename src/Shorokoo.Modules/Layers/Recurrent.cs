@@ -421,8 +421,9 @@ public static class Recurrent
     /// so the ONNX input-bias <c>Wb</c> carries it and the recurrent-bias <c>Rb</c>
     /// is 0 — the two ONNX/PyTorch biases collapse into one, as Keras/Flax do). When
     /// false the op is given no bias. With <paramref name="linearBeforeReset"/> true
-    /// (the default) the single <c>Wb</c> bias is numerically equivalent to PyTorch's
-    /// <c>b_ih + b_hh</c> sum.
+    /// (the default) the single <c>Wb</c> bias holds PyTorch's <c>b_ih + b_hh</c> sum for the
+    /// <c>z</c> and <c>r</c> blocks; PyTorch's candidate bias <c>b_hn</c> sits inside
+    /// <c>r ⊙ (…)</c>, where <c>Rb</c> is 0, and has no equivalent.
     /// </param>
     /// <param name="linearBeforeReset">
     /// Selects how the reset gate enters the candidate. When true (default) the reset
@@ -465,9 +466,9 @@ public static class Recurrent
     /// training-dynamics or correctness difference for a from-scratch model. The
     /// reorder only matters when importing pretrained PyTorch weights (out of scope):
     /// on import, permute the <c>3H</c> rows from <c>r,z,n</c> to <c>z,r,h</c> (swap
-    /// the first two gate blocks; the candidate block stays last), and map PyTorch's
-    /// two <c>3H</c> biases onto <c>Wb</c>/<c>Rb</c> — exact for the default
-    /// <paramref name="linearBeforeReset"/> = true (reset-after) form.
+    /// the first two gate blocks; the candidate block stays last), and sum PyTorch's
+    /// two <c>3H</c> biases into <c>Wb</c> for the <c>z</c> and <c>r</c> blocks. The port
+    /// is exact only where PyTorch's <c>b_hn</c> is 0, since <c>Rb</c> is fixed at 0.
     /// </para>
     /// <para>
     /// <b>Reset-before-vs-after.</b> The default

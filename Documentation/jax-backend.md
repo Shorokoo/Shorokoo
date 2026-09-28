@@ -158,7 +158,8 @@ session binds no output aliases.
 | **`TraceNodePlacement`** | every node on `cpu` | every node on `cuda:N` |
 | **Log severity** | Python warnings a run raises are shown at `Warning` and below, not above | same |
 
-Floating-point products and convolutions run in full `float32` precision, not TensorFloat-32.
+Floating-point products and convolutions run in the operands' full precision; `float32`
+operands are never rounded to TensorFloat-32.
 
 ## Limitations
 

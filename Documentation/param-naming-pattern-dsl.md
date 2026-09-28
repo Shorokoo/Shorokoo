@@ -382,7 +382,7 @@ unknown name. See [§7](#7-error-handling) for the one case that throws.
 
 ## 7. Error Handling
 
-Failures are ordinary BCL exceptions, except a missing match, which returns `null`.
+Failures are ordinary BCL exceptions, except a miss across a whole `SimplePatternNamingScheme`, which returns `null`.
 
 | Failure | Behaviour |
 |---------|-----------|

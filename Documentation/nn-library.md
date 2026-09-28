@@ -341,7 +341,8 @@ Common to RNN, LSTM and GRU (`D = 2` for `Bidirectional`, else `1`):
 - **Weights.** Per layer `W [D, G·H, in]`, `R [D, G·H, H]`, one owned bias `[D, G·H]`,
   with `G` = 1 (RNN), 4 (LSTM), 3 (GRU); the init bound stays `1/√H`, not `1/√(G·H)`.
 - **`bias`.** The single owned bias is ONNX's input bias `Wb`; the recurrent bias `Rb` is
-  0. A ported PyTorch model sums `b_ih + b_hh` into it. `bias: false` passes no bias.
+  0. A ported PyTorch RNN or LSTM sums `b_ih + b_hh` into it; for GRU see *Gate order* below.
+  `bias: false` passes no bias.
 - **`numLayers`.** Layers are stacked, each consuming the previous `y`; no inter-layer
   dropout — put `Dropout` between separate calls if needed.
 - **Initial state** is zero; no caller-supplied initial state, no carry across calls.
@@ -409,8 +410,9 @@ H_t = (1 − z) ⊙ ĥ + z ⊙ H_{t-1}     # blend candidate with previous hidde
   `ĥ = tanh(W_h·x + (r ⊙ h)·R_hᵀ + Rb_h + Wb_h)` — the ONNX default. The forms give
   different results; **both are trainable**.
 - **Gate order (porting).** Packed ONNX-style `z, r, h`. PyTorch packs `r, z, n`: swap
-  the first two `3H` blocks and map `b_ih`/`b_hh` onto `Wb`/`Rb` (exact for the default
-  reset-after form).
+  the first two `3H` blocks and sum `b_ih + b_hh` into `Wb` for the `z` and `r` blocks. In the
+  reset-after form PyTorch's candidate bias `b_hn` sits inside `r ⊙ (…)`, where `Rb` is fixed
+  at 0, so it has no slot: a ported GRU is exact only where `b_hn = 0`.
 - `clip`, custom activations and `sequence_lens` are not exposed (AD003 in BPTT).
 
 #### Recurrent cells (single-step) — `Recurrent.RNNCell` / `LSTMCell` / `GRUCell`
@@ -845,12 +847,12 @@ are on `Reduced` / `PerElement` — see [Configurable knobs](#loss-configurable-
 
 | Module | Formula (per element, then mean) | Input contract |
 |---|---|---|
-| `L2Loss` | `(p − t)²` | predictions, targets (MSE; reduces over axis 0 — use rank-1/flattened predictions) |
+| `L2Loss` | `(p − t)²` | predictions, targets of any rank (MSE over all elements) |
 | `L1Loss` | `\|p − t\|` | predictions, targets (MAE) |
 | `HuberLoss` | `0.5·e²` if `\|e\| ≤ δ`, else `δ·(\|e\| − 0.5·δ)` | `(predictions, targets, delta hyper)` — see note below |
 | `SmoothL1Loss` | Huber with `δ = 1` | predictions, targets |
 | `CrossEntropyLoss` | softmax cross-entropy over logits | predictions `[N, C]` or `[N, C, d1, …]` logits; targets `[N]` or `[N, d1, …]` `Tensor<int64>` class indices. The class axis is axis 1 — see [Sequence logits](#cross-entropy-sequence-logits) |
-| `NLLLoss` | `−log p[target]` | predictions `[N, C]` log-probs (e.g. `x.LogSoftmax(1)`); targets `[N]` `Tensor<int64>` |
+| `NLLLoss` | `−log p[target]` | predictions `[N, C]` or `[N, C, d1, …]` log-probs (e.g. `x.LogSoftmax(1)`); targets `[N]` or `[N, d1, …]` `Tensor<int64>`. The class axis is axis 1, as for [`CrossEntropyLoss`](#cross-entropy-sequence-logits) |
 | `BCELoss` | `−(t·ln p + (1−t)·ln(1−p))` | predictions are probabilities, clamped to `[1e-7, 1−1e-7]` |
 | `BCEWithLogitsLoss` | `max(x, 0) − x·t + ln(1 + e^−\|x\|)` | predictions are raw logits |
 | `KLDivLoss` | `(1/N)·Σ p·(log p − log q)` (batchmean) | predictions are **log**-probs, targets are probs; `p·log p = 0` at `p = 0` |
@@ -952,7 +954,7 @@ last axis. Knobs: `margin` (default 1), `p` (default 2), `eps` (default 1e-6), `
 
 It is a 3-input loss — `TripletMarginLoss.Call(margin, p, eps, swap, anchor, positive, negative)` —
 not a rig loss: to train with the rig, compute it at the **end of your model**.
-`TripletMarginWithDistance` (static helper) takes a custom distance
+`TripletMarginWithDistance` (static helper, with `Reduced`/`PerElement`) takes a custom distance
 `Func<Tensor<float32>, Tensor<float32>, Tensor<float32>>` instead of the p-norm.
 
 ### CosineEmbeddingLoss (metric learning)

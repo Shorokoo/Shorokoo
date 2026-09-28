@@ -86,7 +86,8 @@ At ONNX prep, the key chain and the draw lower to calls of the config's **named 
 algorithm**: versioned *split* / *uniform* / *normal* functions exported as tagged,
 non-inlined ONNX local `FunctionProto`s. `RngSeed` becomes an initializer, and session
 constant folding collapses constant chain segments to literal keys, so the chain adds
-no per-draw cost. Every draw in an exported model is traceable to its function and
+no per-draw cost (except in a graph with no inputs, which is built without graph
+optimizations). Every draw in an exported model is traceable to its function and
 the identity initializer, and is bit-identical on every execution provider that
 implements integer ops correctly, since key derivation and decoding are pure integer
 arithmetic.
@@ -114,9 +115,10 @@ element with integer arithmetic alone (a piecewise degree-12 series inverting th
 Gaussian CDF), so the value depends only on the bits.
 
 You can switch generators on a built model with `WithRngConfig`, like re-seeding; the
-exported model is tagged with the selected algorithm. A **loaded** model's draw
-functions are baked, so a re-bind there may change seeds but not the algorithm (it
-fails loudly; rebuild from the architecture).
+exported model is tagged with the selected algorithm. A loaded model keeps its feed ops,
+so a re-bind there may change the algorithm too. Only a graph whose draws were already
+**lowered** at ONNX prep has its draw functions baked: a re-bind there may change seeds but
+not the algorithm (it fails loudly; rebuild from the architecture).
 
 **The execution counter.** Per-execution variation comes from one model-global counter,
 `RngExecutionCounter` (ordinary model state: an int64 scalar starting at 0, +1 per

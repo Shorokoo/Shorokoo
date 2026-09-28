@@ -4,8 +4,8 @@ Shorokoo supports the standard `ai.onnx` domain from **opset 21** up to **opset 
 maximum implemented by the bundled ONNX Runtime 1.26; import does not convert older models.
 Exported models are stamped at the
 **opset-21 baseline**; only a few post-21 attributes on imported (or
-`NodeBuilder`-built) nodes raise the stamp, and no post-21 operator reaches the
-file. See [limitations.md](limitations.md) for the details and the reason.
+`NodeBuilder`-built) nodes raise the stamp, and no post-21 operator reaches an
+exported ONNX file. See [limitations.md](limitations.md) for the details and the reason.
 
 Every operator Shorokoo defines is listed below: the opset-21 set plus the
 post-21 additions (`Attention`, `RMSNormalization`, `RotaryEmbedding` at opset 23;

@@ -1059,6 +1059,40 @@ namespace Shorokoo.Tests.Modules
         }
     }
 
+    /// <summary>Cubic tf_crop_and_resize with axes 0 and 3 at scale 1 and axis 1 scaled: an NHWC input scaled
+    /// along H and W, C doubled over axes [1], C at its length under a roi, and a not_larger policy over axes
+    /// [1, 2], each flattened. Input x is [1,3,2,2].</summary>
+    [Module]
+    public partial class CubicCropAndResizeChannelsLastValues
+    {
+        public static Tensor<float32> Inline(Tensor<float32> x)
+            => CropAndResizeVariantsValues.Crop(x, Vector(0f, 0.5f, -0.25f, 0f, 1f, 1.5f, 1f, 1f), Vector(1f, 2f, 1.5f, 1f), null, null, null, ResizeMode.Cubic).Concat(0L,
+                CropAndResizeVariantsValues.Crop(x, Vector(0.5f, 1.5f), Vector(2f), null, [1L], null, ResizeMode.Cubic),
+                CropAndResizeVariantsValues.Crop(x, Vector(0f, 0.25f, 0f, 0f, 1f, 1.25f, 1f, 1f), null, Vector(1L, 3L, 2L, 2L), null, null, ResizeMode.Cubic),
+                CropAndResizeVariantsValues.Crop(x, Vector(0.5f, 0f, 1.5f, 1f), null, Vector(6L, 5L), [1L, 2L], KeepAspectRatioPolicy.not_larger, ResizeMode.Cubic));
+    }
+
+    /// <summary>Linear Resize over axes [2, 3] and over axes [1, 2] of an input transposed into place and back,
+    /// against the same resizes written over every axis. Input x is [1,3,4,5].</summary>
+    [Module]
+    public partial class ResizeOverAxesBetweenTransposesCheck
+    {
+        private static Tensor<float32> Around(Tensor<float32> x, long[] perm, long[] back, Vector<float32> scales, long[]? axes)
+            => (Tensor<float32>)OnnxOp.Transpose(OnnxOp.Resize(OnnxOp.Transpose(x, perm), roi: null, scales: scales, sizes: null,
+                antialias: null, axes: axes, coordinateTransformationMode: null, cubicCoeffA: null, excludeOutside: null,
+                extrapolationValue: null, keepAspectRatioPolicy: null, mode: ResizeMode.Linear, nearestMode: null), back);
+
+        public static Scalar<bit> Inline(Tensor<float32> x)
+        {
+            var mismatch =
+                Apart(Around(x, [0L, 3L, 1L, 2L], [0L, 2L, 3L, 1L], Vector(2f, 2f), [2L, 3L]),
+                    Around(x, [0L, 3L, 1L, 2L], [0L, 2L, 3L, 1L], Vector(1f, 1f, 2f, 2f), null)) +
+                Apart(Around(x, [0L, 2L, 3L, 1L], [0L, 3L, 1L, 2L], Vector(2f, 2f), [1L, 2L]),
+                    Around(x, [0L, 2L, 3L, 1L], [0L, 3L, 1L, 2L], Vector(1f, 2f, 2f, 1f), null));
+            return mismatch < Scalar(1L);
+        }
+    }
+
     /// <summary>1-D Col2Im with pads and a stride. Input cols is [1,3,4].</summary>
     [Module]
     public partial class Col2Im1DPaddedValues

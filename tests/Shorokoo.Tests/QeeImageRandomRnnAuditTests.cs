@@ -110,13 +110,9 @@ public class QeeImageRandomRnnAuditTests
     }
 
     [Fact]
-    public void TestAnIntegerRangeCountsItsElementsExactly()
-    {
-        IntegerRangesCountTheirElementsExactly(ComputeContext.Default);
-        Assert.True(AutoTest.AdvancedTestGraph<IntegerRangeOfConstantsCheck>([], []));
-    }
+    public void TestAnInt64RangeCountsItsElementsExactly() => Int64RangesCountTheirElementsExactly(ComputeContext.Default);
 
-    internal static void IntegerRangesCountTheirElementsExactly(ComputeContext c)
+    internal static void Int64RangesCountTheirElementsExactly(ComputeContext c)
     {
         Assert.True(Ranges(c, 0L, (1L << 62) + 1L, 1L << 61, 0L, 1L << 61, 1L << 62));
         Assert.True(Ranges(c, 0L, -(1L << 62) - 1L, -(1L << 61), 0L, -(1L << 61), -(1L << 62)));
@@ -127,12 +123,30 @@ public class QeeImageRandomRnnAuditTests
         Assert.True(Ranges(c, 5L, 5L, 1L));
         Assert.True(Ranges(c, 0L, 1L << 62, -1L));
         Assert.True(Ranges(c, 1L << 62, long.MinValue, 1L << 61));
+    }
+
+    [Fact]
+    public void TestAnInt64RangeWithAUnitStepCountsItsElementsExactly()
+    {
+        Int64UnitStepRangesCountTheirElementsExactly(ComputeContext.Default);
+        Assert.True(AutoTest.AdvancedTestGraph<IntegerRangeOfConstantsCheck>([], []));
+    }
+
+    internal static void Int64UnitStepRangesCountTheirElementsExactly(ComputeContext c)
+    {
         Assert.True(UnitRanges(c, long.MaxValue - 2L, long.MinValue + 2L, [], []));
         Assert.True(UnitRanges(c, long.MaxValue, long.MinValue, [], []));
         Assert.True(UnitRanges(c, -3L, 2L, [-3L, -2L, -1L, 0L, 1L], [2L, 1L, 0L, -1L, -2L]));
         Assert.True(FromAConstantStart(c, long.MinValue));
         Assert.True(FromAConstantStart(c, (1L << 62) + 2L, 1L << 62, (1L << 62) + 1L));
         Assert.ThrowsAny<Exception>(() => Ranges(c, long.MinValue, long.MaxValue, 1L));
+    }
+
+    [Fact]
+    public void TestAnInt32RangeCountsItsElementsExactly() => Int32RangesCountTheirElementsExactly(ComputeContext.Default);
+
+    internal static void Int32RangesCountTheirElementsExactly(ComputeContext c)
+    {
         Assert.True(Ranges32(c, int.MinValue, int.MaxValue, 1 << 30, int.MinValue, -(1 << 30), 0, 1 << 30));
         Assert.True(Ranges32(c, int.MaxValue, int.MinValue, int.MinValue, int.MaxValue, -1));
         Assert.True(Ranges32(c, int.MaxValue - 2, int.MinValue + 2, 1));

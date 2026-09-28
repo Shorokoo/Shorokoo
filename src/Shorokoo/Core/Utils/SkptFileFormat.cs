@@ -725,13 +725,17 @@ namespace Shorokoo.Core.Utils
 
         /// <summary>
         /// The bytes of one entry: either held, or produced on demand by a writer. A produced
-        /// entry is never held whole. Its writer runs once into a sink that measures it — length,
-        /// CRC-32 and SHA-256, which the manifest and the zip headers need before its first byte
-        /// is written — and once more into the destination. An entry as large as the training
-        /// state it carries therefore costs no managed copy of that state, however large it is.
+        /// entry is never held whole. Its writer runs into sinks that measure it — its length, then
+        /// its CRC-32 and SHA-256, which the manifest and the zip headers need before its first
+        /// byte is written — and once more into the destination. Writing an entry therefore costs
+        /// no managed copy of what it carries, however large that is.
         /// </summary>
         internal sealed class EntryPayload
         {
+            /// <summary>The largest entry a .skpt reader reads, in either form; a produced entry
+            /// larger than this is refused when it is measured.</summary>
+            public const long MaxEntryLength = int.MaxValue;
+
             private readonly byte[]? _bytes;
             private readonly Action<Stream>? _produce;
             private uint? _crc32;
@@ -751,30 +755,41 @@ namespace Shorokoo.Core.Utils
                 => new(bytes ?? throw new ArgumentNullException(nameof(bytes)), null, bytes.Length, null, null);
 
             /// <summary>An entry produced by <paramref name="produce"/>, which must write the same
-            /// bytes every time it runs. It runs here once, to measure them.</summary>
+            /// bytes every time it runs. It runs here twice: once to count its bytes, which refuses
+            /// an entry larger than <see cref="MaxEntryLength"/> before any of it is hashed, and once
+            /// to hash them.</summary>
             public static EntryPayload Produced(Action<Stream> produce)
             {
                 if (produce is null) throw new ArgumentNullException(nameof(produce));
-                using var sink = new MeasuringStream(destination: null, hash: true);
+                CountedLength(produce);
+                using var sink = new MeasuringStream(destination: null, hash: true, MaxEntryLength, TooLarge);
                 produce(sink);
                 return new(null, produce, sink.Length, sink.Crc32, sink.Sha256Hex());
             }
 
             /// <summary>Runs <paramref name="produce"/> into an array of exactly the size it writes —
-            /// measured first, so the bytes are copied once and the array never regrows.</summary>
+            /// counted first, so the bytes are copied once and the array never regrows.</summary>
             public static byte[] ProduceBytes(Action<Stream> produce)
             {
-                long length;
-                using (var sink = new MeasuringStream(destination: null, hash: false))
-                {
-                    produce(sink);
-                    length = sink.Length;
-                }
+                if (produce is null) throw new ArgumentNullException(nameof(produce));
+                long length = CountedLength(produce);
                 var bytes = new byte[length];
                 using (var buffer = new MemoryStream(bytes))
                     new EntryPayload(null, produce, length, null, null).WriteTo(buffer, "<in-memory entry>");
                 return bytes;
             }
+
+            private static long CountedLength(Action<Stream> produce)
+            {
+                using var sink = new MeasuringStream(destination: null, hash: false, MaxEntryLength, TooLarge);
+                produce(sink);
+                return sink.Length;
+            }
+
+            private static Exception TooLarge(long length)
+                => new NotSupportedException(
+                    $"A .skpt entry would be at least {length} bytes; an entry holds at most " +
+                    $"{MaxEntryLength} bytes, the most a .skpt reader reads.");
 
             /// <summary>The entry's size in bytes.</summary>
             public long Length { get; }
@@ -786,9 +801,11 @@ namespace Shorokoo.Core.Utils
             public string Sha256 => _sha256 ??= Sha256Hex(_bytes!);
 
             /// <summary>Writes the entry's bytes to <paramref name="destination"/>. A produced entry
-            /// that writes a different number of bytes than it measured at has changed under the
-            /// save, and is refused rather than written into an archive whose headers and manifest
-            /// describe other bytes.</summary>
+            /// is held to the length it measured at: one that writes more or fewer bytes has changed
+            /// under the save, and is refused rather than written into an archive whose headers and
+            /// manifest describe other bytes. Only the length is checked — a producer that writes
+            /// other bytes of the same length is not detected here, and fails its SHA-256 check on
+            /// load.</summary>
             public void WriteTo(Stream destination, string entryName)
             {
                 if (_bytes is not null)
@@ -796,26 +813,32 @@ namespace Shorokoo.Core.Utils
                     destination.Write(_bytes);
                     return;
                 }
-                using var counted = new MeasuringStream(destination, hash: false);
+                Exception Changed(long written) => new InvalidOperationException(
+                    $"The .skpt entry '{entryName}' wrote {written} bytes, but measured " +
+                    $"{Length} bytes moments earlier: its content changed while it was being saved.");
+                using var counted = new MeasuringStream(destination, hash: false, Length, Changed);
                 _produce!(counted);
-                if (counted.Length != Length)
-                    throw new InvalidOperationException(
-                        $"The .skpt entry '{entryName}' wrote {counted.Length} bytes, but measured " +
-                        $"{Length} bytes moments earlier: its content changed while it was being saved.");
+                if (counted.Length != Length) throw Changed(counted.Length);
             }
         }
 
         /// <summary>A write-only stream that counts, and optionally CRC-32s and SHA-256s, what is
-        /// written through it, forwarding it to <c>destination</c> when there is one.</summary>
+        /// written through it, forwarding it to <c>destination</c> when there is one. A write that
+        /// would take it past <c>limit</c> bytes throws <c>overrun</c>'s exception before any of that
+        /// write is hashed or forwarded.</summary>
         private sealed class MeasuringStream : Stream
         {
             private readonly Stream? _destination;
             private readonly IncrementalHash? _sha256;
+            private readonly long _limit;
+            private readonly Func<long, Exception> _overrun;
             private uint _crc = 0xFFFFFFFFu;
 
-            public MeasuringStream(Stream? destination, bool hash)
+            public MeasuringStream(Stream? destination, bool hash, long limit, Func<long, Exception> overrun)
             {
                 _destination = destination;
+                _limit = limit;
+                _overrun = overrun;
                 if (hash) _sha256 = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
             }
 
@@ -828,6 +851,7 @@ namespace Shorokoo.Core.Utils
 
             public override void Write(ReadOnlySpan<byte> buffer)
             {
+                if (_length + buffer.Length > _limit) throw _overrun(_length + buffer.Length);
                 _length += buffer.Length;
                 if (_sha256 is not null)
                 {

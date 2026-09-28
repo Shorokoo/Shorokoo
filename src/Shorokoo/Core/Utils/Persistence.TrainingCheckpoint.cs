@@ -103,8 +103,8 @@ namespace Shorokoo
 
         /// <summary>
         /// One safetensors data entry of a <c>.skpt</c>, as it is stored. Uncompressed, it is
-        /// produced straight out of the tensors' own storage as the archive is written, so saving
-        /// costs no managed copy of the state (Shorokoo/Shorokoo#402); the entry is aligned. With
+        /// produced straight out of the tensors' own storage as the archive is written, so writing
+        /// it costs no managed copy of those tensors (Shorokoo/Shorokoo#402); the entry is aligned. With
         /// a Zstd <paramref name="zstdLevel"/>, the safetensors bytes are built once and wrapped in
         /// a single Zstd frame, and the entry skips the alignment a compressed entry cannot use.
         /// </summary>

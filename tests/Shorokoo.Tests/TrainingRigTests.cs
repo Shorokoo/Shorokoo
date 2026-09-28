@@ -4061,11 +4061,11 @@ public class TrainingRigCheckpointCoverageTests
         Assert.Equal(scalar.CopyRawMemory(), read[1].Data.CopyRawMemory());
     }
 
-    private static long SaveAllocation(TrainingCheckpoint ckpt, Action<TrainingCheckpoint> save)
+    private static long SaveAllocation(Action save)
     {
-        save(ckpt);
+        save();
         var before = GC.GetAllocatedBytesForCurrentThread();
-        save(ckpt);
+        save();
         return GC.GetAllocatedBytesForCurrentThread() - before;
     }
 
@@ -4086,9 +4086,13 @@ public class TrainingRigCheckpointCoverageTests
         {
             void Zip(TrainingCheckpoint c) => Persistence.SaveTrainingCheckpointToSkpt(c, skpt);
             void Dir(TrainingCheckpoint c) => Persistence.ForTrainingCheckpoint(c).SaveAsDirectory(dir);
+            void Model(ComputationGraph m) => Persistence.From(m).WithModel().WithWeights().Save(skpt);
+            var wideModel = wide.ToInferenceModel();
+            var narrowModel = narrow.ToInferenceModel();
 
-            Assert.True(SaveAllocation(wide, Zip) - SaveAllocation(narrow, Zip) < stateBytes / 2);
-            Assert.True(SaveAllocation(wide, Dir) - SaveAllocation(narrow, Dir) < stateBytes / 2);
+            Assert.True(SaveAllocation(() => Zip(wide)) - SaveAllocation(() => Zip(narrow)) < stateBytes / 2);
+            Assert.True(SaveAllocation(() => Dir(wide)) - SaveAllocation(() => Dir(narrow)) < stateBytes / 2);
+            Assert.True(SaveAllocation(() => Model(wideModel)) - SaveAllocation(() => Model(narrowModel)) < stateBytes / 6);
 
             Zip(wide);
             Dir(wide);

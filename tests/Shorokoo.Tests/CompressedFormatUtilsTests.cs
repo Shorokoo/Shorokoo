@@ -1098,6 +1098,21 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
         var drifting = SkptFileFormat.EntryPayload.Produced(s => s.Write(ramp.AsSpan(0, 10 + runs++)));
         Assert.Throws<InvalidOperationException>(() =>
             SkptFileFormat.WriteStoredZip(Stream.Null, [new("c", drifting, Align: false)], DateTime.UtcNow));
+        Assert.Throws<InvalidOperationException>(() =>
+            SkptFileFormat.EntryPayload.ProduceBytes(s => s.Write(ramp.AsSpan(0, 10 + runs++))));
+    }
+
+    [Fact]
+    public void TestSkptEntryLargerThanTheReaderReadsIsRefusedAtSave()
+    {
+        byte[] mebibyte = new byte[1 << 20];
+        void TwoGibibytesAndOne(Stream s)
+        {
+            for (int i = 0; i <= 2048; i++) s.Write(mebibyte);
+        }
+
+        Assert.Throws<NotSupportedException>(() => SkptFileFormat.EntryPayload.Produced(TwoGibibytesAndOne));
+        Assert.Throws<NotSupportedException>(() => SkptFileFormat.EntryPayload.ProduceBytes(TwoGibibytesAndOne));
     }
 
     [Fact]

@@ -1620,7 +1620,7 @@ namespace Shorokoo
             if (checkpoint is null) throw new ArgumentNullException(nameof(checkpoint));
             // Read through the definitions, not the field dictionary: a definition field is what the
             // model expects to be given, and a struct holds every one of them as the kind it declares.
-            // Filtering the dictionary for tensors instead used to drop a field that was not one and
+            // Filtering the dictionary for tensors instead would drop a field that was not one and
             // leave the bind to fail on a lookup for a parameter nothing had supplied. Both defs
             // declare only tensors and a struct is held to its definition, so the refusal below is
             // unreachable today — it is here so that stops being true loudly rather than silently.

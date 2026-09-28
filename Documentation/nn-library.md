@@ -993,7 +993,11 @@ hyperparameter set (`<Name>Hyperparameters`, e.g. `AdamOptimizerHyperparameters`
 | `LambOptimizer` | `r = m̂/(√v̂ + ε); u = r + wd·p; trust = (‖p‖>0 ∧ ‖u‖>0) ? ‖p‖/‖u‖ : 1; p −= lr·trust·u` (norms over the whole tensor) | `lr 1e-3, β1 0.9, β2 0.999, ε 1e-6, wd 0.01` | m, v, step |
 
 - **Adam / AdamW** bias-correct with a scalar `step` per parameter; the first step is
-  ≈ `lr`. At `wd = 0`, AdamW equals Adam.
+  ≈ `lr`. At `wd = 0`, AdamW equals Adam. Both compute the step as
+  `m/(√v + ε·√(1−β2^t)) · lr·√(1−β2^t)/(1−β1^t)`, with the corrections folded into scalars so the
+  update makes as few full passes over the parameter as it can; for a large parameter (an embedding
+  table, say) the number of passes, not the arithmetic, sets the optimizer's share of a step. Every
+  element is updated every step, rows the batch did not read included.
 - **RMSprop** with `momentum = 0` is plain RMSprop (both state tensors still exist).
 - **Adamax** puts `ε` inside the max and bias-corrects only `m`.
 - **NAdam** has no weight decay.

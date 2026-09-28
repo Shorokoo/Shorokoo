@@ -327,17 +327,17 @@ All boolean/integer outputs are non-differentiable, hence N/A gradients.
 
 | Op | Build & run | QEE | Gradient |
 |---|---|---|---|
-| AveragePool | ✅ | 🟡 [1] | 🟡 [2] |
+| AveragePool | ✅ [9] | 🟡 [1] | 🟡 [2] |
 | Conv | ✅ | 🟡 [1] | 🟡 [3] |
 | ConvTranspose | ✅ | 🟡 [1] | 🟡 [4] |
 | DeformConv | ✅ | 🟡 [1] | ❌ [5] |
 | GlobalAveragePool | ✅ | 🟡 [1] | ✅ |
 | GlobalLpPool | ✅ | 🟡 [1] | ✅ |
 | GlobalMaxPool | ✅ | 🟡 [1] | ✅ |
-| LpPool | ✅ | 🟡 [1] | 🟡 [6] |
-| MaxPool | ✅ | 🟡 [1] | 🟡 [7] |
-| MaxRoiPool | ✅ | 🟡 [1] | 🟡 [8] |
-| MaxUnpool | ✅ | 🟡 [9] | ✅ |
+| LpPool | ✅ [9] | 🟡 [1] | ✅ |
+| MaxPool | ✅ [9] | 🟡 [1] | 🟡 [6] |
+| MaxRoiPool | ✅ | 🟡 [1] | 🟡 [7] |
+| MaxUnpool | ✅ | 🟡 [8] | ✅ |
 
 1. Shape/dtype inference only — values are never computed for these heavy
    operators; use the ONNX Runtime backend for numbers.
@@ -350,13 +350,18 @@ All boolean/integer outputs are non-differentiable, hence N/A gradients.
    `output_padding` handled); the `output_shape` attribute is ignored in the
    backward.
 5. The bilinear-sampling adjoint is not implemented; differentiation throws.
-6. Backward ignores `ceil_mode`, `dilations`, and `auto_pad`.
-7. Exact for every attribute combination except `storage_order=1` (throws);
+6. Exact for every attribute combination except `storage_order=1` (throws);
    ties route the gradient to the first maximum.
-8. Recompute-and-mask approximation (deprecated operator); the `rois` input
+7. Recompute-and-mask approximation (deprecated operator); the `rois` input
    gets no gradient.
-9. Shape comes from the `output_shape` input's values when known; element
+8. Shape comes from the `output_shape` input's values when known; element
    values are not computed.
+9. Where ONNX Runtime's pooling kernels depart from the spec — `SAME_UPPER` /
+   `SAME_LOWER` with a dilation above 1 or a stride above the kernel, and
+   explicit pads as large as the kernel — `OnnxOp.AveragePool`,
+   `OnnxOp.LpPool` and `OnnxOp.MaxPool` build the pool from `Pad`, a pool
+   ONNX Runtime computes as the spec does, and `Slice`; one in an imported
+   ONNX model is the plain operator.
 
 ## Normalization & losses
 
@@ -476,11 +481,11 @@ All boolean/integer outputs are non-differentiable, hence N/A gradients.
 |---|---|---|---|
 | AffineGrid | ✅ | 🟡 [1] | ✅ [2] |
 | CenterCropPad | 🟡 [3] | ✅ | ✅ |
-| Col2Im | ✅ | 🟡 [1] | ✅ |
+| Col2Im | ✅ [14] | 🟡 [1] | ✅ |
 | GridSample | ✅ | 🟡 [1] | 🟡 [4] |
 | ImageDecoder | 🟡 [13] | 🟡 [5] | N/A |
 | NonMaxSuppression | ✅ | 🟡 [6] | N/A (index output) |
-| Resize | 🟡 [7] | 🟡 [8] | 🟡 [9] |
+| Resize | 🟡 [7] [15] | 🟡 [8] | 🟡 [9] |
 | RoiAlign | ✅ | 🟡 [1] | 🟡 [10] |
 | Upsample | ✅ [11] | 🟡 [1] | 🟡 [12] |
 
@@ -510,6 +515,13 @@ All boolean/integer outputs are non-differentiable, hence N/A gradients.
     is refused when its session is created. It runs on the
     [PyTorch backend](pytorch-backend.md); the [JAX backend](jax-backend.md) refuses it, its output
     shape being decided by the bytes it decodes.
+14. `OnnxOp.Col2Im` over one spatial axis is built as a `Col2Im` over two axes,
+    the second of extent 1, and a `Squeeze`, since ONNX Runtime's kernel
+    computes the one-axis form wrongly; one in an imported ONNX model is the
+    plain operator.
+15. `OnnxOp.Resize` with `tf_crop_and_resize` crops to the `roi` of an axis
+    whose length it leaves unchanged, which ONNX Runtime's kernel does not;
+    one in an imported ONNX model is the plain operator.
 
 ## Random
 

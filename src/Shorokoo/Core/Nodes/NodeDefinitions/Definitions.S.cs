@@ -23,7 +23,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .InputTestShapes("data", [[3, 3]])
                 .InputTestValues("indices", [TensorData([2, 3], 1L, 0L, 2L, 0L, 2L, 1L)])
                 .InputTestShapes("updates", [[2, 3]])
-                .Code("NN.ScatterElements({1:param}{2:param}{3:param}{a:param}{b:param})"),
+                .Code("Shorokoo.Core.Nodes.NodeDefinitions.OnnxOp.ScatterElements({1:param}{2:param}{3:param}{a:param}{b:param}){o1:fromvar}"),
 
             Op(SCATTER_ND)
                 .Tensor<AnyLike>("T")          // data and updates can be any tensor type
@@ -289,8 +289,8 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Output("output", "T", "R2")
                 .Output("log_prob", "T?", "R")
 
-                // reduction explicitly "mean"/"sum" must resolve to the scalar-loss
-                // variant (it used to fall through to the "none" variant's R2 rank).
+                // reduction explicitly "mean"/"sum" resolves to the scalar-loss variant, not
+                // to the "none" variant's R2 rank.
                 .Constraint(AttrReduction, "mean")
                 .Input("scores", "T", "R")
                 .Input("labels", "Tind", "R2")

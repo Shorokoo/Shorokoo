@@ -220,6 +220,17 @@ public class PyTorchBackendCoverageTests
     }
 
     [Fact]
+    public void TestIntegerAndBoolReduceMaxAndMinOverAnEmptyGroupYieldTheTypeExtremesOnTorch()
+        => Assert.True(AutoTest.AdvancedTestGraph<EmptyIntegerReduceMaxMinCheck>([], [QeeAudit.F32([2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f)],
+            context: new ComputeContext(Torch)));
+
+    // #410: the PyTorch backend's Pad passes an int64 constant value through a Python float.
+    [Fact(Skip = "#410: the PyTorch backend's Pad passes an int64 constant value through a Python float, overflowing or rounding it")]
+    public void TestAnInt64PadKeepsAConstantValueADoubleCannotHold()
+        => Assert.True(AutoTest.AdvancedTestGraph<PadInt64WithWideValuesCheck>([], [QeeAudit.I64([2L], 1L, 2L)],
+            context: new ComputeContext(Torch)));
+
+    [Fact]
     public void TestBatchFirstRecurrentNetworksRunOnTorch()
     {
         Assert.True(AutoTest.AdvancedTestGraph<QeeRecurrentBatchFirstValueCheck>([],

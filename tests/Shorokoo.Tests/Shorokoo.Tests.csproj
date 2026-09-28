@@ -204,4 +204,15 @@
     <ProjectReference Include="..\..\samples\RetinaNet\RetinaNet.csproj" />
   </ItemGroup>
 
+  <!--
+    The meta-package, restored and built but neither referenced nor deployed. A test reads the
+    dependency graph NuGet restored for it (its obj/project.assets.json), and building this project
+    alone must be enough to produce that file. ExcludeAssets keeps the package's own dependencies,
+    the [Module] generator among them, from flowing in a second time.
+  -->
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Shorokoo.Meta\Shorokoo.Meta.csproj"
+                      ReferenceOutputAssembly="false" Private="false" ExcludeAssets="all" />
+  </ItemGroup>
+
 </Project>

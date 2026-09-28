@@ -1008,11 +1008,77 @@ namespace Shorokoo.Tests.Modules
         }
     }
 
+    /// <summary>tf_crop_and_resize over axes, a keep_aspect_ratio_policy, a shifted roi, a changed shape, a roi
+    /// along an unscaled axis, cubic mode, and a roi along an unscaled axis beside a scaled one, each flattened.
+    /// Input x is [1,1,1,5].</summary>
+    [Module]
+    public partial class CropAndResizeVariantsValues
+    {
+        internal static Tensor<float32> Crop(Tensor<float32> x, Vector<float32> roi, Vector<float32>? scales,
+            Vector<int64>? sizes, long[]? axes, KeepAspectRatioPolicy? policy, ResizeMode mode)
+            => ((Tensor<float32>)OnnxOp.Resize(x, roi: roi, scales: scales, sizes: sizes,
+                antialias: null, axes: axes, coordinateTransformationMode: CoordinateTransformationMode.Tf_crop_and_resize,
+                cubicCoeffA: null, excludeOutside: null, extrapolationValue: -1f,
+                keepAspectRatioPolicy: policy, mode: mode, nearestMode: null)).Reshape(Vector(-1L));
+
+        public static Tensor<float32> Inline(Tensor<float32> x)
+        {
+            var x2 = x.Concat(2L, x * Scalar(10f));
+            return Crop(x, Vector(0.5f, 1.5f), Vector(1f), null, [3L], null, ResizeMode.Linear).Concat(0L,
+                Crop(x, Vector(0f, 0f, 0f, 0.5f, 1f, 1f, 1f, 1.5f), null, Vector(1L, 1L, 1L, 5L), null, KeepAspectRatioPolicy.not_larger, ResizeMode.Nearest),
+                Crop(x, Vector(0f, 0f, 0f, -0.25f, 1f, 1f, 1f, 0.75f), Vector(1f, 1f, 1f, 1f), null, null, null, ResizeMode.Linear),
+                Crop(x, Vector(0f, 0f, 0f, 0.5f, 1f, 1f, 1f, 1.5f), Vector(1f, 1f, 1f, 1.2f), null, null, null, ResizeMode.Linear),
+                Crop(x2, Vector(0f, 0f, 0.5f, 0f, 1f, 1f, 1.5f, 1f), Vector(1f, 1f, 1f, 1f), null, null, null, ResizeMode.Linear),
+                Crop(x, Vector(0f, 0.5f, 1f, 1.5f), Vector(1f, 1f), null, [2L, 3L], null, ResizeMode.Cubic),
+                Crop(x2, Vector(0f, 0f, 0.5f, 0f, 1f, 1f, 1.5f, 1f), Vector(1f, 1f, 1f, 2f), null, null, null, ResizeMode.Nearest));
+        }
+    }
+
+    /// <summary>tf_crop_and_resize at an unchanged length under a roi ending at 1, in linear, nearest and cubic
+    /// mode, each flattened. Input x is [1,1,1,4].</summary>
+    [Module]
+    public partial class CropAndResizeToTheRoiEndValues
+    {
+        public static Tensor<float32> Inline(Tensor<float32> x)
+            => CropAndResizeVariantsValues.Crop(x, Vector(0.5f, 1f), Vector(1f), null, [3L], null, ResizeMode.Linear).Concat(0L,
+                CropAndResizeVariantsValues.Crop(x, Vector(0f, 0f, 0f, 0.5f, 1f, 1f, 1f, 1f), null, Vector(1L, 1L, 1L, 4L), null, null, ResizeMode.Nearest),
+                CropAndResizeVariantsValues.Crop(x, Vector(0.5f, 1f), Vector(1f), null, [3L], null, ResizeMode.Cubic),
+                CropAndResizeVariantsValues.Crop(x, Vector(0.25f, 1f), null, Vector(4L), [3L], null, ResizeMode.Cubic));
+    }
+
+    /// <summary>Cubic tf_crop_and_resize under a roi along C of an NCHW input, with C doubled and with C
+    /// unchanged, each flattened. Input x is [1,3,1,2].</summary>
+    [Module]
+    public partial class CubicCropAndResizeAlongChannelsValues
+    {
+        public static Tensor<float32> Inline(Tensor<float32> x)
+        {
+            var roi = Vector(0f, 0.5f, 0f, 0f, 1f, 1.5f, 1f, 1f);
+            return CropAndResizeVariantsValues.Crop(x, roi, null, Vector(1L, 6L, 1L, 2L), null, null, ResizeMode.Cubic).Concat(0L,
+                CropAndResizeVariantsValues.Crop(x, roi, Vector(1f, 1f, 1f, 1f), null, null, null, ResizeMode.Cubic));
+        }
+    }
+
     /// <summary>1-D Col2Im with pads and a stride. Input cols is [1,3,4].</summary>
     [Module]
     public partial class Col2Im1DPaddedValues
     {
         public static Tensor<float32> Inline(Tensor<float32> cols)
             => (Tensor<float32>)OnnxOp.Col2Im(cols, Vector(8L), Vector(3L), dilations: [1L], pads: [1L, 1L], strides: [2L]);
+    }
+
+    /// <summary>Unpadded 1-D Col2Im: C 2 at stride 1, then the same columns as C 1, L 4 at stride 2,
+    /// stride 1 and dilation 2. Input cols is [1,4,2].</summary>
+    [Module]
+    public partial class Col2Im1DUnpaddedValues
+    {
+        public static Tensor<float32> Inline(Tensor<float32> cols)
+        {
+            var wide = (Tensor<float32>)OnnxOp.Reshape(cols, Vector(1L, 2L, 4L), false);
+            return ((Tensor<float32>)OnnxOp.Reshape(OnnxOp.Col2Im(cols, Vector(3L), Vector(2L), [1L], [0L, 0L], [1L]), Vector(1L, 1L, 6L), false))
+                .Concat(2L, (Tensor<float32>)OnnxOp.Col2Im(wide, Vector(8L), Vector(2L), [1L], [0L, 0L], [2L]))
+                .Concat(2L, (Tensor<float32>)OnnxOp.Col2Im(wide, Vector(5L), Vector(2L), [1L], [0L, 0L], [1L]))
+                .Concat(2L, (Tensor<float32>)OnnxOp.Col2Im(wide, Vector(6L), Vector(2L), [2L], [0L, 0L], [1L]));
+        }
     }
 }

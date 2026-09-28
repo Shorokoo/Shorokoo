@@ -116,6 +116,36 @@ public class CSharpModelBuilderCoverageTests
         AssertRoundTrips(new InternalComputationGraph([], [Tensor([2L, 2L], "w", "x", "y", "z").ToVariable()]), []);
     }
 
+    // #412: codegen writes a four-argument Slice that Vector lacks
+    [Fact(Skip = "#412: codegen writes a four-argument Slice that Vector lacks")]
+    public void TestASliceOfAVectorCodegensSourceThatCompiles()
+        => AssertCodegens(new InternalComputationGraph([], [OnnxOp.Slice(Vector(1f, 2f, 3f), Vector(0L), Vector(2L))]));
+
+    [Fact]
+    public void TestAMaxOfAVectorAndAScalarCodegensSourceThatCompiles()
+        => AssertCodegens(new InternalComputationGraph([], [OnnxOp.Max(Vector(1f, 2f), Scalar(1.5f))]));
+
+    // #415: codegen writes a three-argument Split that Vector lacks
+    [Fact(Skip = "#415: codegen writes a three-argument Split that Vector lacks")]
+    public void TestASplitOfAVectorCodegensSourceThatCompiles()
+        => AssertCodegens(new InternalComputationGraph([], [.. OnnxOp.Split(Vector(1f, 2f, 3f, 4f), null, 0, 2, 2)]));
+
+    // #416: codegen names both Splits of one input the same local
+    [Fact(Skip = "#416: codegen names both Splits of one input the same local")]
+    public void TestTwoSplitsOfOneInputCodegenSourceThatCompiles()
+    {
+        Variable x = Tensor([2L, 2L], 1f, 2f, 3f, 4f);
+        AssertCodegens(new InternalComputationGraph([],
+            [.. OnnxOp.Split(x, null, 0, 2, 2), .. OnnxOp.Split(x, null, 1, 2, 2)]));
+    }
+
+    // #414: codegen writes an NN.Resize whose nullable Vector<T2>? roi C# cannot infer T2 from
+    [Fact(Skip = "#414: codegen writes an NN.Resize whose nullable Vector<T2>? roi C# cannot infer T2 from")]
+    public void TestAResizeWithARoiCodegensSourceThatCompiles()
+        => AssertCodegens(new InternalComputationGraph([], [OnnxOp.Resize(Tensor([1L, 1L, 1L, 2L], 1f, 2f),
+            Vector(0f, 0f, 0f, 0f, 1f, 1f, 1f, 1f), Vector(1f, 1f, 1f, 2f), null, null, null,
+            CoordinateTransformationMode.Asymmetric, null, null, null, null, ResizeMode.Nearest, null)]));
+
     [Fact]
     public void TestAStructFirstRegisteredUnderItsShortNameCodegensSourceThatCompiles()
     {
@@ -143,12 +173,117 @@ public class CSharpModelBuilderCoverageTests
     }
 
     [Fact]
+    public void TestNonFiniteFloatingPointConstantsCodegenSourceThatRebuildsThem()
+    {
+        AssertRoundTrips(new InternalComputationGraph([], [Vector(float.NegativeInfinity, float.PositiveInfinity, float.NaN, 1.5f).ToVariable()]), []);
+        AssertRoundTrips(new InternalComputationGraph([], [Vector(double.NegativeInfinity, double.PositiveInfinity, double.NaN, 1.5).ToVariable()]), []);
+        AssertRoundTrips(new InternalComputationGraph([], [Scalar(float.NegativeInfinity).ToVariable()]), []);
+        AssertRoundTrips(new InternalComputationGraph([], [Scalar(double.NaN).ToVariable()]), []);
+        AssertRoundTrips(new InternalComputationGraph([], [OnnxOp.LeakyRelu(Tensor([1L, 2L], -1f, 2f).ToVariable(), alpha: float.PositiveInfinity)]), []);
+    }
+
+    [Fact]
+    public void TestMaxPoolsCodegenSourceThatRebuildsThem()
+    {
+        Variable x = Tensor([1L, 1L, 5L], 3f, -1f, 4f, 1f, -5f);
+        AssertRoundTrips(new InternalComputationGraph([], [OnnxOp.MaxPool(x, AutoPad.NotSet, true, [2L], [2L], [1L, 1L], 0L, [2L])]), []);
+        AssertRoundTrips(new InternalComputationGraph([], [OnnxOp.MaxPoolWithIndices(x, AutoPad.SameUpper, false, null, [3L], null, 0L, [2L]).indices]), []);
+        AssertRoundTrips(new InternalComputationGraph([], [OnnxOp.MaxPool(OnnxOp.Cast(x, null, DType.Int8), null, null, null, [2L], [1L, 0L], null, null)]), []);
+    }
+
+    [Fact]
+    public void TestAMinOfScalarsCodegensSourceThatCompiles()
+        => AssertCodegens(new InternalComputationGraph([], [OnnxOp.Min(Scalar(1f), Scalar(-2f), Scalar(3f))]));
+
+    [Fact]
+    public void TestAConstantPadWithItsDefaultModeCodegensSourceThatCompiles()
+        => AssertCodegens(new InternalComputationGraph([], [OnnxOp.Pad(Tensor([1L, 2L], 1f, 2f), Vector(0L, 1L, 0L, 2L), Scalar(-1f))]));
+
+    [Fact]
+    public void TestPoolsWhosePaddingReachesTheKernelRebuildFromTheirSource()
+    {
+        TensorData[] x = [TensorData([1L, 1L, 9L], [.. Enumerable.Range(-4, 9).Select(i => (float)i)])];
+        AssertRebuildsUnchanged(PadsReachingTheKernelPoolValues.ComputationGraph.ToInternal(), x);
+        AssertRebuildsUnchanged(SameWideDilationPoolValues.ComputationGraph.ToInternal(), x);
+        AssertRebuildsUnchanged(CeilModePadsReachingTheKernelPoolValues.ComputationGraph.ToInternal(), x);
+    }
+
+    [Fact]
     public void TestCodegenedSourceRebuildsTheGraphItCameFrom()
     {
         TensorData[] two = [TensorData([], 1f), TensorData([], 2f)];
         AssertRoundTrips(TensorStructLoopCarry.ComputationGraph.ToInternal(), two);
         AssertRoundTrips(SequenceOpsOnStructs.ComputationGraph.ToInternal(),
             [.. two, TensorData([], 3f), TensorData([], 4f)]);
+    }
+
+    [Fact]
+    public void TestOneAxisPaddedCol2ImRebuildsWithoutGrowing()
+    {
+        TensorData[] cols = [TensorData([1L, 3L, 4L], [.. Enumerable.Range(0, 12).Select(i => (float)i)])];
+        string[] ops = [OpCodes.COL2IM, OpCodes.CONCAT, OpCodes.SQUEEZE];
+        var graph = Col2Im1DPaddedValues.ComputationGraph.ToInternal();
+        var once = Rebuild(graph);
+        var twice = Rebuild(once);
+        int[] expected = [1, 2, 1];
+        Assert.Equal(expected, OpCounts(graph, ops));
+        Assert.Equal(expected, OpCounts(once, ops));
+        Assert.Equal(expected, OpCounts(twice, ops));
+        Assert.Equal(Run(graph, cols), Run(twice, cols));
+    }
+
+    [Fact]
+    public void TestCodegenedSourceRebuildsACropAndResizeWithoutGuardingItAgain()
+    {
+        TensorData[] x = [TensorData([1L, 1L, 1L, 5L], 0f, 1f, 2f, 3f, 4f)];
+        AssertRebuildsUnchanged(CropAndResizeAtScaleOneValues.ComputationGraph.ToInternal(), x);
+        AssertRebuildsUnchanged(CropAndResizeVariantsValues.ComputationGraph.ToInternal(), x);
+    }
+
+    [Fact]
+    public void TestCodegenedSourceRebuildsALoweredOrImportedCropAndResizeWithoutGuardingItAgain()
+    {
+        TensorData[] x = [TensorData([1L, 1L, 1L, 5L], 0f, 1f, 2f, 3f, 4f)];
+        TensorData[] x4 = [TensorData([1L, 1L, 1L, 4L], 1f, 2f, 3f, 4f)];
+        AssertLowersAndRebuildsUnchanged(CropAndResizeAtScaleOneValues.ComputationGraph.ToInternal(), x, viaOnnx: false);
+        AssertLowersAndRebuildsUnchanged(CropAndResizeVariantsValues.ComputationGraph.ToInternal(), x, viaOnnx: false);
+        AssertLowersAndRebuildsUnchanged(CropAndResizeToTheRoiEndValues.ComputationGraph.ToInternal(), x4, viaOnnx: false);
+        AssertLowersAndRebuildsUnchanged(CropAndResizeAtScaleOneValues.ComputationGraph.ToInternal(), x, viaOnnx: true);
+        AssertLowersAndRebuildsUnchanged(CropAndResizeVariantsValues.ComputationGraph.ToInternal(), x, viaOnnx: true);
+    }
+
+    [Fact]
+    public void TestOnlyTheIfACropAndResizeBuildsIsWrittenBackAsOneCall()
+    {
+        Assert.NotNull(CropAndResizeSourceOf(OnnxOp.Resize(Tensor([1L, 1L, 1L, 5L], 0f, 1f, 2f, 3f, 4f),
+            Vector(0f, 0f, 0f, 0.5f, 1f, 1f, 1f, 1.5f), Vector(1f, 1f, 1f, 1f), null, null, null,
+            CoordinateTransformationMode.Tf_crop_and_resize, null, null, -1f, null, ResizeMode.Linear, null)));
+        Assert.NotNull(CropAndResizeSourceOf(CropLookAlike()));
+        Assert.Null(CropAndResizeSourceOf(CropLookAlike(mode: CoordinateTransformationMode.Asymmetric)));
+        Assert.Null(CropAndResizeSourceOf(CropLookAlike(grownExtrapolation: 0f)));
+        Assert.Null(CropAndResizeSourceOf(CropLookAlike(grownRoi: [0f, 0f, 0f, 0f, 1f, 1f, 1f, 1f])));
+        Assert.Null(CropAndResizeSourceOf(CropLookAlike(foreignCondition: true)));
+        Assert.Null(CropAndResizeSourceOf(CropLookAlike(foreignSteps: true)));
+        Assert.Null(CropAndResizeSourceOf(CropLookAlike(foreignScales: true)));
+    }
+
+    [Fact]
+    public void TestBoolReduceMaxAndMinAndScatterElementsCodegenSourceThatCompiles()
+    {
+        Variable b = Tensor([2L, 2L], true, false, false, false);
+        AssertCodegens(new InternalComputationGraph([], [OnnxOp.ReduceMax(b, Vector(1L), false, null)]));
+        AssertCodegens(new InternalComputationGraph([], [OnnxOp.ReduceMin(b, Vector(1L), true, null)]));
+        AssertCodegens(new InternalComputationGraph([], [OnnxOp.ScatterElements(Tensor([2L, 2L], 1f, 2f, 3f, 4f),
+            Tensor([1L, 2L], 1L, 0L), Tensor([1L, 2L], 5f, 6f), axis: 0)]));
+        AssertCodegens(new InternalComputationGraph([], [OnnxOp.ScatterElements(Vector(1L, 2L, 3L), Vector(2L),
+            Vector(9L), axis: 0, reduction: ScatterNDReduction.Add)]));
+    }
+
+    [Fact]
+    public void TestCodegenedSourceRebuildsAnIntegerOrBoolReduceMaxAndMinWithoutGuardingThemAgain()
+    {
+        TensorData[] x = [TensorData([2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f)];
+        AssertRebuildsUnchanged(EmptyIntegerReduceMaxMinCheck.ComputationGraph.ToInternal(), x);
     }
 
     [Fact]
@@ -222,16 +357,77 @@ public class CSharpModelBuilderCoverageTests
     /// <summary><see cref="AutoTest"/> executes generated source only for a graph with no inputs,
     /// so this is the one place the emitted code for a graph that takes them runs at all.</summary>
     private static void AssertRoundTrips(InternalComputationGraph graph, TensorData[] inputs)
+        => Assert.Equal(Run(graph, inputs), Run(Rebuild(graph), inputs));
+
+    private static void AssertRebuildsUnchanged(InternalComputationGraph graph, TensorData[] inputs)
+    {
+        var once = Rebuild(graph);
+        var twice = Rebuild(once);
+        Assert.Equal(once.Nodes.Count, twice.Nodes.Count);
+        Assert.Equal(Run(graph, inputs), Run(twice, inputs));
+    }
+
+    private static Node? CropAndResizeSourceOf(Variable v) => OnnxOp.CropAndResizeSource(v.OwningNode);
+
+    private static Variable CropLookAlike(CoordinateTransformationMode mode = CoordinateTransformationMode.Tf_crop_and_resize,
+        float grownExtrapolation = -1f, float[]? grownRoi = null,
+        bool foreignCondition = false, bool foreignSteps = false, bool foreignScales = false)
+    {
+        Variable x = Tensor([1L, 1L, 1L, 5L], 0f, 1f, 2f, 3f, 4f);
+        Variable roi = Vector(0f, 0f, 0f, 0.5f, 1f, 1f, 1f, 1.5f);
+        Variable scales = Vector(1f, 1f, 1f, 1f);
+        var grow = OnnxOp.And(OnnxOp.Equal(OnnxOp.Shape(x), OnnxOp.Shape(x)), Vector(false, false, false, true));
+        Variable Mask(bool foreign) => foreign ? OnnxOp.And(Vector(true, true, true, true), Vector(false, false, false, true)) : grow;
+        Variable Raw(Variable r, Variable s, float extrapolation) => NodeBuilder.BuildNodeSingleOut(OpCodes.RESIZE, [x, r, s, null], [
+            (OnnxOpAttributeNames.AttrCoordinateTransformationMode, mode),
+            (OnnxOpAttributeNames.AttrExtrapolationValue, extrapolation),
+            (OnnxOpAttributeNames.AttrMode, ResizeMode.Linear)]);
+
+        var grown = Raw(grownRoi is null ? roi : Vector(grownRoi),
+            OnnxOp.Where(Mask(foreignScales), Vector(1f, 1f, 1f, 1.9f), scales), grownExtrapolation);
+        var cropped = OnnxOp.Slice(grown, Vector(0L, 0L, 0L, 0L), Vector(1L, 1L, 1L, 9L), Vector(0L, 1L, 2L, 3L),
+            OnnxOp.Add(OnnxOp.Cast(Mask(foreignSteps), null, DType.Int64), Scalar(1L)));
+        var condition = OnnxOp.Cast(OnnxOp.ReduceMax(OnnxOp.Cast(Mask(foreignCondition), null, DType.Float32), keepdims: false), null, DType.Bool);
+        return FrameworkOps.IfElse((Scalar<bit>)condition, cropped, Raw(roi, scales, -1f));
+    }
+
+    private static void AssertLowersAndRebuildsUnchanged(InternalComputationGraph graph, TensorData[] inputs, bool viaOnnx)
+    {
+        var once = Rebuild(Lower(graph, inputs, viaOnnx));
+        var twice = Rebuild(Lower(once, inputs, viaOnnx));
+        Assert.Equal(once.Nodes.Count, twice.Nodes.Count);
+        Assert.Equal(Run(graph, inputs), Run(twice, inputs));
+    }
+
+    private static InternalComputationGraph Lower(InternalComputationGraph graph, TensorData[] inputs, bool viaOnnx)
+    {
+        var model = graph.ToConcreteArchitecture([.. inputs]).ToConcreteModel();
+        if (!viaOnnx)
+            return model;
+        var path = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid()}.onnx");
+        try
+        {
+            Persistence.ExportOnnx(new ComputationGraph(model, GraphKind.ConcreteModel), path);
+            return Persistence.ImportOnnx(path).ToInternal();
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    private static InternalComputationGraph Rebuild(InternalComputationGraph graph)
     {
         var method = new CSharpModelBuilder().BuildMethod(graph, "CovTest");
         var graphInputs = InternalComputationGraphConverter.BuildNodes(graph).inputs;
         object?[] args = [.. method.GetParameters().Zip(graphInputs).Select(x =>
             x.First.ParameterType.GetMethod("op_Implicit", [typeof(Variable)])!.Invoke(null, [x.Second]))];
-        var rebuilt = new InternalComputationGraph(
+        return new InternalComputationGraph(
             graphInputs, [((IValue)method.Invoke(null, args)!).ToVariable()]);
-
-        Assert.Equal(Run(graph, inputs), Run(rebuilt, inputs));
     }
+
+    private static int[] OpCounts(InternalComputationGraph graph, params string[] opCodes)
+        => [.. opCodes.Select(op => graph.Nodes.Count(n => n.OpCode == op))];
 
     private static byte[][] Run(InternalComputationGraph graph, TensorData[] inputs)
     {

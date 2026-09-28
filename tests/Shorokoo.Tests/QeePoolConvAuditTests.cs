@@ -52,9 +52,7 @@ public class QeePoolConvAuditTests
             F32Wave([2L, 2L, 9L]), F32Wave([1L, 4L, 7L, 6L]), F32Wave([1L, 2L, 5L, 4L, 4L]), F32Wave([1024L])));
     }
 
-    // ONNX Runtime pads SAME_UPPER/SAME_LOWER pools for the undilated kernel and emits too few, shifted windows:
-    // https://github.com/Shorokoo/Shorokoo/issues/379
-    [Fact(Skip = "Shorokoo/Shorokoo#379: ONNX Runtime pads dilated SAME pools for the undilated kernel")]
+    [Fact]
     public void TestSameAutoPadWithDilationsPadsForTheDilatedKernel()
     {
         var x = F32([1L, 1L, 10L], [.. Enumerable.Range(0, 10).Select(i => (float)i)]);
@@ -64,7 +62,57 @@ public class QeePoolConvAuditTests
             expected: [3.1622777, 5.9160798, 9.1104336, 12.4498996, 11.4017543, 2, 4.4721360, 7.4833148, 10.7703296, 10]));
         Assert.True(AutoTest.AdvancedTestGraph<SameDilatedAveragePoolValues>([], [x],
             expected: [2, 3, 5, 7, 8, 1, 2, 4, 6, 7]));
+        Assert.True(AutoTest.AdvancedTestGraph<SameDilatedPoolOddLengthValues>([], [F32([1L, 1L, 9L], [.. Enumerable.Range(0, 9).Select(i => (float)i)])],
+            expected: [2, 4, 6, 8, 8, 2 / 3.0, 2, 4, 6, 14 / 3.0, 2, 3, 4, 5, 6, 7, 8, 7, 8]));
+        Assert.True(AutoTest.AdvancedTestGraph<SameDilatedMaxPoolWithIndicesValues>([], [F32([1L, 1L, 5L, 6L], [.. Enumerable.Range(0, 30).Select(i => (float)(i * 7 % 30))])],
+            expected: [7, 21, 29, 25, 25, 29, 25, 25, 29, 1, 3, 17, 25, 25, 17, 25, 25, 17]));
     }
+
+    [Fact]
+    public void TestPaddingAsLargeAsTheKernelIsPooled()
+    {
+        var x = F32([1L, 1L, 9L], [.. Enumerable.Range(-4, 9).Select(i => (float)i)]);
+        Assert.True(AutoTest.AdvancedTestGraph<PadsReachingTheKernelPoolValues>([], [x],
+            expected: [-3, -2, -1, 0, 1, 2, 3, 4, 2, -3, -2, -2.5, -1.5, -0.5, 0.5, 1.5, 2.5, 2, -1.5, -1, -2.5, -1.5, -0.5, 0.5, 1.5, 2.5, 1,
+                3, 2, 4.1231056, 3, 2.236068, 2.236068, 3, 4.1231056, 2, -3, 0, 3]));
+        Assert.True(AutoTest.AdvancedTestGraph<SameWideDilationPoolValues>([], [x],
+            expected: [-2, 0, 2, 4, 3, -3, -2, -2.5, -1.5, -0.5, 0.5, 1.5, 2.5, 2, -5 / 3.0, -1 / 3.0, 0, 1 / 3.0, 5 / 3.0, 2, 4, 2.8284271, 4, 2]));
+        Assert.True(AutoTest.AdvancedTestGraph<PadsReachingTheKernelMaxPoolWithIndicesValues>([],
+            [F32([1L, 2L, 4L, 4L], [.. Enumerable.Range(0, 32).Select(i => (float)(i * 7 % 32 - 16))])],
+            expected: [12, -6, 4, -2, 10, 10, 14, 14, 4, 6, 12, 2, 22, 22, 18, 18, 12, -6, 4, -2, 10, 10, 14, 14, 1, 9, 3, 8, 25, 25, 24, 24,
+                -10, 15, -6, -13, 6, -1, 10, 3, 10, 9, 6, 5, 26, 25, 22, 21]));
+        Assert.True(AutoTest.AdvancedTestGraph<PadsReachingTheKernelMaxPoolElementTypeValues>([], [x],
+            expected: [-3, -2, -1, 0, 1, 2, 3, 4, 2, 1, 2, 3, 4, 5, 6, 7, 8, 6, -3, -2, -1, 0, 1, 2, 3, 4, 2]));
+        Assert.True(AutoTest.AdvancedTestGraph<PadsReachingTheKernelThreeAxisPoolValues>([],
+            [F32([1L, 2L, 3L, 4L, 3L], [.. Enumerable.Range(0, 72).Select(i => (float)(i * 7 % 11 - 5))])],
+            expected: [4, 4, 2, -2, 4, 4, 0, -4, 2, 2, 5, 5, 0, 0, 3, 3, 4, 5, 5, 1, 4, 4, 3, -1, 5, 5, 1, -3, 3, 3, -1, -5, 1, 1, 4, 4,
+                -1, -1, 2, 2, 5, 5, 4, 0, 3, 3, 2, -2, 0.125, 0.125, 0.25, 0.25, 0, -0.25, 0, -0.125, 0.125, 0.125, 0.25, 0.25, 0, -0.25,
+                0, -0.125, 0, -0.125, 0, -0.25, -0.25, 0.625, -0.125, -0.375, 0, -0.125, 0, -0.25, -0.25, 0.625, -0.125, -0.375]));
+    }
+
+    [Fact]
+    public void TestCeilModeKeepsTheSpecsWindowsWhenPadsReachTheKernel()
+        => Assert.True(AutoTest.AdvancedTestGraph<CeilModePadsReachingTheKernelPoolValues>([],
+            [F32([1L, 1L, 9L], [.. Enumerable.Range(-4, 9).Select(i => (float)i)])],
+            expected: [-3.5, -0.5, 2.5, 0, 5, 1, 3.6055513, 0, -3, -1, 1, 3, 3, -4, -1, 2, 3, -3.5, -2, 0, 2, 3.5]));
+
+    [Fact]
+    public void TestNegativeSamePaddingShiftsTheWindowsAsTheSpecDoes()
+        => Assert.True(AutoTest.AdvancedTestGraph<NegativeSamePaddingPoolValues>([],
+            [F32([1L, 1L, 8L], 5f, -3f, 8f, 1f, -7f, 2f, 6f, -4f)],
+            expected: [1, 2, 8, 6, 2.5, 1, 1, 4, 3, 7, 4, 8, 6, -3, -7, -4]));
+
+    // #420: ONNX Runtime's MaxPool gives index -1 to a window whose every value is the element type's lowest
+    [Fact(Skip = "#420: ONNX Runtime's MaxPool gives index -1 to a window whose every value is the element type's lowest")]
+    public void TestMaxPoolIndexOfALowestValuedWindowIsItsFirstPosition()
+        => Assert.True(AutoTest.AdvancedTestGraph<LowestValueWindowMaxPoolIndicesValues>([],
+            [F32([1L, 1L, 5L], 0f, 0f, 5f, 0f, 0f)],
+            expected: [0, 2, 2, 3, 0, 2, 2, 3, 0, 1, 2, 1, 2, 3, 4]));
+
+    [Fact]
+    public void TestPaddedMaxPoolIndicesAreUnsetOrPointAtTheirValue()
+        => Assert.True(AutoTest.AdvancedTestGraph<PaddedMaxPoolIndicesPointAtTheirValues>([],
+            [F32([1L, 1L, 5L], 0f, 0f, 5f, 0f, 0f)]));
 
     [Fact]
     public void TestConvTransposeOutputShapeBeyondTheFullExtentIsRefused()

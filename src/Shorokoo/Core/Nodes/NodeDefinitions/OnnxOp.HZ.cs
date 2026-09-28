@@ -52,7 +52,10 @@ public static partial class OnnxOp
 
     public static Variable LpPool(Variable x, AutoPad? autoPad, bool? ceilMode,
         long[]? dilations, long[] kernelShape, long? p, long[]? pads, long[]? strides)
-        => NodeBuilder.BuildNodeSingleOut(LP_POOL, [x], [
+        => NeedsWrittenPadding(autoPad, dilations, kernelShape, pads, strides)
+            ? PaddedPool(x, PoolKind.Lp, autoPad, ceilMode, dilations, kernelShape, pads, strides, null,
+                (input, explicitPads, s, ceil, _) => [LpPool(input, null, ceil, dilations, kernelShape, p, explicitPads, s)])[0]
+            : NodeBuilder.BuildNodeSingleOut(LP_POOL, [x], [
             (AttrAutoPad, autoPad),
             (AttrCeilMode, ceilMode),
             (AttrDilations, dilations),
@@ -76,7 +79,10 @@ public static partial class OnnxOp
     public static Variable MaxPool(Variable x, AutoPad? autoPad = null, bool? ceilMode = null,
         long[]? dilations = null, long[]? kernelShape = null, long[]? pads = null,
         long? storageOrder = null, long[]? strides = null)
-        => NodeBuilder.BuildNodeSingleOut(MAX_POOL, [x], [
+        => NeedsWrittenPadding(autoPad, dilations, kernelShape, pads, strides)
+            ? PaddedPool(x, PoolKind.Max, autoPad, ceilMode, dilations, kernelShape!, pads, strides, storageOrder,
+                (input, p, s, ceil, _) => [MaxPool(input, null, ceil, dilations, kernelShape, p, storageOrder, s)])[0]
+            : NodeBuilder.BuildNodeSingleOut(MAX_POOL, [x], [
             (InternalAttrHasOptionalOutputs, false),
             (AttrAutoPad, autoPad),
             (AttrCeilMode, ceilMode),
@@ -90,6 +96,16 @@ public static partial class OnnxOp
         long[]? dilations = null, long[]? kernelShape = null, long[]? pads = null,
         long? storageOrder = null, long[]? strides = null)
     {
+        if (NeedsWrittenPadding(autoPad, dilations, kernelShape, pads, strides))
+        {
+            var padded = PaddedPool(x, PoolKind.Max, autoPad, ceilMode, dilations, kernelShape!, pads, strides, storageOrder,
+                (input, p, s, ceil, _) =>
+                {
+                    var (y, indices) = MaxPoolWithIndices(input, null, ceil, dilations, kernelShape, p, storageOrder, s);
+                    return [y, indices];
+                });
+            return (padded[0], padded[1]);
+        }
         var retval = NodeBuilder.BuildNodeMultiOut(MAX_POOL, [x], [
             (InternalAttrHasOptionalOutputs, true),
             (AttrAutoPad, autoPad),
@@ -262,6 +278,18 @@ public static partial class OnnxOp
         => NodeBuilder.BuildNodeSingleOut(REVERSE_SEQUENCE, [input, sequenceLens], [(AttrBatchAxis, batchAxis), (AttrTimeAxis, timeAxis)]);
 
     public static Variable Resize(Variable x, Variable? roi, Variable? scales,
+        Variable? sizes, bool? antialias, long[]? axes,
+        CoordinateTransformationMode? coordinateTransformationMode,
+        float? cubicCoeffA, bool? excludeOutside,
+        float? extrapolationValue, KeepAspectRatioPolicy? keepAspectRatioPolicy,
+        ResizeMode? mode, NearestMode? nearestMode)
+        => coordinateTransformationMode == CoordinateTransformationMode.Tf_crop_and_resize && roi is not null
+            ? CropAndResize(x, roi, scales, sizes, antialias, axes, cubicCoeffA, excludeOutside,
+                extrapolationValue, keepAspectRatioPolicy, mode, nearestMode)
+            : ResizeNode(x, roi, scales, sizes, antialias, axes, coordinateTransformationMode, cubicCoeffA,
+                excludeOutside, extrapolationValue, keepAspectRatioPolicy, mode, nearestMode);
+
+    private static Variable ResizeNode(Variable x, Variable? roi, Variable? scales,
         Variable? sizes, bool? antialias, long[]? axes,
         CoordinateTransformationMode? coordinateTransformationMode,
         float? cubicCoeffA, bool? excludeOutside,

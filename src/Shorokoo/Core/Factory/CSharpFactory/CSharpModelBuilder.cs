@@ -100,8 +100,8 @@ namespace Shorokoo.Core.Factory.CSharpFactory
             if (dtype == DType.Int64 || dtype == DType.UInt64)
                 return Convert.ToInt64(value, invariant).ToString(invariant) + "L";
             if (dtype == DType.Float64)
-                return Convert.ToDouble(value, invariant).ToString("R", invariant) + "d";
-            return Convert.ToSingle(value, invariant).ToString("R", invariant) + "f";
+                return DoubleLiteral(Convert.ToDouble(value, invariant));
+            return FloatLiteral(Convert.ToSingle(value, invariant));
         }
 
         public static string GetTypeDefString(Variable Variable)
@@ -353,9 +353,15 @@ public static class " + modelName + @"
                 }
             }
 
+            var (cropAndResizes, cropAndResizeBodies) = FindCropAndResizes(topologicalOrderNodes, graphOutputs, tensorChildNodes);
+
             foreach (var node in topologicalOrderNodes)
             {
-                (var newNodeGenerator, var newVariableNames) = this.MakeNode(node, nodeCodeGenerators.ToImmutableDictionary(), variableNames.ToImmutableDictionary(), functionNames, tensorChildNodes);
+                if (cropAndResizeBodies.Contains(node))
+                    continue;
+                (var newNodeGenerator, var newVariableNames) = cropAndResizes.TryGetValue(node, out var plainResize)
+                    ? MakeCropAndResizeNode(node, plainResize, variableNames.ToImmutableDictionary())
+                    : this.MakeNode(node, nodeCodeGenerators.ToImmutableDictionary(), variableNames.ToImmutableDictionary(), functionNames, tensorChildNodes);
                 var newInlinedVariables = newNodeGenerator.InlinedNodes;
                 variableNames.AddAll(newVariableNames);
                 nodeCodeGenerators[node] = newNodeGenerator;
@@ -416,7 +422,7 @@ public static class " + modelName + @"
             {
                 if (nodeCodeGenerators.TryGetValue(node, out var nodeCodeGenerator))
                 {
-                    if (node.IsCloseNode)
+                    if (node.IsCloseNode && !cropAndResizes.ContainsKey(node))
                         defaultIndent -= 1;
 
                     foreach (var codeLine in nodeCodeGenerator.AssertNotNull().FullCode)
@@ -674,12 +680,12 @@ public static class " + modelName + @"
             }
             else if (tensorDataAttribute.DType == DType.Float32)
             {
-                var paramList = tensorDataAttribute.Elements<float>().ToArray().Select(x => $"{Literal(x)}f");
+                var paramList = tensorDataAttribute.Elements<float>().ToArray().Select(FloatLiteral);
                 dataParams = string.Join(", ", paramList);
             }
             else if (tensorDataAttribute.DType == DType.Float64)
             {
-                var paramList = tensorDataAttribute.Elements<double>().ToArray().Select(x => $"{Literal(x)}d");
+                var paramList = tensorDataAttribute.Elements<double>().ToArray().Select(DoubleLiteral);
                 dataParams = string.Join(", ", paramList);
             }
             else if (tensorDataAttribute.DType == DType.Int16)
@@ -930,6 +936,57 @@ public static class " + modelName + @"
                 var nodeCodeGenerator = new NodeGenerationInfo(closeNode.NodeDef, closeNode, null, lines.ToImmutableList(), inlinedVariables.ToImmutableList());
                 return (nodeCodeGenerator, []);
             }
+        }
+
+        /// <summary>
+        /// The <c>If</c> nodes <see cref="OnnxOp.Resize"/> builds for a <c>tf_crop_and_resize</c>
+        /// call, each with the plain <c>Resize</c> it came from, and every node that serves only
+        /// them. Such an <c>If</c> is written back as that one <c>OnnxOp.Resize</c> call, which
+        /// builds the same nodes again, so the source reproduces the graph instead of guarding the
+        /// call once more. A node the <c>If</c> reads that anything else also reads is written as
+        /// usual.
+        /// </summary>
+        private static (Dictionary<Node, Node> Guards, HashSet<Node> Bodies) FindCropAndResizes(
+            IReadOnlyList<Node> nodes, IReadOnlyList<Variable?> graphOutputs, Dictionary<Variable, List<Node>> tensorChildNodes)
+        {
+            var guards = new Dictionary<Node, Node>();
+            var bodies = new HashSet<Node>();
+            foreach (var close in nodes)
+            {
+                if (OnnxOp.CropAndResizeSource(close) is not { } plain)
+                    continue;
+
+                HashSet<Variable> sources = [.. plain.Inputs.NotNulls()];
+                var body = new HashSet<Node>();
+                var pending = new Stack<Node>([close]);
+                while (pending.TryPop(out var node))
+                    foreach (var input in node.InputsWithConnectingTensor.NotNulls())
+                        if (!sources.Contains(input) && body.Add(input.OwningNode))
+                            pending.Push(input.OwningNode);
+
+                bool ServesOnlyTheIf(Node n) => n.Outputs.Append(n.IsGraphOpenNode ? n.ConnectingTensor : null).NotNulls()
+                    .All(v => !graphOutputs.Contains(v)
+                        && (!tensorChildNodes.TryGetValue(v, out var readers) || readers.All(r => r == close || body.Contains(r))));
+                List<Node> shared;
+                while ((shared = [.. body.Where(n => !ServesOnlyTheIf(n))]).Count > 0)
+                    body.ExceptWith(shared);
+
+                guards[close] = plain;
+                bodies.UnionWith(body);
+            }
+            return (guards, bodies);
+        }
+
+        private (NodeGenerationInfo nodeGenerator, Dictionary<Variable, string> newVariables) MakeCropAndResizeNode(
+            Node close, Node plain, ImmutableDictionary<Variable, string> currentNames)
+        {
+            var output = close.Outputs[0]!;
+            var name = GetSanitizedVariableName(output);
+            var code = MakeNodeWithInlines(plain, ImmutableDictionary<Node, string>.Empty, currentNames,
+                "OnnxOp.Resize({1:param}{2:param}{3:param}{4:param}{a:param}{b:param}{c:param}{d:param}{e:param}{f:param}{g:param}{h:param}{i:param})");
+            var line = $"var {name} = ({GetTypeDefString(output)}){code};";
+            return (new NodeGenerationInfo(plain.NodeDef, close, null, [new CodeLine(0, line)], []),
+                new Dictionary<Variable, string> { [output] = name });
         }
 
         private (NodeGenerationInfo nodeGenerator, Dictionary<Variable, string> newVariables) MakeIfNode(Node node, ImmutableDictionary<Node, NodeGenerationInfo> nodeCodeGenerators, ImmutableDictionary<Variable, string> currentNames, Dictionary<Variable, List<Node>> tensorChildNodes)
@@ -1293,6 +1350,22 @@ public static class " + modelName + @"
         private static string Literal<T>(T value) where T : IFormattable
             => value.ToString(null, System.Globalization.CultureInfo.InvariantCulture);
 
+        /// <summary>A <see cref="float"/> as C# spells it: a suffixed literal, or the
+        /// <see cref="float"/> constant naming an infinity or NaN.</summary>
+        private static string FloatLiteral(float value)
+            => float.IsNaN(value) ? "float.NaN"
+                : float.IsPositiveInfinity(value) ? "float.PositiveInfinity"
+                : float.IsNegativeInfinity(value) ? "float.NegativeInfinity"
+                : Literal(value) + "f";
+
+        /// <summary>A <see cref="double"/> as C# spells it: a suffixed literal, or the
+        /// <see cref="double"/> constant naming an infinity or NaN.</summary>
+        private static string DoubleLiteral(double value)
+            => double.IsNaN(value) ? "double.NaN"
+                : double.IsPositiveInfinity(value) ? "double.PositiveInfinity"
+                : double.IsNegativeInfinity(value) ? "double.NegativeInfinity"
+                : Literal(value) + "d";
+
         private static string EscapeString(string input)
         {
             return input.Replace("\\", "\\\\")
@@ -1451,7 +1524,7 @@ public static class " + modelName + @"
                     else if (attrType is AttributeType.Long)
                         attrValue = Literal(attributes.GetLongVal(attrName).AssertNotNull()) + "L";
                     else if (attrType is AttributeType.Float)
-                        attrValue = Literal(attributes.GetFloatVal(attrName).AssertNotNull()) + "f";
+                        attrValue = FloatLiteral(attributes.GetFloatVal(attrName).AssertNotNull());
                     else if (attrType is AttributeType.Bool)
                         attrValue = attributes.GetBoolVal(attrName).AssertNotNull() ? "true" : "false";
                     else if (attrType is AttributeType.String)
@@ -1487,7 +1560,7 @@ public static class " + modelName + @"
                     else if (attrType is AttributeType.Longs)
                         attrValue = listOf(attributes.GetLongsVal(attrName).AssertNotNull().Select(x => $"{Literal(x)}L"), "long");
                     else if (attrType is AttributeType.Floats)
-                        attrValue = listOf(attributes.GetFloatsVal(attrName).AssertNotNull().Select(x => $"{Literal(x)}f"), "float");
+                        attrValue = listOf(attributes.GetFloatsVal(attrName).AssertNotNull().Select(FloatLiteral), "float");
                     else if (attrType is AttributeType.Bools)
                         attrValue = listOf(attributes.GetBoolsVal(attrName).AssertNotNull().Select(x => x ? "true" : "false"), "bool");
                     else if (attrType is AttributeType.Strings)

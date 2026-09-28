@@ -197,6 +197,7 @@ namespace Shorokoo
         public static Tensor<bfloat16> bfloat16(this IValue var) => (Tensor<bfloat16>)var.ToVariable();
         public static Tensor<float32> float32(this IValue var) => (Tensor<float32>)var.ToVariable();
         public static Tensor<float64> float64(this IValue var) => (Tensor<float64>)var.ToVariable();
+        public static Tensor<bit> bit(this IValue var) => (Tensor<bit>)var.ToVariable();
 
         public static DataStructure Structure(this IValue var)
             => var is ITensorStruct ? DataStructure.TensorStruct :

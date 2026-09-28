@@ -73,6 +73,11 @@ public class JaxBackendCoverageTests
     }
 
     [Fact]
+    public void TestIntegerAndBoolReduceMaxAndMinOverAnEmptyGroupYieldTheTypeExtremesOnJax()
+        => Assert.True(AutoTest.AdvancedTestGraph<EmptyIntegerReduceMaxMinCheck>([], [QeeAudit.F32([2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f)],
+            context: new ComputeContext(Jax)));
+
+    [Fact]
     public void TestAnAutoGradNodeIsJaxsGradientOfItsLoss()
     {
         float[] w = [0.5f, -1f, 2f], b = [0.1f, 0.2f, -0.3f], x = [1f, 2f, -0.5f], c = [0.3f, -0.2f, 0.1f];

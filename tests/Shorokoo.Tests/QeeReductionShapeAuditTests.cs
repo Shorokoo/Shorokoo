@@ -44,11 +44,66 @@ public class QeeReductionShapeAuditTests
         Assert.True(QeeAudit.Check<QeeScatterGatherNdEdgeValueAuditCheck>(F32([2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f)));
     }
 
-    // ONNX Runtime yields 0 for an empty int64 ReduceMax/ReduceMin instead of the type's minimum/maximum:
-    // https://github.com/Shorokoo/Shorokoo/issues/382
-    [Fact(Skip = "Shorokoo/Shorokoo#382: ONNX Runtime yields 0 for an empty int64 ReduceMax/ReduceMin")]
-    public void TestInt64ReduceMaxAndMinOverAnEmptyAxisYieldTheTypeExtremes()
-        => Assert.True(AutoTest.AdvancedTestGraph<EmptyInt64ReduceMaxMinValues>([],
+    [Fact]
+    public void TestIntegerAndBoolReduceMaxAndMinOverAnEmptyGroupYieldTheTypeExtremes()
+        => Assert.True(AutoTest.AdvancedTestGraph<EmptyIntegerReduceMaxMinCheck>([], [F32([2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f)]));
+
+    [Fact]
+    public void TestAGenericReduceMaxAndMinSpecialisedToAnIntegerOrBoolYieldTheTypeExtremesOverAnEmptyGroup()
+    {
+        Assert.True(GenericMaxMin(DType.Int64, I64([1L, 0L]), long.MinValue, long.MaxValue));
+        Assert.True(GenericMaxMin(DType.Int64, I64([2L, 2L], 1L, 5L, 3L, 2L), 5L, 3L, 1L, 2L));
+        Assert.True(GenericMaxMin(DType.Int32, I32([1L, 0L]), int.MinValue, int.MaxValue));
+        Assert.True(GenericMaxMin(DType.Int8, I8([1L, 0L]), sbyte.MinValue, sbyte.MaxValue));
+        Assert.True(GenericMaxMin(DType.UInt8, U8([1L, 0L]), byte.MinValue, byte.MaxValue));
+        Assert.True(GenericMaxMin(DType.Bool, Bits([1L, 0L]), 0L, 1L));
+        Assert.True(GenericMaxMin(DType.Bool, Bits([2L, 2L], true, false, false, false), 1L, 0L, 0L, 0L));
+    }
+
+    [Fact]
+    public void TestAReduceMaxOrMinThatCannotMeetAnEmptyGroupBuildsThePlainOperator()
+    {
+        Tensor<float32> f = InputTensor<float32>("f", rank: 2);
+        Tensor<float16> h = InputTensor<float16>("h", rank: 2);
+        Tensor<int64> i = InputTensor<int64>("i", rank: 2);
+        Tensor<int64> c = Tensor([2L, 2L], 1L, 2L, 3L, 4L);
+        Tensor<bit> b = Tensor([2L], true, false);
+        Assert.True(IsPlain(f, f.Reduce(ReduceKind.Max, Vector(1L))));
+        Assert.True(IsPlain(f, f.Reduce(ReduceKind.Min)));
+        Assert.True(IsPlain(h, h.Reduce(ReduceKind.Max, Vector(-1L), keepDims: true)));
+        Assert.True(IsPlain(c, c.Reduce(ReduceKind.Min, Vector(1L))));
+        Assert.True(IsPlain(b, b.Reduce(ReduceKind.Max)));
+        Assert.True(IsPlain(i, NN.Reduce(ReduceKind.Max, i, null, true, true)));
+    }
+
+    // #422: ONNX Runtime returns an empty input unreduced when a Reduce axis is negative.
+    [Fact(Skip = "#422: ONNX Runtime returns an empty input unreduced when a Reduce axis is negative")]
+    public void TestAReductionOverANegativeAxisOfAnEmptyInputHasTheSpecShape()
+    {
+        Assert.True(AutoTest.AdvancedTestGraph<EmptyReduceNegativeAxisShapes>([], [F32([2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f)],
+            expected: [3, 1, 0, 3, 1, 0]));
+        Assert.True(AutoTest.AdvancedTestGraph<EmptyRawReduceNegativeAxisShapes>([], [F32([2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f)],
+            expected: [3, 1, 0, 3, 1, 0]));
+    }
+
+    // #409: ONNX Runtime ignores noop_with_empty_axes on an empty input and reduces every axis.
+    [Fact(Skip = "#409: ONNX Runtime ignores noop_with_empty_axes on an empty input and reduces every axis")]
+    public void TestANoopReductionPassesAnEmptyInputThrough()
+        => Assert.True(AutoTest.AdvancedTestGraph<EmptyNoopReduceShape>([],
             [F32([2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f)],
-            expected: [long.MinValue, long.MaxValue]));
+            expected: [2, 0]));
+
+    // #411: ONNX Runtime's float16 ReduceSumSquare and ReduceL1 crash the process on an empty input with no axes.
+    [Fact(Skip = "#411: ONNX Runtime's float16 ReduceSumSquare and ReduceL1 over an empty input with no axes crash the process")]
+    public void TestFloat16ReduceSumSquareAndL1OverAnEmptyInputGiveZero()
+        => Assert.True(AutoTest.AdvancedTestGraph<EmptyFloat16ReduceAllValues>([],
+            [F32([2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f)],
+            expected: [0, 0]));
+
+    private static bool GenericMaxMin(DType t, TensorData x, params long[] expected)
+        => AutoTest.AdvancedTestGraph<GenericReduceMaxMinCheck>([], [x, I64([expected.Length], expected)],
+            genericTypes: new() { ["T"] = t });
+
+    private static bool IsPlain<T>(Tensor<T> x, Tensor<T> reduced) where T : IVarType
+        => ((Variable)reduced).OwningNode is { OpCode: OpCodes.REDUCE_MAX or OpCodes.REDUCE_MIN } n && n.Inputs[0] == (Variable)x;
 }

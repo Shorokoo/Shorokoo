@@ -140,11 +140,11 @@ namespace Shorokoo.Tests.Modules
     }
 
 
-    /// <summary>The backend's empty-group values for the five reductions QEE will not fold, and the
-    /// reason it will not: float32 gives -inf/+inf/0/-inf/-inf, but int64 Max and Min give 0 rather
-    /// than the dtype's extremes, so there is no dtype-independent identity to bake into a constant.
-    /// QEE must still leave the output typed and shaped - a DType.Invalid here means an op threw.
-    /// Driven by QeeAudit.OrtOnly, since QEE cannot fold the bit. Input xf = [[1,2,3],[4,5,6]].</summary>
+    /// <summary>The backend's empty-group values for the five reductions QEE will not fold: float32
+    /// gives -inf/+inf/0/-inf/-inf, and int64 Max and Min give the dtype's extremes, so no single
+    /// constant is the identity for every dtype. QEE must still leave the output typed and shaped -
+    /// a DType.Invalid here means an op threw. Driven by QeeAudit.OrtOnly, since QEE cannot fold the
+    /// bit. Input xf = [[1,2,3],[4,5,6]].</summary>
     [Module]
     public partial class QeeEmptyReduceNoIdentityCheck
     {
@@ -158,8 +158,8 @@ namespace Shorokoo.Tests.Modules
                 Differs(e.Reduce(ReduceKind.Mean, Vector(1L)), 0f) +
                 Differs(e.Reduce(ReduceKind.LogSum, Vector(1L)), float.NegativeInfinity) +
                 Differs(e.Reduce(ReduceKind.LogSumExp, Vector(1L)), float.NegativeInfinity) +
-                IntMismatch(FlatI(eI.Reduce(ReduceKind.Max, Vector(1L))), Vector(0L)) +
-                IntMismatch(FlatI(eI.Reduce(ReduceKind.Min, Vector(1L))), Vector(0L));
+                Differs(eI.Reduce(ReduceKind.Max, Vector(1L)), long.MinValue) +
+                Differs(eI.Reduce(ReduceKind.Min, Vector(1L)), long.MaxValue);
             return (mismatch < Scalar(1L)).Scalar();
         }
 
@@ -168,7 +168,9 @@ namespace Shorokoo.Tests.Modules
             => ((Tensor<bit>)OnnxOp.Not(actual.Reshape(Vector(-1L)) == Scalar(expected)))
                 .Cast<int64>().Reduce(ReduceKind.Sum).Scalar();
 
-        private static Tensor<int64> FlatI(Tensor<int64> t) => t.Reshape(Vector(-1L));
+        private static Scalar<int64> Differs(Tensor<int64> actual, long expected)
+            => ((Tensor<bit>)OnnxOp.Not(actual.Reshape(Vector(-1L)) == Scalar(expected)))
+                .Cast<int64>().Reduce(ReduceKind.Sum).Scalar();
     }
 
     /// <summary>Reshape (keepAxes copy-dim positions, -1, literal 0 on an empty tensor), Flatten (negative axis,
@@ -286,6 +288,22 @@ namespace Shorokoo.Tests.Modules
         }
 
         private static Tensor<float32> Flat(Tensor<float32> t) => t.Reshape(Vector(-1L));
+    }
+
+    /// <summary>A constant Pad of int64 with values a double cannot hold exactly. Input xi = [1, 2].</summary>
+    [Module]
+    public partial class PadInt64WithWideValuesCheck
+    {
+        public static Scalar<bit> Inline(Tensor<int64> xi)
+        {
+            var mismatch =
+                Differs(xi.Pad(PadMode.Constant, Vector(0L, 1L), Scalar(long.MaxValue)), Vector(1L, 2L, long.MaxValue)) +
+                Differs(xi.Pad(PadMode.Constant, Vector(1L, 0L), Scalar(9007199254740993L)), Vector(9007199254740993L, 1L, 2L));
+            return (mismatch < Scalar(1L)).Scalar();
+        }
+
+        private static Scalar<int64> Differs(Tensor<int64> actual, Vector<int64> expected)
+            => ((Tensor<bit>)OnnxOp.Not(actual == expected)).Cast<int64>().Reduce(ReduceKind.Sum).Scalar();
     }
 
     /// <summary>ScatterElements (reduction none/add/mul/min/max, negative indices, axis 1),
@@ -496,14 +514,115 @@ namespace Shorokoo.Tests.Modules
         private static Tensor<int64> FlatI(Tensor<int64> t) => t.Reshape(Vector(-1L));
     }
 
-    /// <summary>int64 ReduceMax then ReduceMin over an empty axis. Input xf is any float tensor.</summary>
+    /// <summary>ReduceMax then ReduceMin over an empty group for each integer and boolean dtype the
+    /// backend reduces, over every axis, over an axis beside a nonempty one, over a constant, and over
+    /// a nonempty int32 input, each held to its exact values. Input xf = [[1,2,3],[4,5,6]].</summary>
     [Module]
-    public partial class EmptyInt64ReduceMaxMinValues
+    public partial class EmptyIntegerReduceMaxMinCheck
+    {
+        public static Tensor<bit> Inline(Tensor<float32> xf)
+        {
+            var e = xf.Reshape(Vector(-1L)).Slice(Vector(0L), Vector(0L)).Reshape(Vector(1L, 0L));
+            var e203 = e.Reshape(Vector(2L, 0L, 3L)).Cast<int64>();
+            return OnnxOp.Concat(
+            [
+                Is(MaxMin(e.Cast<int64>(), Vector(1L)), long.MinValue, long.MaxValue),
+                Is(MaxMin(e.Cast<int32>(), Vector(1L)), int.MinValue, int.MaxValue),
+                Is(MaxMin(e.Cast<int8>(), Vector(1L)), sbyte.MinValue, sbyte.MaxValue),
+                Is(MaxMin(e.Cast<uint8>(), Vector(1L)), byte.MinValue, byte.MaxValue),
+                Is(MaxMin(e.Cast<bit>(), Vector(1L)), 0L, 1L),
+                Is(MaxMin(e.Cast<int64>(), null), long.MinValue, long.MaxValue),
+                Is(MaxMin(e203, Vector(1L)), [.. Enumerable.Repeat(long.MinValue, 6), .. Enumerable.Repeat(long.MaxValue, 6)]),
+                Is(MaxMin<int64>(EmptyVector<int64>(), null), long.MinValue, long.MaxValue),
+                Is(MaxMin(xf.Cast<int32>(), Vector(1L)), 3L, 6L, 1L, 4L),
+            ], 0);
+        }
+
+        private static Tensor<int64> MaxMin<T>(Tensor<T> x, Vector<int64>? axes) where T : IVarType
+            => OnnxOp.Concat([Flat(x.Reduce(ReduceKind.Max, axes)), Flat(x.Reduce(ReduceKind.Min, axes))], 0);
+
+        private static Tensor<int64> Flat<T>(Tensor<T> t) where T : IVarType => t.Cast<int64>().Reshape(Vector(-1L));
+
+        private static Tensor<bit> Is(Tensor<int64> actual, params long[] expected)
+            => OnnxOp.Concat([actual.TShape == Vector((long)expected.Length), actual == Vector(expected)], 0);
+    }
+
+    /// <summary>ReduceMax then ReduceMin over axis 1 of a generic input, cast to int64 and held to
+    /// <c>expected</c> exactly.</summary>
+    [Module]
+    public partial class GenericReduceMaxMinCheck
+    {
+        public static Tensor<bit> Inline<T>(Tensor<T> x, Tensor<int64> expected) where T : IVarType
+        {
+            Tensor<int64> actual = OnnxOp.Concat([x.Reduce(ReduceKind.Max, Vector(1L)).Cast<int64>().Reshape(Vector(-1L)),
+                x.Reduce(ReduceKind.Min, Vector(1L)).Cast<int64>().Reshape(Vector(-1L))], 0);
+            return OnnxOp.Concat([actual.TShape == expected.TShape, actual == expected], 0);
+        }
+    }
+
+    /// <summary>The raw ReduceSum and ReduceMax over a negative axis of an input empty by its values,
+    /// with and without keepdims: the output shapes. Input xf = [[1,2,3],[4,5,6]].</summary>
+    [Module]
+    public partial class EmptyRawReduceNegativeAxisShapes
     {
         public static Tensor<int64> Inline(Tensor<float32> xf)
         {
-            var e = xf.Reshape(Vector(-1L)).Slice(Vector(0L), Vector(0L)).Reshape(Vector(1L, 0L)).Cast<int64>();
-            return e.Reduce(ReduceKind.Max, Vector(1L)).Concat(0L, e.Reduce(ReduceKind.Min, Vector(1L)));
+            var flat = xf.Reshape(Vector(-1L));
+            var e = flat.Slice(Vector(0L), (flat.Slice(Vector(0L), Vector(1L)).Cast<int64>() - Vector(1L)).Vec()).Reshape(Vector(3L, -1L));
+            return OnnxOp.Concat(
+            [
+                ((Tensor<float32>)OnnxOp.ReduceSum(e, Vector(-1L), true, null)).TShape,
+                ((Tensor<float32>)OnnxOp.ReduceSum(e, Vector(-2L), false, null)).TShape,
+                ((Tensor<float32>)OnnxOp.ReduceMax(e, Vector(-1L), false, null)).TShape,
+                ((Tensor<float32>)OnnxOp.ReduceMax(e, Vector(-2L), true, null)).TShape,
+            ], 0);
+        }
+    }
+
+    /// <summary>Reduce Sum, Max and Min over a negative axis of an input empty by its values, with and
+    /// without keepDims: the output shapes. Input xf = [[1,2,3],[4,5,6]].</summary>
+    [Module]
+    public partial class EmptyReduceNegativeAxisShapes
+    {
+        public static Tensor<int64> Inline(Tensor<float32> xf)
+        {
+            var flat = xf.Reshape(Vector(-1L));
+            var e = flat.Slice(Vector(0L), (flat.Slice(Vector(0L), Vector(1L)).Cast<int64>() - Vector(1L)).Vec()).Reshape(Vector(3L, -1L));
+            return OnnxOp.Concat(
+            [
+                e.Reduce(ReduceKind.Sum, Vector(-1L), keepDims: true).TShape,
+                e.Reduce(ReduceKind.Sum, Vector(-2L)).TShape,
+                e.Reduce(ReduceKind.Max, Vector(-1L)).TShape,
+                e.Cast<int64>().Reduce(ReduceKind.Min, Vector(-2L), keepDims: true).TShape,
+            ], 0);
+        }
+    }
+
+    /// <summary>A reduction with noop_with_empty_axes set and no axes over an empty input, empty by
+    /// the input's values: the input passes through. Input xf = [[1,2,3],[4,5,6]].</summary>
+    [Module]
+    public partial class EmptyNoopReduceShape
+    {
+        public static Vector<int64> Inline(Tensor<float32> xf)
+        {
+            var flat = xf.Reshape(Vector(-1L));
+            var none = flat.Slice(Vector(0L), (flat.Slice(Vector(0L), Vector(1L)).Cast<int64>() - Vector(1L)).Vec());
+            return NN.Reduce(ReduceKind.Sum, none.Reshape(Vector(2L, -1L)), null, keepDims: true, noOp: true).TShape;
+        }
+    }
+
+    /// <summary>float16 ReduceSumSquare and ReduceL1 over every axis of an input empty by its values,
+    /// with no axes input. Input xf = [[1,2,3],[4,5,6]].</summary>
+    [Module]
+    public partial class EmptyFloat16ReduceAllValues
+    {
+        public static Tensor<float32> Inline(Tensor<float32> xf)
+        {
+            var flat = xf.Reshape(Vector(-1L));
+            var none = flat.Slice(Vector(0L), (flat.Slice(Vector(0L), Vector(1L)).Cast<int64>() - Vector(1L)).Vec());
+            var e = none.Reshape(Vector(3L, -1L)).Cast<float16>();
+            return OnnxOp.Concat([e.Reduce(ReduceKind.SumSquare).Cast<float32>().Reshape(Vector(1L)),
+                e.Reduce(ReduceKind.L1).Cast<float32>().Reshape(Vector(1L))], 0);
         }
     }
 }

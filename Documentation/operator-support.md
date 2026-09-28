@@ -213,9 +213,20 @@ All boolean/integer outputs are non-differentiable, hence N/A gradients.
 4. Affects **values only**, and only when the reduction has groups to compute *and* a
    **reduced axis has extent 0**, which leaves each of those groups empty. `ReduceMax`,
    `ReduceMin`, `ReduceMean`, `ReduceLogSum` and `ReduceLogSumExp` propagate dtype and shape
-   but leave the value uncomputed there, because the empty-group result is the backend's
-   rather than the spec's: ONNX Runtime returns -inf, +inf, 0, -inf and -inf for `float32`,
-   but 0 for `int64` `ReduceMax`/`ReduceMin` rather than that type's extremes. `ReduceSum`,
+   but leave the value uncomputed there, because the empty-group result is not one identity
+   across dtypes: -inf, +inf, 0, -inf and -inf for `float32`, and the type's minimum and
+   maximum for an integer `ReduceMax`/`ReduceMin` (false and true for `bool`). ONNX Runtime's
+   own kernels return 0 for the integer ones and fail on an empty `bool` input, so `Reduce`
+   (`Tensor`, `Vector`, `Scalar`, and `NN.Reduce`) builds an integer or boolean
+   `ReduceMax`/`ReduceMin` as an `If` on the input's element count being 0: the other branch is
+   the plain operator, and the empty branch fills the plain operator's output shape with the
+   identity. A graph input's extents are not known when the graph is built, so every integer or
+   boolean `ReduceMax`/`ReduceMin` of one carries this `If`, however large the input turns out
+   to be. A floating-point input, a nonempty constant input, and a reduction with no axes and
+   `noOp` set are the plain operator. In a generic module whose element type is a type
+   parameter, the `If` also tests in the graph that the type is not floating point. A raw
+   `OnnxOp.ReduceMax` / `OnnxOp.ReduceMin`, or one in an imported ONNX model, is the plain
+   operator. `ReduceSum`,
    `ReduceSumSquare`, `ReduceL1`, `ReduceL2` and `ReduceProd` do fold, to their identity
    (0, or 1 for `Prod`), which is the same in every dtype. A reduction with no groups at all
    — an empty **kept** axis — folds to the empty result for all ten. Every other input folds
@@ -323,17 +334,17 @@ All boolean/integer outputs are non-differentiable, hence N/A gradients.
 
 | Op | Build & run | QEE | Gradient |
 |---|---|---|---|
-| AveragePool | ✅ | 🟡 [1] | 🟡 [2] |
+| AveragePool | ✅ [9] | 🟡 [1] | 🟡 [2] |
 | Conv | ✅ | 🟡 [1] | 🟡 [3] |
 | ConvTranspose | ✅ | 🟡 [1] | 🟡 [4] |
 | DeformConv | ✅ | 🟡 [1] | ❌ [5] |
 | GlobalAveragePool | ✅ | 🟡 [1] | ✅ |
 | GlobalLpPool | ✅ | 🟡 [1] | ✅ |
 | GlobalMaxPool | ✅ | 🟡 [1] | ✅ |
-| LpPool | ✅ | 🟡 [1] | 🟡 [6] |
-| MaxPool | ✅ | 🟡 [1] | 🟡 [7] |
-| MaxRoiPool | ✅ | 🟡 [1] | 🟡 [8] |
-| MaxUnpool | ✅ | 🟡 [9] | ✅ |
+| LpPool | ✅ [9] | 🟡 [1] | ✅ |
+| MaxPool | ✅ [9] | 🟡 [1] | 🟡 [6] |
+| MaxRoiPool | ✅ | 🟡 [1] | 🟡 [7] |
+| MaxUnpool | ✅ | 🟡 [8] | ✅ |
 
 1. Shape/dtype inference only — values are never computed for these heavy
    operators; use the ONNX Runtime backend for numbers.
@@ -346,13 +357,18 @@ All boolean/integer outputs are non-differentiable, hence N/A gradients.
    `output_padding` handled); the `output_shape` attribute is ignored in the
    backward.
 5. The bilinear-sampling adjoint is not implemented; differentiation throws.
-6. Backward ignores `ceil_mode`, `dilations`, and `auto_pad`.
-7. Exact for every attribute combination except `storage_order=1` (throws);
+6. Exact for every attribute combination except `storage_order=1` (throws);
    ties route the gradient to the first maximum.
-8. Recompute-and-mask approximation (deprecated operator); the `rois` input
+7. Recompute-and-mask approximation (deprecated operator); the `rois` input
    gets no gradient.
-9. Shape comes from the `output_shape` input's values when known; element
+8. Shape comes from the `output_shape` input's values when known; element
    values are not computed.
+9. Where ONNX Runtime's pooling kernels depart from the spec — `SAME_UPPER` /
+   `SAME_LOWER` with a dilation above 1 or a stride above the kernel, and
+   explicit pads as large as the kernel — `OnnxOp.AveragePool`,
+   `OnnxOp.LpPool` and `OnnxOp.MaxPool` build the pool from `Pad`, a pool
+   ONNX Runtime computes as the spec does, and `Slice`; one in an imported
+   ONNX model is the plain operator.
 
 ## Normalization & losses
 
@@ -472,11 +488,11 @@ All boolean/integer outputs are non-differentiable, hence N/A gradients.
 |---|---|---|---|
 | AffineGrid | ✅ | 🟡 [1] | ✅ [2] |
 | CenterCropPad | 🟡 [3] | ✅ | ✅ |
-| Col2Im | ✅ | 🟡 [1] | ✅ |
+| Col2Im | ✅ [14] | 🟡 [1] | ✅ |
 | GridSample | ✅ | 🟡 [1] | 🟡 [4] |
 | ImageDecoder | 🟡 [13] | 🟡 [5] | N/A |
 | NonMaxSuppression | ✅ | 🟡 [6] | N/A (index output) |
-| Resize | 🟡 [7] | 🟡 [8] | 🟡 [9] |
+| Resize | 🟡 [7] [15] | 🟡 [8] | 🟡 [9] |
 | RoiAlign | ✅ | 🟡 [1] | 🟡 [10] |
 | Upsample | ✅ [11] | 🟡 [1] | 🟡 [12] |
 
@@ -506,6 +522,13 @@ All boolean/integer outputs are non-differentiable, hence N/A gradients.
     is refused when its session is created. It runs on the
     [PyTorch backend](pytorch-backend.md); the [JAX backend](jax-backend.md) refuses it, its output
     shape being decided by the bytes it decodes.
+14. `OnnxOp.Col2Im` over one spatial axis is built as a `Col2Im` over two axes,
+    the second of extent 1, and a `Squeeze`, since ONNX Runtime's kernel
+    computes the one-axis form wrongly; one in an imported ONNX model is the
+    plain operator.
+15. `OnnxOp.Resize` with `tf_crop_and_resize` crops to the `roi` of an axis
+    whose length it leaves unchanged, which ONNX Runtime's kernel does not;
+    one in an imported ONNX model is the plain operator.
 
 ## Random
 

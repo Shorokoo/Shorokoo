@@ -193,19 +193,42 @@ public class QeeImageRandomRnnAuditTests
         Assert.True(QeeAudit.OrtOnly<QeeLstmValueAuditCheck>(Wave(4, 2, 3), Wave(2, 20, 3), Wave(2, 20, 5), Wave(2, 40), Wave(2, 2, 5), Wave(2, 2, 5), Wave(2, 15), EmptySequence));
     }
 
-    // ONNX Runtime copies the input through when the output shape equals the input shape, ignoring the roi:
-    // https://github.com/Shorokoo/Shorokoo/issues/380
-    [Fact(Skip = "Shorokoo/Shorokoo#380: ONNX Runtime ignores the tf_crop_and_resize roi at an unchanged shape")]
+    [Fact]
     public void TestCropAndResizeAtScaleOneStillCropsToTheRoi()
         => Assert.True(AutoTest.AdvancedTestGraph<CropAndResizeAtScaleOneValues>([],
             [F32([1L, 1L, 1L, 5L], 0f, 1f, 2f, 3f, 4f)],
             expected: [2, 3, 4, -1, -1, 2, 3, 4, -1, -1]));
 
-    // ONNX Runtime's 1-D Col2Im with pads returns wrong, run-to-run varying values:
-    // https://github.com/Shorokoo/Shorokoo/issues/381
-    [Fact(Skip = "Shorokoo/Shorokoo#381: ONNX Runtime computes 1-D padded Col2Im wrongly")]
+    [Fact]
+    public void TestCropAndResizeVariantsCropToTheRoi()
+        => Assert.True(AutoTest.AdvancedTestGraph<CropAndResizeVariantsValues>([],
+            [F32([1L, 1L, 1L, 5L], 0f, 1f, 2f, 3f, 4f)],
+            expected: [2, 3, 4, -1, -1, 2, 3, 4, -1, -1, -1, 0, 1, 2, 3, 2, 2.8, 3.6, -1, -1, -1,
+                0, 5.5, 11, 16.5, 22, -1, -1, -1, -1, -1, 2, 3, 4, -1, -1,
+                0, 0, 1, 1, 2, 2, 3, 3, 4, 4, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1]));
+
+    [Fact]
+    public void TestCropAndResizeAtAnUnchangedLengthReachesTheRoiEnd()
+        => Assert.True(AutoTest.AdvancedTestGraph<CropAndResizeToTheRoiEndValues>([],
+            [F32([1L, 1L, 1L, 4L], 1f, 2f, 3f, 4f)],
+            expected: [2.5, 3, 3.5, 4, 2, 3, 3, 4, 2.5, 3, 3.59375, 4, 1.66796875, 2.5, 3.33203125, 4]));
+
+    // #421: ONNX Runtime's cubic Resize scaled on the middle axes of a 4-D input extrapolates at the wrong elements
+    [Fact(Skip = "#421: ONNX Runtime's cubic Resize scaled on the middle axes of a 4-D input extrapolates at the wrong elements")]
+    public void TestCubicCropAndResizeAlongChannelsExtrapolatesWhereTheRoiLeavesTheInput()
+        => Assert.True(AutoTest.AdvancedTestGraph<CubicCropAndResizeAlongChannelsValues>([],
+            [F32([1L, 3L, 1L, 2L], 0f, 1f, 2f, 3f, 4f, 5f)],
+            expected: [2, 3, 2.992, 3.992, 3.696, 4.696, -1, -1, -1, -1, -1, -1, 2, 3, 4, 5, -1, -1]));
+
+    [Fact]
     public void TestCol2ImOverOneSpatialAxisWithPadsAndStride()
         => Assert.True(AutoTest.AdvancedTestGraph<Col2Im1DPaddedValues>([],
             [F32([1L, 3L, 4L], [.. Enumerable.Range(0, 12).Select(i => (float)i)])],
             expected: [4, 9, 5, 11, 6, 13, 7, 11]));
+
+    [Fact]
+    public void TestCol2ImOverOneSpatialAxisWithoutPads()
+        => Assert.True(AutoTest.AdvancedTestGraph<Col2Im1DUnpaddedValues>([],
+            [F32([1L, 4L, 2L], [.. Enumerable.Range(1, 8).Select(i => (float)i)])],
+            expected: [1, 5, 4, 5, 13, 8, 1, 5, 2, 6, 3, 7, 4, 8, 1, 7, 9, 11, 8, 1, 2, 8, 10, 7, 8]));
 }

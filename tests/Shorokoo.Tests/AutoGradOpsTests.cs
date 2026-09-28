@@ -306,6 +306,7 @@ public class AutoGradSequenceDftAndRuntimeInputOpsCoverageTests
     public void TestAutoGradRuntimeInputDrivenGradients()
     {
         Run<AutoGradCastRoundTripCheck>(2.0f);
+        Run<AutoGradFloat64ProductBetweenCastsCheck>(3.0f);
         Run<AutoGradIfRuntimeConditionTrueCheck>(2.0f, 3.0f);
         Run<AutoGradIfRuntimeConditionFalseCheck>(-1.0f, 3.0f);
         Run<AutoGradDftWithDftLengthCheck>(3.0f);

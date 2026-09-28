@@ -5990,6 +5990,22 @@ namespace Shorokoo.Tests.Modules
     }
 
     /// <summary>
+    /// a squared in float64 between two Casts: the gradient reaching the float64 Mul is float64,
+    /// so dL/da = 2a.
+    /// </summary>
+    [Module]
+    public partial class AutoGradFloat64ProductBetweenCastsCheck
+    {
+        public static Scalar<bit> Inline(Scalar<float32> a)
+        {
+            var wide = a.Cast<float64>();
+            var loss = (wide * wide).Cast<float32>();
+            var grad = Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(a, loss);
+            return (grad - Scalar(2f) * a).Abs() < Scalar(1e-5f);
+        }
+    }
+
+    /// <summary>
     /// IfElse with a runtime-derived condition (a &gt; 0) prevents
     /// FastFoldConstantConditionBranches from collapsing the IF before AutoGrad.
     /// With a=2, b=3 the condition is true so loss = 2a, dL/da = 2, dL/db = 0.

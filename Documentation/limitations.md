@@ -420,10 +420,9 @@ included, are unaffected. Declare the struct as an `IStruct` interface instead.
 Import reads every standard-domain (`ai.onnx`) node against its current definition (opset 21,
 or the operator's own opset for an operator introduced after 21, with the attributes opsets
 22–26 add; the range of the bundled ONNX Runtime 1.26, which pins ONNX 1.21). It does not
-check the opset the model declares and converts nothing, so **models older than opset 21 are
-not supported**, and import does not refuse them
-([#434](https://github.com/Shorokoo/Shorokoo/issues/434)). Where an operator's signature
-changed after the model's opset, one of two things happens:
+check the opset the model declares and converts nothing. **Models older than opset 21 are not
+supported, and their behaviour is undefined**: import does not refuse them, and where an
+operator's signature changed after the model's opset, either of these can happen:
 
 - ONNX Runtime refuses the compiled model. `Unsqueeze` with an `axes` attribute (before
   opset 13) fails with `[ErrorCode:InvalidGraph] … has input size 1 not in range [min=2,

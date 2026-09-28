@@ -125,11 +125,10 @@ ComputationGraph g2 = OnnxModelImporter.FromOnnxModel(byteArray);
 ComputationGraph g3 = OnnxModelImporter.FromOnnxModel(stream);
 ```
 
-Models must be opset 21 or later. Import neither checks the declared opset nor converts: an
-older model whose operators changed signature since its opset is either refused by ONNX Runtime
-when compiled (`Unsqueeze` with an `axes` attribute) or runs with wrong results (`Squeeze`,
-the reductions, `Softmax`; [#434](https://github.com/Shorokoo/Shorokoo/issues/434)). Convert
-such a model to opset 21 first,
+Models must be opset 21 or later; an older model's behaviour is undefined. Import neither
+checks the declared opset nor converts, so such a model may be refused by ONNX Runtime when
+compiled (`Unsqueeze` with an `axes` attribute) or run with wrong results (`Squeeze`, the
+reductions, `Softmax`). Convert it to opset 21 first,
 for example with `onnx.version_converter.convert_version(model, 21)` — see
 [limitations.md](limitations.md#onnx-opset-range-and-export-stamping).
 

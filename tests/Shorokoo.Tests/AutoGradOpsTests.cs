@@ -459,6 +459,19 @@ public class AutoGradMatrixPoolingAndConvOpsCoverageTests
     }
 
     [Fact]
+    public void TestAutoGradSamePoolGradientsWithStrideAboveKernel()
+    {
+        RunTensorNoQee<AutoGradAvgPoolIncludingPadSameUpperStrideAboveKernel>([1L, 2L, 9L], Wave18);
+        RunTensorNoQee<AutoGradAvgPoolExcludingPadSameUpperStrideAboveKernel>([1L, 2L, 9L], Wave18);
+        RunTensorNoQee<AutoGradAvgPoolIncludingPadSameLowerStrideAboveKernel>([1L, 2L, 9L], Wave18);
+        RunTensorNoQee<AutoGradAvgPoolExcludingPadSameLowerStrideAboveKernel>([1L, 2L, 9L], Wave18);
+        RunTensorNoQee<AutoGradLpPoolSameUpperStrideAboveKernel>([1L, 2L, 9L], Wave18);
+        RunTensorNoQee<AutoGradLpPoolSameLowerStrideAboveKernel>([1L, 2L, 9L], Wave18);
+        RunTensorNoQee<AutoGradMaxPoolSameUpperStrideAboveKernel>([1L, 2L, 9L], Wave18);
+        RunTensorNoQee<AutoGradMaxPoolSameLowerStrideAboveKernel>([1L, 2L, 9L], Wave18);
+    }
+
+    [Fact]
     public void TestAutoGradLpPoolGradientsFollowDilationsAutoPadAndCeilMode()
     {
         RunTensorNoQee<AutoGradLpPoolDilated>([1L, 2L, 9L], Wave18);

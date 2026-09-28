@@ -500,6 +500,62 @@ namespace Shorokoo.Tests.Modules
     }
 
     [Module]
+    public partial class AutoGradAvgPoolIncludingPadSameUpperStrideAboveKernel
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x)
+            => PoolGradientCheck.Holds(x, v => OnnxOp.AveragePool(v, AutoPad.SameUpper, false, true, null, [2L], null, [3L]));
+    }
+
+    [Module]
+    public partial class AutoGradAvgPoolExcludingPadSameUpperStrideAboveKernel
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x)
+            => PoolGradientCheck.Holds(x, v => OnnxOp.AveragePool(v, AutoPad.SameUpper, false, false, null, [2L], null, [3L]));
+    }
+
+    [Module]
+    public partial class AutoGradAvgPoolIncludingPadSameLowerStrideAboveKernel
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x)
+            => PoolGradientCheck.Holds(x, v => OnnxOp.AveragePool(v, AutoPad.SameLower, false, true, null, [2L], null, [5L]));
+    }
+
+    [Module]
+    public partial class AutoGradAvgPoolExcludingPadSameLowerStrideAboveKernel
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x)
+            => PoolGradientCheck.Holds(x, v => OnnxOp.AveragePool(v, AutoPad.SameLower, false, false, null, [2L], null, [5L]));
+    }
+
+    [Module]
+    public partial class AutoGradLpPoolSameUpperStrideAboveKernel
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x)
+            => PoolGradientCheck.Holds(x, v => OnnxOp.LpPool(v, AutoPad.SameUpper, false, null, [2L], 2L, null, [3L]));
+    }
+
+    [Module]
+    public partial class AutoGradLpPoolSameLowerStrideAboveKernel
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x)
+            => PoolGradientCheck.Holds(x, v => OnnxOp.LpPool(v, AutoPad.SameLower, false, null, [2L], 2L, null, [5L]));
+    }
+
+    [Module]
+    public partial class AutoGradMaxPoolSameUpperStrideAboveKernel
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x)
+            => PoolGradientCheck.Holds(x, v => OnnxOp.MaxPool(v, AutoPad.SameUpper, false, null, [2L], null, 0L, [3L]));
+    }
+
+    [Module]
+    public partial class AutoGradMaxPoolSameLowerStrideAboveKernel
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x)
+            => PoolGradientCheck.Holds(x, v => OnnxOp.MaxPool(v, AutoPad.SameLower, false, null, [2L], null, 0L, [5L]));
+    }
+
+    [Module]
     public partial class AutoGradLpPoolCeilMode
     {
         public static Scalar<bit> Inline(Tensor<float32> x)

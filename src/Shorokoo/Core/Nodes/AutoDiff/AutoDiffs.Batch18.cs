@@ -26,7 +26,10 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         // elements — every window, including one that ceil_mode keeps past the end padding — or
         // the input and its start padding if that is longer. The input is then sliced out of it.
         // SAME_UPPER / SAME_LOWER take their start padding from the input's and the output's
-        // lengths, floor or ceil of half of (out - 1) * stride + (k - 1) * dilation + 1 - in.
+        // lengths, floor or ceil of half of (out - 1) * stride + (k - 1) * dilation + 1 - in,
+        // which is negative for some lengths when the stride exceeds the kernel's extent: the
+        // first window then starts past the input's first element (SameStartPadding,
+        // UnpaddedFold).
 
         internal static Variable?[] LpPoolGradient(Variable?[] inputs, Variable?[] outputGrads, OnnxCSharpAttributes attributes)
         {
@@ -56,13 +59,10 @@ namespace Shorokoo.Core.Nodes.AutoDiff
             var outLength = OnnxOp.Shape(weight, start: 2L);
             var covered = OnnxOp.Add(OnnxOp.Mul(OnnxOp.Sub(outLength, one), steps), Globals.Vector(extent));
 
-            Variable begin = Globals.Vector(pads[..n]);
-            if (autoPad is AutoPad.SameUpper or AutoPad.SameLower)
-            {
-                var total = OnnxOp.Max(OnnxOp.Sub(covered, inLength), Globals.Vector(new long[n]));
-                if (autoPad is AutoPad.SameLower) total = OnnxOp.Add(total, one);
-                begin = OnnxOp.Div(total, Globals.Vector([.. Enumerable.Repeat(2L, n)]));
-            }
+            bool isSame = autoPad is AutoPad.SameUpper or AutoPad.SameLower;
+            var begin = isSame
+                ? SameStartPadding(OnnxOp.Sub(covered, inLength), strides, autoPad is AutoPad.SameLower)
+                : (Variable)Globals.Vector(pads[..n]);
             var imageShape = OnnxOp.Max(covered, OnnxOp.Add(begin, inLength));
 
             var gradShape = OnnxOp.Shape(weight);
@@ -76,10 +76,42 @@ namespace Shorokoo.Core.Nodes.AutoDiff
             var columns = OnnxOp.Reshape(repeated,
                 OnnxOp.Concat([batch, OnnxOp.Mul(channels, kernelSizeVec), blocks], axis: 0), allowZero: false);
             var folded = OnnxOp.Col2Im(columns, imageShape, Globals.Vector(kernelShape), dilations, new long[2 * n], strides);
-            var scattered = OnnxOp.Slice(folded, begin, OnnxOp.Add(begin, inLength),
-                Globals.Vector([.. Enumerable.Range(2, n).Select(a => (long)a)]), null);
+            var scattered = UnpaddedFold(folded, begin, inLength, n, isSame && SameMayCrop(kernelShape, dilations, strides));
 
             return [OnnxOp.Mul(OnnxOp.Mul(absXPm1, OnnxOp.Sign(x)), scattered)];
+        }
+
+        /// <summary>The start padding of a <c>SAME_UPPER</c> (<paramref name="lower"/> false) or
+        /// <c>SAME_LOWER</c> pool along each spatial axis: <c>floor(total / 2)</c> or
+        /// <c>ceil(total / 2)</c> of its <paramref name="total"/> padding, which is at least
+        /// <c>1 - stride</c> and so negative for some lengths when the stride exceeds the kernel's
+        /// extent — taken as a truncating division of the total raised by twice the stride.</summary>
+        private static Variable SameStartPadding(Variable total, long[] strides, bool lower)
+            => OnnxOp.Sub(
+                OnnxOp.Div(OnnxOp.Add(total, Globals.Vector([.. strides.Select(s => 2 * s + (lower ? 1 : 0))])),
+                    Globals.Vector([.. Enumerable.Repeat(2L, strides.Length)])),
+                Globals.Vector(strides));
+
+        /// <summary>Whether a <c>SAME</c> pool's padding can be negative along some axis: a stride
+        /// above the dilated kernel's extent.</summary>
+        private static bool SameMayCrop(long[] kernelShape, long[] dilations, long[] strides)
+            => Enumerable.Range(0, kernelShape.Length).Any(a => strides[a] > (kernelShape[a] - 1) * dilations[a] + 1);
+
+        /// <summary>The input's positions of a fold over its padded extent, in which input position
+        /// <c>i</c> sits at <c>i + begin</c> along each spatial axis. With
+        /// <paramref name="mayCrop"/>, <paramref name="begin"/> may be negative: the positions a
+        /// negative one leaves before the fold are in no window, and take zeros.</summary>
+        private static Variable UnpaddedFold(Variable folded, Variable begin, Variable inLength, int n, bool mayCrop)
+        {
+            var axes = Globals.Vector([.. Enumerable.Range(2, n).Select(a => (long)a)]);
+            if (!mayCrop)
+                return OnnxOp.Slice(folded, begin, OnnxOp.Add(begin, inLength), axes, null);
+            var none = OnnxOp.Mul(begin, Globals.Scalar(0L));
+            var ahead = OnnxOp.Max(OnnxOp.Neg(begin), none);
+            var start = OnnxOp.Max(begin, none);
+            var padded = OnnxOp.Pad(folded, OnnxOp.Concat([Globals.Vector(0L, 0L), ahead, Globals.Vector(0L, 0L), none], axis: 0),
+                OnnxOp.CastLike(Globals.Scalar(0f), folded, null));
+            return OnnxOp.Slice(padded, start, OnnxOp.Add(start, inLength), axes, null);
         }
     }
 }

@@ -678,6 +678,20 @@ public class TrainingRigFromScratchCoverageTests
         Assert.NotNull(ctx.Compile(bound));
     }
 
+    private static int RigBuildSessions(ComputationGraph model)
+    {
+        var backend = new SessionCountingBackend(DefaultBackend.Instance);
+        using var ctx = new ComputeContext(backend);
+        TrainingRig.FromScratch(model, L2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph,
+            [TensorData([1L, 4L], new float[4])], new AdamWOptimizerHyperparameters { LearningRate = 0.01f },
+            mergeContext: ctx, runtimeContext: ctx);
+        return backend.Sessions;
+    }
+
+    [Fact]
+    public void TestSameShapedParametersShareTheirRigBuildSessions()
+        => Assert.Equal(RigBuildSessions(RngInitSameShapeStack2.ComputationGraph), RigBuildSessions(RngInitSameShapeStack8.ComputationGraph));
+
     [Fact]
     public void TestASpecializedModuleGraphTrainsWithItsHypersBakedOutOfTheInputList()
     {

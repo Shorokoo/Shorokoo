@@ -899,10 +899,11 @@ Console.WriteLine(compiled.DeviceMemory.LimitBytes);               // the arena 
 | `ArenaExtend` | `DeviceMemorySettings` | `arena_extend_strategy` | `Auto` — `SameAsRequested`, except ORT's `NextPowerOfTwo` for a session Shorokoo knows is reused across differing shapes | when a session is built |
 | `ShrinkArenaAfterRun` | `RunSettings` | `memory.enable_memory_arena_shrinkage` | `false` — and forced on under a budget | on every run |
 
-- A training step's arena typically takes one large extra block after step 0 and keeps it,
-  ending near twice what its steps use under either strategy. An arena limit near the step's
-  real use prevents that block, and the steps still fit in what the arena already holds; size a context budget as what the
-  step uses plus what the rig keeps on the card.
+- A training step's arena can take one large extra block after step 0 and keep it; on one
+  large model it grew 1.75–1.9x between steps 0 and 1 under either strategy. An arena limit
+  near the step's real use prevents that block, and the steps still fit in what the arena
+  already holds: size a context budget as what the step uses plus what the rig keeps on the
+  card.
 - `ShrinkArenaAfterRun` costs a synchronizing allocation every step; outside a budget, use it
   only when the card is shared. ORT rejects it where the device has no arena (e.g.
   `ORT_DISABLE_ARENA`), failing the run, so try it on a short run first.

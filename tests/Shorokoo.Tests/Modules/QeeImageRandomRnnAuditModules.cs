@@ -1093,6 +1093,57 @@ namespace Shorokoo.Tests.Modules
         }
     }
 
+    /// <summary>Resize over named axes against the same resize written over every axis, between the transposes
+    /// of an NCHW-to-NHWC round trip and on the input itself: linear, nearest over sizes, cubic over negative
+    /// axes, a nearest not_larger policy over every axis out of order, a crop over axes, and axes out of order.
+    /// Input x is [1,3,4,5].</summary>
+    [Module]
+    public partial class ResizeOverAxesCheck
+    {
+        private static Tensor<float32> R(Tensor<float32> t, ResizeMode mode, Vector<float32>? scales, Vector<int64>? sizes, long[]? axes,
+            KeepAspectRatioPolicy? policy = null, Vector<float32>? roi = null)
+            => (Tensor<float32>)OnnxOp.Resize(t, roi: roi, scales: scales, sizes: sizes, antialias: null, axes: axes,
+                coordinateTransformationMode: roi is null ? null : CoordinateTransformationMode.Tf_crop_and_resize, cubicCoeffA: null,
+                excludeOutside: null, extrapolationValue: null, keepAspectRatioPolicy: policy, mode: mode, nearestMode: null);
+
+        private static Scalar<int64> Around(Tensor<float32> x, Func<Tensor<float32>, Tensor<float32>> named, Func<Tensor<float32>, Tensor<float32>> full)
+            => Apart((Tensor<float32>)OnnxOp.Transpose(named((Tensor<float32>)OnnxOp.Transpose(x, [0L, 2L, 3L, 1L])), [0L, 3L, 1L, 2L]),
+                (Tensor<float32>)OnnxOp.Transpose(full((Tensor<float32>)OnnxOp.Transpose(x, [0L, 2L, 3L, 1L])), [0L, 3L, 1L, 2L]));
+
+        public static Scalar<bit> Inline(Tensor<float32> x)
+        {
+            var mismatch =
+                Around(x, t => R(t, ResizeMode.Linear, Vector(2f, 1.5f), null, [1L, 2L]), t => R(t, ResizeMode.Linear, Vector(1f, 2f, 1.5f, 1f), null, null)) +
+                Around(x, t => R(t, ResizeMode.Nearest, null, Vector(7L, 9L), [1L, 2L]), t => R(t, ResizeMode.Nearest, null, Vector(1L, 7L, 9L, 3L), null)) +
+                Around(x, t => R(t, ResizeMode.Cubic, Vector(2f, 2f), null, [-3L, -2L]), t => R(t, ResizeMode.Cubic, Vector(1f, 2f, 2f, 1f), null, null)) +
+                Around(x, t => R(t, ResizeMode.Nearest, null, Vector(2L, 12L, 10L, 6L), [0L, 2L, 1L, 3L], KeepAspectRatioPolicy.not_larger),
+                    t => R(t, ResizeMode.Nearest, null, Vector(2L, 10L, 12L, 6L), null, KeepAspectRatioPolicy.not_larger)) +
+                Around(x, t => R(t, ResizeMode.Linear, Vector(2f, 2f), null, [1L, 2L], roi: Vector(0.1f, -0.2f, 0.9f, 1.2f)),
+                    t => R(t, ResizeMode.Linear, Vector(1f, 2f, 2f, 1f), null, null, roi: Vector(0f, 0.1f, -0.2f, 0f, 1f, 0.9f, 1.2f, 1f))) +
+                Around(x, t => R(t, ResizeMode.Linear, Vector(1f, 1f, 3f, 2f), null, [0L, 3L, 2L, 1L]), t => R(t, ResizeMode.Linear, Vector(1f, 2f, 3f, 1f), null, null)) +
+                Apart(R(x, ResizeMode.Linear, null, Vector(8L, 7L), [2L, 3L]), R(x, ResizeMode.Linear, null, Vector(1L, 3L, 8L, 7L), null)) +
+                Apart(R(x, ResizeMode.Cubic, Vector(1.5f), null, [-1L]), R(x, ResizeMode.Cubic, Vector(1f, 1f, 1f, 1.5f), null, null));
+            return mismatch < Scalar(1L);
+        }
+    }
+
+    /// <summary>A not_larger policy over axes [1, 2] between the transposes of an NCHW-to-NHWC round trip, against
+    /// the same resize on the input itself over axes [2, 3]. Input x is [1,3,4,5].</summary>
+    [Module]
+    public partial class ResizePolicyOverAxesBetweenTransposesCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x)
+        {
+            Tensor<float32> R(Tensor<float32> t, long[] axes) => (Tensor<float32>)OnnxOp.Resize(t, roi: null, scales: null,
+                sizes: Vector(7L, 9L), antialias: null, axes: axes, coordinateTransformationMode: null, cubicCoeffA: null,
+                excludeOutside: null, extrapolationValue: null, keepAspectRatioPolicy: KeepAspectRatioPolicy.not_larger,
+                mode: ResizeMode.Linear, nearestMode: null);
+            var mismatch = Apart((Tensor<float32>)OnnxOp.Transpose(R((Tensor<float32>)OnnxOp.Transpose(x, [0L, 2L, 3L, 1L]), [1L, 2L]), [0L, 3L, 1L, 2L]),
+                R(x, [2L, 3L]));
+            return mismatch < Scalar(1L);
+        }
+    }
+
     /// <summary>1-D Col2Im with pads and a stride. Input cols is [1,3,4].</summary>
     [Module]
     public partial class Col2Im1DPaddedValues

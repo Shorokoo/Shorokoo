@@ -237,6 +237,16 @@ public class QeeImageRandomRnnAuditTests
             [F32([1L, 3L, 4L, 5L], [.. Enumerable.Range(0, 60).Select(i => (float)i)])]));
 
     [Fact]
+    public void TestResizeOverAxesMatchesTheResizeOverEveryAxisInEveryModeAndOperand()
+        => Assert.True(AutoTest.AdvancedTestGraph<ResizeOverAxesCheck>([],
+            [F32([1L, 3L, 4L, 5L], [.. Enumerable.Range(0, 60).Select(i => (float)i)])]));
+
+    [Fact]
+    public void TestResizePolicyOverAxesBetweenTransposesMatchesTheResizeOnTheInput()
+        => Assert.True(AutoTest.AdvancedTestGraph<ResizePolicyOverAxesBetweenTransposesCheck>([],
+            [F32([1L, 3L, 4L, 5L], [.. Enumerable.Range(0, 60).Select(i => (float)i)])]));
+
+    [Fact]
     public void TestCol2ImOverOneSpatialAxisWithPadsAndStride()
         => Assert.True(AutoTest.AdvancedTestGraph<Col2Im1DPaddedValues>([],
             [F32([1L, 3L, 4L], [.. Enumerable.Range(0, 12).Select(i => (float)i)])],

@@ -3889,6 +3889,95 @@ namespace Shorokoo.Tests.Modules
     }
 
     /// <summary>
+    /// dL/dtable of <c>Sum(Gather(table, indices, axis 0) · weights)</c> against an expected
+    /// gradient, in shape and in value — an empty gradient included.
+    /// </summary>
+    internal static class AutoGradGatherTable
+    {
+        internal static Scalar<bit> Check<T>(Tensor<T> table, Variable indices, Tensor<T> weights, Tensor<T> expected)
+            where T : FloatLike
+        {
+            var gathered = (Tensor<T>)OnnxOp.Gather(table, indices, axis: 0);
+            var loss = (Scalar<T>)(Variable)(gathered * weights).Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+            var grad = (Tensor<T>)Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad([(IValue)table], loss)[0]!;
+            var shapeGap = ((Tensor<int64>)OnnxOp.Shape(grad) - (Tensor<int64>)OnnxOp.Shape(expected)).Abs()
+                .Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+            var valueGap = ((Tensor<float32>)OnnxOp.Cast((grad - expected).Abs(), saturate: null, to: DType.Float32))
+                .Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+            return (shapeGap == Scalar(0L)) & (valueGap < Scalar(1e-5f));
+        }
+
+        internal static Tensor<float32> Matrix(long rows, long cols, params float[] values)
+            => (Tensor<float32>)OnnxOp.Reshape(Vector(values), Vector(rows, cols), allowZero: false);
+    }
+
+    /// <summary><see cref="AutoGradGatherTableRowsCheck"/> with int32 indices.</summary>
+    [Module]
+    public partial class AutoGradGatherTableRowsInt32IndicesCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float32> table)
+            => AutoGradGatherTable.Check(table, Vector(3, -1, 0, 3, -4),
+                AutoGradGatherTable.Matrix(5, 2, 1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f, 9f, 10f),
+                AutoGradGatherTable.Matrix(4, 2, 14f, 16f, 0f, 0f, 0f, 0f, 11f, 14f));
+    }
+
+    /// <summary>A rank-0 index reads one row of a [4, 2] table: only that row has a gradient.</summary>
+    [Module]
+    public partial class AutoGradGatherTableScalarIndexCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float32> table)
+            => AutoGradGatherTable.Check(table, Scalar(2L), Vector(3f, -2f),
+                AutoGradGatherTable.Matrix(4, 2, 0f, 0f, 0f, 0f, 3f, -2f, 0f, 0f));
+    }
+
+    /// <summary>No index reads a [4, 2] table, so its gradient is all zeros at its shape.</summary>
+    [Module]
+    public partial class AutoGradGatherTableNoIndicesCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float32> table)
+            => AutoGradGatherTable.Check(table, Vector<int64>.Empty,
+                (Tensor<float32>)OnnxOp.Expand(Scalar(1f), Vector(0L, 2L)),
+                (Tensor<float32>)OnnxOp.Expand(Scalar(0f), Vector(4L, 2L)));
+    }
+
+    /// <summary><see cref="AutoGradGatherTableRowsCheck"/> on a float64 table, whose float32 loss
+    /// reads the weighted rows through a Cast.</summary>
+    [Module]
+    public partial class AutoGradGatherTableRowsFloat64Check
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x)
+        {
+            var table = x.Cast<float64>();
+            var gathered = (Tensor<float64>)OnnxOp.Gather(table, Vector(3L, -1L, 0L, 3L, -4L), axis: 0);
+            var weights = AutoGradGatherTable.Matrix(5, 2, 1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f, 9f, 10f).Cast<float64>();
+            var loss = (gathered * weights).Cast<float32>().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+            var grad = (Tensor<float64>)Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad([(IValue)table], loss)[0]!;
+            var expected = AutoGradGatherTable.Matrix(4, 2, 14f, 16f, 0f, 0f, 0f, 0f, 11f, 14f);
+            return (grad.Cast<float32>() - expected).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar() < Scalar(1e-5f);
+        }
+    }
+
+    /// <summary>A rank-1 [4] table — a per-token bias — read at 3, 3 (as -1) and 0 under weights
+    /// 1..3.</summary>
+    [Module]
+    public partial class AutoGradGatherVectorRowsCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float32> table)
+            => AutoGradGatherTable.Check(table, Vector(3L, -1L, 0L), Vector(1f, 2f, 3f), Vector(3f, 0f, 0f, 3f));
+    }
+
+    /// <summary>A [3, 0] table read at [2, 2] indices: its gradient is empty at the table's shape.</summary>
+    [Module]
+    public partial class AutoGradGatherZeroWidthTableMultiDimIndicesCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float32> table)
+            => AutoGradGatherTable.Check(table,
+                OnnxOp.Reshape(Vector(2L, 0L, 2L, 1L), Vector(2L, 2L), allowZero: false),
+                (Tensor<float32>)OnnxOp.Expand(Scalar(1f), Vector(2L, 2L, 0L)),
+                (Tensor<float32>)OnnxOp.Expand(Scalar(0f), Vector(3L, 0L)));
+    }
+
+    /// <summary>
     /// Axis-0 Gather of table rows with repeats and negative spellings: rows 3, 3 (as -1), 0, 3
     /// and 0 (as -4) of a [4, 2] table under weights 1..10, so dL/dtable sums each row's weights
     /// and leaves the unread rows 1 and 2 at zero.

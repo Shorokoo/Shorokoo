@@ -346,11 +346,22 @@ public class AutoGradIndexingOpsCoverageTests
     }
 
     [Fact]
+    public void TestAutoGradGatherAxis0TableGradients()
+    {
+        RunSmall<AutoGradGatherTableRowsCheck>([4L, 2L]);
+        RunSmall<AutoGradGatherTableRowsInt32IndicesCheck>([4L, 2L]);
+        RunSmall<AutoGradGatherTableRowsFloat64Check>([4L, 2L]);
+        RunSmall<AutoGradGatherTableScalarIndexCheck>([4L, 2L]);
+        RunSmall<AutoGradGatherTableNoIndicesCheck>([4L, 2L]);
+        RunSmall<AutoGradGatherVectorRowsCheck>([4L]);
+        RunSmall<AutoGradGatherTableBlocksMultiDimIndicesCheck>([3L, 2L, 2L]);
+        RunSmall<AutoGradGatherZeroWidthTableMultiDimIndicesCheck>([3L, 0L]);
+    }
+
+    [Fact]
     public void TestAutoGradGatherNDWhereAndUniqueGradients()
     {
         Run<AutoGradGatherAxis0MultiDimIndicesCheck>(2f);
-        RunTensor<AutoGradGatherTableRowsCheck>([4L, 2L], 1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f);
-        RunSmall<AutoGradGatherTableBlocksMultiDimIndicesCheck>([3L, 2L, 2L]);
         Run<AutoGradGatherNonZeroAxisOneDimIndicesCheck>(3f);
         Run<AutoGradGatherNonZeroAxisOneDimIndicesUnknownRankCheck>(3f);
         Run<AutoGradGatherNonZeroAxisMultiDimIndicesCheck>(4f);

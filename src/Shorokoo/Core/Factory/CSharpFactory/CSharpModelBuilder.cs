@@ -353,15 +353,9 @@ public static class " + modelName + @"
                 }
             }
 
-            var (cropAndResizes, cropAndResizeBodies) = FindCropAndResizes(topologicalOrderNodes, graphOutputs, tensorChildNodes);
-
             foreach (var node in topologicalOrderNodes)
             {
-                if (cropAndResizeBodies.Contains(node))
-                    continue;
-                (var newNodeGenerator, var newVariableNames) = cropAndResizes.TryGetValue(node, out var plainResize)
-                    ? MakeCropAndResizeNode(node, plainResize, variableNames.ToImmutableDictionary())
-                    : this.MakeNode(node, nodeCodeGenerators.ToImmutableDictionary(), variableNames.ToImmutableDictionary(), functionNames, tensorChildNodes);
+                (var newNodeGenerator, var newVariableNames) = this.MakeNode(node, nodeCodeGenerators.ToImmutableDictionary(), variableNames.ToImmutableDictionary(), functionNames, tensorChildNodes);
                 var newInlinedVariables = newNodeGenerator.InlinedNodes;
                 variableNames.AddAll(newVariableNames);
                 nodeCodeGenerators[node] = newNodeGenerator;
@@ -422,7 +416,7 @@ public static class " + modelName + @"
             {
                 if (nodeCodeGenerators.TryGetValue(node, out var nodeCodeGenerator))
                 {
-                    if (node.IsCloseNode && !cropAndResizes.ContainsKey(node))
+                    if (node.IsCloseNode)
                         defaultIndent -= 1;
 
                     foreach (var codeLine in nodeCodeGenerator.AssertNotNull().FullCode)
@@ -936,57 +930,6 @@ public static class " + modelName + @"
                 var nodeCodeGenerator = new NodeGenerationInfo(closeNode.NodeDef, closeNode, null, lines.ToImmutableList(), inlinedVariables.ToImmutableList());
                 return (nodeCodeGenerator, []);
             }
-        }
-
-        /// <summary>
-        /// The <c>If</c> nodes <see cref="OnnxOp.Resize"/> builds for a <c>tf_crop_and_resize</c>
-        /// call, each with the plain <c>Resize</c> it came from, and every node that serves only
-        /// them. Such an <c>If</c> is written back as that one <c>OnnxOp.Resize</c> call, which
-        /// builds the same nodes again, so the source reproduces the graph instead of guarding the
-        /// call once more. A node the <c>If</c> reads that anything else also reads is written as
-        /// usual.
-        /// </summary>
-        private static (Dictionary<Node, Node> Guards, HashSet<Node> Bodies) FindCropAndResizes(
-            IReadOnlyList<Node> nodes, IReadOnlyList<Variable?> graphOutputs, Dictionary<Variable, List<Node>> tensorChildNodes)
-        {
-            var guards = new Dictionary<Node, Node>();
-            var bodies = new HashSet<Node>();
-            foreach (var close in nodes)
-            {
-                if (OnnxOp.CropAndResizeSource(close) is not { } plain)
-                    continue;
-
-                HashSet<Variable> sources = [.. plain.Inputs.NotNulls()];
-                var body = new HashSet<Node>();
-                var pending = new Stack<Node>([close]);
-                while (pending.TryPop(out var node))
-                    foreach (var input in node.InputsWithConnectingTensor.NotNulls())
-                        if (!sources.Contains(input) && body.Add(input.OwningNode))
-                            pending.Push(input.OwningNode);
-
-                bool ServesOnlyTheIf(Node n) => n.Outputs.Append(n.IsGraphOpenNode ? n.ConnectingTensor : null).NotNulls()
-                    .All(v => !graphOutputs.Contains(v)
-                        && (!tensorChildNodes.TryGetValue(v, out var readers) || readers.All(r => r == close || body.Contains(r))));
-                List<Node> shared;
-                while ((shared = [.. body.Where(n => !ServesOnlyTheIf(n))]).Count > 0)
-                    body.ExceptWith(shared);
-
-                guards[close] = plain;
-                bodies.UnionWith(body);
-            }
-            return (guards, bodies);
-        }
-
-        private (NodeGenerationInfo nodeGenerator, Dictionary<Variable, string> newVariables) MakeCropAndResizeNode(
-            Node close, Node plain, ImmutableDictionary<Variable, string> currentNames)
-        {
-            var output = close.Outputs[0]!;
-            var name = GetSanitizedVariableName(output);
-            var code = MakeNodeWithInlines(plain, ImmutableDictionary<Node, string>.Empty, currentNames,
-                "OnnxOp.Resize({1:param}{2:param}{3:param}{4:param}{a:param}{b:param}{c:param}{d:param}{e:param}{f:param}{g:param}{h:param}{i:param})");
-            var line = $"var {name} = ({GetTypeDefString(output)}){code};";
-            return (new NodeGenerationInfo(plain.NodeDef, close, null, [new CodeLine(0, line)], []),
-                new Dictionary<Variable, string> { [output] = name });
         }
 
         private (NodeGenerationInfo nodeGenerator, Dictionary<Variable, string> newVariables) MakeIfNode(Node node, ImmutableDictionary<Node, NodeGenerationInfo> nodeCodeGenerators, ImmutableDictionary<Variable, string> currentNames, Dictionary<Variable, List<Node>> tensorChildNodes)

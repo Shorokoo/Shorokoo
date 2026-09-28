@@ -1,4 +1,5 @@
 using System;
+using Shorokoo.Core.Lowering.KernelWorkarounds;
 using Shorokoo.Core.Nodes.NodeDefinitions;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -1707,7 +1708,8 @@ namespace Shorokoo.Runtime
             graph.RequireRunnableOps("ComputeContext.Compile", trainingFormat);
             var originalInputNames = ResolveOriginalInputNames(graph);
             return CompileFromModel(
-                () => FastOnnxModelBuilder.BuildInternalOnnxModel(graph, prepForOnnx: true, inputDims: inputDims),
+                () => FastOnnxModelBuilder.BuildInternalOnnxModel(graph, prepForOnnx: true, inputDims: inputDims,
+                    workarounds: KernelWorkaroundRegistry.For(ResolvedBackend.KernelWorkaroundSet)),
                 originalInputNames,
                 trainingStep,
                 reusedAcrossShapes,
@@ -1927,7 +1929,8 @@ namespace Shorokoo.Runtime
             graph.RequireRunnableOps("ComputeContext.Run");
             var originalInputNames = ResolveOriginalInputNames(graph);
             return RunFromModel(
-                () => model ?? FastOnnxModelBuilder.BuildInternalOnnxModel(graph, prepForOnnx: true),
+                () => model ?? FastOnnxModelBuilder.BuildInternalOnnxModel(graph, prepForOnnx: true,
+                    workarounds: KernelWorkaroundRegistry.For(ResolvedBackend.KernelWorkaroundSet)),
                 originalInputNames,
                 inputs);
         }

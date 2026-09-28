@@ -60,22 +60,6 @@ public class QeeReductionShapeAuditTests
         Assert.True(GenericMaxMin(DType.Bool, Bits([2L, 2L], true, false, false, false), 1L, 0L, 0L, 0L));
     }
 
-    [Fact]
-    public void TestAReduceMaxOrMinThatCannotMeetAnEmptyGroupBuildsThePlainOperator()
-    {
-        Tensor<float32> f = InputTensor<float32>("f", rank: 2);
-        Tensor<float16> h = InputTensor<float16>("h", rank: 2);
-        Tensor<int64> i = InputTensor<int64>("i", rank: 2);
-        Tensor<int64> c = Tensor([2L, 2L], 1L, 2L, 3L, 4L);
-        Tensor<bit> b = Tensor([2L], true, false);
-        Assert.True(IsPlain(f, f.Reduce(ReduceKind.Max, Vector(1L))));
-        Assert.True(IsPlain(f, f.Reduce(ReduceKind.Min)));
-        Assert.True(IsPlain(h, h.Reduce(ReduceKind.Max, Vector(-1L), keepDims: true)));
-        Assert.True(IsPlain(c, c.Reduce(ReduceKind.Min, Vector(1L))));
-        Assert.True(IsPlain(b, b.Reduce(ReduceKind.Max)));
-        Assert.True(IsPlain(i, NN.Reduce(ReduceKind.Max, i, null, true, true)));
-    }
-
     // #422: ONNX Runtime returns an empty input unreduced when a Reduce axis is negative.
     [Fact(Skip = "#422: ONNX Runtime returns an empty input unreduced when a Reduce axis is negative")]
     public void TestAReductionOverANegativeAxisOfAnEmptyInputHasTheSpecShape()
@@ -104,6 +88,4 @@ public class QeeReductionShapeAuditTests
         => AutoTest.AdvancedTestGraph<GenericReduceMaxMinCheck>([], [x, I64([expected.Length], expected)],
             genericTypes: new() { ["T"] = t });
 
-    private static bool IsPlain<T>(Tensor<T> x, Tensor<T> reduced) where T : IVarType
-        => ((Variable)reduced).OwningNode is { OpCode: OpCodes.REDUCE_MAX or OpCodes.REDUCE_MIN } n && n.Inputs[0] == (Variable)x;
 }

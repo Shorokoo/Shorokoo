@@ -50,11 +50,6 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// </summary>
     internal static class FastLowerRegisteredOps
     {
-        // Field and group separators for the plan cache key: control characters, so no op code,
-        // attribute name, dtype name or attribute value can be mistaken for one.
-        private const char Sep = '\u0001';
-        private const char Group = '\u0002';
-
         /// <summary>
         /// Whether <paramref name="graph"/> holds anything this pass would rewrite for a caller
         /// whose list is <paramref name="opCodes"/>. A caller runs this first so a graph with no
@@ -88,7 +83,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             // Local to this call, not to the process: a decomposition is spliced into one graph
             // and re-keyed per occurrence, so keeping it past the pass would only hold the
             // built nodes alive for a graph that no longer exists.
-            var plans = new Dictionary<string, LoweredPlan>(StringComparer.Ordinal);
+            var plans = new Dictionary<string, FastSplice.Plan>(StringComparer.Ordinal);
 
             var newNodes = new List<FastNode>(graph.Nodes.Count);
             foreach (var node in graph.Nodes)
@@ -98,7 +93,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     : null;
 
                 if (plan is null) newNodes.Add(node);
-                else Splice(node, plan, newNodes);
+                else FastSplice.SpliceInPlace(node, plan, newNodes);
             }
             graph.Nodes = newNodes;
 
@@ -136,34 +131,22 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// test, be spliced in, and stay — <see cref="Process"/> walks the node list once and
         /// never revisits what it splices. Nothing reaches that shape today.</para>
         /// </summary>
-        internal static LoweredPlan? Decompose(
+        internal static FastSplice.Plan? Decompose(
             OpLowering lowering,
             (DType DType, int? Rank)?[] inputs,
             OnnxCSharpAttributes attributes,
             int declaredOutputs)
         {
-            var standIns = new Variable?[inputs.Length];
-            for (int i = 0; i < inputs.Length; i++)
-                if (inputs[i] is { } descriptor)
-                    standIns[i] = InternalOp.RuntimeInput(descriptor.DType, descriptor.Rank);
-
+            var standIns = FastSplice.StandIns(inputs);
             var outputs = lowering.Build(standIns, attributes);
             if (outputs.Length != declaredOutputs || outputs.Any(x => x is null)) return null;
 
-            ImmutableArray<Variable> presentStandIns = [.. standIns.Where(x => x is not null).Select(x => x!)];
-            var built = new InternalComputationGraph(presentStandIns, [.. outputs.Select(x => x!)]);
-
-            var standInKeyBySlot = new FastTensorKey?[inputs.Length];
-            var builtInputs = built.Inputs;
-            for (int i = 0, present = 0; i < standIns.Length; i++)
-                if (standIns[i] is not null) standInKeyBySlot[i] = builtInputs[present++];
-
             // The stand-ins are the built graph's input prefix and its output nodes its suffix; the
             // decomposition is what lies between.
-            List<FastNode> body = [.. built.Nodes.Take(built.BodyEnd).Skip(built.InputCount)];
-            if (body.Count == 0) return null;
+            var plan = FastSplice.Build(standIns, [.. outputs.Select(x => x!)]);
+            if (plan is null) return null;
 
-            foreach (var node in body)
+            foreach (var node in plan.Body)
             {
                 if (string.Equals(node.OpCode, lowering.OpCode, StringComparison.Ordinal))
                     throw new InvalidOperationException(
@@ -176,21 +159,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                         + "QuickExecutionEngine has no operator for.");
             }
 
-            var terminalOutputs = body[^1].Outputs;
-            var builtOutputs = built.Outputs;
-            if (terminalOutputs.Count != declaredOutputs) return null;
-            for (int i = 0; i < declaredOutputs; i++)
-                if (terminalOutputs[i] != builtOutputs[i]) return null;
-
-            return new LoweredPlan(body, standInKeyBySlot);
+            return plan.TerminalProducesOutputs ? plan : null;
         }
-
-        /// <summary>
-        /// Everything about one lowered operator that does not depend on which occurrence of it is
-        /// being rewritten: the decomposition's nodes, terminal last, and the tensor key standing
-        /// in for each of the operator's input slots.
-        /// </summary>
-        internal sealed record LoweredPlan(List<FastNode> Body, FastTensorKey?[] StandInKeyBySlot);
 
         private static bool IsLowerable(FastNode node, IReadOnlySet<string> opCodes)
             => opCodes.Contains(node.OpCode) && OpLoweringRegistry.TryGet(node.OpCode, out _);
@@ -215,11 +185,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// kernel for. Only a plan that built cleanly is kept, so a decomposition that is refused
         /// is refused at every node it appears on.
         /// </summary>
-        private static LoweredPlan? TryPlan(
+        private static FastSplice.Plan? TryPlan(
             OpLowering lowering,
             FastNode node,
             Dictionary<FastTensorKey, FastTensorInfo> tensorInfo,
-            Dictionary<string, LoweredPlan> plans)
+            Dictionary<string, FastSplice.Plan> plans)
         {
             var inputs = node.Inputs;
             var declaredOutputs = node.Outputs.Count;
@@ -236,7 +206,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             var cacheKey = TryBuildKey(lowering, descriptors, node.Attributes, declaredOutputs);
             if (cacheKey is not null && plans.TryGetValue(cacheKey, out var cached)) return cached;
 
-            LoweredPlan? plan;
+            FastSplice.Plan? plan;
             try { plan = Decompose(lowering, descriptors, node.Attributes, declaredOutputs); }
             catch { plan = null; }
 
@@ -284,127 +254,16 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         }
 
         /// <summary>
-        /// Inserts <paramref name="plan"/>'s decomposition for <paramref name="node"/> into
-        /// <paramref name="newNodes"/>, under keys minted for this occurrence, and mutates
-        /// <paramref name="node"/> into the terminal step.
-        /// </summary>
-        private static void Splice(FastNode node, LoweredPlan plan, List<FastNode> newNodes)
-        {
-            var hostInputs = node.Inputs;
-
-            var tensorMap = new Dictionary<FastTensorKey, FastTensorKey>();
-            for (int i = 0; i < plan.StandInKeyBySlot.Length; i++)
-                if (plan.StandInKeyBySlot[i] is { } standIn && hostInputs[i] is { } host)
-                    tensorMap[standIn] = host;
-
-            var nodeMap = new Dictionary<FastNodeKey, FastNodeKey>(plan.Body.Count);
-            foreach (var built in plan.Body) nodeMap[built.Key] = FastNodeKey.New();
-            foreach (var built in plan.Body)
-                foreach (var group in built.FullOutputs)
-                    foreach (var key in group.Value)
-                        if (key is { } k && !k.IsEmpty)
-                            tensorMap[k] = new FastTensorKey(nodeMap[k.FastNodeKey], k.OutputIndex);
-
-            for (int i = 0; i < plan.Body.Count - 1; i++)
-            {
-                var built = plan.Body[i];
-                var copy = new FastNode
-                {
-                    Key = nodeMap[built.Key],
-                    OpCode = built.OpCode,
-                    Attributes = built.Attributes,
-                    FriendlyName = built.FriendlyName,
-                    StackTrace = built.StackTrace,
-                    GraphOpenNodeKey = built.GraphOpenNodeKey is { } open && nodeMap.TryGetValue(open, out var remapped)
-                        ? remapped
-                        : built.GraphOpenNodeKey,
-                    IdentifierTemplate = built.IdentifierTemplate,
-                    TargetFunction = built.TargetFunction,
-                };
-                foreach (var group in built.FullInputs) copy.FullInputs[group.Key] = Remap(group.Value, tensorMap);
-                foreach (var group in built.FullOutputs) copy.FullOutputs[group.Key] = Remap(group.Value, tensorMap);
-                newNodes.Add(copy);
-            }
-
-            var terminal = plan.Body[^1];
-            node.OpCode = terminal.OpCode;
-            node.Attributes = terminal.Attributes;
-            node.FullInputs = terminal.FullInputs.ToDictionary(g => g.Key, g => Remap(g.Value, tensorMap));
-            newNodes.Add(node);
-        }
-
-        private static List<FastTensorKey?> Remap(
-            List<FastTensorKey?> keys, Dictionary<FastTensorKey, FastTensorKey> tensorMap)
-        {
-            var remapped = new List<FastTensorKey?>(keys.Count);
-            foreach (var key in keys)
-                remapped.Add(key is { } k && tensorMap.TryGetValue(k, out var mapped) ? mapped : key);
-            return remapped;
-        }
-
-        /// <summary>
-        /// What a plan may be reused for: the lowering itself, the dtype and rank of each input
-        /// (and which inputs are absent), how many outputs the operator declares, and the
-        /// attribute VALUES. The attributes belong in the key because a lowering is ordinary C#
-        /// and may branch on them, so the same operator with different attributes can legitimately
-        /// decompose into different nodes. Null when some attribute has no stable rendering — a
-        /// tensor or a subgraph — since a key that ignored it would serve one node's plan to
-        /// another that differs only there.
+        /// What a plan may be reused for: the lowering itself and, as
+        /// <see cref="FastSplice.TryBuildKey"/> renders them, the inputs, the declared output
+        /// count and the attribute values. Null when some attribute has no stable rendering.
         /// </summary>
         internal static string? TryBuildKey(
             OpLowering lowering,
             (DType DType, int? Rank)?[] inputs,
             OnnxCSharpAttributes attributes,
             int declaredOutputs)
-        {
-            // The slot and output counts are part of the key, so a cached plan's stand-in-per-slot
-            // table always lines up with the node it is reused for.
-            var key = new StringBuilder(lowering.OpCode)
-                .Append(Sep).Append(lowering.Method.MethodHandle.Value)
-                .Append(Sep).Append(inputs.Length)
-                .Append(Sep).Append(declaredOutputs);
-
-            foreach (var input in inputs)
-            {
-                key.Append(Group);
-                if (input is not { } descriptor) { key.Append('~'); continue; }
-                key.Append(descriptor.DType).Append(Sep).Append(descriptor.Rank ?? -1);
-            }
-
-            foreach (var (name, value) in attributes.GetAttributeVals().OrderBy(x => x.Key, StringComparer.Ordinal))
-            {
-                key.Append(Group).Append(name).Append(Sep);
-                if (!TryAppendValue(key, value)) return null;
-            }
-            return key.ToString();
-        }
-
-        private static bool TryAppendValue(StringBuilder key, object? value)
-        {
-            switch (value)
-            {
-                case null: key.Append('~'); return true;
-                case bool b: key.Append(b ? 'T' : 'F'); return true;
-                case long l: key.Append(l); return true;
-                case int i: key.Append(i); return true;
-                // By bits, so the rendering is exact and carries no culture or rounding of its own.
-                case float f: key.Append(BitConverter.SingleToInt32Bits(f)); return true;
-                case double d: key.Append(BitConverter.DoubleToInt64Bits(d)); return true;
-                // Length-prefixed: a string is the one value that could otherwise hold a separator.
-                case string s: key.Append(s.Length).Append('"').Append(s); return true;
-                case DType t: key.Append(t); return true;
-                case Enum e: key.Append(e.GetType().FullName).Append('.').Append(e); return true;
-                case Array a:
-                    key.Append('[');
-                    foreach (var item in a)
-                    {
-                        if (!TryAppendValue(key, item)) return false;
-                        key.Append(Sep);
-                    }
-                    key.Append(']');
-                    return true;
-                default: return false;
-            }
-        }
+            => FastSplice.TryBuildKey($"{lowering.OpCode}/{lowering.Method.MethodHandle.Value}",
+                inputs, attributes, declaredOutputs)?.ToString();
     }
 }

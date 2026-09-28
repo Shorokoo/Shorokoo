@@ -1,9 +1,66 @@
+using Shorokoo.Core.Nodes;
+using Shorokoo.Core.Nodes.NodeDefinitions;
 using Shorokoo.Core.Nodes.OnnxNodes;
 
-namespace Shorokoo.Core.Nodes.NodeDefinitions;
+namespace Shorokoo.Core.Lowering.KernelWorkarounds.OnnxRuntime;
 
-public static partial class OnnxOp
+using static OnnxOp;
+using static OnnxOpAttributeNames;
+using static OpCodes;
+
+/// <summary>
+/// A pool whose padding ONNX Runtime's pooling kernels do not pool as the spec does
+/// (Shorokoo/Shorokoo#379, Shorokoo/Shorokoo#408), rewritten as pools they do compute as the spec
+/// does, with the padding written out (<see cref="NeedsWrittenPadding"/>,
+/// <see cref="PaddedPool"/>).
+/// </summary>
+internal sealed class PoolPaddingWorkaround : KernelWorkaround
 {
+    public override IReadOnlySet<string> OpCodes { get; } =
+        new HashSet<string>([AVERAGE_POOL, LP_POOL, MAX_POOL], StringComparer.Ordinal);
+
+    public override bool Applies(WorkaroundSite site)
+    {
+        var a = site.Attributes;
+        return NeedsWrittenPadding(a.GetEnumVal<AutoPad>(AttrAutoPad), a.GetLongsVal(AttrDilations),
+            a.GetLongsVal(AttrKernelShape), a.GetLongsVal(AttrPads), a.GetLongsVal(AttrStrides));
+    }
+
+    public override Variable?[] Rewrite(WorkaroundSite site, Variable?[] inputs)
+    {
+        var a = site.Attributes;
+        var x = inputs[0]!;
+        var autoPad = a.GetEnumVal<AutoPad>(AttrAutoPad);
+        var ceilMode = a.GetBoolVal(AttrCeilMode);
+        var dilations = a.GetLongsVal(AttrDilations);
+        var kernelShape = a.GetLongsVal(AttrKernelShape)!;
+        var pads = a.GetLongsVal(AttrPads);
+        var strides = a.GetLongsVal(AttrStrides);
+
+        switch (site.OpCode)
+        {
+            case AVERAGE_POOL:
+                return PaddedPool(x, a.GetBoolVal(AttrCountIncludePad) == true ? PoolKind.AverageIncludingPad : PoolKind.AverageExcludingPad,
+                    autoPad, ceilMode, dilations, kernelShape, pads, strides, null,
+                    (input, p, s, ceil, includePad) => [AveragePool(input, null, ceil, includePad, dilations, kernelShape, p, s)]);
+            case LP_POOL:
+                var norm = a.GetLongVal(AttrP);
+                return PaddedPool(x, PoolKind.Lp, autoPad, ceilMode, dilations, kernelShape, pads, strides, null,
+                    (input, explicitPads, s, ceil, _) => [LpPool(input, null, ceil, dilations, kernelShape, norm, explicitPads, s)]);
+            default:
+                var storageOrder = a.GetLongVal(AttrStorageOrder);
+                if (!site.IsOutputPresent(1))
+                    return PaddedPool(x, PoolKind.Max, autoPad, ceilMode, dilations, kernelShape, pads, strides, storageOrder,
+                        (input, p, s, ceil, _) => [MaxPool(input, null, ceil, dilations, kernelShape, p, storageOrder, s)]);
+                return PaddedPool(x, PoolKind.Max, autoPad, ceilMode, dilations, kernelShape, pads, strides, storageOrder,
+                    (input, p, s, ceil, _) =>
+                    {
+                        var (y, indices) = MaxPoolWithIndices(input, null, ceil, dilations, kernelShape, p, storageOrder, s);
+                        return [y, indices];
+                    });
+        }
+    }
+
     /// <summary>What a pool computes over its window, which decides how its padding may be
     /// written out as data.</summary>
     private enum PoolKind
@@ -25,12 +82,11 @@ public static partial class OnnxOp
 
     /// <summary>
     /// Whether a pool's padding is one ONNX Runtime's pooling kernels do not pool as the spec does,
-    /// so the builder writes it out itself (<see cref="PaddedPool"/>): <c>SAME_UPPER</c> or
-    /// <c>SAME_LOWER</c> with a dilation above 1, which ONNX Runtime pads for the undilated kernel;
-    /// <c>SAME_UPPER</c> or <c>SAME_LOWER</c> with a stride above the kernel along some axis,
-    /// whose padding is negative for some input lengths and which ONNX Runtime then splits
-    /// between the ends otherwise than the spec does; or explicit pads as large as the kernel
-    /// along some axis, which it refuses.
+    /// so it is written out (<see cref="PaddedPool"/>): <c>SAME_UPPER</c> or <c>SAME_LOWER</c> with
+    /// a dilation above 1, which ONNX Runtime pads for the undilated kernel; <c>SAME_UPPER</c> or
+    /// <c>SAME_LOWER</c> with a stride above the kernel along some axis, whose padding is negative
+    /// for some input lengths and which ONNX Runtime then splits between the ends otherwise than
+    /// the spec does; or explicit pads as large as the kernel along some axis, which it refuses.
     /// </summary>
     private static bool NeedsWrittenPadding(AutoPad? autoPad, long[]? dilations, long[]? kernelShape, long[]? pads, long[]? strides)
         => kernelShape is { Length: > 0 } kernel && (autoPad switch

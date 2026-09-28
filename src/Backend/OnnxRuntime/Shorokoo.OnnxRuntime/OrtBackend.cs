@@ -124,6 +124,13 @@ public abstract class OrtBackend : IShorokooBackend
     public object RuntimeIdentity => LoadedRuntime;
 
     /// <summary>
+    /// <see cref="KernelWorkaroundSets.OnnxRuntime"/>: the rewrites around ONNX Runtime's kernels,
+    /// on every execution provider, since each rewrite computes what the operator it replaces
+    /// computes.
+    /// </summary>
+    public string? KernelWorkaroundSet => KernelWorkaroundSets.OnnxRuntime;
+
+    /// <summary>
     /// Creates an ORT inference session over a serialized ONNX model, on this backend's
     /// execution provider.
     /// </summary>

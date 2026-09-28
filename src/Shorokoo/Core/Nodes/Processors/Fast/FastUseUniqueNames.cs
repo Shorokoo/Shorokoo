@@ -30,16 +30,35 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// invoke this on each graph separately and supply their own external
     /// counter via <see cref="ProcessWithCounter"/>.
     /// </para>
+    ///
+    /// <para>
+    /// A caller may name nodes to number last (<c>numberLast</c>): the nodes a pass spliced in,
+    /// so that every other node keeps the number, and every value the name, it has in the graph
+    /// built without them.
+    /// </para>
     /// </summary>
     internal static class FastUseUniqueNames
     {
         /// <summary>
         /// Rewrite the graph using a fresh per-graph counter starting at 1.
         /// </summary>
-        public static void Process(InternalComputationGraph graph)
+        public static void Process(InternalComputationGraph graph, IReadOnlySet<FastNodeKey>? numberLast = null)
         {
             int counter = 0;
-            ProcessWithCounter(graph, ref counter);
+            ProcessWithCounterAndReturnMap(graph, ref counter, numberLast);
+        }
+
+        /// <summary>
+        /// Same as <see cref="Process(InternalComputationGraph, IReadOnlySet{FastNodeKey})"/> but returns the
+        /// <c>oldKey → newKey</c> map. Useful when the caller has additional
+        /// data structures (e.g. tensor info lookups) keyed by old keys that
+        /// also need rewriting.
+        /// </summary>
+        public static Dictionary<FastNodeKey, FastNodeKey> ProcessAndReturnMap(
+            InternalComputationGraph graph, IReadOnlySet<FastNodeKey>? numberLast = null)
+        {
+            int counter = 0;
+            return ProcessWithCounterAndReturnMap(graph, ref counter, numberLast);
         }
 
         /// <summary>
@@ -48,24 +67,13 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// keeping a single id space across multiple graphs (e.g. main graph +
         /// functions).
         /// </summary>
-        /// <summary>
-        /// Same as <see cref="Process(InternalComputationGraph)"/> but returns the
-        /// <c>oldKey → newKey</c> map. Useful when the caller has additional
-        /// data structures (e.g. tensor info lookups) keyed by old keys that
-        /// also need rewriting.
-        /// </summary>
-        public static Dictionary<FastNodeKey, FastNodeKey> ProcessAndReturnMap(InternalComputationGraph graph)
-        {
-            int counter = 0;
-            return ProcessWithCounterAndReturnMap(graph, ref counter);
-        }
-
         public static void ProcessWithCounter(InternalComputationGraph graph, ref int counter)
         {
             ProcessWithCounterAndReturnMap(graph, ref counter);
         }
 
-        public static Dictionary<FastNodeKey, FastNodeKey> ProcessWithCounterAndReturnMap(InternalComputationGraph graph, ref int counter)
+        public static Dictionary<FastNodeKey, FastNodeKey> ProcessWithCounterAndReturnMap(
+            InternalComputationGraph graph, ref int counter, IReadOnlySet<FastNodeKey>? numberLast = null)
         {
             // Pass 1: assign fresh sequential keys and FriendlyNames; remember
             // the old → new key mapping for the rewrite pass.
@@ -73,9 +81,15 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             // boundary rather than ops, and nothing references them, so numbering them first would
             // only shift every phantom's name.
             var oldToNew = new Dictionary<FastNodeKey, FastNodeKey>();
+            List<FastNode> last = [];
             foreach (var node in graph.Nodes)
             {
                 if (InternalOpCodes.IsGraphOutputOp(node.OpCode)) continue;
+                if (numberLast is not null && numberLast.Contains(node.Key))
+                {
+                    last.Add(node);
+                    continue;
+                }
                 counter++;
                 var newKey = new FastNodeKey((UInt128)(uint)counter);
                 oldToNew[node.Key] = newKey;
@@ -95,6 +109,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             // is rewritten to the same renamed key. OutputIndex is preserved.
             // Collect every referenced FastNodeKey into a flat list, then
             // register phantoms (those not already in oldToNew) inline.
+            var lastKeys = new HashSet<FastNodeKey>();
+            foreach (var node in last) lastKeys.Add(node.Key);
             var referenced = new List<FastNodeKey>();
             foreach (var node in graph.Nodes)
             {
@@ -110,7 +126,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             foreach (var key in referenced)
             {
                 if (key.IsEmpty) continue;
-                if (oldToNew.ContainsKey(key)) continue;
+                if (oldToNew.ContainsKey(key) || lastKeys.Contains(key)) continue;
                 counter++;
                 oldToNew[key] = new FastNodeKey((UInt128)(uint)counter);
             }
@@ -119,6 +135,15 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             {
                 counter++;
                 node.Key = new FastNodeKey((UInt128)(uint)counter);
+                node.FriendlyName = $"N{counter}";
+            }
+
+            foreach (var node in last)
+            {
+                counter++;
+                var newKey = new FastNodeKey((UInt128)(uint)counter);
+                oldToNew[node.Key] = newKey;
+                node.Key = newKey;
                 node.FriendlyName = $"N{counter}";
             }
 

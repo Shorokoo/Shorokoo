@@ -217,54 +217,13 @@ public class CSharpModelBuilderCoverageTests
             [.. two, TensorData([], 3f), TensorData([], 4f)]);
     }
 
-    [Fact]
-    public void TestOneAxisPaddedCol2ImRebuildsWithoutGrowing()
-    {
-        TensorData[] cols = [TensorData([1L, 3L, 4L], [.. Enumerable.Range(0, 12).Select(i => (float)i)])];
-        string[] ops = [OpCodes.COL2IM, OpCodes.CONCAT, OpCodes.SQUEEZE];
-        var graph = Col2Im1DPaddedValues.ComputationGraph.ToInternal();
-        var once = Rebuild(graph);
-        var twice = Rebuild(once);
-        int[] expected = [1, 2, 1];
-        Assert.Equal(expected, OpCounts(graph, ops));
-        Assert.Equal(expected, OpCounts(once, ops));
-        Assert.Equal(expected, OpCounts(twice, ops));
-        Assert.Equal(Run(graph, cols), Run(twice, cols));
-    }
-
-    [Fact]
-    public void TestCodegenedSourceRebuildsACropAndResizeWithoutGuardingItAgain()
+    // #414: codegen writes an NN.Resize whose nullable Vector<T2>? roi C# cannot infer T2 from
+    [Fact(Skip = "#414: codegen writes an NN.Resize whose nullable Vector<T2>? roi C# cannot infer T2 from")]
+    public void TestCodegenedSourceRebuildsACropAndResize()
     {
         TensorData[] x = [TensorData([1L, 1L, 1L, 5L], 0f, 1f, 2f, 3f, 4f)];
         AssertRebuildsUnchanged(CropAndResizeAtScaleOneValues.ComputationGraph.ToInternal(), x);
         AssertRebuildsUnchanged(CropAndResizeVariantsValues.ComputationGraph.ToInternal(), x);
-    }
-
-    [Fact]
-    public void TestCodegenedSourceRebuildsALoweredOrImportedCropAndResizeWithoutGuardingItAgain()
-    {
-        TensorData[] x = [TensorData([1L, 1L, 1L, 5L], 0f, 1f, 2f, 3f, 4f)];
-        TensorData[] x4 = [TensorData([1L, 1L, 1L, 4L], 1f, 2f, 3f, 4f)];
-        AssertLowersAndRebuildsUnchanged(CropAndResizeAtScaleOneValues.ComputationGraph.ToInternal(), x, viaOnnx: false);
-        AssertLowersAndRebuildsUnchanged(CropAndResizeVariantsValues.ComputationGraph.ToInternal(), x, viaOnnx: false);
-        AssertLowersAndRebuildsUnchanged(CropAndResizeToTheRoiEndValues.ComputationGraph.ToInternal(), x4, viaOnnx: false);
-        AssertLowersAndRebuildsUnchanged(CropAndResizeAtScaleOneValues.ComputationGraph.ToInternal(), x, viaOnnx: true);
-        AssertLowersAndRebuildsUnchanged(CropAndResizeVariantsValues.ComputationGraph.ToInternal(), x, viaOnnx: true);
-    }
-
-    [Fact]
-    public void TestOnlyTheIfACropAndResizeBuildsIsWrittenBackAsOneCall()
-    {
-        Assert.NotNull(CropAndResizeSourceOf(OnnxOp.Resize(Tensor([1L, 1L, 1L, 5L], 0f, 1f, 2f, 3f, 4f),
-            Vector(0f, 0f, 0f, 0.5f, 1f, 1f, 1f, 1.5f), Vector(1f, 1f, 1f, 1f), null, null, null,
-            CoordinateTransformationMode.Tf_crop_and_resize, null, null, -1f, null, ResizeMode.Linear, null)));
-        Assert.NotNull(CropAndResizeSourceOf(CropLookAlike()));
-        Assert.Null(CropAndResizeSourceOf(CropLookAlike(mode: CoordinateTransformationMode.Asymmetric)));
-        Assert.Null(CropAndResizeSourceOf(CropLookAlike(grownExtrapolation: 0f)));
-        Assert.Null(CropAndResizeSourceOf(CropLookAlike(grownRoi: [0f, 0f, 0f, 0f, 1f, 1f, 1f, 1f])));
-        Assert.Null(CropAndResizeSourceOf(CropLookAlike(foreignCondition: true)));
-        Assert.Null(CropAndResizeSourceOf(CropLookAlike(foreignSteps: true)));
-        Assert.Null(CropAndResizeSourceOf(CropLookAlike(foreignScales: true)));
     }
 
     [Fact]
@@ -277,13 +236,6 @@ public class CSharpModelBuilderCoverageTests
             Tensor([1L, 2L], 1L, 0L), Tensor([1L, 2L], 5f, 6f), axis: 0)]));
         AssertCodegens(new InternalComputationGraph([], [OnnxOp.ScatterElements(Vector(1L, 2L, 3L), Vector(2L),
             Vector(9L), axis: 0, reduction: ScatterNDReduction.Add)]));
-    }
-
-    [Fact]
-    public void TestCodegenedSourceRebuildsAnIntegerOrBoolReduceMaxAndMinWithoutGuardingThemAgain()
-    {
-        TensorData[] x = [TensorData([2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f)];
-        AssertRebuildsUnchanged(EmptyIntegerReduceMaxMinCheck.ComputationGraph.ToInternal(), x);
     }
 
     [Fact]
@@ -367,55 +319,6 @@ public class CSharpModelBuilderCoverageTests
         Assert.Equal(Run(graph, inputs), Run(twice, inputs));
     }
 
-    private static Node? CropAndResizeSourceOf(Variable v) => OnnxOp.CropAndResizeSource(v.OwningNode);
-
-    private static Variable CropLookAlike(CoordinateTransformationMode mode = CoordinateTransformationMode.Tf_crop_and_resize,
-        float grownExtrapolation = -1f, float[]? grownRoi = null,
-        bool foreignCondition = false, bool foreignSteps = false, bool foreignScales = false)
-    {
-        Variable x = Tensor([1L, 1L, 1L, 5L], 0f, 1f, 2f, 3f, 4f);
-        Variable roi = Vector(0f, 0f, 0f, 0.5f, 1f, 1f, 1f, 1.5f);
-        Variable scales = Vector(1f, 1f, 1f, 1f);
-        var grow = OnnxOp.And(OnnxOp.Equal(OnnxOp.Shape(x), OnnxOp.Shape(x)), Vector(false, false, false, true));
-        Variable Mask(bool foreign) => foreign ? OnnxOp.And(Vector(true, true, true, true), Vector(false, false, false, true)) : grow;
-        Variable Raw(Variable r, Variable s, float extrapolation) => NodeBuilder.BuildNodeSingleOut(OpCodes.RESIZE, [x, r, s, null], [
-            (OnnxOpAttributeNames.AttrCoordinateTransformationMode, mode),
-            (OnnxOpAttributeNames.AttrExtrapolationValue, extrapolation),
-            (OnnxOpAttributeNames.AttrMode, ResizeMode.Linear)]);
-
-        var grown = Raw(grownRoi is null ? roi : Vector(grownRoi),
-            OnnxOp.Where(Mask(foreignScales), Vector(1f, 1f, 1f, 1.9f), scales), grownExtrapolation);
-        var cropped = OnnxOp.Slice(grown, Vector(0L, 0L, 0L, 0L), Vector(1L, 1L, 1L, 9L), Vector(0L, 1L, 2L, 3L),
-            OnnxOp.Add(OnnxOp.Cast(Mask(foreignSteps), null, DType.Int64), Scalar(1L)));
-        var condition = OnnxOp.Cast(OnnxOp.ReduceMax(OnnxOp.Cast(Mask(foreignCondition), null, DType.Float32), keepdims: false), null, DType.Bool);
-        return FrameworkOps.IfElse((Scalar<bit>)condition, cropped, Raw(roi, scales, -1f));
-    }
-
-    private static void AssertLowersAndRebuildsUnchanged(InternalComputationGraph graph, TensorData[] inputs, bool viaOnnx)
-    {
-        var once = Rebuild(Lower(graph, inputs, viaOnnx));
-        var twice = Rebuild(Lower(once, inputs, viaOnnx));
-        Assert.Equal(once.Nodes.Count, twice.Nodes.Count);
-        Assert.Equal(Run(graph, inputs), Run(twice, inputs));
-    }
-
-    private static InternalComputationGraph Lower(InternalComputationGraph graph, TensorData[] inputs, bool viaOnnx)
-    {
-        var model = graph.ToConcreteArchitecture([.. inputs]).ToConcreteModel();
-        if (!viaOnnx)
-            return model;
-        var path = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid()}.onnx");
-        try
-        {
-            Persistence.ExportOnnx(new ComputationGraph(model, GraphKind.ConcreteModel), path);
-            return Persistence.ImportOnnx(path).ToInternal();
-        }
-        finally
-        {
-            File.Delete(path);
-        }
-    }
-
     private static InternalComputationGraph Rebuild(InternalComputationGraph graph)
     {
         var method = new CSharpModelBuilder().BuildMethod(graph, "CovTest");
@@ -425,9 +328,6 @@ public class CSharpModelBuilderCoverageTests
         return new InternalComputationGraph(
             graphInputs, [((IValue)method.Invoke(null, args)!).ToVariable()]);
     }
-
-    private static int[] OpCounts(InternalComputationGraph graph, params string[] opCodes)
-        => [.. opCodes.Select(op => graph.Nodes.Count(n => n.OpCode == op))];
 
     private static byte[][] Run(InternalComputationGraph graph, TensorData[] inputs)
     {

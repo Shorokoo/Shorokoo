@@ -531,6 +531,17 @@ namespace Shorokoo
         internal int UpdatedOptimizerStateFieldCount { get; private set; }
 
         /// <summary>
+        /// The scheduled hyperparameters whose applied value the training step returns, as optimizer
+        /// indices in output order: the step's outputs after the loss are, one each, the very tensors
+        /// the optimizer update read for these hyperparameters. Internal output-layout machinery.
+        /// </summary>
+        private int[] _scheduledHyperparameterOutputs = [];
+
+        /// <summary>Each baked hyperparameter's value as a step applies it, by optimizer index; null
+        /// for the others, whose value a step reports from what it computed or was fed.</summary>
+        private AppliedHyperparameter?[] _bakedAppliedValues = [];
+
+        /// <summary>
         /// Initial trainable parameter values — <b>empty</b> on a deferred build, which has none yet
         /// (Shorokoo/Shorokoo#327) and describes its fields through
         /// <see cref="DeferredInitialization.ParamSlots"/> instead. Read
@@ -1665,6 +1676,7 @@ namespace Shorokoo
                 BatchIndex = checkpoint.BatchIndex,
                 Rig = this,
                 Loss = checkpoint.Loss,
+                AppliedHyperparameters = checkpoint.AppliedHyperparameters,
                 FeedMode = checkpoint.FeedMode,
             };
         }
@@ -2099,6 +2111,10 @@ namespace Shorokoo
                 if (hyperparameters[h].Kind == HyperparameterKind.Baked)
                     normalizedHypers[h] = Hyperparameter.Baked(_hyperparamInitialCounterValues[h]!);
             _constituents = _constituents with { Hyperparameters = normalizedHypers };
+            _bakedAppliedValues = new AppliedHyperparameter?[numHyperparams];
+            for (int h = 0; h < numHyperparams; h++)
+                if (hyperparameters[h].Kind == HyperparameterKind.Baked)
+                    _bakedAppliedValues[h] = AppliedHyperparameter.Of(_hyperparamInitialCounterValues[h]!);
 
             // Build optimizer state struct definition. Element type comes from each state's
             // initializer; the rank falls back to the parameter's rank when the initializer's
@@ -2205,7 +2221,10 @@ namespace Shorokoo
             newInputs.Add(targetsKey);
 
             // Original outputs: [loss, gradient_struct, state_struct]
-            // Target outputs:   [updated_param_struct, state_struct, updated_optimizer_state?, loss]
+            // Target outputs:   [updated_param_struct, state_struct, updated_optimizer_state?, loss, scheduled_hyper...]
+            // Each scheduled hyperparameter's output is the key every optimizer replay read for it,
+            // so what a step reports is what it applied, not a second evaluation of the schedule.
+            // Baked and runtime values are known on the host and are not outputs.
             var lossOutputKey = fastTraining.Outputs[0];
             var stateStructOutputKey = fastTraining.Outputs[2];
 
@@ -2214,6 +2233,8 @@ namespace Shorokoo
             newOutputs.Add(stateStructOutputKey);
             if (updatedOptStateStructKey is FastTensorKey uosk) newOutputs.Add(uosk);
             newOutputs.Add(lossOutputKey);
+            foreach (var h in scheduledIndices) newOutputs.Add(hyperparamKeys[h]);
+            _scheduledHyperparameterOutputs = [.. scheduledIndices];
 
             fastTraining.SetInputs(newInputs);
             fastTraining.SetOutputs(newOutputs);
@@ -2240,6 +2261,14 @@ namespace Shorokoo
             UpdatedParamFieldCount = TrainableParamStructDef.Fields.Length;
             UpdatedStateFieldCount = ModelStateDef.Fields.Length;
             UpdatedOptimizerStateFieldCount = OptimizerStateDef.Fields.Length;
+
+            var expectedOutputs = UpdatedParamFieldCount + UpdatedStateFieldCount
+                + UpdatedOptimizerStateFieldCount + 1 + _scheduledHyperparameterOutputs.Length;
+            if (_trainingStepWorkGraph.Outputs.Count != expectedOutputs)
+                throw new InvalidOperationException(
+                    $"The lowered training step has {_trainingStepWorkGraph.Outputs.Count} outputs where its " +
+                    $"layout calls for {expectedOutputs}: the updated state fields, the loss and one per " +
+                    "scheduled hyperparameter.");
         }
 
         /// <summary>
@@ -3133,6 +3162,13 @@ namespace Shorokoo
             // names for the state inputs are internal identifiers.
             var hyperparameters = HyperparameterStructDef.Fields.Length > 0 ? hyperStruct! : null;
             var labels = StepLabels(checkpoint, hyperparameters, inputStruct, targetStruct);
+            // Read before the step runs: fed as they are, the runtime values are consumed by it.
+            var applied = new AppliedHyperparameter?[HyperparameterNames.Count];
+            Array.Copy(_bakedAppliedValues, applied, applied.Length);
+            if (hyperparameters is not null)
+                for (int i = 0; i < DynamicHyperparameterIndices.Count; i++)
+                    applied[DynamicHyperparameterIndices[i]] = AppliedHyperparameter.Of(
+                        FedTensor(hyperparameters.Fields[DynamicHyperparameterNames[i]])!);
             var execInputs = new List<IData>(labels.Count);
             AddStruct(execInputs, checkpoint.TrainableParams, checkpoint.FeedMode);
             AddStruct(execInputs, checkpoint.ModelState, checkpoint.FeedMode);
@@ -3157,7 +3193,8 @@ namespace Shorokoo
                 StepFaultInjection?.Invoke();
                 if (retainStateOnDevice && compiled.HasDeviceMemory)
                 {
-                    // Every output but the trailing loss is state the next step feeds straight back.
+                    // The leading outputs are state the next step feeds straight back; the loss and
+                    // the scheduled hyperparameters' values after it are read on the host.
                     // Sized from the session's own outputs, not from the field counts: the release
                     // loop below already allows more outputs than state plus loss, and Execute refuses
                     // a retention array of any other length -- so deriving it twice would fail the GPU
@@ -3221,7 +3258,7 @@ namespace Shorokoo
                 ReleaseReadCopies(targetStruct);
             }
 
-            // Graph outputs (after lowering): [updated_param_field_0, ..., updated_state_field_0, ..., updated_opt_state_field_0, ..., loss]
+            // Graph outputs (after lowering): [updated_param_field_0, ..., updated_state_field_0, ..., updated_opt_state_field_0, ..., loss, scheduled_hyper_0, ...]
             // Repack updated param fields into a TensorDataStruct
             var updatedParamFields = new Dictionary<string, IData>();
             for (int i = 0; i < UpdatedParamFieldCount; i++)
@@ -3253,8 +3290,14 @@ namespace Shorokoo
             // checkpoint's to carry, the rest is a step's worth of outputs nobody keeps.
             var lossTensor = results[stateOutputCount].ToTensorData<float32>();
             var lossValue = lossTensor.ValueAt<float>(0);
+            // Graph outputs after the loss: one per scheduled hyperparameter, the value this step applied.
+            for (int j = 0; j < _scheduledHyperparameterOutputs.Length; j++)
+                applied[_scheduledHyperparameterOutputs[j]] =
+                    AppliedHyperparameter.Of(results[stateOutputCount + 1 + j].ToTensorData());
             for (int i = stateOutputCount; i < results.Length; i++)
                 results[i].ToTensorData().Dispose();
+            var appliedByName = new Dictionary<string, AppliedHyperparameter>(applied.Length, StringComparer.Ordinal);
+            for (int h = 0; h < applied.Length; h++) appliedByName[HyperparameterNames[h]] = applied[h]!;
 
             // Step is the graph-advanced counter (one training step per call). Epoch and batch
             // index are host-owned — the training loop advances them — so they carry through
@@ -3269,6 +3312,7 @@ namespace Shorokoo
                 BatchIndex = checkpoint.BatchIndex,
                 Rig = this,
                 Loss = lossValue,
+                AppliedHyperparameters = new System.Collections.ObjectModel.ReadOnlyDictionary<string, AppliedHyperparameter>(appliedByName),
             };
 
             // Only state this step superseded and left alive: what it consumed is released already.

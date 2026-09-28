@@ -529,6 +529,9 @@ internal static class TrainingRigHelpers
                 actual = Step(native, actual, input, target, runtimeHypers, step);
                 AssertClose(expected.Loss!.Value, actual.Loss!.Value, tol);
                 AssertClose(expected, actual, tol);
+                Assert.Equal(expected.AppliedHyperparameters!.Keys, actual.AppliedHyperparameters!.Keys);
+                foreach (var (name, value) in expected.AppliedHyperparameters)
+                    AssertClose(value.ToSingle(), actual.AppliedHyperparameters[name].ToSingle(), tol);
             }
             return null;
         }
@@ -1838,6 +1841,119 @@ public class TrainingRigScheduleCoverageTests
                 inputBatch.Shared(), targetBatch.Shared());
             Assert.True(MathF.Abs(Weight(moduleRig, moduleCkpt) - Weight(runtimeRig, moduleRefCkpt)) < 1e-5f);
         }
+    }
+
+    private static float Applied(TrainingCheckpoint ckpt, string name = "learningRate")
+        => ckpt.AppliedHyperparameters![name].ToSingle();
+
+    private static TrainingRig SgdRig(NamedModelParam[] sample, Hyperparameter lr) => TrainingRig.FromScratch(
+        ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+        sample, new SGDOptimizerHyperparameters { LearningRate = lr });
+
+    [Fact]
+    public void TestEachStepReportsTheScheduledValueItAppliedCoverage()
+    {
+        var (sample, input, target) = ScalarMultiplyBatches();
+        var warmup = Schedules.Constant(1e-2f).WithWarmup(4);
+        float[] expected = [0f, 0.0025f, 0.005f, 0.0075f, 0.01f, 0.01f];
+        var rig = SgdRig(sample, warmup);
+
+        var ckpt = rig.CreateInitialCheckpoint();
+        Assert.Null(ckpt.AppliedHyperparameters);
+        for (int s = 0; s < expected.Length; s++)
+        {
+            ckpt = rig.TrainStep(ckpt, input.Shared(), target.Shared());
+            AssertClose(expected[s], Applied(ckpt), 1e-7f);
+            AssertClose(warmup.At(ckpt.Step - 1), Applied(ckpt), 1e-7f);
+        }
+        Assert.Equal(rig.HyperparameterNames, ckpt.AppliedHyperparameters!.Keys);
+        Assert.Equal(DType.Float32, ckpt.AppliedHyperparameters["learningRate"].DType);
+        Assert.Empty(ckpt.AppliedHyperparameters["learningRate"].Shape.Dims);
+        Assert.Equal(Applied(ckpt), ckpt.AppliedHyperparameters["learningRate"].ToTensorData().As<float32>().ValueAt<float>(0));
+        Assert.Equal(Applied(ckpt), Applied(ckpt.WithCounters(step: 0, epoch: 2).Shared()));
+
+        using (var run = rig.BeginResidentRun())
+        {
+            Assert.Null(run.AppliedHyperparameters);
+            for (int s = 0; s < expected.Length; s++)
+            {
+                if (s % 2 == 0) run.Step(input.Shared(), target.Shared());
+                else AssertClose(expected[s], Applied(run.StepToCheckpoint(input.Shared(), target.Shared())), 1e-7f);
+                AssertClose(expected[s], run.AppliedHyperparameters!["learningRate"].ToSingle(), 1e-7f);
+            }
+        }
+
+        var fit = rig.Fit([input, input, input], [target, target, target], numEpochs: 1, rig.CreateInitialCheckpoint());
+        AssertClose(expected[2], Applied(fit.FinalCheckpoint), 1e-7f);
+
+        var adam = TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph, sample,
+            new AdamWOptimizerHyperparameters { LearningRate = warmup, WeightDecay = warmup, Beta1 = 0.8f });
+        var adamCkpt = adam.TrainStep(adam.TrainStep(adam.CreateInitialCheckpoint(), input.Shared(), target.Shared()),
+            input.Shared(), target.Shared());
+        float[] adamExpected = [expected[1], 0.8f, 0.999f, 1e-8f, expected[1]];
+        foreach (var (value, name) in adamExpected.Zip(adam.HyperparameterNames)) AssertClose(value, Applied(adamCkpt, name), 1e-7f);
+    }
+
+    [Fact]
+    public void TestAResumedRunReportsTheScheduleAtTheStepItResumesFromCoverage()
+    {
+        var (sample, input, target) = ScalarMultiplyBatches();
+        var schedule = Schedules.Linear(0.2f, 0f, 8);
+        var rig = SgdRig(sample, schedule);
+
+        var atThree = rig.CreateInitialCheckpoint();
+        for (int s = 0; s < 3; s++) atThree = rig.TrainStep(atThree, input.Shared(), target.Shared());
+        AssertClose(schedule.At(2), Applied(atThree), 1e-7f);
+        AssertClose(schedule.At(3), Applied(rig.TrainStep(atThree.Shared(), input.Shared(), target.Shared())), 1e-7f);
+        AssertClose(schedule.At(5), Applied(rig.TrainStep(rig.CreateInitialCheckpoint().WithStep(5), input.Shared(), target.Shared())), 1e-7f);
+
+        var path = TempPath("applied") + ".safetensors";
+        var skpt = TempPath("applied") + ".skpt";
+        try
+        {
+            atThree.Save(path);
+            var loaded = rig.LoadCheckpoint(path);
+            Assert.Null(loaded.AppliedHyperparameters);
+            AssertClose(schedule.At(3), Applied(rig.TrainStep(loaded, input.Shared(), target.Shared())), 1e-7f);
+
+            Persistence.SaveTrainingCheckpointToSkpt(atThree, skpt);
+            var (rebuilt, fromSkpt) = TrainingRig.Load(skpt);
+            Assert.Null(fromSkpt.AppliedHyperparameters);
+            using var run = rebuilt.BeginResidentRun(fromSkpt);
+            run.Step(input.Shared(), target.Shared());
+            AssertClose(schedule.At(3), run.AppliedHyperparameters!["learningRate"].ToSingle(), 1e-7f);
+        }
+        finally
+        {
+            if (File.Exists(path)) File.Delete(path);
+            if (File.Exists(skpt)) File.Delete(skpt);
+        }
+    }
+
+    [Fact]
+    public void TestBakedRuntimeAndCounterDrivenValuesAreReportedAsAppliedCoverage()
+    {
+        var (sample, input, target) = ScalarMultiplyBatches();
+
+        var momentum = TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, SGDMomentumOptimizer.ComputationGraph,
+            sample, new SGDMomentumOptimizerHyperparameters { LearningRate = Hyperparameter.Runtime(), MomentumCoeff = 0.7f });
+        var fed = momentum.MakeHyperparameters(0.3f);
+        var momentumCkpt = momentum.TrainStep(momentum.CreateInitialCheckpoint(), fed, input.Shared(), target.Shared());
+        Assert.Equal(0.3f, Applied(momentumCkpt));
+        Assert.Equal(0.7f, Applied(momentumCkpt, "momentumCoeff"));
+        using (var run = momentum.BeginResidentRun())
+        {
+            run.Step(momentum.MakeHyperparameters(0.05f), input.Shared(), target.Shared());
+            Assert.Equal(0.05f, run.AppliedHyperparameters!["learningRate"].ToSingle());
+        }
+
+        var epochRig = SgdRig(sample, Hyperparameter.Scheduled(StepEpochScheduler.ComputationGraph));
+        var seed = epochRig.CreateInitialCheckpoint();
+        AssertClose(0.5f - 0.01f * 0 - 0.1f * 4, Applied(epochRig.TrainStep(seed.Shared(), input.Shared(), target.Shared(), epoch: 4, batchNumber: 7)), 1e-6f);
+        AssertClose(0.5f - 0.01f * 6 - 0.1f * 2, Applied(epochRig.TrainStep(seed.WithCounters(step: 6, epoch: 2).Shared(), input.Shared(), target.Shared())), 1e-6f);
+        AssertClose(0.5f - 0.01f * 3 - 0.1f * 1, Applied(epochRig.TrainStep(seed.WithCounters(step: 3, epoch: 1), input.Shared(), target.Shared())), 1e-6f);
     }
 
     private static float FreshOptStateValue(TrainingRig rig, TrainingCheckpoint ckpt)
@@ -5031,6 +5147,44 @@ public class TrainingRigHyperparameterDTypeCoverageTests
     }
 
     [Fact]
+    public void TestAppliedHyperparametersKeepEveryDeclaredDTypeCoverage()
+    {
+        var (_, input, target) = ScalarMultiplyBatches();
+        static object[] Values(TrainingCheckpoint ckpt) =>
+        [
+            ckpt.AppliedHyperparameters!["learningRate"].ToArray<float>()[0],
+            ckpt.AppliedHyperparameters["gradScale"].ToArray<int>()[0],
+            ckpt.AppliedHyperparameters["descend"].ToArray<bool>()[0],
+            ckpt.AppliedHyperparameters["decay"].ToArray<double>()[0],
+        ];
+
+        var scheduled = MixedRig(new MixedDTypeHyperOptimizerHyperparameters
+        {
+            LearningRate = Schedules.Constant(0.1f),
+            GradScale = Hyperparameter.Scheduled(IntStepScheduler.ComputationGraph),
+            Descend = false,
+            Decay = 0.125,
+        });
+        var ckpt = scheduled.TrainStep(scheduled.CreateInitialCheckpoint().WithStep(5), input.Shared(), target.Shared());
+        Assert.Equal([0.1f, 7, false, 0.125], Values(ckpt));
+        Assert.Equal(scheduled.HyperparameterDTypes, scheduled.HyperparameterNames.Select(n => ckpt.AppliedHyperparameters![n].DType));
+        Assert.Equal(7d, ckpt.AppliedHyperparameters!["gradScale"].ToDouble());
+        Assert.Equal(0d, ckpt.AppliedHyperparameters["descend"].ToDouble());
+        Assert.Throws<InvalidOperationException>(() => ckpt.AppliedHyperparameters["gradScale"].ToArray<long>());
+
+        var runtime = MixedRig(new MixedDTypeHyperOptimizerHyperparameters
+        {
+            LearningRate = Hyperparameter.Runtime(),
+            GradScale = Hyperparameter.Runtime(),
+            Descend = Hyperparameter.Runtime(),
+            Decay = Hyperparameter.Runtime(),
+        });
+        var fed = runtime.MakeHyperparameters(("learningRate", 0.25f), ("gradScale", 3), ("descend", true), ("decay", 0.5));
+        Assert.Equal([0.25f, 3, true, 0.5],
+            Values(runtime.TrainStep(runtime.CreateInitialCheckpoint(), fed, input.Shared(), target.Shared())));
+    }
+
+    [Fact]
     public void TestHyperparameterDTypeConversionsAndRejectionsCoverage()
     {
         var runtimeRig = MixedRig(new MixedDTypeHyperOptimizerHyperparameters
@@ -5161,6 +5315,27 @@ public class TrainingRigHyperparameterShapeCoverageTests
             VectorRateOptimizer.ComputationGraph, ScalarMultiplyBatches().sample, hypers);
 
     private static TensorData Rate(params float[] v) => (TensorData)TensorData([(long)v.Length], v);
+
+    [Fact]
+    public void TestANonScalarAppliedHyperparameterKeepsItsShapeAndElementsCoverage()
+    {
+        var (_, input, target) = ScalarMultiplyBatches();
+        var rig = VectorRig(new VectorRateOptimizerHyperparameters
+            { PerElementRate = Hyperparameter.Scheduled(VectorRateScheduler.ComputationGraph), Gain = 2f });
+        var ckpt = rig.TrainStep(rig.CreateInitialCheckpoint().WithStep(2), input.Shared(), target.Shared());
+        var rate = ckpt.AppliedHyperparameters!["perElementRate"];
+
+        Assert.Equal((long[])[4L], rate.Shape.Dims);
+        Assert.Equal(4, rate.ElementCount);
+        foreach (var (e, a) in ((float[])[0.08f, 0.18f, 0.38f, 0.78f]).Zip(rate.ToArray<float>())) AssertClose(e, a, 1e-6f);
+        Assert.Equal(rate.ToArray<float>(), rate.ToTensorData().As<float32>().CopyMemory<float>());
+        Assert.Throws<InvalidOperationException>(() => rate.ToDouble());
+        rate.Shape.Dims[0] = 9;
+        rate.ToArray<float>()[0] = 9f;
+        Assert.Equal((long[])[4L], rate.Shape.Dims);
+        Assert.Equal(rate, rig.TrainStep(rig.CreateInitialCheckpoint().WithStep(2), input.Shared(), target.Shared()).AppliedHyperparameters!["perElementRate"]);
+        Assert.Equal(2f, ckpt.AppliedHyperparameters["gain"].ToSingle());
+    }
 
     [Fact]
     public void TestNonScalarHyperparametersDriveTrainingThroughEveryKindCoverage()

@@ -204,6 +204,25 @@ initialization — via a build-time evaluation at the initial counters (all 0). 
 host-materialized value that can disagree with the in-graph one. Host preview (`Schedule.At`) is served
 by a single interpreter that mirrors the graph lowering.
 
+**Reading back the applied value.** Every checkpoint a step returns carries
+`.AppliedHyperparameters`: each hyperparameter's value in that step, keyed by
+`rig.HyperparameterNames` — a scheduled one's value as the step computed it in-graph (the very tensor
+the optimizer update read), a baked one's constant, a runtime one's value as fed. The step that
+produced a checkpoint ran at counter `Step - 1`, so for a built-in schedule the reported value is
+`schedule.At(ckpt.Step - 1)`, up to the numeric note below:
+
+```csharp
+var ckpt = rig.TrainStep(ckpt, input, target);
+float lr = ckpt.AppliedHyperparameters!["learningRate"].ToSingle();
+```
+
+Each value is an `AppliedHyperparameter`: an immutable host copy with `DType`, `Shape`,
+`ElementCount`, `ToDouble()` / `ToSingle()` for a single-element value, `ToArray<T>()` (with `T` the
+dtype's storage type — `float`, `int`, `bool`, `double`, …) and `ToTensorData()` for a fresh tensor.
+A resident run exposes its last step's values as `run.AppliedHyperparameters`, since `Step` returns
+only the loss. The map is `null` on a checkpoint no step produced (an initial or loaded one), and it
+is not saved.
+
 > **Numeric note.** Because a schedule is evaluated in-graph rather than host-side, its live-training
 > value carries the schedule-lowering tolerance: on engines whose `Cos`/`Pow` differ from .NET `MathF`
 > (e.g. ONNX Runtime) a schedule using those ops may differ from the host `Schedule.At` value by a few
@@ -410,7 +429,8 @@ public TrainingCheckpoint CreateInitialCheckpoint(TensorDataStruct hyperparamete
 
 // Schedule-driven: scheduled hyperparameters are computed in-graph from the checkpoint's
 // step (fed as the step counter), then the step advances. Requires no schedule-less runtime hypers.
-// Returns the post-step checkpoint directly, with its .Loss set to this step's loss. The rig
+// Returns the post-step checkpoint directly, with its .Loss set to this step's loss and its
+// .AppliedHyperparameters to the value each hyperparameter had in this step. The rig
 // compiles its training-step graph internally (lazily, cached per fed shape), so a manual loop is just
 // `cp = rig.TrainStep(cp, in, out);` — no caller-side ComputeContext.Compile.
 // Each struct argument is a TensorDataStruct — consumed by the step — or one passed through
@@ -503,6 +523,9 @@ public sealed class ResidentTrainingRun : IDisposable
     public TrainingCheckpoint StepToCheckpoint(DataBatch batch);
 
     public long CurrentStep { get; }   // the Step the run's last checkpoint carries; next is +1
+    // Each hyperparameter's value in the run's last step (host values: no download); see
+    // TrainingCheckpoint.AppliedHyperparameters.
+    public IReadOnlyDictionary<string, AppliedHyperparameter>? AppliedHyperparameters { get; }
 
     public void Dispose();             // releases state the run still holds; published checkpoints survive
 }
@@ -841,7 +864,7 @@ rig's collection at all. A `StepToCheckpoint` step hands
 state back to you instead, so that one is reclaimed like any other.
 
 Result types:
-- `TrainingCheckpoint` → `.TrainableParams`, `.ModelState`, `.OptimizerState`, `.Step` (global step, `long`; advances each `TrainStep`, so schedules resume from a saved checkpoint), and the host-owned run counters `.Epoch` / `.BatchIndex` (`long?`; the training loop advances them — the counter-agnostic `TrainStep` carries them through unchanged). They are `null` when the position is genuinely **unknown** — an initial checkpoint, or one trained without a data loader / explicit counters — rather than a misleading `0`; the loader-driven and explicit-counter paths set concrete values. A scheduled hyperparameter reading the epoch / batch counter sees `0` for a `null` value. `.Step` is always a concrete `long`; all counters are `int64` end to end. It also carries `.Rig` (the `TrainingRig?` that produced it — set on every rig-produced checkpoint, so `checkpoint.ToInferenceModel()` needs no re-supplied graph) and `.Loss` (`float?`; the loss of the `TrainStep` that produced it, `null` on an initial or bare checkpoint). Both are preserved through the counter derivations (`WithCounters`/`WithStep`/`WithEpoch`/`WithBatchIndex`) and through the state derivations (`WithTrainableParams`/`WithModelState`/`WithOptimizerState`), each of which returns a new checkpoint with one slot replaced and every other slot carried through unchanged — the receiver is never mutated. `TrainStep` returns this checkpoint directly — read the step's loss off `.Loss`. `.Loss` persists as its own `Loss` component, independent of `Counters` (dropping `Loss`, or an initial checkpoint, reloads with `.Loss == null` — never a sentinel `0`).
+- `TrainingCheckpoint` → `.TrainableParams`, `.ModelState`, `.OptimizerState`, `.Step` (global step, `long`; advances each `TrainStep`, so schedules resume from a saved checkpoint), and the host-owned run counters `.Epoch` / `.BatchIndex` (`long?`; the training loop advances them — the counter-agnostic `TrainStep` carries them through unchanged). They are `null` when the position is genuinely **unknown** — an initial checkpoint, or one trained without a data loader / explicit counters — rather than a misleading `0`; the loader-driven and explicit-counter paths set concrete values. A scheduled hyperparameter reading the epoch / batch counter sees `0` for a `null` value. `.Step` is always a concrete `long`; all counters are `int64` end to end. It also carries `.Rig` (the `TrainingRig?` that produced it — set on every rig-produced checkpoint, so `checkpoint.ToInferenceModel()` needs no re-supplied graph) and `.Loss` (`float?`; the loss of the `TrainStep` that produced it, `null` on an initial or bare checkpoint), and `.AppliedHyperparameters` (each hyperparameter's value in that step, keyed by name; `null` on an initial, bare or loaded checkpoint, and never saved — see [Hyperparameter kinds](#hyperparameter-kinds-hyperparameter)). All three are preserved through the counter derivations (`WithCounters`/`WithStep`/`WithEpoch`/`WithBatchIndex`) and through the state derivations (`WithTrainableParams`/`WithModelState`/`WithOptimizerState`), each of which returns a new checkpoint with one slot replaced and every other slot carried through unchanged — the receiver is never mutated. `TrainStep` returns this checkpoint directly — read the step's loss off `.Loss`. `.Loss` persists as its own `Loss` component, independent of `Counters` (dropping `Loss`, or an initial checkpoint, reloads with `.Loss == null` — never a sentinel `0`).
 - `TrainingResult` → `.FinalCheckpoint`, `.EpochLosses` (the per-epoch mean losses).
 
 **Constructing one directly.** You are normally *handed* a checkpoint — by `CreateInitialCheckpoint`,

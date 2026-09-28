@@ -120,13 +120,33 @@ namespace Shorokoo
         /// <summary>
         /// The loss computed for the training step that produced this checkpoint, or <c>null</c> on an
         /// initial or bare checkpoint that no step produced. Set by
-        /// <see cref="TrainingRig.TrainStep(TrainingCheckpoint, IData, IData)"/>
-        /// (which now returns the post-step checkpoint directly) to that step's loss. Carried
+        /// <see cref="TrainingRig.TrainStep(TrainingCheckpoint, IData, IData)"/>, which returns the
+        /// post-step checkpoint, to that step's loss. Carried
         /// unchanged through the counter derivations, and persisted as its own
         /// <see cref="CheckpointComponents.Loss"/> component, independent of the counters (absent, or a
         /// null loss, ⇒ reads back <c>null</c>).
         /// </summary>
         public float? Loss { get; init; }
+
+        /// <summary>
+        /// The value every optimizer hyperparameter had in the training step that produced this
+        /// checkpoint, keyed by <see cref="TrainingRig.HyperparameterNames"/> — or <c>null</c> on a
+        /// checkpoint no step produced (an initial, bare or loaded one).
+        ///
+        /// <para>These are the values the step's optimizer update actually read: a scheduled
+        /// hyperparameter's value as the training step computed it in-graph, a baked one's constant, and
+        /// a runtime one's value as the caller fed it. The step that produced this checkpoint ran at
+        /// counter <see cref="Step"/> <c>- 1</c>, so for a built-in schedule the value is
+        /// <c>schedule.At(Step - 1)</c>; a scheduler reading <c>epoch</c> or <c>batchIndex</c> saw
+        /// this checkpoint's <see cref="Epoch"/> and <see cref="BatchIndex"/> (<c>0</c> where
+        /// <c>null</c>), which the step carries through.</para>
+        ///
+        /// <para>Set by every training step, carried unchanged through the derivations, like
+        /// <see cref="Loss"/> — so after <see cref="WithCounters"/> it still describes the step that
+        /// produced the checkpoint, not the new counters — and held in memory only: a save does not
+        /// write it, and a load reads back <c>null</c>.</para>
+        /// </summary>
+        public IReadOnlyDictionary<string, AppliedHyperparameter>? AppliedHyperparameters { get; init; }
 
         /// <summary>
         /// What a training step fed this checkpoint does with its state — the tensors of
@@ -214,6 +234,7 @@ namespace Shorokoo
             long? batchIndex = null,
             TrainingRig? rig = null,
             float? loss = null,
+            IReadOnlyDictionary<string, AppliedHyperparameter>? appliedHyperparameters = null,
             SharedInputMode? feedMode = null)
             => new()
             {
@@ -225,11 +246,13 @@ namespace Shorokoo
                 BatchIndex = batchIndex ?? BatchIndex,
                 Rig = rig ?? Rig,
                 Loss = loss ?? Loss,
+                AppliedHyperparameters = appliedHyperparameters ?? AppliedHyperparameters,
                 FeedMode = feedMode ?? FeedMode,
             };
 
         /// <summary>A new checkpoint with <see cref="TrainableParams"/> replaced; every other slot —
-        /// model state, optimizer state, counters, rig, loss and <see cref="FeedMode"/> — carries
+        /// model state, optimizer state, counters, rig, loss, applied hyperparameters and
+        /// <see cref="FeedMode"/> — carries
         /// through unchanged.</summary>
         public TrainingCheckpoint WithTrainableParams(TensorDataStruct trainableParams)
             => Derive(trainableParams: trainableParams

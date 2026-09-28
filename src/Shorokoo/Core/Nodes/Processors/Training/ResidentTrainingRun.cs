@@ -98,6 +98,17 @@ namespace Shorokoo
         /// </summary>
         public long CurrentStep => Current.Step;
 
+        /// <summary>
+        /// The value every optimizer hyperparameter had in the run's last step, keyed by
+        /// <see cref="TrainingRig.HyperparameterNames"/>; that step ran at counter
+        /// <see cref="CurrentStep"/> <c>- 1</c>. Before the run's first step, the values of the
+        /// checkpoint it began from: <c>null</c> where no step produced that one. Host values, read
+        /// with the step's loss, so asking costs no download; see
+        /// <see cref="TrainingCheckpoint.AppliedHyperparameters"/>.
+        /// </summary>
+        public IReadOnlyDictionary<string, AppliedHyperparameter>? AppliedHyperparameters
+            => Current.AppliedHyperparameters;
+
         /// <summary>Trains on one batch and returns its loss, leaving the updated state resident.</summary>
         /// <param name="trainingInput">Training input data: a <see cref="TensorDataStruct"/>,
         /// consumed by the step, or one passed through <c>.Shared()</c> or <c>.TryConsume()</c>.</param>

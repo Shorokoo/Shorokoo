@@ -66,7 +66,11 @@ public class KernelWorkaroundPassTests
         Assert.True(AsWritten(new([], [OnnxOp.Range(Scalar(1L - (1L << 53)), Scalar(0L), Scalar(1L << 50))])));
         Assert.True(AsWritten(Graph(n, OnnxOp.Range(Scalar(0), n, Scalar(1)))));
         Assert.True(AsWritten(Graph(i, OnnxOp.Range(Scalar(0L), i, Scalar(1L)))));
-        Assert.True(AsWritten(Graph(i, OnnxOp.Range(i, Scalar(long.MinValue), Scalar(-1L)))));
+        Assert.True(AsWritten(Graph(i, OnnxOp.Range(Scalar(2L), i, Scalar(1L)))));
+        Assert.True(AsWritten(Graph(i, OnnxOp.Range(Scalar(1L - (1L << 62)), i, Scalar(-1L)))));
+        Assert.False(AsWritten(Graph(i, OnnxOp.Range(Scalar(1L << 62), i, Scalar(1L)))));
+        Assert.False(AsWritten(Graph(i, OnnxOp.Range(i, Scalar(long.MinValue), Scalar(-1L)))));
+        Assert.False(AsWritten(new([], [OnnxOp.Range(Scalar(long.MaxValue - 2L), Scalar(long.MinValue + 2L), Scalar(1L))])));
         Assert.False(AsWritten(Graph(i, OnnxOp.Range(Scalar(0L), i, Scalar(2L)))));
     }
 

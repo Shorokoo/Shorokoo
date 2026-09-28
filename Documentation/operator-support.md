@@ -335,14 +335,18 @@ shape and type.
     removes the `Range` although it is an output, and reading the model's outputs
     throws `UnsupportedDTypeException` (`OU002`). Accepted as ONNX Runtime's
     behaviour ([#432](https://github.com/Shorokoo/Shorokoo/issues/432)).
-    An int64 `Range` counts its elements exactly on every backend, a span
-    `limit − start` beyond 2^53 or beyond int64 included. ONNX Runtime's kernel
-    computes the count in double precision, so on ONNX Runtime an int64 `Range`
-    is rewritten to count in uint64 and scale a `Range(0, count, 1)` by `delta`,
-    except one whose three inputs are `Constant`s spanning less than 2^53, which
-    the kernel counts exactly, and one whose `delta` is a `Constant` 1 or −1, whose
-    count is its span, so that a count the kernel gets wrong is one no tensor
-    holds ([#447](https://github.com/Shorokoo/Shorokoo/issues/447)).
+    An int64 `Range` counts its elements exactly on every backend, a span `limit −
+    start` beyond 2^53 or beyond int64 included. ONNX Runtime's kernel takes `limit
+    − start` in int64, which wraps beyond int64, and computes the count in double
+    precision, so on ONNX Runtime an int64 `Range` is rewritten to count in uint64
+    and scale a `Range(0, count, 1)` by `delta`, refusing a count no tensor holds.
+    Two forms are left as written. One whose three inputs are `Constant`s spanning
+    less than 2^53 the kernel counts exactly. One whose `delta` is a `Constant` 1 or
+    −1 and whose `start` is a `Constant` of magnitude below 2^62, such as `Range(0,
+    n, 1)`, the kernel counts exactly for a span below 2^53; for a larger span,
+    whose count is 0 or one no tensor holds, it refuses the call or gives no
+    elements, and never a wrong element
+    ([#447](https://github.com/Shorokoo/Shorokoo/issues/447)).
 
 ## Convolution & pooling
 

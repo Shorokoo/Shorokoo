@@ -1352,4 +1352,3 @@ public partial class NegativeInfinityWindowMaxPoolIndicesValues
     public static Tensor<float32> Inline(Tensor<float32> x)
         => ((Tensor<int64>)OnnxOp.MaxPoolWithIndices(x, AutoPad.NotSet, false, null, [2L], [1L, 1L], 0L, null).indices).Cast<float32>();
 }
-

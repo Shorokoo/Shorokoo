@@ -223,10 +223,13 @@ namespace Shorokoo.Core.Nodes.AutoDiff
                 if (a.Rank == 2)
                     return [aGradDirect, (Tensor<T>)OnnxOp.MatMul(a.Transpose(1L, 0L), grad)];
 
+                // Every dim is stated, and allowzero keeps a zero-sized one: a -1 cannot be inferred
+                // beside a zero, and without allowzero a 0 would copy a's dim instead.
+                Tensor<int64> rows = OnnxOp.ReduceProd(OnnxOp.Shape(a, end: -1), keepdims: true);   // [B·M]
                 Tensor<T> aRows = OnnxOp.Reshape(
-                    a, OnnxOp.Concat([Vector(-1L), OnnxOp.Shape(b, start: 0, end: 1)], axis: 0), allowZero: false); // [B·M, K]
+                    a, OnnxOp.Concat([rows, OnnxOp.Shape(b, start: 0, end: 1)], axis: 0), allowZero: true);    // [B·M, K]
                 Tensor<T> gradRows = OnnxOp.Reshape(
-                    grad, OnnxOp.Concat([Vector(-1L), OnnxOp.Shape(b, start: 1)], axis: 0), allowZero: false);       // [B·M, N]
+                    grad, OnnxOp.Concat([rows, OnnxOp.Shape(b, start: 1)], axis: 0), allowZero: true);         // [B·M, N]
                 return [aGradDirect, (Tensor<T>)OnnxOp.MatMul(aRows.Transpose(1L, 0L), gradRows)];
             }
 

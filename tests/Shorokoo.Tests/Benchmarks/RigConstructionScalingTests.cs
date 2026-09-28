@@ -57,23 +57,23 @@ internal static class RigScalingStack
 
 /// <summary>
 /// Code-pinned scaling gate for the phase that runs every trainable parameter's initializer
-/// before any training happens. Three laws, because rig construction broke on three separate
-/// things (<see href="https://github.com/Shorokoo/Shorokoo/issues/194">#194</see> host memory,
-/// <see href="https://github.com/Shorokoo/Shorokoo/issues/195">#195</see> build time, and the
-/// per-session retention that fixing #195 introduced) and each has a different cause, so one
-/// measurement cannot stand in for another.
+/// before any training happens. Three laws — host memory
+/// (<see href="https://github.com/Shorokoo/Shorokoo/issues/194">#194</see>), build time
+/// (<see href="https://github.com/Shorokoo/Shorokoo/issues/195">#195</see>), and what each
+/// per-parameter session retains — each with a cause of its own, so one measurement cannot stand
+/// in for another.
 ///
-/// <para><b>Bytes per trainable element.</b> Construction used to cost ~4.4 KiB of host working
-/// set per parameter ELEMENT, ~1100x the 4 bytes the fp32 parameter occupies, because the backend
-/// folded the whole input-less initialization graph at session build. Measured as the ADDITIONAL
+/// <para><b>Bytes per trainable element.</b> A backend that folds the whole input-less
+/// initialization graph at session build costs ~4.4 KiB of host working set per parameter
+/// ELEMENT, ~1100x the 4 bytes the fp32 parameter occupies. Measured as the ADDITIONAL
 /// peak the large table needs over the small one, so the fixed process floor cancels and what
 /// remains is the per-element law — machine-independent in a way a wall clock is not.</para>
 ///
-/// <para><b>Cost per trainable parameter.</b> Initializing every parameter in one session made
+/// <para><b>Cost per trainable parameter.</b> Initializing every parameter in one session makes
 /// construction quadratic in the parameter count, since the backend's session build is
-/// superlinear in graph size. It runs one session per parameter now, which is linear. Measured as
-/// a RATIO of per-parameter cost at the two ends of the range, so no absolute time budget is
-/// needed and it holds on any machine: linear keeps it near 1, the quadratic law it replaced puts
+/// superlinear in graph size; initialization runs one session per parameter, which is linear.
+/// Measured as a RATIO of per-parameter cost at the two ends of the range, so no absolute time
+/// budget is needed and it holds on any machine: linear keeps it near 1, the quadratic law puts
 /// it near 6. What a ratio cannot see is a uniform constant-factor slowdown, and between 2 and 12
 /// parameters it does not separate mild superlinearity (N^1.3 lands at 1.7) from linear either.
 /// It pins the shape that broke, not every way construction could get slower.</para>
@@ -100,7 +100,7 @@ public class RigConstructionScalingTests
     /// <summary>Measured ~400 B/element over a 0.5% spread; the law this catches is ~4.4 KiB.</summary>
     private const double MemoryBudgetBytesPerElement = 1536.0;
 
-    /// <summary>Measured 0.65-1.14 (linear); the quadratic law it replaced gives ~6.</summary>
+    /// <summary>Measured 0.65-1.14 (linear); the quadratic law gives ~6.</summary>
     private const double MaxPerParameterCostGrowth = 2.0;
 
     /// <summary>Measured 10-46 MiB across a 12-parameter initialization; uncopied, 379-481 MiB.</summary>

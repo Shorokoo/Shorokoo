@@ -44,7 +44,7 @@ internal enum EvaluationOrder
 /// pair is charged that one buffer; any other pair holds both, the input for the run and the
 /// output from its writer on. The proof is asked of each graph evaluated, so a rewrite that
 /// breaks one — a reader of the input moved past the output's writer, a recomputation reading it
-/// late — is charged the output it can no longer write in place.</para>
+/// late — is charged the buffer of the output that rewrite keeps from being written in place.</para>
 /// </summary>
 /// <param name="Pairs">Each updated state output with the state input it replaces, by position:
 /// output <c>Output</c> of the graph, input <c>Input</c>.</param>

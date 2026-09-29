@@ -320,31 +320,57 @@ public class KernelWorkaroundPassTests
     }
 
     [Fact]
-    public void TestTheMatMulWorkaroundFiresOnlyWhereAnOperandMayBeEmptyAndTheProductBatchedOrOfAVector()
+    public void TestTheMatMulWorkaroundFiresWithConcreteShapesOnlyWhereTheProductIsBatchedOrOfAVector()
     {
         var v = InputTensor<float32>("v", rank: 1);
         var m = InputTensor<float32>("m", rank: 2);
         var b = InputTensor<float32>("b", rank: 3);
         var u = InputTensor<float32>("u");
         var i = InputTensor<int64>("i", rank: 3);
-        Assert.True(AsWritten(new([m], [OnnxOp.MatMul(m, m)])));
-        Assert.True(AsWritten(new([v, m], [OnnxOp.MatMul(v, m)])));
-        Assert.True(AsWritten(new([v], [OnnxOp.MatMul(v, v)])));
-        Assert.True(AsWritten(new([], [OnnxOp.MatMul(Constant([2L, 1L, 2L], 1f, 2f, 3f, 4f), Constant([2L, 1L], 5f, 6f))])));
-        Assert.False(AsWritten(new([m, v], [OnnxOp.MatMul(m, v)])));
-        Assert.False(AsWritten(new([b], [OnnxOp.MatMul(b, b)])));
-        Assert.False(AsWritten(new([b, m], [OnnxOp.MatMul(b, m)])));
-        Assert.False(AsWritten(new([m, b], [OnnxOp.MatMul(m, b)])));
-        Assert.False(AsWritten(new([u, m], [OnnxOp.MatMul(m, u)])));
-        Assert.False(AsWritten(new([i], [OnnxOp.MatMul(i, i)])));
+        Assert.True(AsWritten(new([m], [OnnxOp.MatMul(m, m)]), [2L, 2L]));
+        Assert.True(AsWritten(new([v, m], [OnnxOp.MatMul(v, m)]), [2L], [2L, 3L]));
+        Assert.True(AsWritten(new([v], [OnnxOp.MatMul(v, v)]), [2L]));
+        Assert.False(AsWritten(new([m, v], [OnnxOp.MatMul(m, v)]), [3L, 2L], [2L]));
+        Assert.False(AsWritten(new([b], [OnnxOp.MatMul(b, b)]), [2L, 2L, 2L]));
+        Assert.False(AsWritten(new([b, m], [OnnxOp.MatMul(b, m)]), [2L, 3L, 0L], [0L, 4L]));
+        Assert.False(AsWritten(new([m, b], [OnnxOp.MatMul(m, b)]), [3L, 2L], [4L, 2L, 5L]));
+        Assert.False(AsWritten(new([u, m], [OnnxOp.MatMul(m, u)]), [2L, 2L], [2L, 2L]));
+        Assert.False(AsWritten(new([i], [OnnxOp.MatMul(i, i)]), [2L, 2L, 2L]));
     }
 
     [Fact]
-    public void TestAMatMulWithAnEmptyOperandGivesZerosOfTheProductsShapeOrAnEmptyProductOnOnnxRuntime()
+    public void TestTheMatMulWorkaroundFiresWithShapesKnownOnlyAtRunTimeOnlyForAnEmptyConstantOperand()
     {
-        Assert.True(AutoTest.AdvancedTestGraph<EmptyMatMulTransposedCheck>([], [TensorData(DType.Float32, [], 2f)]));
-        Assert.True(AutoTest.AdvancedTestGraph<EmptyMatMulUntransposedCheck>([], [TensorData(DType.Float32, [], 2f)]));
-        Assert.True(AutoTest.AdvancedTestGraph<EmptyMatMulOfUnknownRankCheck>([], [TensorData(DType.Float32, [], 2f)]));
+        var m = InputTensor<float32>("m", rank: 2);
+        var b = InputTensor<float32>("b", rank: 3);
+        var u = InputTensor<float32>("u");
+        Assert.True(AsWritten(new([b], [OnnxOp.MatMul(b, b)])));
+        Assert.True(AsWritten(new([b, m], [OnnxOp.MatMul(b, m)])));
+        Assert.True(AsWritten(new([u, m], [OnnxOp.MatMul(m, u)])));
+        Assert.True(AsWritten(new([b], [OnnxOp.MatMul(b, Constant([2L, 1L], 5f, 6f))])));
+        Assert.True(AsWritten(new([], [OnnxOp.MatMul(Constant([2L, 1L, 2L], 1f, 2f, 3f, 4f), Constant([2L, 1L], 5f, 6f))]), []));
+        Assert.False(AsWritten(new([b], [OnnxOp.MatMul(b, Constant([2L, 0L, 4L]))])));
+        Assert.False(AsWritten(new([u], [OnnxOp.MatMul(Constant([0L, 3L]), u)])));
+        Assert.Equal(0, Ifs(Session(new([b], [OnnxOp.MatMul(b, Constant([2L, 0L, 4L]))]), KernelWorkaroundRegistry.OnnxRuntime)));
+    }
+
+    [Fact]
+    public void TestAMatMulWithAnEmptyOperandGivesZerosOfTheProductsShapeOrAnEmptyProductOnOnnxRuntimeWithConcreteShapes()
+    {
+        var a = TensorData(DType.Float32, [], 2f);
+        Assert.True(AllTrueWithConcreteShapes(EmptyMatMulTransposedCheck.ComputationGraph, a));
+        Assert.True(AllTrueWithConcreteShapes(EmptyMatMulUntransposedCheck.ComputationGraph, a));
+        Assert.True(AllTrueWithConcreteShapes(EmptyMatMulOfUnknownRankCheck.ComputationGraph, a));
+        Assert.True(AutoTest.AdvancedTestGraph<EmptyMatMulOfAnEmptyConstantCheck>([], [a]));
+    }
+
+    [Fact]
+    public void TestAMatMulWithAnEmptyOperandAndShapesKnownOnlyAtRunTimeTakesTheLeftBatchOfOneOnOnnxRuntime()
+    {
+        var a = InputTensor<float32>("a", rank: 3);
+        var b = InputTensor<float32>("b", rank: 3);
+        Assert.Equal([1L, 3L, 4L], ComputeContext.Default.Execute(new InternalComputationGraph([a, b], [OnnxOp.MatMul(a, b)]),
+            TensorData(DType.Float32, [1L, 3L, 0L], Array.Empty<object>()).Shared(), TensorData(DType.Float32, [2L, 0L, 4L], Array.Empty<object>()).Shared())[0].ToTensorData().Shape.Dims);
     }
 
     [Fact]
@@ -353,9 +379,11 @@ public class KernelWorkaroundPassTests
         var step = AttentionTrainingStep();
         List<long[]?> dims = [.. step.InputNodes.Select(RepresentativeInputShapes.Get)];
         var concrete = FastOnnxModelBuilder.BuildInternalOnnxModel(step, prepForOnnx: true, inputDims: dims, workarounds: KernelWorkaroundRegistry.OnnxRuntime);
-        Assert.True(Ifs(Session(step, KernelWorkaroundRegistry.OnnxRuntime)) > Ifs(Session(step, null)));
-        Assert.True(Ifs(concrete) > Ifs(Session(step, null)));
+        var withoutIt = FastOnnxModelBuilder.BuildInternalOnnxModel(step, prepForOnnx: true, inputDims: dims, workarounds: WithoutTheMatMulWorkaround);
+        Assert.Equal(Bytes(Session(step, WithoutTheMatMulWorkaround)), Bytes(Session(step, KernelWorkaroundRegistry.OnnxRuntime)));
+        Assert.True(Ifs(concrete) > Ifs(withoutIt));
         Assert.Equal(0, Ifs(Optimized(concrete)));
+        Assert.Equal(OpTypes(Optimized(withoutIt)), OpTypes(Optimized(concrete)));
     }
 
     // #455: ONNX Runtime fails to build a session in which it folded an If to a branch holding a constant of 128 bytes or more
@@ -400,6 +428,17 @@ public class KernelWorkaroundPassTests
 
     private static bool AsWritten(InternalComputationGraph g)
         => Bytes(Session(g, null)).SequenceEqual(Bytes(Session(g, KernelWorkaroundRegistry.OnnxRuntime)));
+
+    private static bool AsWritten(InternalComputationGraph g, params long[][] dims)
+    {
+        ModelProto Built(KernelWorkaroundSet? set) => FastOnnxModelBuilder.BuildInternalOnnxModel(g, prepForOnnx: true, inputDims: dims, workarounds: set);
+        return Bytes(Built(null)).SequenceEqual(Bytes(Built(KernelWorkaroundRegistry.OnnxRuntime)));
+    }
+
+    private static readonly KernelWorkaroundSet WithoutTheMatMulWorkaround = new("without-matmul",
+        [.. KernelWorkaroundRegistry.OnnxRuntime.Workarounds.Where(w => w is not Shorokoo.Core.Lowering.KernelWorkarounds.OnnxRuntime.MatMulEmptyOperandWorkaround)]);
+
+    private static string[] OpTypes(ModelProto model) => [.. AllNodes(model).Select(n => $"{n.Domain}:{n.OpType}").Order()];
 
     private static Variable Constant(long[] dims, params float[] values) => OnnxOp.Constant(TensorAttribute.Create(new Shape(dims), values));
 
@@ -795,6 +834,18 @@ public partial class EmptyMatMulUntransposedCheck
             & EmptyMatMul.Is(OnnxOp.MatMul(T([2L, 3L, 0L]), T([0L])), 2L, 3L)
             & EmptyMatMul.Is(OnnxOp.MatMul(T([3L, 0L]), T([0L])), 3L)
             & EmptyMatMul.Is(OnnxOp.Cast(OnnxOp.MatMul(OnnxOp.Cast(T([3L, 0L]), null, DType.Int64), OnnxOp.Cast(T([2L, 0L, 4L]), null, DType.Int64)), null, DType.Float32), 2L, 3L, 4L);
+    }
+}
+
+[Module]
+public partial class EmptyMatMulOfAnEmptyConstantCheck
+{
+    public static Scalar<bit> Inline(Scalar<float32> a)
+    {
+        Variable Empty(params long[] dims) => OnnxOp.Constant(TensorAttribute.Create(new Shape(dims), Array.Empty<float>()));
+        return EmptyMatMul.Is(OnnxOp.MatMul(EmptyMatMul.Of(a, [2L, 3L, 0L], 3), Empty(0L, 4L)), 2L, 3L, 4L)
+            & EmptyMatMul.Is(OnnxOp.MatMul(Empty(3L, 0L), EmptyMatMul.Of(a, [2L, 0L, 4L])), 2L, 3L, 4L)
+            & EmptyMatMul.Is(OnnxOp.MatMul(EmptyMatMul.Of(a, [2L, 3L, 5L], 3), Empty(2L, 5L, 0L)), 2L, 3L, 0L);
     }
 }
 

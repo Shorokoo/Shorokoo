@@ -1,4 +1,5 @@
 using static Shorokoo.Tests.AutoGradOpsRunners;
+using Shorokoo.Runtime;
 
 namespace Shorokoo.Tests;
 
@@ -26,6 +27,15 @@ internal static class AutoGradOpsRunners
         Assert.True(AutoTest.AdvancedTestGraph<TModule>(
             [], [TensorData(DType.Float32, dims, [.. vals.Select(v => (object)v)])],
             testQuickEngineExecution: false));
+
+    internal static void RunWithConcreteShapes<TModule>(float scalar)
+    {
+        var x = TensorData(DType.Float32, [], scalar);
+        var module = (ComputationGraph)typeof(TModule).GetProperty("ComputationGraph")!.GetValue(null)!;
+        using var context = new ComputeContext();
+        using var compiled = context.Compile(module.ToInternal().ToConcreteArchitecture([x]).ToConcreteModel(), [x.Shape.Dims], trainingStep: false);
+        Assert.All(compiled.Execute(x.Shared())[0].ToTensorData().AccessRawMemory().ToArray(), b => Assert.NotEqual(0, b));
+    }
 
     internal static void RunSmallNoQee<TModule>(long[] shape) =>
         Assert.True(AutoTest.AdvancedTestGraph<TModule>(
@@ -416,8 +426,8 @@ public class AutoGradMatrixPoolingAndConvOpsCoverageTests
     [Fact]
     public void TestAutoGradBatchedMatMulWithNoRowsGradientsOnOrt()
     {
-        Run<AutoGradMatMulKnownRankNoRowsCheck>(2f);
-        Run<AutoGradMatMulUnknownRankNoRowsCheck>(2f);
+        RunWithConcreteShapes<AutoGradMatMulKnownRankNoRowsCheck>(2f);
+        RunWithConcreteShapes<AutoGradMatMulUnknownRankNoRowsCheck>(2f);
     }
 
     [Fact]

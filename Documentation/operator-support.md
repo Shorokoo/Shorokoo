@@ -477,15 +477,21 @@ shape and type.
    exotic equations give unknown shape); values not computed.
 6. Repeated subscripts within one operand (e.g. `"ii->i"`) are unsupported;
    ellipsis is supported.
-7. With a contraction dimension of 0 the product is zeros. ONNX Runtime's kernel
-   leaves the output unwritten where the product is batched or of a matrix with
-   a vector, and gives it the left operand's batch dimension where that is 1 and
-   the right one's is not; the `FusedMatMul` it fuses a `Transpose` into does
-   the same, and can stop the process on some empty operands. On ONNX Runtime
-   such a `MatMul` is rewritten when it builds a session as an `If` on either
-   operand being empty, giving zeros of the product's shape where one is. The
-   `If` folds away where the session knows the operands' shapes
-   ([#451](https://github.com/Shorokoo/Shorokoo/issues/451)).
+7. With a contraction dimension of 0 the product is zeros. ONNX Runtime's
+   kernel, and the `FusedMatMul` it fuses a `Transpose` into, compute a matrix
+   or vector times a matrix and a vector times a vector as the spec does; for
+   other operands with a dimension of 0 they can leave the output unwritten or
+   give it the left operand's batch dimension where that is 1 and the right
+   one's is not, and a `FusedMatMul` that moves the batch axis of rank-3
+   operands can stop the process (SIGFPE) on some empty operands. Its backend
+   corrects this when the session is built with every input's dimensions
+   stated, as a training step is for the shapes it is fed: such a `MatMul`
+   becomes an `If` on either operand being empty, giving zeros of the product's
+   shape where one is, which ONNX Runtime folds away wherever the operands'
+   shapes follow from those dimensions. A `Constant` operand with a dimension
+   of 0 gives those zeros whatever the dimensions. A session built without
+   stated dimensions runs the `MatMul` as written: accepted as ONNX Runtime's
+   behaviour ([#451](https://github.com/Shorokoo/Shorokoo/issues/451)).
 
 ## Quantization
 

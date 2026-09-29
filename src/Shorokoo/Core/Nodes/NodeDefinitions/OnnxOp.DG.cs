@@ -13,7 +13,7 @@ public static partial class OnnxOp
 {
     public static Variable Dft(Variable x, Variable? length, Variable? axis, bool? inverse, bool? onesided = null)
     {
-        // ORT 1.25/1.26 segfaults when the DFT node's axis input is omitted (the
+        // ONNX Runtime crashes the process when the DFT node's axis input is omitted (the
         // empty-string placeholder in the protobuf), even though the ONNX spec
         // says the default is -2. Substitute the spec default explicitly so the
         // emitted graph never carries a null axis input.

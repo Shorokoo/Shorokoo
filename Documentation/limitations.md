@@ -446,7 +446,7 @@ Convert an older model to opset 21 before importing it, for example with
 Export stamps models at the **opset-21 baseline**, raised only as far as the graph
 requires. Post-21 operators have export floors (`RMSNormalization` and
 `RotaryEmbedding` 23; `Attention`, `Swish` and `TensorScatter` 24, `Attention`
-because ORT 1.26's CPU kernel starts there; `BitCast` and `CumProd` 26), but an
+because Shorokoo defines it with the opset-24 inputs; `BitCast` and `CumProd` 26), but an
 authored graph never emits one:
 
 - `Attention`, `AttentionWithKVCache`, `RotaryEmbedding`, `BitCast` and `CumProd`

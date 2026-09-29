@@ -494,6 +494,30 @@ public class AutoDiffCheckpointingCoverageTests
         return ([.. results.SelectMany(r => r.ToTensorData().As<float32>().CopyMemory<float>())], context.AliasedOutputs);
     }
 
+    private static bool OrderingLeaves(Func<Variable, Variable, Variable, Variable[]> outputs)
+    {
+        var (graph, shapeInfo) = StepGraph(outputs, ordered: false);
+        return ReferenceEquals(graph, StateReadOrdering.Apply(graph, shapeInfo, [(0, 0)]).Graph);
+    }
+
+    private static CompiledGraph CompiledOrdered(Func<Variable, Variable, Variable, Variable[]> outputs)
+    {
+        using var context = new ComputeContext();
+        var (graph, _) = StepGraph(outputs, ordered: true, side: 16);
+        return context.Compile(graph, [[16L, 16L], [16L, 16L], []], trainingStep: true, aliasCandidates: [(0, 0)]);
+    }
+
+    [Fact]
+    public void TestAnUpdateIsNeverOrderedThroughAnOperandThatDeterminesAShapeCoverage()
+    {
+        Assert.True(OrderingLeaves((p, g, lr) => [OnnxOp.Sub(p, OnnxOp.Mul(g, OnnxOp.Range(Scalar(0f), Scalar(512f), Scalar(1f)))), OnnxOp.MatMul(g, Twice(p))]));
+        Assert.True(OrderingLeaves((p, g, lr) => [OnnxOp.Sub(p, OnnxOp.Resize(g, null, Vector(1f, 1f), null, null, null, null, null, null, null, null, null, null)), OnnxOp.MatMul(g, Twice(p))]));
+    }
+
+    [Fact]
+    public void TestAnUpdateWhoseStateIsReadIntoASequenceCompilesCoverage()
+        => Assert.NotNull(CompiledOrdered((p, g, lr) => [Update(p, g, lr), OnnxOp.SplitToSequence(Twice(p))]));
+
     [Fact]
     public void TestTheModelCountsAReaderOfWhatTheStateAloneComputesAsAReaderOfTheStateCoverage()
     {

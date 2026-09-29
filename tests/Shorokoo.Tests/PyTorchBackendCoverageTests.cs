@@ -979,7 +979,7 @@ public class PyTorchBackendCoverageTests
             mkdir "%last%"
             """);
         var hung = FakeUv("sleep 20; exit 1", "ping -n 21 127.0.0.1 >nul & exit /b 1", TimeSpan.FromSeconds(2));
-        var install = installed.Log.Single(line => line.StartsWith("pip install", StringComparison.Ordinal));
+        var install = installed.Log.Single(line => line.StartsWith("pip install", StringComparison.Ordinal)).Replace("\"", "");
 
         Assert.Equal(PythonEnvironmentFailure.NotAVirtualEnvironment, installed.Failure);
         Assert.Contains($"--python {installed.Directory}", install);

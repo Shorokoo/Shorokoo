@@ -3491,6 +3491,23 @@ public class TrainingRigTrainingLoopCoverageTests
         Assert.All(stepped.OptimizerState.Fields.Values, f => Assert.True(((TensorData)f).IsHostResident));
         Assert.NotEmpty(FlattenStruct(stepped.TrainableParams));
     }
+
+    // A resident step writes only 50 of its 56 state outputs over the state it consumed:
+    // https://github.com/Shorokoo/Shorokoo/issues/453
+    [Fact(Skip = "Shorokoo/Shorokoo#453: a resident step writes 50 of its 56 state outputs over the state it consumed")]
+    public void TestAResidentRunWritesEveryStateOutputOverTheStateItConsumedCoverage()
+    {
+        using var context = new ComputeContext();
+        var sample = TensorData([2L, 8L], [.. Enumerable.Range(0, 16).Select(i => i / 16f)]);
+        var rig = TrainingRig.FromScratch(
+            Modules.PlainTinyMlpStack.ComputationGraph, L2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph,
+            [sample.CopyTo(ComputeContext.Host)], new AdamWOptimizerHyperparameters { LearningRate = 0.01f }, runtimeContext: context);
+        var input = rig.InputDef.FromOrderedData(sample);
+        var target = rig.TargetDef.FromOrderedData(TensorData([2L, 16L], [.. Enumerable.Range(0, 32).Select(i => i / 32f)]));
+        using var run = rig.BeginResidentRun();
+        for (int i = 0; i < 4; i++) run.Step(input.Shared(), target.Shared());
+        Assert.Equal(4 * 56L, context.AliasedOutputs);
+    }
 }
 
 [Trait("Domain", "Training")]
@@ -5521,23 +5538,6 @@ public class TrainingRigSkptCheckpointCoverageTests
             Assert.Equal(1, loaded.Step);
         }
         finally { if (File.Exists(path)) File.Delete(path); }
-    }
-
-    // Six of the 56 state outputs are no longer written over their inputs each step:
-    // https://github.com/Shorokoo/Shorokoo/issues/453
-    [Fact(Skip = "Shorokoo/Shorokoo#453: a resident step writes 50 of its 56 state outputs over the state it consumed")]
-    public void TestAResidentRunWritesEveryStateOutputOverTheStateItConsumedCoverage()
-    {
-        using var context = new ComputeContext();
-        var sample = TensorData([2L, 8L], [.. Enumerable.Range(0, 16).Select(i => i / 16f)]);
-        var rig = TrainingRig.FromScratch(
-            Modules.PlainTinyMlpStack.ComputationGraph, L2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph,
-            [sample.CopyTo(ComputeContext.Host)], new AdamWOptimizerHyperparameters { LearningRate = 0.01f }, runtimeContext: context);
-        var input = rig.InputDef.FromOrderedData(sample);
-        var target = rig.TargetDef.FromOrderedData(TensorData([2L, 16L], [.. Enumerable.Range(0, 32).Select(i => i / 32f)]));
-        using var run = rig.BeginResidentRun();
-        for (int i = 0; i < 4; i++) run.Step(input.Shared(), target.Shared());
-        Assert.Equal(4 * 56L, context.AliasedOutputs);
     }
 
     [Fact]

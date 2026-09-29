@@ -266,10 +266,10 @@ public class KernelWorkaroundPassTests
         var i = InputTensor<int64>("i", rank: 1);
         Assert.True(CudaMaxes(InBody(u, (outer, carried) => OnnxOp.BitwiseXor(outer, Scalar(5u)))) > 0);
         Assert.True(CudaMaxes(InBody(u, (outer, carried) => OnnxOp.BitShift(carried, Scalar(1u), BitShiftDirection.Right))) > 0);
-        Assert.True(CudaMaxes(InBody(w, (outer, carried) => OnnxOp.Equal(outer, carried + Scalar(1UL)))) > 0);
+        Assert.True(CudaMaxes(InBody(w, (outer, carried) => OnnxOp.BitwiseOr(outer, carried + Scalar(1UL)))) > 0);
         Assert.True(CudaMaxes(InBody(i, (outer, carried) => OnnxOp.BitwiseAnd(outer, carried))) > 0);
         Assert.Equal(0, CudaMaxes(InBody(u, (outer, carried) => OnnxOp.BitwiseXor(carried + Scalar(1u), carried * Scalar(3u)))));
-        Assert.Equal(0, CudaMaxes(InBody(i, (outer, carried) => OnnxOp.Equal(outer, carried))));
+        Assert.Equal(0, CudaMaxes(InBody(w, (outer, carried) => OnnxOp.Equal(outer, carried))));
         Assert.Equal(0, CudaMaxes(Graph(u, OnnxOp.BitwiseXor(u, u))));
         Assert.Equal(0, AllNodes(Session(InBody(u, (outer, carried) => OnnxOp.BitwiseXor(outer, carried)), KernelWorkaroundRegistry.OnnxRuntime)).Count(n => n.OpType == MAX));
     }

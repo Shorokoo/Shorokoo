@@ -8,19 +8,18 @@ using static OpCodes;
 
 /// <summary>
 /// A bitwise call — <c>BitwiseAnd</c>, <c>BitwiseOr</c>, <c>BitwiseXor</c>, <c>BitwiseNot</c> or
-/// <c>BitShift</c> — or an <c>Equal</c> of uint32 or uint64 values, inside a loop or branch body,
-/// over an int32, int64, uint32 or uint64 value the body did not compute: one from an enclosing
-/// scope, or one of the body's own inputs, such as a loop-carried value.
+/// <c>BitShift</c> — inside a loop or branch body, over an int32, int64, uint32 or uint64 value the
+/// body did not compute: one from an enclosing scope, or one of the body's own inputs, such as a
+/// loop-carried value.
 ///
-/// <para>ONNX Runtime's CUDA execution provider has no kernel for the bitwise operators, nor for an
-/// <c>Equal</c> of unsigned values, so it runs such a call on the CPU and copies its operands off
-/// the card. Inside a body, the copy of a
-/// value the body did not compute is not ordered after whatever wrote it: now and then the CPU
-/// kernel reads the host buffer before the copy has filled it, and the call computes from what that
-/// memory held before. Measured on ONNX Runtime 1.26, a keyed draw's chunk loop came out wrong in
-/// about one run in a hundred, and a model initialized from one seed on the card came out different
-/// from build to build. The same copy of a value the body computed itself is ordered, and so is a
-/// value that is already in host memory when the body starts.</para>
+/// <para>ONNX Runtime's CUDA execution provider has no kernel for the bitwise operators, so it runs
+/// such a call on the CPU and copies its operands off the card. Inside a body, the copy of a value
+/// the body did not compute is not ordered after whatever wrote it: now and then the CPU kernel
+/// reads the host buffer before the copy has filled it, and the call computes from what that memory
+/// held before. Measured, a keyed draw's chunk loop comes out wrong in a few runs in a thousand,
+/// and a model initialized from one seed on the card comes out different from build to build. The
+/// same copy of a value the body computed itself is ordered, and so is a value that is already in
+/// host memory when the body starts.</para>
 ///
 /// <para>So each such operand is first taken through <c>Max(v, v)</c>, which is <c>v</c>, has a CUDA
 /// kernel for these four types, and is computed inside the body: the copy the CPU call needs is
@@ -35,11 +34,10 @@ using static OpCodes;
 internal sealed class CudaHostFallbackBodyInputWorkaround : KernelWorkaround
 {
     public override IReadOnlySet<string> OpCodes { get; } =
-        new HashSet<string>([BITWISE_AND, BITWISE_OR, BITWISE_XOR, BITWISE_NOT, BIT_SHIFT, EQUAL], StringComparer.Ordinal);
+        new HashSet<string>([BITWISE_AND, BITWISE_OR, BITWISE_XOR, BITWISE_NOT, BIT_SHIFT], StringComparer.Ordinal);
 
     public override bool Applies(WorkaroundSite site)
-        => (site.OpCode != EQUAL || Unsigned(site.DTypeOf(0)))
-        && Enumerable.Range(0, site.InputCount).Any(slot => Taken(site, slot));
+        => Enumerable.Range(0, site.InputCount).Any(slot => Taken(site, slot));
 
     public override Variable?[] Rewrite(WorkaroundSite site, Variable?[] inputs)
     {
@@ -50,7 +48,6 @@ internal sealed class CudaHostFallbackBodyInputWorkaround : KernelWorkaround
             BITWISE_OR => BitwiseOr(operands[0]!, operands[1]!),
             BITWISE_XOR => BitwiseXor(operands[0]!, operands[1]!),
             BITWISE_NOT => BitwiseNot(operands[0]!),
-            EQUAL => Equal(operands[0]!, operands[1]!),
             _ => BitShift(operands[0]!, operands[1]!,
                 site.Attributes.IsAttributeDefined(OnnxOpAttributeNames.AttrDirection)
                     ? site.Attributes.GetAttributeObj(OnnxOpAttributeNames.AttrDirection) switch
@@ -68,10 +65,6 @@ internal sealed class CudaHostFallbackBodyInputWorkaround : KernelWorkaround
         => site.IsPresent(slot) && site.IsFromOutsideBody(slot) && HasCudaMax(site.DTypeOf(slot));
 
     private static bool HasCudaMax(DType dtype)
-        => dtype.IsSameElementTypeAs(DType.Int32) || dtype.IsSameElementTypeAs(DType.Int64) || Unsigned(dtype);
-
-    /// <summary>The two types an <c>Equal</c> is rewritten over: those the CUDA provider runs on the
-    /// CPU. It has a kernel of its own for every other type <c>Equal</c> takes here.</summary>
-    private static bool Unsigned(DType dtype)
-        => dtype.IsSameElementTypeAs(DType.UInt32) || dtype.IsSameElementTypeAs(DType.UInt64);
+        => dtype.IsSameElementTypeAs(DType.Int32) || dtype.IsSameElementTypeAs(DType.Int64)
+        || dtype.IsSameElementTypeAs(DType.UInt32) || dtype.IsSameElementTypeAs(DType.UInt64);
 }

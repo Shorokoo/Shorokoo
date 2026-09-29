@@ -58,10 +58,8 @@ namespace Shorokoo.Tests.Utils
             if (n <= 30) return y.Reshape([Scalar((long)n)]);
             var proj = new float[p * n];
             for (int i = 0; i < n; i++) proj[(i % p) * n + i] = Weight(i);
-            // collapsed[c] = Σ_i W[c,i]·y[i], via broadcast-multiply + ReduceSum. Flatten with a
-            // free (-1) dim: a static-target reshape of a dynamic-shape output (e.g. GroupNorm's,
-            // restored via a live Shape node) used to crash ORT's ReshapeFusion (Shorokoo/Shorokoo#10;
-            // now composed away at ONNX prep) — the -1 form never triggered it and stays the cheaper shape.
+            // collapsed[c] = Σ_i W[c,i]·y[i], via broadcast-multiply + ReduceSum, over a flatten
+            // with a free (-1) dim.
             var w = Vector(proj).Reshape([Scalar((long)p), Scalar((long)n)]);   // [p, n]
             var yFlat = y.Reshape([Scalar(-1L)]);                                // [n], broadcasts to [p, n]
             return (w * yFlat).Reduce(ReduceKind.Sum, [Scalar(1L)], keepDims: false);  // [p]

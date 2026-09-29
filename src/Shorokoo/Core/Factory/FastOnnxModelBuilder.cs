@@ -870,8 +870,8 @@ namespace Shorokoo.Core.Factory
 
         /// <summary>
         /// Replaces deprecated Upsample nodes in the graph with equivalent Resize nodes.
-        /// Upsample was deprecated in ONNX opset 9 and is no longer accepted by ONNX Runtime
-        /// at opset 21. The mapping is:
+        /// Upsample is deprecated in ONNX, and ONNX Runtime does not accept it at opset 21. The
+        /// mapping is:
         ///   Upsample(X, scales, mode=M) -> Resize(X, roi="", scales, sizes="",
         ///                                         mode=M, coordinate_transformation_mode="asymmetric")
         /// </summary>
@@ -1586,8 +1586,8 @@ namespace Shorokoo.Core.Factory
             //   - after the lowerings above, so an operator one of THEM produces is still offered
             //     to this one, and so the attribute-tensor pass resolves its geometry against the
             //     graph as authored;
-            //   - before FastPrepForOnnx, whose reshape composition (the ORT ReshapeFusion
-            //     workaround) and close-input identity wrapping must see the decomposition's
+            //   - before FastPrepForOnnx, whose reshape composition (FastComposeContiguousReshapes)
+            //     and close-input identity wrapping must see the decomposition's
             //     nodes, not just the operator they replaced;
             //   - before FastStripCallStacks, because a decomposition is built through
             //     NodeBuilder, which captures a stack trace per node — left after the strip, the

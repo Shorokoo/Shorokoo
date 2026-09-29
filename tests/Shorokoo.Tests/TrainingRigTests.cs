@@ -214,6 +214,14 @@ public partial class TiedWeightMlp
     }
 }
 
+/// <summary>A hidden linear layer of sixteen units and a ReLU, then a linear layer of eight.</summary>
+[Module]
+public partial class TwoLayerMlp
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+        => Linear.Model(Scalar(8L), Scalar(true)).Call(Linear.Model(Scalar(16L), Scalar(true)).Call(x).Relu());
+}
+
 /// <summary>Two same-shaped parameters drawn from their own streams, the first scaling the input
 /// and the second offsetting it.</summary>
 [Module]
@@ -3535,6 +3543,25 @@ public class TrainingRigTrainingLoopCoverageTests
         for (int i = 0; i < 4; i++) run.Step(input.Shared(), target.Shared());
         Assert.Equal(4 * 56L, context.AliasedOutputs);
     }
+
+    private static TensorData Ramp(long rows, long columns)
+        => TensorData([rows, columns], [.. Enumerable.Range(0, (int)(rows * columns)).Select(i => i / 16f)]);
+
+    private static float[] TrainedAtBatchSizes(ComputationGraph model, long outputs, bool aliasing, params long[] batches)
+    {
+        using var context = new ComputeContext { OutputAliasing = aliasing };
+        var rig = TrainingRig.FromScratch(model, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            [Ramp(batches[0], 8L).CopyTo(ComputeContext.Host)], new SGDOptimizerHyperparameters { LearningRate = 0.01f }, runtimeContext: context);
+        var ckpt = rig.CreateInitialCheckpoint();
+        foreach (var batch in batches)
+            ckpt = rig.TrainStep(ckpt, rig.InputDef.FromOrderedData(Ramp(batch, 8L)), rig.TargetDef.FromOrderedData(Ramp(batch, outputs)));
+        return [.. FlattenStruct(ckpt.TrainableParams)];
+    }
+
+    [Fact]
+    public void TestAStepWritingItsStateInPlaceTrainsAtEveryBatchSizeCoverage()
+        => Assert.Equal(TrainedAtBatchSizes(TwoLayerMlp.ComputationGraph, 8L, aliasing: false, 2L, 3L, 5L),
+            TrainedAtBatchSizes(TwoLayerMlp.ComputationGraph, 8L, aliasing: true, 2L, 3L, 5L));
 
     private static (float[] Values, long Aliased) ResidentRun(ComputationGraph model, long outputs, bool aliasing)
     {

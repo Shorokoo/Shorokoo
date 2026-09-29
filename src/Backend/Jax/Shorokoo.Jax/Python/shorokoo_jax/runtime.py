@@ -343,7 +343,8 @@ def device_count(platform):
 def arena_statistics(device_name):
     """A device allocator's figures, in the order ArenaStatistics takes them: in use, the most it
     may hold, largest single allocation, peak in use, allocations, extensions (not recorded: 0),
-    shrinkages (0), reserves (0), held in all. None where the device keeps none."""
+    shrinkages (0), reserves (0), held in all, and in use again as what callers requested, since the
+    allocator does not report its rounding. None where the device keeps none."""
     if device_name == "cpu":
         return None
     stats = device_of(device_name).memory_stats() or {}
@@ -358,6 +359,7 @@ def arena_statistics(device_name):
         0,
         0,
         get("pool_bytes") or get("bytes_reserved") or get("bytes_in_use"),
+        get("bytes_in_use"),
     )
 
 

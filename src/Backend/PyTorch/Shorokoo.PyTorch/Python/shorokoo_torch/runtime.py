@@ -502,7 +502,8 @@ def _memory_fraction(index):
 def arena_statistics(device_name):
     """The CUDA caching allocator's figures for a device, in the order ArenaStatistics takes them
     after the limit: in use, largest single allocation (which torch does not record: 0), peak in
-    use, allocations, segments held, segments released, reserves (none: 0), reserved in all."""
+    use, allocations, segments held, segments released, reserves (none: 0), reserved in all, and
+    the bytes callers requested of what is in use, without the allocator's rounding."""
     device = torch.device(device_name)
     if device.type != "cuda":
         return None
@@ -517,4 +518,5 @@ def arena_statistics(device_name):
         get("segment.all.freed"),
         0,
         get("reserved_bytes.all.current"),
+        get("requested_bytes.all.current") or get("allocated_bytes.all.current"),
     )

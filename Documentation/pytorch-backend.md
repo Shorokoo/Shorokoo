@@ -235,7 +235,8 @@ so the per-session settings map only partly:
   before the backend starts.
 - `ReadArenaStatistics` reads `torch.cuda.memory_stats` for the whole device, not one session:
   `InUseBytes`, `MaxInUseBytes`, `TotalAllocatedBytes`, `AllocationCount`,
-  `ArenaExtensionCount` (segments held), `ArenaShrinkageCount` (segments released).
+  `ArenaExtensionCount` (segments held), `ArenaShrinkageCount` (segments released),
+  `RequestedInUseBytes` (the bytes requested, without the allocator's rounding).
   `LimitBytes` is the session's limit or -1; `MaxAllocSizeBytes` and `ReserveCount` are 0.
 - `ReadPinnedArenaStatistics` is null: there is no pinned host arena.
 

@@ -202,7 +202,7 @@ internal sealed class TorchSession : IShorokooSession
                 using var item = figures[index];
                 return item.As<long>();
             }
-            return new ArenaStatistics(At(0), _limitBytes ?? -1, At(1), At(2), At(3), At(4), At(5), At(6), At(7));
+            return new ArenaStatistics(At(0), _limitBytes ?? -1, At(1), At(2), At(3), At(4), At(5), At(6), At(7), At(8));
         }
     }
 

@@ -925,7 +925,7 @@ public class CoreUtilsCoverageTests
     /// still lands where it thinks it does. The hazard it guards is not a missing feature but a
     /// wrong one — a field that moved hands back some other pointer, which the binding then calls
     /// as a function — so it names every step: the internal type holding the one <c>OrtApi</c>, the
-    /// field on it, each entry point by name and type, and the nine figures a real session
+    /// field on it, each entry point by name and type, and the ten figures a real session
     /// allocator answers with. ORT's own default allocator implements none of them, which is the
     /// other half of why the allocator has to come from the session.
     /// </summary>
@@ -982,6 +982,8 @@ public class CoreUtilsCoverageTests
         Assert.True(after.AllocationCount > 0);
         Assert.True(after.TotalAllocatedBytes >= after.MaxInUseBytes);
         Assert.True(after.MaxAllocSizeBytes > 0);
+        Assert.InRange(after.RequestedInUseBytes, 0L, after.InUseBytes);
+        Assert.Equal(0L, before.RequestedInUseBytes);
         Assert.Null(compiled.ReadPinnedArenaStatistics());
 
         IShorokooSession unanswering = new RunSettingsRecorder();
@@ -1095,7 +1097,7 @@ public class CoreUtilsCoverageTests
     public void TestTheRecentRunRingIsBoundedWhileTheAggregatesStayExactOverEveryRun()
     {
         static ArenaStatistics Arena(long maxInUse, long allocs) =>
-            new(0, -1, 16, maxInUse, allocs, allocs, 0, 0, maxInUse * 2);
+            new(0, -1, 16, maxInUse, allocs, allocs, 0, 0, maxInUse * 2, 0);
 
         static RunStatistics Fold(int capacity, params long[] peaks)
         {

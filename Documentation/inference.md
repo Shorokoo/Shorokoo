@@ -932,14 +932,25 @@ for (int step = 0; step < steps; step++)
     run.Step(input.Shared(), target.Shared());   // read, so the next step can use them
     DeviceMemory.Sample();
 }
-Console.WriteLine($"peak {DeviceMemory.PeakUsedBytes / (1024 * 1024)} MiB");
+Console.WriteLine($"this process at its peak {DeviceMemory.PeakProcessBytes / (1024 * 1024)} MiB");
+Console.WriteLine($"the card at its peak {DeviceMemory.PeakUsedBytes / (1024 * 1024)} MiB");
 ```
 
-`Read()` returns a `DeviceMemoryReading` (`UsedBytes`, `FreeBytes`, `TotalBytes`); `Sample()`
-also folds it into `PeakUsedBytes`; `ResetPeak()` restarts the peak.
+`Read()` returns a `DeviceMemoryReading` (`UsedBytes`, `FreeBytes`, `TotalBytes`,
+`ProcessBytes`); `Sample()` also folds it into `PeakUsedBytes` and `PeakProcessBytes`;
+`ResetPeak()` restarts both.
 
-- The figures are the **device's**, including other processes.
-- `PeakUsedBytes` is the largest of your own `Sample()` calls; nothing samples on its own. A
+- `UsedBytes`, `FreeBytes` and `TotalBytes` are the **device's**, including other processes.
+- `ProcessBytes` is **this process's** share: everything it holds on the card — weights and
+  optimizer state, every session's arena, the CUDA context and its libraries' workspaces — and
+  nothing another process holds. `PeakProcessBytes` is therefore the one figure for "the most this
+  run held on the card". It is the figure Task Manager shows per process on Windows, and
+  `nvidia-smi` lists per process where it can.
+- `ProcessBytes` is read from DXGI for a Windows card driven by WDDM (a GeForce, or any card
+  driving a display), where `nvidia-smi` prints `[N/A]` for it, and from NVML everywhere else. It
+  is `null` where neither attributes memory to this process: off Windows without NVML, or in a
+  container whose process ids NVML does not see.
+- The peaks are the largest of your own `Sample()` calls; nothing samples on its own. A
   sample costs about a microsecond, so one per step is cheap — and, unlike an external poller
   such as `nvidia-smi`, cannot miss the step.
 - With no CUDA runtime both return `null`, so the calls can stay in CPU code.
@@ -1155,7 +1166,7 @@ second read returns the same trace. `Nodes` is in execution order; inserted `Mem
 
 | what | where | cost | null / none when |
 |---|---|---|---|
-| `DeviceMemory.Read()` | static, the whole card | a microsecond | no CUDA runtime |
+| `DeviceMemory.Read()` | static, the whole card, and this process's share of it | a few microseconds | no CUDA runtime; `ProcessBytes` alone is null where the driver attributes no memory to this process |
 | `CompiledGraph.ReadArenaStatistics()` | one session's allocator | a call into the backend | the backend reports no arena |
 | `CompiledGraph.ReadPinnedArenaStatistics()` | one session's pinned host arena | a call into the backend | the backend stages nothing (every CPU one) |
 | `ComputeContext.ReadDeviceMemoryUse()` | what the context holds in its memory, against its budget | a walk over its list | never null; `LimitBytes` is null with no budget in force |

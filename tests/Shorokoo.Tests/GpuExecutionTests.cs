@@ -679,11 +679,31 @@ public class GpuExecutionTests
             var grew = DeviceMemory.PeakUsedBytes - idle!.Value.UsedBytes;
             Assert.True(grew >= stats.PeakBytes);
             Assert.True(DeviceMemory.PeakUsedBytes < idle.Value.TotalBytes);
+            Assert.True(DeviceMemory.PeakProcessBytes - idle.Value.ProcessBytes >= stats.PeakBytes);
+            Assert.True(DeviceMemory.PeakProcessBytes <= DeviceMemory.PeakUsedBytes);
         }
         finally
         {
             DeviceMemory.ResetPeak();
         }
+    }
+
+    /// <summary>
+    /// The card's figure for this process alone, which #406 asked for: a gigabyte held on the card
+    /// is in it, and it is a part of what the card reports across every process.
+    /// </summary>
+    [CudaFact]
+    public void CudaProvider_TheProcessFigureHoldsWhatThisProcessPutOnTheCard()
+    {
+        using var ctx = new ComputeContext();
+        Assert.True(DeviceMemory.Read()!.Value.ProcessBytes > 0);
+
+        var held = ctx.AllocateUninitialized<float32>(new Shape(256L << 20));
+        var reading = DeviceMemory.Read()!.Value;
+        held.Delete();
+
+        Assert.True(reading.ProcessBytes >= 1L << 30);
+        Assert.True(reading.ProcessBytes <= reading.UsedBytes);
     }
 
     /// <summary>

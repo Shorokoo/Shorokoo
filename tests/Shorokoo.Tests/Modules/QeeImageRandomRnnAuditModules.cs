@@ -585,6 +585,86 @@ namespace Shorokoo.Tests.Modules
         }
     }
 
+    /// <summary>An int64 Range of runtime start, limit and delta equals <c>expected</c>.</summary>
+    [Module]
+    public partial class Int64RangeCheck
+    {
+        public static Scalar<bit> Inline(Scalar<int64> start, Scalar<int64> limit, Scalar<int64> delta, Vector<int64> expected)
+            => Mismatches((Tensor<int64>)OnnxOp.Range(start, limit, delta), expected) < Scalar(1L);
+
+        internal static Scalar<int64> Mismatches(Tensor<int64> range, Vector<int64> expected)
+            => Differs((Tensor<int64>)OnnxOp.Shape(range), (Tensor<int64>)OnnxOp.Shape(expected))
+                + Differs((Tensor<int64>)OnnxOp.Concat([range, expected], 0), (Tensor<int64>)OnnxOp.Concat([expected, range], 0));
+
+        private static Scalar<int64> Differs(Tensor<int64> actual, Tensor<int64> expected)
+            => ((Tensor<bit>)OnnxOp.Not(actual == expected)).Cast<int64>().Reduce(ReduceKind.Sum).Scalar();
+    }
+
+    /// <summary>An int32 Range of runtime start, limit and delta equals <c>expected</c>.</summary>
+    [Module]
+    public partial class Int32RangeCheck
+    {
+        public static Scalar<bit> Inline(Scalar<int32> start, Scalar<int32> limit, Scalar<int32> delta, Vector<int32> expected)
+            => Int64RangeCheck.Mismatches(((Tensor<int32>)OnnxOp.Range(start, limit, delta)).Cast<int64>(), expected.Cast<int64>()) < Scalar(1L);
+    }
+
+    /// <summary>Int32 Ranges of runtime start and limit, stepping by a constant 1 up to <c>limit</c>
+    /// and by a constant -1 back down to <c>start</c>.</summary>
+    [Module]
+    public partial class Int32UnitStepRangeCheck
+    {
+        public static Scalar<bit> Inline(Scalar<int32> start, Scalar<int32> limit, Vector<int32> up, Vector<int32> down)
+            => Int64RangeCheck.Mismatches(((Tensor<int32>)OnnxOp.Range(start, limit, Scalar(1))).Cast<int64>(), up.Cast<int64>())
+                + Int64RangeCheck.Mismatches(((Tensor<int32>)OnnxOp.Range(limit, start, Scalar(-1))).Cast<int64>(), down.Cast<int64>())
+                < Scalar(1L);
+    }
+
+    /// <summary>Int64 Ranges of runtime start and limit, stepping by a constant 1 up to <c>limit</c>
+    /// and by a constant -1 back down to <c>start</c>.</summary>
+    [Module]
+    public partial class Int64UnitStepRangeCheck
+    {
+        public static Scalar<bit> Inline(Scalar<int64> start, Scalar<int64> limit, Vector<int64> up, Vector<int64> down)
+            => Int64RangeCheck.Mismatches((Tensor<int64>)OnnxOp.Range(start, limit, Scalar(1L)), up)
+                + Int64RangeCheck.Mismatches((Tensor<int64>)OnnxOp.Range(limit, start, Scalar(-1L)), down)
+                < Scalar(1L);
+    }
+
+    /// <summary>An int64 Range from a constant 2^62 to a runtime <c>limit</c> by a constant 1.</summary>
+    [Module]
+    public partial class Int64RangeFromAConstantStartCheck
+    {
+        public static Scalar<bit> Inline(Scalar<int64> limit, Vector<int64> expected)
+            => Int64RangeCheck.Mismatches((Tensor<int64>)OnnxOp.Range(Scalar(1L << 62), limit, Scalar(1L)), expected) < Scalar(1L);
+    }
+
+    /// <summary>Int64 and int32 Ranges of constants, spanning beyond 2^53, beyond their type and
+    /// within both, stepping by more than 1 wherever the span wraps.</summary>
+    [Module]
+    public partial class IntegerRangeOfConstantsCheck
+    {
+        public static Scalar<bit> Inline()
+            => Int64RangeCheck.Mismatches((Tensor<int64>)OnnxOp.Range(Scalar(0L), Scalar((1L << 62) + 1L), Scalar(1L << 61)), Vector(0L, 1L << 61, 1L << 62))
+                + Int64RangeCheck.Mismatches((Tensor<int64>)OnnxOp.Range(Scalar(long.MinValue), Scalar(long.MaxValue), Scalar(1L << 62)), Vector(long.MinValue, -(1L << 62), 0L, 1L << 62))
+                + Int64RangeCheck.Mismatches((Tensor<int64>)OnnxOp.Range(Scalar(0L), Scalar(-7L), Scalar(-2L)), Vector(0L, -2L, -4L, -6L))
+                + Int64RangeCheck.Mismatches(((Tensor<int32>)OnnxOp.Range(Scalar(int.MinValue), Scalar(int.MaxValue), Scalar(1 << 30))).Cast<int64>(), Vector(int.MinValue, -(1L << 30), 0L, 1L << 30))
+                + Int64RangeCheck.Mismatches(((Tensor<int32>)OnnxOp.Range(Scalar(0), Scalar(-7), Scalar(-2))).Cast<int64>(), Vector(0L, -2L, -4L, -6L))
+                < Scalar(1L);
+    }
+
+    /// <summary>Int64 and int32 Ranges of constants stepping by 1 or -1 across a span that wraps
+    /// their type, each empty.</summary>
+    [Module]
+    public partial class UnitStepRangeOfConstantsWrappingItsTypeCheck
+    {
+        public static Scalar<bit> Inline()
+            => Int64RangeCheck.Mismatches((Tensor<int64>)OnnxOp.Range(Scalar(long.MaxValue - 2L), Scalar(long.MinValue + 2L), Scalar(1L)), EmptyVector<int64>())
+                + Int64RangeCheck.Mismatches((Tensor<int64>)OnnxOp.Range(Scalar(long.MaxValue), Scalar(long.MinValue), Scalar(1L)), EmptyVector<int64>())
+                + Int64RangeCheck.Mismatches((Tensor<int64>)OnnxOp.Range(Scalar(long.MinValue), Scalar(long.MaxValue), Scalar(-1L)), EmptyVector<int64>())
+                + Int64RangeCheck.Mismatches(((Tensor<int32>)OnnxOp.Range(Scalar(int.MaxValue), Scalar(int.MinValue), Scalar(1))).Cast<int64>(), EmptyVector<int64>())
+                < Scalar(1L);
+    }
+
     /// <summary>Range (count = max(ceil((limit-start)/delta), 0) — int, negative-delta,
     /// empty, and float variants, value-checked) and ConstantOfShape (the value attribute
     /// defines dtype + fill; int64 and bool fills here, float32-zero default covered by

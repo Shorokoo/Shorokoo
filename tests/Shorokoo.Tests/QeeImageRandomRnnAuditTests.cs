@@ -110,6 +110,88 @@ public class QeeImageRandomRnnAuditTests
     }
 
     [Fact]
+    public void TestAnInt64RangeCountsItsElementsExactly() => Int64RangesCountTheirElementsExactly(ComputeContext.Default);
+
+    internal static void Int64RangesCountTheirElementsExactly(ComputeContext c)
+    {
+        Assert.True(Ranges(c, 0L, (1L << 62) + 1L, 1L << 61, 0L, 1L << 61, 1L << 62));
+        Assert.True(Ranges(c, 0L, -(1L << 62) - 1L, -(1L << 61), 0L, -(1L << 61), -(1L << 62)));
+        Assert.True(Ranges(c, long.MinValue, long.MaxValue, 1L << 62, long.MinValue, -(1L << 62), 0L, 1L << 62));
+        Assert.True(Ranges(c, long.MaxValue, long.MinValue, long.MinValue, long.MaxValue, -1L));
+        Assert.True(Ranges(c, 9007199254740993L, 9007199254740995L, 1L, 9007199254740993L, 9007199254740994L));
+        Assert.True(Ranges(c, 0L, 7L, 2L, 0L, 2L, 4L, 6L));
+        Assert.True(Ranges(c, 5L, 5L, 1L));
+        Assert.True(Ranges(c, 0L, 1L << 62, -1L));
+        Assert.True(Ranges(c, 1L << 62, long.MinValue, 1L << 61));
+    }
+
+    [Fact]
+    public void TestAnInt64RangeWithAUnitStepCountsItsElementsExactly() => Int64UnitStepRangesCountTheirElementsExactly(ComputeContext.Default);
+
+    [Fact]
+    public void TestAnIntegerRangeOfConstantsCountsItsElementsExactly() => Assert.True(AutoTest.AdvancedTestGraph<IntegerRangeOfConstantsCheck>([], []));
+
+    internal static void Int64UnitStepRangesCountTheirElementsExactly(ComputeContext c)
+    {
+        Assert.True(UnitRanges(c, -3L, 2L, [-3L, -2L, -1L, 0L, 1L], [2L, 1L, 0L, -1L, -2L]));
+        Assert.True(FromAConstantStart(c, (1L << 62) + 2L, 1L << 62, (1L << 62) + 1L));
+        Assert.ThrowsAny<Exception>(() => Ranges(c, long.MinValue, long.MaxValue, 1L));
+    }
+
+    internal static void UnitStepRangesWhoseSpanWrapsTheirTypeAreEmpty(ComputeContext c)
+    {
+        Assert.True(UnitRanges(c, long.MaxValue - 2L, long.MinValue + 2L, [], []));
+        Assert.True(UnitRanges(c, long.MaxValue, long.MinValue, [], []));
+        Assert.True(FromAConstantStart(c, long.MinValue));
+        Assert.True(UnitRanges32(c, int.MaxValue - 2, int.MinValue + 2, [], []));
+        Assert.True(UnitRanges32(c, int.MaxValue, int.MinValue, [], []));
+        Assert.True(AutoTest.AdvancedTestGraph<UnitStepRangeOfConstantsWrappingItsTypeCheck>([], [], context: c));
+    }
+
+    [Fact]
+    public void TestTheQuickEngineGivesNoShapeToARangeOfMoreElementsThanAnInt64Counts()
+    {
+        var (s, l) = (InputScalar<int64>("s"), InputScalar<int64>("l"));
+        var g = new InternalComputationGraph([s, l], [OnnxOp.Range(s, l, Scalar(1L))]);
+        Shape? Count(long start, long limit) => ((RuntimeTensor)new QuickExecutionEngine().Run(g, TensorData(DType.Int64, [], start), TensorData(DType.Int64, [], limit))[g.Outputs[0]]).Shape;
+        Assert.Null(Count(long.MinValue, long.MaxValue));
+        Assert.Null(Count(-2L, long.MaxValue));
+        Assert.Equal([long.MaxValue], Count(-1L, long.MaxValue - 1L)!.Dims);
+    }
+
+    [Fact]
+    public void TestAnInt32RangeCountsItsElementsExactly() => Int32RangesCountTheirElementsExactly(ComputeContext.Default);
+
+    internal static void Int32RangesCountTheirElementsExactly(ComputeContext c)
+    {
+        Assert.True(Ranges32(c, int.MinValue, int.MaxValue, 1 << 30, int.MinValue, -(1 << 30), 0, 1 << 30));
+        Assert.True(Ranges32(c, int.MaxValue, int.MinValue, int.MinValue, int.MaxValue, -1));
+        Assert.True(Ranges32(c, int.MaxValue - 2, int.MinValue + 2, 1));
+        Assert.True(Ranges32(c, int.MinValue, int.MaxValue, -1));
+        Assert.True(Ranges32(c, 5, -5, -3, 5, 2, -1, -4));
+        Assert.True(UnitRanges32(c, -3, 2, [-3, -2, -1, 0, 1], [2, 1, 0, -1, -2]));
+    }
+
+    private static bool Ranges32(ComputeContext c, int start, int limit, int delta, params int[] expected)
+        => AutoTest.AdvancedTestGraph<Int32RangeCheck>([],
+            [I32([], start), I32([], limit), I32([], delta), I32([expected.Length], expected)], context: c);
+
+    private static bool UnitRanges32(ComputeContext c, int start, int limit, int[] up, int[] down)
+        => AutoTest.AdvancedTestGraph<Int32UnitStepRangeCheck>([],
+            [I32([], start), I32([], limit), I32([up.Length], up), I32([down.Length], down)], context: c);
+
+    private static bool UnitRanges(ComputeContext c, long start, long limit, long[] up, long[] down)
+        => AutoTest.AdvancedTestGraph<Int64UnitStepRangeCheck>([],
+            [I64([], start), I64([], limit), I64([up.Length], up), I64([down.Length], down)], context: c);
+
+    private static bool FromAConstantStart(ComputeContext c, long limit, params long[] expected)
+        => AutoTest.AdvancedTestGraph<Int64RangeFromAConstantStartCheck>([], [I64([], limit), I64([expected.Length], expected)], context: c);
+
+    private static bool Ranges(ComputeContext c, long start, long limit, long delta, params long[] expected)
+        => AutoTest.AdvancedTestGraph<Int64RangeCheck>([],
+            [I64([], start), I64([], limit), I64([], delta), I64([expected.Length], expected)], context: c);
+
+    [Fact]
     public void TestQeeRandomGeneratorAndRecurrentShapeAudits()
     {
         Assert.True(QeeAudit.CheckWith<QeeRandomFamilyAuditCheck>(

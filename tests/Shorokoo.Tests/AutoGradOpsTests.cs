@@ -1,4 +1,6 @@
 using static Shorokoo.Tests.AutoGradOpsRunners;
+using Shorokoo.PyTorch.Cpu;
+using Shorokoo.Runtime;
 
 namespace Shorokoo.Tests;
 
@@ -413,13 +415,19 @@ public class AutoGradMatrixPoolingAndConvOpsCoverageTests
         Run<AutoGradMatMulUnknownRankRank4NoRowsCheck>(2f);
     }
 
-    // ONNX Runtime's batched FusedMatMul leaves its output unwritten when the contraction dim is 0:
-    // https://github.com/Shorokoo/Shorokoo/issues/451
-    [Fact(Skip = "ONNX Runtime batched FusedMatMul with a zero contraction dim: Shorokoo/Shorokoo#451")]
-    public void TestAutoGradBatchedMatMulWithNoRowsGradientsOnOrt()
+    [Fact]
+    public void TestAutoGradBatchedMatMulWithNoRowsGradientsOnOrtWithConcreteShapes()
     {
-        Run<AutoGradMatMulKnownRankNoRowsCheck>(2f);
-        Run<AutoGradMatMulUnknownRankNoRowsCheck>(2f);
+        Assert.True(AutoTest.AllTrueWithConcreteShapes(AutoGradMatMulKnownRankNoRowsCheck.ComputationGraph, TensorData(DType.Float32, [], 2f)));
+        Assert.True(AutoTest.AllTrueWithConcreteShapes(AutoGradMatMulUnknownRankNoRowsCheck.ComputationGraph, TensorData(DType.Float32, [], 2f)));
+    }
+
+    [Fact]
+    public void TestAutoGradBatchedMatMulWithNoRowsGradientsOnTorchAndTheQuickEngine()
+    {
+        using var torch = new ComputeContext(new TorchCpuBackend());
+        Assert.True(AutoTest.AdvancedTestGraph<AutoGradMatMulKnownRankNoRowsCheck>([], [TensorData(DType.Float32, [], 2f)], context: torch));
+        Assert.True(AutoTest.AdvancedTestGraph<AutoGradMatMulUnknownRankNoRowsCheck>([], [TensorData(DType.Float32, [], 2f)], context: torch));
     }
 
     [Fact]

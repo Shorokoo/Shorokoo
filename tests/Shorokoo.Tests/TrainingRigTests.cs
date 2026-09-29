@@ -2362,6 +2362,22 @@ public class TrainingRigTrainingLoopCoverageTests
             NNLibraryTrainingFixtures.MakeBatch("targets", "Target", TensorData([2L], 0f, 0f))).Loss!.Value;
     }
 
+    private static float LossOfAPoolStep(ComputationGraph modelGraph, long[] output)
+    {
+        var x = TensorData(DType.Float32, [2L, 4L, 5L, 6L], [.. Enumerable.Repeat((object)3f, 240)]);
+        var rig = TrainingRig.FromScratch(modelGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            [new TensorDataModelParam("input", ModelParamType.InputParam, x)], 0.1f);
+        return rig.TrainStep(rig.CreateInitialCheckpoint(), NNLibraryTrainingFixtures.MakeBatch("input", "ModelInput", x),
+            NNLibraryTrainingFixtures.MakeBatch("targets", "Target", TensorData(DType.Float32, output, [.. Enumerable.Repeat((object)0f, (int)output.Aggregate(1L, (a, b) => a * b))]))).Loss!.Value;
+    }
+
+    [Fact]
+    public void TestAModelWithASamePoolStridedPastItsKernelTrains()
+    {
+        Assert.Equal(9f, LossOfAPoolStep(SameStridedMaxPoolModel.ComputationGraph, [2L, 4L, 3L, 3L]), 1e-4f);
+        Assert.Equal(9f, LossOfAPoolStep(SameStridedAveragePoolModel.ComputationGraph, [2L, 4L, 2L, 3L]), 1e-4f);
+    }
+
     // A read placed after Globals.StateUpdate must still see the value fed in for this step: the
     // link is a graph-level registration, not an assignment. Guards the semantics an attempt at
     // Shorokoo/Shorokoo#306 broke while the whole suite stayed green.

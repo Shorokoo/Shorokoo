@@ -104,6 +104,35 @@ public class JaxBackendCoverageTests
     public void TestWhereSelectsOnEveryIntegerTypeAndBoolOnJax() => WhereSelectsOnEveryIntegerTypeAndBool(new ComputeContext(Jax));
 
     [Fact]
+    public void TestAConstantPadFillsWithItsValueExactlyOnEveryTypeOnJax() => ConstantPadsFillWithTheirValueExactly(Jax);
+
+    [Fact]
+    public void TestAnIntegerRangeCountsItsElementsExactlyOnJax()
+    {
+        Assert.Equal([0L, 1L << 61, 1L << 62], Ranged(0L, (1L << 62) + 1L, 1L << 61));
+        Assert.Equal([0L, -(1L << 61), -(1L << 62)], Ranged(0L, -(1L << 62) - 1L, -(1L << 61)));
+        Assert.Equal([int.MinValue, -(1L << 30), 0L, 1L << 30], Ranged(int.MinValue, int.MaxValue, 1L << 30, 6));
+        Assert.Equal([], Ranged(int.MaxValue, int.MinValue, 1L, 6));
+        Assert.Equal([int.MaxValue, -1L], Ranged(int.MaxValue, int.MinValue, int.MinValue, 6));
+    }
+
+    private static long[] Ranged(long start, long limit, long delta, int type = 7)
+    {
+        var graph = PyTorchBackendCoverageTests.Graph([], ["y"],
+            Node("Constant", [], ["start"], attributes: Tensor("value", 7, [], [start])),
+            Node("Constant", [], ["limit"], attributes: Tensor("value", 7, [], [limit])),
+            Node("Constant", [], ["delta"], attributes: Tensor("value", 7, [], [delta])),
+            Node("Cast", ["start"], ["s"], attributes: Int("to", type)),
+            Node("Cast", ["limit"], ["l"], attributes: Int("to", type)),
+            Node("Cast", ["delta"], ["d"], attributes: Int("to", type)),
+            Node("Range", ["s", "l", "d"], ["r"]),
+            Node("Cast", ["r"], ["y"], attributes: Int("to", 7)));
+        using var session = Jax.CreateSession(Serialize(graph), default, default, DeviceMemorySettings.Default);
+        using var y = session.Run(new Dictionary<string, IShorokooTensorValue>(), ["y"], RunSettings.Default)[0];
+        return y.GetTensorDataAsSpan<long>().ToArray();
+    }
+
+    [Fact]
     public void TestANegativeZeroInAConstantEqualToAnIotaLosesItsSignOnJaxAndKeepsItOnOnnxRuntime()
     {
         Assert.True(AutoTest.AdvancedTestGraph<NegativeZeroInAnIotaConstantReciprocalSigns>([], [QeeAudit.Bits([2L], true, true)],

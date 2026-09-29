@@ -53,7 +53,7 @@ order they apply.
 | Abs | ✅ | ✅ | ✅ |
 | Acos | ✅ | ✅ | ✅ |
 | Acosh | ✅ | ✅ | ✅ |
-| Add | ✅ | ✅ | ✅ |
+| Add | ✅ [16] | ✅ | ✅ |
 | Asin | ✅ | ✅ | ✅ |
 | Asinh | ✅ | ✅ | ✅ |
 | Atan | ✅ | ✅ | ✅ |
@@ -68,7 +68,7 @@ order they apply.
 | Cosh | ✅ | ✅ | ✅ |
 | CumProd | ❌ [1] | ✅ | ✅ |
 | CumSum | ✅ | ✅ | ✅ |
-| Div | ✅ | ✅ | ✅ |
+| Div | ✅ [16] | ✅ | ✅ |
 | Elu | ✅ | ✅ | ✅ |
 | Erf | ✅ | 🟡 [6] | ✅ |
 | Exp | ✅ | ✅ | ✅ |
@@ -85,7 +85,7 @@ order they apply.
 | Min | ✅ | ✅ | ✅ [9] |
 | Mish | ✅ | ✅ | ✅ |
 | Mod | ✅ | ✅ | ✅ [10] |
-| Mul | ✅ | ✅ | ✅ |
+| Mul | ✅ [16] | ✅ | ✅ |
 | Neg | ✅ | ✅ | ✅ |
 | PRelu | 🟡 [11] | ✅ | ✅ |
 | Pow | 🟡 [12] | ✅ | ✅ [13] |
@@ -102,7 +102,7 @@ order they apply.
 | Softplus | ✅ | ✅ | ✅ |
 | Softsign | ✅ | ✅ | ✅ |
 | Sqrt | ✅ | ✅ | ✅ |
-| Sub | ✅ | ✅ | ✅ |
+| Sub | ✅ [16] | ✅ | ✅ |
 | Sum | ✅ | ✅ | ✅ |
 | Swish | ✅ [15] | ✅ | ✅ |
 | Tan | ✅ | ✅ | ✅ |
@@ -131,6 +131,15 @@ order they apply.
 14. Float tensors only; the spec also allows signed integers since opset 14.
 15. Lowers inline to `Mul`/`Sigmoid` (`y = x * sigmoid(alpha * x)`), so it runs on
     any execution provider; ONNX Runtime 1.26 has no `Swish` kernel.
+16. ONNX Runtime's graph optimization removes an `Add` or `Mul` with an empty
+    constant operand, and a `Sub` or `Div` with an empty constant right operand,
+    giving the other operand where the spec gives the empty broadcast result. Its
+    backend rewrites such a call when it builds a session, when the operand is a
+    `Constant` of the model and the other operand is not: the empty operand is
+    rebuilt from the other one, as a value ONNX Runtime does not compute when it
+    builds the session. Two `Constant` operands, and an empty operand ONNX
+    Runtime computes from constants when it builds the session, are left as
+    they are: accepted as ONNX Runtime's behaviour ([#454](https://github.com/Shorokoo/Shorokoo/issues/454)).
 
 ## Comparisons & logic
 
@@ -220,20 +229,17 @@ shape and type.
      otherwise ([#422](https://github.com/Shorokoo/Shorokoo/issues/422)).
    - `noop_with_empty_axes` set with no axes, or an empty axes tensor: ONNX Runtime
      reduces every axis of an empty input where the output is that empty input.
-     When the session's model states every input's dimensions, the call becomes an
-     `If` on the input and the axes being empty, each counted as the product of its
-     shape, keeping the plain call wherever the input is not empty. ONNX Runtime
-     folds the `If` away when it builds the session wherever those shapes follow
-     from the stated dimensions; where a shape depends on the data, the `If` runs
-     with the session. Otherwise the call keeps one reduction of the same data and
-     axes with `keepdims` 0, the reduced axes put back by an `Unsqueeze`, and an
-     empty input with empty axes is viewed with a trailing axis of one that alone
-     is reduced — no branch and no copy ([#409](https://github.com/Shorokoo/Shorokoo/issues/409)).
+     The call keeps one reduction of the same data and axes with `keepdims` 0, the
+     reduced axes put back by an `Unsqueeze`, and an empty input with empty axes is
+     viewed with a trailing axis of one that alone is reduced — no branch and no
+     copy ([#409](https://github.com/Shorokoo/Shorokoo/issues/409)).
    - A float16 `ReduceSumSquare`, `ReduceL1` or `ReduceLogSum` with no axes input:
      ONNX Runtime's kernel crashes the process on an empty input. The call becomes
      an `If` on the input's element count, the product of its shape, that reduces
-     an empty input in float32 and casts the result back; ONNX Runtime folds it as
-     above ([#411](https://github.com/Shorokoo/Shorokoo/issues/411)).
+     an empty input in float32 and casts the result back. ONNX Runtime folds the
+     `If` away when it builds the session wherever that shape follows from the
+     stated input dimensions; where it depends on the data, the `If` runs with the
+     session ([#411](https://github.com/Shorokoo/Shorokoo/issues/411)).
    - An integer or boolean `ReduceMax`/`ReduceMin`: ONNX Runtime gives an empty
      group 0 for every integer type, and throws when a reduced axis of a `bool`
      input has extent 0. A `bool` call becomes a uint8 `ReduceMax` of the input
@@ -335,6 +341,25 @@ shape and type.
     removes the `Range` although it is an output, and reading the model's outputs
     throws `UnsupportedDTypeException` (`OU002`). Accepted as ONNX Runtime's
     behaviour ([#432](https://github.com/Shorokoo/Shorokoo/issues/432)).
+    An int64 or int32 `Range` counts its elements exactly on every backend, a span
+    `limit − start` beyond 2^53 or beyond its type included, except as below.
+    ONNX Runtime's kernel takes `limit − start` in the input type, which wraps
+    beyond it, and computes the count in double precision, so on ONNX Runtime an
+    int64 `Range` is rewritten to count in uint64 and scale a `Range(0, count, 1)`
+    by `delta`, refusing a count no tensor holds, and an int32 `Range` is rewritten
+    the same way on its inputs cast to int64, its elements cast back. Two forms are
+    left as written. One whose three inputs are `Constant`s spanning less than
+    2^53 for int64, or within int32 for int32, the kernel counts exactly. One whose
+    `delta` is a `Constant` 1 or −1, whatever its `start` and `limit`, such as
+    `Range(0, n, 1)` or `Range(s, s + n, 1)`, so that a position or index `Range`
+    pays nothing: the kernel counts it exactly for a span below 2^53, and for a
+    larger span that does not wrap gives no elements or refuses the call, as the
+    spec's count is 0 or one no tensor holds. Where its span wraps its type, ONNX
+    Runtime gives the elements of the wrapped difference — `Range(long.MaxValue −
+    2, long.MinValue + 2, 1)` gives five where the spec gives none — or refuses
+    the call (`Tensor storage size overflowed`): accepted as ONNX Runtime's
+    behaviour ([#447](https://github.com/Shorokoo/Shorokoo/issues/447),
+    [#450](https://github.com/Shorokoo/Shorokoo/issues/450)).
 
 ## Convolution & pooling
 
@@ -370,7 +395,8 @@ shape and type.
    - **Padding** (`AveragePool`, `LpPool`, `MaxPool`): `SAME_UPPER`/`SAME_LOWER`
      with dilation above 1 or stride above the kernel, and explicit pads as large
      as the kernel, are rebuilt as `Pad`, a pool ONNX Runtime computes as the spec
-     does, and `Slice` ([#379](https://github.com/Shorokoo/Shorokoo/issues/379), [#408](https://github.com/Shorokoo/Shorokoo/issues/408)).
+     does, and `Slice`, with no branch; where the stated input dimensions leave
+     nothing to crop, ONNX Runtime removes the `Slice` when it builds the session ([#379](https://github.com/Shorokoo/Shorokoo/issues/379), [#408](https://github.com/Shorokoo/Shorokoo/issues/408)).
    - **`MaxPool` indices** over int8 or uint8: ONNX Runtime gives a window holding
      only the type's lowest value a wrong index. When the `Indices` output is
      read, the pool is computed over the input cast to float32 and its values cast
@@ -447,7 +473,7 @@ shape and type.
 | Det | ✅ | 🟡 [4] | ✅ |
 | Einsum | ✅ | 🟡 [5] | 🟡 [6] |
 | Gemm | ✅ | ✅ | ✅ |
-| MatMul | ✅ | ✅ | ✅ |
+| MatMul | ✅ [7] | ✅ | ✅ |
 | RotaryEmbedding | ❌ [1] | 🟡 [2] | ❌ [3] |
 
 1. `OnnxOp.Attention`, `OnnxOp.AttentionWithKVCache`, `OnnxOp.RotaryEmbedding` and
@@ -462,6 +488,28 @@ shape and type.
    exotic equations give unknown shape); values not computed.
 6. Repeated subscripts within one operand (e.g. `"ii->i"`) are unsupported;
    ellipsis is supported.
+7. With a contraction dimension of 0 the product is zeros. ONNX Runtime's
+   kernel, and the `FusedMatMul` it fuses a `Transpose` into, compute a matrix
+   or vector times a matrix and a vector times a vector as the spec does; for
+   other operands with a dimension of 0 they can leave the output unwritten or
+   give it the left operand's batch dimension where that is 1 and the right
+   one's is not. Its backend corrects this when the session is built with every
+   input's dimensions stated, as a training step is for the shapes it is fed,
+   outside a loop body: the product goes through an `If` on either operand or
+   the product being empty, giving zeros of the product's shape where one is,
+   which ONNX Runtime folds away wherever the shapes follow from those
+   dimensions. Where an operand's shape is computed from the data (a
+   `NonZero`, a `TopK` with a computed `k`, a `Reshape` or `Expand` to a
+   computed shape) that `If` runs on every run, at the cost of a few shape
+   operations. A `Constant` operand with a dimension of 0 gives those zeros
+   whatever the dimensions. A session built without stated dimensions, and a
+   `MatMul` in a loop body, run the `MatMul` as written, and the kernel runs
+   on the empty operands in every session: it refuses an empty batch against
+   an operand with no batch dimension or one of 1, a `FusedMatMul` that moves
+   the batch axis of rank-3 operands can stop the process (SIGFPE), and a
+   wrongly shaped product can fail a run where ONNX Runtime reuses its memory.
+   Accepted as ONNX Runtime's behaviour
+   ([#451](https://github.com/Shorokoo/Shorokoo/issues/451)).
 
 ## Quantization
 
@@ -651,7 +699,7 @@ String operators are non-differentiable.
 
 | Op | Build & run | QEE | Gradient |
 |---|---|---|---|
-| If | ✅ | ✅ | ✅ [1] |
+| If | ✅ [5] | ✅ | ✅ [1] |
 | Loop | ✅ | 🟡 [2] | 🟡 [3] |
 | Scan | ❌ [4] | ❌ [4] | ❌ [4] |
 
@@ -663,6 +711,15 @@ String operators are non-differentiable.
 4. A model containing `Scan` is rejected at import; see
    [limitations.md](limitations.md). Use an explicit `Loop` (in Shorokoo,
    `LoopAPI` with `ctx.Scan`).
+5. ONNX Runtime fails to build a session in which it has folded an `If` to a
+   branch holding a constant of 128 bytes or more: the build throws
+   `OnnxRuntimeException` (`!utils::HasExternalDataInMemory(tensor_proto)`). It
+   folds an `If` whose condition it computes when it builds the session, from
+   constants and the input dimensions the session states. Accepted as ONNX
+   Runtime's behaviour; a branch value computed from the model's inputs, rather
+   than from constants alone, avoids it. The `If`s its backend's own rewrites
+   build never hold such a constant
+   ([#455](https://github.com/Shorokoo/Shorokoo/issues/455)).
 
 ## Shorokoo-specific operators
 

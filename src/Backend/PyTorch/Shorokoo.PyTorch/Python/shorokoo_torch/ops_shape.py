@@ -120,8 +120,11 @@ def constant_of_shape(shape, /, *, value=None):
 
 def range_(start, limit, delta):
     s, l, d = start.item(), limit.item(), delta.item()
-    count = max(math.ceil((l - s) / d), 0)
-    steps = torch.arange(count, device=_rt.device(), dtype=torch.float64 if start.dtype.is_floating_point else torch.int64)
+    floating = start.dtype.is_floating_point
+    # An integer count is an exact ceiling division; one through a double loses the count of a
+    # span beyond 2^53.
+    count = max(math.ceil((l - s) / d) if floating else -((s - l) // d), 0)
+    steps = torch.arange(count, device=_rt.device(), dtype=torch.float64 if floating else torch.int64)
     return (s + steps * d).to(start.dtype)
 
 
@@ -180,7 +183,9 @@ def pad(data, pads_in=None, constant_value=None, axes_in=None, /, *, mode="const
             inside = F.pad(torch.ones_like(result), widths, mode="constant", value=0.0) > 0
             return torch.where(inside, F.pad(result, widths, mode="constant"), constant_value.reshape(()))
         fill = constant_value.reshape(-1)[0].item() if constant_value is not None else value
-        return F.pad(result, widths, mode="constant", value=fill)
+        # constant_pad_nd takes the fill as a number of the tensor's own type: F.pad's is a double,
+        # which cannot hold every int64 or uint64, nor a complex number.
+        return torch.constant_pad_nd(result, widths, fill)
     for axis in range(rank):
         if before[axis] or after[axis]:
             index = _padding_indices(result.shape[axis], before[axis], after[axis], mode, result.device)

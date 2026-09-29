@@ -13,15 +13,14 @@ using static OpCodes;
 /// that over a nonempty input, and over an empty one reduce every axis instead; the result there is
 /// the input itself, an empty tensor of its shape and type.
 ///
-/// <para>When the model states every input's dimensions, the call becomes an <c>If</c> on the input
-/// and the axes both being empty, each counted as the product of its shape: the plain call where
-/// they are not, the input where they are. ONNX Runtime folds that <c>If</c> away when it builds
-/// the session wherever those shapes follow from the stated dimensions, and runs it where one
-/// depends on the data. Otherwise the
-/// call stays one call to the same kernel on the same data, with <c>keepdims</c> 0 and the axes it
-/// reduces put back by an <c>Unsqueeze</c>; only when the input and the axes are both empty is the
-/// input viewed with a trailing axis of one, and that axis alone reduced. That choice is shape
-/// arithmetic and the views share the tensor's memory, so there is no branch and no copy. A scalar
+/// <para>The call stays one call to the same kernel on the same data, with <c>keepdims</c> 0 and
+/// the axes it reduces put back by an <c>Unsqueeze</c>; only when the input and the axes are both
+/// empty is the input viewed with a trailing axis of one, and that axis alone reduced. That choice
+/// is shape arithmetic and the views share the tensor's memory, so there is no branch and no copy,
+/// and ONNX Runtime computes the choice when it builds the session wherever the shapes follow from
+/// the dimensions the model states. An <c>If</c> holding the call in a branch would fail to build
+/// some of the sessions in which ONNX Runtime folds it, among them one over an input it computes
+/// from those dimensions alone, such as a tensor of ones of an input's shape. A scalar
 /// input, never empty, and a <c>Constant</c> input that is not empty keep the call as it stands; an
 /// empty <c>Constant</c> input with no axes or constant empty ones becomes an <c>Identity</c>.</para>
 /// (Shorokoo/Shorokoo#409)
@@ -42,14 +41,6 @@ internal sealed class ReduceNoopEmptyAxesWorkaround : KernelWorkaround
         var axes = site.IsPresent(1) && site.ConstantShapeOf(1) is null ? inputs[1] : null;
         if (axes is null && site.ConstantShapeOf(0) is not null) return [Identity(x, null)];
         var shape = Shape(x);
-
-        if (site.ShapesAreConcrete)
-        {
-            var elements = Reductions.ElementCount(x);
-            if (axes is not null) elements = Add(elements, Reductions.ElementCount(axes));
-            return [Ops.IfElse((Scalar<bit>)Equal(elements, Globals.Scalar(0L)),
-                Identity(x, null), Reductions.Rebuild(site, x, inputs[1]))];
-        }
 
         Variable rank = site.RankOf(0) is { } known ? Globals.Vector((long)known) : Shape(shape);
         Variable empty = ReduceProd(shape, keepdims: true);

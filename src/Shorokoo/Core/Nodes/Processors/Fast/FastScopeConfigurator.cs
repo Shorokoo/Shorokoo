@@ -58,6 +58,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             var status = ClassifyNodes(
                 graph, scopes, forwardReach, backwardReach, thenReach, elseReach, inAByStructure);
             var decision = DecidePlacement(graph, scopes, status);
+            KeepProducersAroundTheirConsumers(graph, scopes, status, decision, inAByStructure);
 
             var inputs = graph.Inputs;
             graph.Nodes = Reorder(graph, scopes, decision);
@@ -416,6 +417,77 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 decision[node.Key] = dec;
             }
             return decision;
+        }
+
+        /// <summary>
+        /// Takes a node out of every scope some reader of it is outside: a value computed inside
+        /// a scope exists only there, so a node whose result is read before the scope opens, as
+        /// the condition of an <c>If</c> sharing it with a branch is, or after it closes, is placed
+        /// outside it, and so outside every scope nested in it. The graph is in linear order, so
+        /// walking it backwards settles every reader of a node before the node itself. A node a
+        /// scope requires (MustIn) keeps its placement; one a scope nested in the scope it is taken
+        /// out of requires is a body value read outside its body, and is refused as
+        /// <see cref="DecidePlacement"/> refuses one.
+        ///
+        /// <para>A boundary reads from inside scope S when it is S's <c>CLOSE</c>, or a boundary of
+        /// a scope nested in S; S's own <c>OPEN</c> reads from outside.</para>
+        /// </summary>
+        private static void KeepProducersAroundTheirConsumers(
+            InternalComputationGraph graph,
+            List<Scope> scopes,
+            Dictionary<FastNodeKey, NodeStatus[]> status,
+            Dictionary<FastNodeKey, bool[]> decision,
+            bool[,] inAByStructure)
+        {
+            var producer = new Dictionary<FastTensorKey, FastNode>();
+            foreach (var n in graph.Nodes)
+                foreach (var grp in n.FullOutputs)
+                    foreach (var key in grp.Value)
+                        if (key is FastTensorKey tk && !tk.IsEmpty)
+                            producer[tk] = n;
+
+            var readers = new Dictionary<FastNodeKey, List<FastNode>>();
+            foreach (var n in graph.Nodes)
+                foreach (var grp in n.FullInputs)
+                    foreach (var key in grp.Value)
+                        if (key is FastTensorKey tk && !tk.IsEmpty && producer.TryGetValue(tk, out var p))
+                        {
+                            if (!readers.TryGetValue(p.Key, out var list))
+                                readers[p.Key] = list = [];
+                            list.Add(n);
+                        }
+
+            var boundaryScope = new Dictionary<FastNodeKey, (int Id, bool IsClose)>();
+            foreach (var sc in scopes)
+            {
+                boundaryScope[sc.OpenNode.Key] = (sc.Id, false);
+                boundaryScope[sc.CloseNode.Key] = (sc.Id, true);
+            }
+
+            bool ReadsFromInside(FastNode reader, int s)
+                => boundaryScope.TryGetValue(reader.Key, out var b)
+                    ? (b.Id == s ? b.IsClose : inAByStructure[s, b.Id])
+                    : decision.TryGetValue(reader.Key, out var d) && d[s];
+
+            for (int i = graph.Nodes.Count - 1; i >= 0; i--)
+            {
+                var node = graph.Nodes[i];
+                if (!decision.TryGetValue(node.Key, out var dec) || !readers.TryGetValue(node.Key, out var rs)) continue;
+                var st = status[node.Key];
+                for (int s = 0; s < scopes.Count; s++)
+                {
+                    if (!dec[s] || st[s] == NodeStatus.MustIn || rs.TrueForAll(r => ReadsFromInside(r, s))) continue;
+                    for (int t = 0; t < scopes.Count; t++)
+                    {
+                        if (t != s && !inAByStructure[s, t]) continue;
+                        if (st[t] == NodeStatus.MustIn)
+                            throw new InvalidOperationException(
+                                $"Node {node.OpCode} (Key={node.Key}) is required inside " +
+                                $"{scopes[t].Kind} scope #{t} but forced out of an enclosing scope.");
+                        dec[t] = false;
+                    }
+                }
+            }
         }
 
         private static bool AnyAncestorForcesOut(List<Scope> scopes, NodeStatus[] st, int s)

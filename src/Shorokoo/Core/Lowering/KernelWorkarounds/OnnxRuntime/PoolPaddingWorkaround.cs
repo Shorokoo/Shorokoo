@@ -40,19 +40,19 @@ internal sealed class PoolPaddingWorkaround : KernelWorkaround
         switch (site.OpCode)
         {
             case AVERAGE_POOL:
-                return PaddedPool(x, site.ShapesAreConcrete, a.GetBoolVal(AttrCountIncludePad) == true ? PoolKind.AverageIncludingPad : PoolKind.AverageExcludingPad,
+                return PaddedPool(x, a.GetBoolVal(AttrCountIncludePad) == true ? PoolKind.AverageIncludingPad : PoolKind.AverageExcludingPad,
                     autoPad, ceilMode, dilations, kernelShape, pads, strides, null,
                     (input, same, p, s, ceil, includePad) => [AveragePool(input, same, ceil, includePad, dilations, kernelShape, p, s)]);
             case LP_POOL:
                 var norm = a.GetLongVal(AttrP);
-                return PaddedPool(x, site.ShapesAreConcrete, PoolKind.Lp, autoPad, ceilMode, dilations, kernelShape, pads, strides, null,
+                return PaddedPool(x, PoolKind.Lp, autoPad, ceilMode, dilations, kernelShape, pads, strides, null,
                     (input, same, explicitPads, s, ceil, _) => [LpPool(input, same, ceil, dilations, kernelShape, norm, explicitPads, s)]);
             default:
                 var storageOrder = a.GetLongVal(AttrStorageOrder);
                 if (!site.IsOutputPresent(1))
-                    return PaddedPool(x, site.ShapesAreConcrete, PoolKind.Max, autoPad, ceilMode, dilations, kernelShape, pads, strides, storageOrder,
+                    return PaddedPool(x, PoolKind.Max, autoPad, ceilMode, dilations, kernelShape, pads, strides, storageOrder,
                         (input, same, p, s, ceil, _) => [MaxPool(input, same, ceil, dilations, kernelShape, p, storageOrder, s)]);
-                return PaddedPool(x, site.ShapesAreConcrete, PoolKind.Max, autoPad, ceilMode, dilations, kernelShape, pads, strides, storageOrder,
+                return PaddedPool(x, PoolKind.Max, autoPad, ceilMode, dilations, kernelShape, pads, strides, storageOrder,
                     (input, same, p, s, ceil, _) =>
                     {
                         var (y, indices) = MaxPoolWithIndices(input, same, ceil, dilations, kernelShape, p, storageOrder, s);
@@ -113,9 +113,12 @@ internal sealed class PoolPaddingWorkaround : KernelWorkaround
     /// Undilated, ONNX Runtime splits a total of at least 0 as the spec does and pads a negative one
     /// with nothing, so the input is cropped by the negative part of each end's padding with a
     /// <c>Slice</c> computed from its shape, and the cropped input, whose total is then 0 or the
-    /// input's own, pooled as the call stands. When the session knows every shape, an <c>If</c>
-    /// on the crop being empty, which ONNX Runtime folds, leaves the call as it stands wherever it
-    /// already computes the spec's result.
+    /// input's own, pooled as the call stands. An end not cropped is sliced to the largest int64,
+    /// so where the session knows the input's shape and nothing is cropped, the <c>Slice</c> takes
+    /// every element from the start to past the end, and ONNX Runtime removes it when it builds the
+    /// session, the input then reaching the pool through a <c>Reshape</c> to its own shape. There is no <c>If</c>: one holding the pool in a branch fails to build some sessions
+    /// in which ONNX Runtime folds it, among them the gradient of an <c>AveragePool</c> that does not
+    /// count its padding, which pools a tensor of ones.
     /// Dilated, ONNX Runtime pads for the undilated kernel. With every stride 1 the total is
     /// <c>(k - 1) * d</c> whatever the input's length, and the pool takes it as explicit pads.
     /// Otherwise it depends on a length the input's shape may leave open until it runs, so the
@@ -142,7 +145,7 @@ internal sealed class PoolPaddingWorkaround : KernelWorkaround
     /// <c>-inf</c>, <c>-128</c> and <c>0</c> cast to it, which is <c>-inf</c> for a floating type,
     /// -128 for int8 and 0 for uint8 — the types MaxPool takes.</para>
     /// </summary>
-    private static Variable[] PaddedPool(Variable x, bool shapesAreConcrete, PoolKind kind, AutoPad? autoPad, bool? ceilMode,
+    private static Variable[] PaddedPool(Variable x, PoolKind kind, AutoPad? autoPad, bool? ceilMode,
         long[]? dilations, long[] kernelShape, long[]? pads, long[]? strides, long? storageOrder, PlainPool pool)
     {
         int n = kernelShape.Length;
@@ -169,13 +172,14 @@ internal sealed class PoolPaddingWorkaround : KernelWorkaround
             var none = Constant(new long[n]);
             var cropStart = Max(Neg(needed), none);
             var cropEnd = Max(Sub(needed, total), none);
-            var cropped = Slice(x, cropStart, Sub(length, cropEnd), axes);
+            var cropTo = Where(Greater(cropEnd, none), Sub(length, cropEnd), Constant(long.MaxValue));
+            // Through a Reshape to its own shape, which costs no copy: ONNX Runtime does not remove
+            // a Slice of a graph input.
+            var cropped = Slice(Reshape(x, Shape(x), allowZero: true), cropStart, cropTo, axes);
             var same = pool(cropped, autoPad, null, stride, ceilMode ?? false, kind == PoolKind.AverageIncludingPad);
             if (same.Length > 1)
                 same[1] = UnpaddedIndices(same[1], x, cropped, Neg(cropStart), n, storageOrder ?? 0L);
-            if (!shapesAreConcrete) return same;
-            var plain = pool(x, autoPad, null, stride, ceilMode ?? false, kind == PoolKind.AverageIncludingPad);
-            return IfClose(same, plain, IfOpen(Greater(ReduceMax(Add(cropStart, cropEnd), keepdims: false), Constant(0L))));
+            return same;
         }
 
         long[] head = [.. reach.Select(r => upper ? r / 2 : (r + 1) / 2)];

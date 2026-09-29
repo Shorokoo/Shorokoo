@@ -30,6 +30,7 @@ public class KernelWorkaroundPassTests
     private static readonly KernelWorkaroundSet NegThenSubSet = new("neg-sub", [new NegAsSubtraction(), new SubAsAddOfNeg()]);
     private static readonly KernelWorkaroundSet NegAbsSet = new("neg-abs", [new NegAsSubtraction(), new AbsAsIf()]);
     private static readonly KernelWorkaroundSet NegIfSet = new("neg-if", [new NegAsIf()]);
+    private static readonly KernelWorkaroundSet MulIfSet = new("mul-if", [new MulAsIfOnItsRightShape()]);
     private static readonly KernelWorkaroundSet AddConstantSet = new("add-constant", [new AddOfConstantAsSubtraction()]);
     private static readonly KernelWorkaroundSet AddShapeSet = new("add-shape", [new AddOfConstantReshapedToItsShape()]);
 
@@ -318,6 +319,81 @@ public class KernelWorkaroundPassTests
         Assert.Equal(Run(g, Session(g, null), [data]), Run(g, Session(g, KernelWorkaroundRegistry.OnnxRuntime), [data]));
     }
 
+    [Fact]
+    public void TestTheMatMulWorkaroundFiresOnlyWhereAnOperandMayBeEmptyAndTheProductBatchedOrOfAVector()
+    {
+        var v = InputTensor<float32>("v", rank: 1);
+        var m = InputTensor<float32>("m", rank: 2);
+        var b = InputTensor<float32>("b", rank: 3);
+        var u = InputTensor<float32>("u");
+        var i = InputTensor<int64>("i", rank: 3);
+        Assert.True(AsWritten(new([m], [OnnxOp.MatMul(m, m)])));
+        Assert.True(AsWritten(new([v, m], [OnnxOp.MatMul(v, m)])));
+        Assert.True(AsWritten(new([v], [OnnxOp.MatMul(v, v)])));
+        Assert.True(AsWritten(new([], [OnnxOp.MatMul(Constant([2L, 1L, 2L], 1f, 2f, 3f, 4f), Constant([2L, 1L], 5f, 6f))])));
+        Assert.False(AsWritten(new([m, v], [OnnxOp.MatMul(m, v)])));
+        Assert.False(AsWritten(new([b], [OnnxOp.MatMul(b, b)])));
+        Assert.False(AsWritten(new([b, m], [OnnxOp.MatMul(b, m)])));
+        Assert.False(AsWritten(new([m, b], [OnnxOp.MatMul(m, b)])));
+        Assert.False(AsWritten(new([u, m], [OnnxOp.MatMul(m, u)])));
+        Assert.False(AsWritten(new([i], [OnnxOp.MatMul(i, i)])));
+    }
+
+    [Fact]
+    public void TestAMatMulWithAnEmptyOperandGivesZerosOfTheProductsShapeOrAnEmptyProductOnOnnxRuntime()
+    {
+        Assert.True(AutoTest.AdvancedTestGraph<EmptyMatMulTransposedCheck>([], [TensorData(DType.Float32, [], 2f)]));
+        Assert.True(AutoTest.AdvancedTestGraph<EmptyMatMulUntransposedCheck>([], [TensorData(DType.Float32, [], 2f)]));
+        Assert.True(AutoTest.AdvancedTestGraph<EmptyMatMulOfUnknownRankCheck>([], [TensorData(DType.Float32, [], 2f)]));
+    }
+
+    [Fact]
+    public void TestOnnxRuntimeFoldsEveryIfOfTheMatMulWorkaroundInAnAttentionTrainingStepWithConcreteShapes()
+    {
+        var step = AttentionTrainingStep();
+        List<long[]?> dims = [.. step.InputNodes.Select(RepresentativeInputShapes.Get)];
+        var concrete = FastOnnxModelBuilder.BuildInternalOnnxModel(step, prepForOnnx: true, inputDims: dims, workarounds: KernelWorkaroundRegistry.OnnxRuntime);
+        Assert.True(Ifs(Session(step, KernelWorkaroundRegistry.OnnxRuntime)) > Ifs(Session(step, null)));
+        Assert.True(Ifs(concrete) > Ifs(Session(step, null)));
+        Assert.Equal(0, Ifs(Optimized(concrete)));
+    }
+
+    [Fact]
+    public void TestAnIfOnnxRuntimeFoldsToABranchHoldingAConstantOfAHundredAndTwentyEightBytesOrMoreBuildsItsSession()
+    {
+        var x = InputTensor<float32>("x", rank: 1);
+        var i = InputTensor<int32>("i", rank: 2);
+        byte[] Run(InternalComputationGraph g, TensorData data)
+        {
+            using var context = new ComputeContext();
+            using var compiled = context.Compile(g, [data.Shape.Dims], trainingStep: false);
+            return compiled.Execute(data.Shared())[0].ToTensorData().AccessRawMemory().ToArray();
+        }
+        Assert.Equal(new byte[128], Run(Graph(x, Shorokoo.Core.Nodes.Ops.IfElse((Scalar<bit>)OnnxOp.Equal(OnnxOp.ReduceProd(OnnxOp.Shape(x), keepdims: false), Scalar(32L)),
+            OnnxOp.Expand(Scalar(0f), Vector(32L)), x)), TensorData(DType.Float32, [32L], [.. Enumerable.Repeat((object)1f, 32)])));
+        Assert.Equal(160, Run(Graph(i, i.Reduce(ReduceKind.Max, Vector(0L))), TensorData(DType.Int32, [0L, 40L], Array.Empty<object>())).Length);
+    }
+
+    [Fact]
+    public void TestAnIfSplicedIntoALoopBodyKeepsTheLoopInvariantShapeItsConditionAndBranchShareBeforeBoth()
+    {
+        var x = TensorData(DType.Float32, [3L], 2f, 3f, 4f);
+        AssertRewritten(MulIfSet, "Loop", IF, false, Concrete(KernelWorkaroundMulByOuterInLoop.ComputationGraph, x), x);
+    }
+
+    [Fact]
+    public void TestAnArithmeticOpWithAnEmptyConstantOperandBroadcastsToAnEmptyResultOnOnnxRuntime()
+    {
+        var x = InputTensor<float32>("x", rank: 3);
+        var data = TensorData(DType.Float32, [2L, 1L, 3L], 1f, 2f, 3f, 4f, 5f, 6f);
+        long[] Broadcast(Func<Variable, Variable, Variable> op, long[] dims)
+            => ComputeContext.Default.Execute(Graph(x, OnnxOp.Relu(op(OnnxOp.Relu(x), Constant(dims)))), data.Shared())[0].ToTensorData().Shape.Dims;
+        Assert.Equal([2L, 0L, 3L], Broadcast(OnnxOp.Add, [2L, 0L, 1L]));
+        Assert.Equal([2L, 0L, 3L], Broadcast(OnnxOp.Sub, [2L, 0L, 3L]));
+        Assert.Equal([2L, 0L, 3L], Broadcast(OnnxOp.Mul, [0L, 1L]));
+        Assert.Equal([2L, 0L, 3L], Broadcast(OnnxOp.Div, [1L, 0L, 1L]));
+    }
+
     private static InternalComputationGraph Graph(Variable input, Variable output) => new([input], [output]);
 
     private static bool AsWritten(InternalComputationGraph g)
@@ -352,6 +428,11 @@ public class KernelWorkaroundPassTests
         => TrainingRig.FromScratch(ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph,
             [new TensorDataModelParam("input", ModelParamType.InputParam, TensorData([4L], [1f, 2f, 3f, 4f]))],
             new AdamWOptimizerHyperparameters { LearningRate = 0.1f }).TrainingStepPureGraph.ToInternal();
+
+    private static InternalComputationGraph AttentionTrainingStep()
+        => TrainingRig.FromScratch(SdpaMeanPoolModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            [new TensorDataModelParam("input", ModelParamType.InputParam, TensorData([1L, 2L, 8L, 4L], TransformerTrainingFixtures.Floats(64, seed: 0.05f)))],
+            0.01f).TrainingStepPureGraph.ToInternal();
 
     private static ModelProto SmallestFirst(ModelProto model)
     {
@@ -562,6 +643,20 @@ public class KernelWorkaroundPassTests
         }
     }
 
+    private sealed class MulAsIfOnItsRightShape : KernelWorkaround
+    {
+        public override IReadOnlySet<string> OpCodes { get; } = new HashSet<string>([MUL]);
+
+        public override bool Applies(WorkaroundSite site) => site.DTypeOf(0) == DType.Float32;
+
+        public override Variable?[] Rewrite(WorkaroundSite site, Variable?[] inputs)
+        {
+            var shape = OnnxOp.Shape(inputs[1]!);
+            return [Shorokoo.Core.Nodes.Ops.IfElse((Scalar<bit>)OnnxOp.Equal(OnnxOp.ReduceProd(shape, keepdims: false), Scalar(0L)),
+                OnnxOp.Expand(Scalar(0f), OnnxOp.Slice(shape, Vector(0L), Vector(1L))), OnnxOp.Mul(inputs[0]!, inputs[1]!))];
+        }
+    }
+
     private sealed class AddOfConstantAsSubtraction : KernelWorkaround
     {
         public override IReadOnlySet<string> OpCodes { get; } = new HashSet<string>([ADD]);
@@ -625,6 +720,18 @@ public partial class KernelWorkaroundNegInLoop
 }
 
 [Module]
+public partial class KernelWorkaroundMulByOuterInLoop
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+    {
+        var a = x;
+        foreach (var ctx in LoopAPI.Iterate(x.Reduce(ReduceKind.Min, keepDims: false).Scalar().Cast<int64>()))
+            a = (Tensor<float32>)OnnxOp.Mul(a, x);
+        return a;
+    }
+}
+
+[Module]
 public partial class KernelWorkaroundTopKInLoop
 {
     public static Tensor<float32> Inline(Tensor<float32> x)
@@ -637,5 +744,72 @@ public partial class KernelWorkaroundTopKInLoop
             a = (Tensor<float32>)OnnxOp.Add(values, OnnxOp.CastLike(indices, values, null));
         }
         return a;
+    }
+}
+
+internal static class EmptyMatMul
+{
+    internal static Tensor<float32> Of(Scalar<float32> a, long[] dims, int? rank = null)
+    {
+        var t = (Tensor<float32>)OnnxOp.Expand(a, Vector(dims));
+        return rank is { } r ? (Tensor<float32>)OnnxOp.Identity(t, rank: r) : t;
+    }
+
+    internal static Scalar<bit> Is(Variable product, params long[] dims)
+    {
+        var p = (Tensor<float32>)product;
+        var shapeGap = ((Tensor<int64>)OnnxOp.Shape(p) - Vector(dims)).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+        return (shapeGap == Scalar(0L)) & (p.Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar() == Scalar(0f));
+    }
+}
+
+[Module]
+public partial class EmptyMatMulTransposedCheck
+{
+    public static Scalar<bit> Inline(Scalar<float32> a)
+    {
+        Tensor<float32> T(long[] dims) => EmptyMatMul.Of(a, dims, dims.Length);
+        return EmptyMatMul.Is(OnnxOp.MatMul(T([2L, 0L, 3L]).Transpose(0L, 2L, 1L), T([2L, 0L, 4L])), 2L, 3L, 4L)
+            & EmptyMatMul.Is(OnnxOp.MatMul(T([2L, 3L, 0L]), T([2L, 4L, 0L]).Transpose(0L, 2L, 1L)), 2L, 3L, 4L)
+            & EmptyMatMul.Is(OnnxOp.MatMul(T([2L, 0L, 3L]).Transpose(0L, 2L, 1L), T([2L, 4L, 0L]).Transpose(0L, 2L, 1L)), 2L, 3L, 4L)
+            & EmptyMatMul.Is(OnnxOp.MatMul(T([1L, 2L, 0L, 3L]).Transpose(0L, 1L, 3L, 2L), T([2L, 1L, 0L, 4L])), 2L, 2L, 3L, 4L)
+            & EmptyMatMul.Is(OnnxOp.MatMul(T([0L, 3L]).Transpose(1L, 0L), T([2L, 0L, 4L])), 2L, 3L, 4L)
+            & EmptyMatMul.Is(OnnxOp.MatMul(T([2L, 0L, 3L]).Transpose(0L, 2L, 1L), T([0L, 4L])), 2L, 3L, 4L)
+            & EmptyMatMul.Is(OnnxOp.MatMul(T([0L, 2L, 3L]).Transpose(1L, 0L, 2L), T([2L, 3L, 4L])), 2L, 0L, 4L)
+            & EmptyMatMul.Is(OnnxOp.MatMul(T([0L, 2L, 3L]).Transpose(1L, 2L, 0L), T([2L, 0L, 4L])), 2L, 3L, 4L)
+            & EmptyMatMul.Is(OnnxOp.MatMul(T([2L, 3L, 0L]), T([0L, 2L, 4L]).Transpose(1L, 0L, 2L)), 2L, 3L, 4L);
+    }
+}
+
+[Module]
+public partial class EmptyMatMulUntransposedCheck
+{
+    public static Scalar<bit> Inline(Scalar<float32> a)
+    {
+        Tensor<float32> T(long[] dims) => EmptyMatMul.Of(a, dims, dims.Length);
+        return EmptyMatMul.Is(OnnxOp.MatMul(T([3L, 0L]), T([2L, 0L, 4L])), 2L, 3L, 4L)
+            & EmptyMatMul.Is(OnnxOp.MatMul(T([1L, 3L, 0L]), T([2L, 0L, 4L])), 2L, 3L, 4L)
+            & EmptyMatMul.Is(OnnxOp.MatMul(T([1L, 1L, 3L, 0L]), T([2L, 2L, 0L, 4L])), 2L, 2L, 3L, 4L)
+            & EmptyMatMul.Is(OnnxOp.MatMul(T([2L, 3L, 0L]), T([0L])), 2L, 3L)
+            & EmptyMatMul.Is(OnnxOp.MatMul(T([3L, 0L]), T([0L])), 3L)
+            & EmptyMatMul.Is(OnnxOp.Cast(OnnxOp.MatMul(OnnxOp.Cast(T([3L, 0L]), null, DType.Int64), OnnxOp.Cast(T([2L, 0L, 4L]), null, DType.Int64)), null, DType.Float32), 2L, 3L, 4L);
+    }
+}
+
+[Module]
+public partial class EmptyMatMulOfUnknownRankCheck
+{
+    public static Scalar<bit> Inline(Scalar<float32> a)
+    {
+        Tensor<float32> T(long[] dims) => EmptyMatMul.Of(a, dims);
+        return EmptyMatMul.Is(OnnxOp.MatMul(T([2L, 0L, 3L]).Transpose(0L, 2L, 1L), T([2L, 0L, 4L])), 2L, 3L, 4L)
+            & EmptyMatMul.Is(OnnxOp.MatMul(T([2L, 3L, 0L]), T([2L, 4L, 0L]).Transpose(0L, 2L, 1L)), 2L, 3L, 4L)
+            & EmptyMatMul.Is(OnnxOp.MatMul(T([1L, 2L, 0L, 3L]).Transpose(0L, 1L, 3L, 2L), T([2L, 1L, 0L, 4L])), 2L, 2L, 3L, 4L)
+            & EmptyMatMul.Is(OnnxOp.MatMul(T([0L]), T([2L, 4L, 0L]).Transpose(0L, 2L, 1L)), 2L, 4L)
+            & EmptyMatMul.Is(OnnxOp.MatMul(T([2L, 0L, 3L]).Transpose(0L, 2L, 1L), T([0L])), 2L, 3L)
+            & EmptyMatMul.Is(OnnxOp.MatMul(T([0L]), T([0L])))
+            & EmptyMatMul.Is(OnnxOp.MatMul(T([0L, 2L, 3L]).Transpose(1L, 2L, 0L), T([2L, 0L, 4L])), 2L, 3L, 4L)
+            & EmptyMatMul.Is(OnnxOp.MatMul(T([1L, 3L, 0L]), T([2L, 0L, 4L])), 2L, 3L, 4L)
+            & EmptyMatMul.Is(OnnxOp.MatMul(T([3L, 0L]), T([0L])), 3L);
     }
 }

@@ -16,8 +16,9 @@ internal static class KernelWorkaroundRegistry
     /// negative axes made non-negative before a reduction of no axis is rewritten, since the axis
     /// that rewrite reduces is never negative; the
     /// crop-and-resize roi before the cubic resize layout, and both before the resize axes, since
-    /// the calls they build keep the call's <c>axes</c>; <c>Where</c> last, since earlier
-    /// rewrites, the integer <c>Range</c> count among them, build <c>Where</c>s of their own.
+    /// the calls they build keep the call's <c>axes</c>; the <c>MatMul</c> after the reductions,
+    /// since the reductions it builds take no axes and need none of their rewrites; <c>Where</c> last, since earlier rewrites, the integer <c>Range</c> count among
+    /// them, build <c>Where</c>s of their own.
     /// </summary>
     public static KernelWorkaroundSet OnnxRuntime { get; } = new(KernelWorkaroundSets.OnnxRuntime,
     [
@@ -33,6 +34,7 @@ internal static class KernelWorkaroundRegistry
         new CubicResizeMiddleAxesWorkaround(),
         new ResizeAxesSubsetWorkaround(),
         new IntegerRangeCountWorkaround(),
+        new MatMulEmptyOperandWorkaround(),
         new WhereTypesWorkaround(),
     ]);
 

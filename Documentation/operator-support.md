@@ -462,7 +462,7 @@ shape and type.
 | Det | ✅ | 🟡 [4] | ✅ |
 | Einsum | ✅ | 🟡 [5] | 🟡 [6] |
 | Gemm | ✅ | ✅ | ✅ |
-| MatMul | ✅ | ✅ | ✅ |
+| MatMul | ✅ [7] | ✅ | ✅ |
 | RotaryEmbedding | ❌ [1] | 🟡 [2] | ❌ [3] |
 
 1. `OnnxOp.Attention`, `OnnxOp.AttentionWithKVCache`, `OnnxOp.RotaryEmbedding` and
@@ -477,6 +477,15 @@ shape and type.
    exotic equations give unknown shape); values not computed.
 6. Repeated subscripts within one operand (e.g. `"ii->i"`) are unsupported;
    ellipsis is supported.
+7. With a contraction dimension of 0 the product is zeros. ONNX Runtime's kernel
+   leaves the output unwritten where the product is batched or of a matrix with
+   a vector, and gives it the left operand's batch dimension where that is 1 and
+   the right one's is not; the `FusedMatMul` it fuses a `Transpose` into does
+   the same, and can stop the process on some empty operands. On ONNX Runtime
+   such a `MatMul` is rewritten when it builds a session as an `If` on either
+   operand being empty, giving zeros of the product's shape where one is. The
+   `If` folds away where the session knows the operands' shapes
+   ([#451](https://github.com/Shorokoo/Shorokoo/issues/451)).
 
 ## Quantization
 

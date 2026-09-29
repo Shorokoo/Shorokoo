@@ -53,7 +53,7 @@ order they apply.
 | Abs | ✅ | ✅ | ✅ |
 | Acos | ✅ | ✅ | ✅ |
 | Acosh | ✅ | ✅ | ✅ |
-| Add | ✅ | ✅ | ✅ |
+| Add | ✅ [16] | ✅ | ✅ |
 | Asin | ✅ | ✅ | ✅ |
 | Asinh | ✅ | ✅ | ✅ |
 | Atan | ✅ | ✅ | ✅ |
@@ -68,7 +68,7 @@ order they apply.
 | Cosh | ✅ | ✅ | ✅ |
 | CumProd | ❌ [1] | ✅ | ✅ |
 | CumSum | ✅ | ✅ | ✅ |
-| Div | ✅ | ✅ | ✅ |
+| Div | ✅ [16] | ✅ | ✅ |
 | Elu | ✅ | ✅ | ✅ |
 | Erf | ✅ | 🟡 [6] | ✅ |
 | Exp | ✅ | ✅ | ✅ |
@@ -85,7 +85,7 @@ order they apply.
 | Min | ✅ | ✅ | ✅ [9] |
 | Mish | ✅ | ✅ | ✅ |
 | Mod | ✅ | ✅ | ✅ [10] |
-| Mul | ✅ | ✅ | ✅ |
+| Mul | ✅ [16] | ✅ | ✅ |
 | Neg | ✅ | ✅ | ✅ |
 | PRelu | 🟡 [11] | ✅ | ✅ |
 | Pow | 🟡 [12] | ✅ | ✅ [13] |
@@ -102,7 +102,7 @@ order they apply.
 | Softplus | ✅ | ✅ | ✅ |
 | Softsign | ✅ | ✅ | ✅ |
 | Sqrt | ✅ | ✅ | ✅ |
-| Sub | ✅ | ✅ | ✅ |
+| Sub | ✅ [16] | ✅ | ✅ |
 | Sum | ✅ | ✅ | ✅ |
 | Swish | ✅ [15] | ✅ | ✅ |
 | Tan | ✅ | ✅ | ✅ |
@@ -131,6 +131,15 @@ order they apply.
 14. Float tensors only; the spec also allows signed integers since opset 14.
 15. Lowers inline to `Mul`/`Sigmoid` (`y = x * sigmoid(alpha * x)`), so it runs on
     any execution provider; ONNX Runtime 1.26 has no `Swish` kernel.
+16. ONNX Runtime's graph optimization removes an `Add` or `Mul` with an empty
+    constant operand, and a `Sub` or `Div` with an empty constant right operand,
+    giving the other operand where the spec gives the empty broadcast result. Its
+    backend rewrites such a call when it builds a session, when the operand is a
+    `Constant` of the model and the other operand is not: the empty operand is
+    rebuilt from the other one, as a value ONNX Runtime does not compute when it
+    builds the session. Two `Constant` operands, and an empty operand ONNX
+    Runtime computes from constants when it builds the session, are left as
+    they are: accepted as ONNX Runtime's behaviour ([#454](https://github.com/Shorokoo/Shorokoo/issues/454)).
 
 ## Comparisons & logic
 

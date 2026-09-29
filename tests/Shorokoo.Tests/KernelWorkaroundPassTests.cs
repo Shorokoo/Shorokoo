@@ -410,8 +410,7 @@ public class KernelWorkaroundPassTests
         AssertRewritten(MulIfSet, "Loop", IF, false, Concrete(KernelWorkaroundMulByOuterInLoop.ComputationGraph, x), x);
     }
 
-    // #454: ONNX Runtime's NoopElimination drops an Add, Sub, Mul or Div with an empty constant operand
-    [Fact(Skip = "#454: ONNX Runtime's NoopElimination drops an Add, Sub, Mul or Div with an empty constant operand")]
+    [Fact]
     public void TestAnArithmeticOpWithAnEmptyConstantOperandBroadcastsToAnEmptyResultOnOnnxRuntime()
     {
         var x = InputTensor<float32>("x", rank: 3);
@@ -422,6 +421,38 @@ public class KernelWorkaroundPassTests
         Assert.Equal([2L, 0L, 3L], Broadcast(OnnxOp.Sub, [2L, 0L, 3L]));
         Assert.Equal([2L, 0L, 3L], Broadcast(OnnxOp.Mul, [0L, 1L]));
         Assert.Equal([2L, 0L, 3L], Broadcast(OnnxOp.Div, [1L, 0L, 1L]));
+    }
+
+    [Fact]
+    public void TestAnArithmeticOpWithAnEmptyConstantOperandOnnxRuntimeWouldDropIsEmptyOnOnnxRuntime()
+    {
+        var x = InputTensor<float32>("x", rank: 3);
+        var data = TensorData(DType.Float32, [2L, 1L, 3L], 1f, 2f, 3f, 4f, 5f, 6f);
+        var empty = Constant([2L, 0L, 1L]);
+        long[] Dims(Variable output) => ComputeContext.Default.Execute(Graph(x, output), data.Shared())[0].ToTensorData().Shape.Dims;
+        Assert.Equal([2L, 0L, 3L], Dims(OnnxOp.Add(x, empty)));
+        Assert.Equal([2L, 0L, 3L], Dims(OnnxOp.Relu(OnnxOp.Add(empty, OnnxOp.Relu(x)))));
+        Assert.Equal([2L, 0L, 3L], Dims(OnnxOp.Relu(OnnxOp.Mul(empty, OnnxOp.Relu(x)))));
+        Assert.Equal([2L, 0L, 3L], Dims(OnnxOp.Sub(x, empty)));
+        Assert.Equal([2L, 0L, 3L], Dims(OnnxOp.Div(x, empty)));
+        Assert.Equal([2L, 0L, 3L], Dims(OnnxOp.Cast(OnnxOp.Add(OnnxOp.Cast(x, null, DType.Int64), OnnxOp.Constant(TensorAttribute.Create(new Shape(2L, 0L, 1L), Array.Empty<long>()))), null, DType.Float32)));
+        Assert.Equal([2L, 1L, 3L], Dims(OnnxOp.Relu(OnnxOp.Add(OnnxOp.Relu(x), OnnxOp.Add(Constant([1L, 1L, 3L], 1f, 2f, 3f), empty)))));
+    }
+
+    [Fact]
+    public void TestTheArithmeticWorkaroundFiresOnlyWhereOnnxRuntimeWouldDropTheCall()
+    {
+        var x = InputTensor<float32>("x", rank: 3);
+        var empty = Constant([2L, 0L, 1L]);
+        Assert.False(AsWritten(Graph(x, OnnxOp.Add(x, empty))));
+        Assert.False(AsWritten(Graph(x, OnnxOp.Add(empty, x))));
+        Assert.False(AsWritten(Graph(x, OnnxOp.Mul(empty, x))));
+        Assert.False(AsWritten(Graph(x, OnnxOp.Div(x, empty))));
+        Assert.True(AsWritten(Graph(x, OnnxOp.Sub(empty, x))));
+        Assert.True(AsWritten(Graph(x, OnnxOp.Div(empty, x))));
+        Assert.True(AsWritten(Graph(x, OnnxOp.Add(x, Constant([1L], 0f)))));
+        Assert.True(AsWritten(Graph(x, OnnxOp.Pow(x, empty))));
+        Assert.True(AsWritten(new([], [OnnxOp.Add(Constant([1L], 1f), empty)])));
     }
 
     private static InternalComputationGraph Graph(Variable input, Variable output) => new([input], [output]);

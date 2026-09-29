@@ -35,6 +35,7 @@ internal static class KernelWorkaroundRegistry
         new ResizeAxesSubsetWorkaround(),
         new IntegerRangeCountWorkaround(),
         new MatMulEmptyOperandWorkaround(),
+        new ArithmeticEmptyConstantWorkaround(),
         new WhereTypesWorkaround(),
     ]);
 

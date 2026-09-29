@@ -160,6 +160,7 @@ so the `Where`s the reduction, pool and `Range` rewrites emit are covered by the
 | `Resize` | An `axes` attribute: the transpose optimizer misreads its per-axis operands, and the kernel refuses negative axes | Written out over every axis; a `not_larger`/`not_smaller` policy over a subset of the axes keeps its axes, counted from the front, behind an `OptionalGetElement(Optional(x))` the optimizer cannot move a `Transpose` through | [#429](https://github.com/Shorokoo/Shorokoo/issues/429) |
 | `Range` | int64 with `limit − start` beyond 2^53 or beyond int64, int32 with it beyond int32: the difference is taken in the input type, which wraps beyond it, and the element count is computed in double precision; either can give a wrong count | The count as an exact uint64 ceiling division (0 where `limit` does not lie beyond `start` in the direction of `delta`; a count above 2^62 taken as 2^62, which is refused), then `Range(0, count, 1) · delta + start`, an int32 call computed on its inputs cast to int64 and cast back. Left alone: three `Constant`s spanning less than 2^53 (int64) or within int32 (int32); a `Constant` `delta` of ±1 with a `Constant` `start` of 0 (int32), or of magnitude below 2^62 (int64), which the kernel counts exactly for a span below 2^53 and otherwise refuses or leaves empty, never giving a wrong element | [#447](https://github.com/Shorokoo/Shorokoo/issues/447), [#450](https://github.com/Shorokoo/Shorokoo/issues/450) |
 | `MatMul` | An empty operand, with a contraction dimension of 0, where the product is batched or of a matrix with a vector: the kernel leaves the output unwritten, and gives it the left operand's batch dimension where that is 1 and the right one's is not; a `Transpose` fused into a batched `FusedMatMul` leaves it unwritten too, and one moving the batch axis of rank-3 operands can stop the process | With every input's dimensions stated, an `If` on either operand being empty, the empty branch giving zeros of the product's shape, which ONNX Runtime folds when it builds the session wherever the operands' shapes follow from the stated dimensions; where an operand has rank below 3 the call runs before the `If`, which hands its result on and reads only the operands' shapes, so a training step still writes an updated parameter over one the call reads; a `Constant` operand with a dimension of 0: those zeros, with no branch. A matrix or vector times a matrix, a vector times a vector, two nonempty `Constant`s, and every call of a session built without stated dimensions are left alone (see below) | [#451](https://github.com/Shorokoo/Shorokoo/issues/451) |
+| `Add`, `Sub`, `Mul`, `Div` | An empty `Constant` operand, the right one of `Sub` and `Div`, beside one that is not a `Constant`: graph optimization removes the call and gives the other operand | The empty operand rebuilt from the other one, its first no elements viewed with the constant's shape, a value ONNX Runtime does not compute when it builds the session | [#454](https://github.com/Shorokoo/Shorokoo/issues/454) |
 | `Where` | int8, int16, uint16, uint32, uint64, bfloat16 or bool values (no kernel) | bool: `Or(And(c, x), And(Not(c), y))`; others: selected through int32, int64 or float32 and cast back | [#423](https://github.com/Shorokoo/Shorokoo/issues/423) |
 
 A call whose input is a scalar or a nonempty `Constant` cannot hit the empty-input rows and is left
@@ -171,7 +172,7 @@ depends on the data runs with the session. The other rewrites — `noop_with_emp
 dimensions, negative axes, and a bool `ReduceMax`/`ReduceMin` — have no branch: one graph, built
 from the input's shape and axes, is right for every input.
 
-Five more ONNX Runtime faults, besides the float `MaxPool` indices of the table's `MaxPool` row
+Six more ONNX Runtime faults, besides the float `MaxPool` indices of the table's `MaxPool` row
 ([#437](https://github.com/Shorokoo/Shorokoo/issues/437)), have no workaround, since none can be told
 apart without a cost on every call of its operator. They are accepted as ONNX Runtime's behaviour,
 and a model that meets one gets ONNX Runtime's result:
@@ -183,6 +184,10 @@ and a model that meets one gets ONNX Runtime's result:
   `FusedMatMul` moving the batch axis of rank-3 operands can stop the process (SIGFPE) on some
   empty operands. With the dimensions stated, as a training step's session is for the shapes it is
   fed, the `MatMul` row of the table corrects it ([#451](https://github.com/Shorokoo/Shorokoo/issues/451)).
+- An `Add`, `Sub`, `Mul` or `Div` whose empty operand ONNX Runtime computes from constants when it
+  builds the session, rather than a `Constant` of the model, or whose operands are both
+  `Constant`s, is removed as the table's row describes, giving the other operand ([#454](https://github.com/Shorokoo/Shorokoo/issues/454)).
+
 - A float32, float64 or float16 `Where` gives +0 where it selects −0 from `x`; a −0 it selects from
   `y` keeps its sign. A bfloat16 `Where`, selected through float32, does the same
   ([#439](https://github.com/Shorokoo/Shorokoo/issues/439)).

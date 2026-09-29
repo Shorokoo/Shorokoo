@@ -121,9 +121,20 @@ internal class TensorManipulationPerf : IOpPerf
                 };
             }
 
+            case SLICE:
+            {
+                // A strided copy of the region it keeps: it reads what it writes, however large
+                // the tensor it is cut from, and a slice of nothing costs its launch alone.
+                return new OpPerfResult
+                {
+                    ComputeTime = OpCostModel.Survival(input, OpCostModel.Copy(2.0 * outputShape.MemoryBytes)),
+                    ExtraMemoryBytes = 0,
+                };
+            }
+
             default:
             {
-                // Concat, Split, Slice, Pad, Tile, Gather*, Range, ConstantOfShape, …: a strided copy
+                // Concat, Split, Pad, Tile, Gather*, Range, ConstantOfShape, …: a strided copy
                 return new OpPerfResult
                 {
                     ComputeTime = OpCostModel.Survival(input, OpCostModel.Copy(moved)),

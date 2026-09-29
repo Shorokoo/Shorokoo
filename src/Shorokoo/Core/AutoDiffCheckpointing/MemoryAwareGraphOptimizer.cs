@@ -53,6 +53,9 @@ public class GraphOptimizationResult
 /// alternating strategies — <c>RematReorder</c> and <c>ReorderRemat</c> — and selects
 /// the one with the best combined metric
 /// (see <see cref="ComputeMemoryObjective"/>: both terms as ratios to the baseline graph).
+/// Where its evaluator carries a step's state written in place, both start from the graph with
+/// each state update ordered after the state's readers (<see cref="OrderedStateReads"/>) when that
+/// scores better than the graph as it came.
 ///
 /// <para>
 /// Not strictly "gradient checkpointing" in the narrow sense (that's what
@@ -117,6 +120,13 @@ internal class MemoryAwareGraphOptimizer
     /// </summary>
     public const long MinimumPeakBytesToOptimize = 1L << 20;
 
+    /// <summary>
+    /// The strategy that orders each updated state output's writer after every reader of the state
+    /// it replaces (<see cref="StateReadOrdering"/>), and nothing more; the rematerializing and
+    /// reordering strategies start from it where it is kept.
+    /// </summary>
+    public const string OrderedStateReads = "OrderedStateReads";
+
     private readonly GraphEvaluator _evaluator;
     private readonly ShapeInferenceInterpreter _shapeInference;
     private readonly double _computeFactor;
@@ -173,23 +183,6 @@ internal class MemoryAwareGraphOptimizer
 
         var baselineEval = _evaluator.Evaluate(graph, shapeInfo);
 
-        // The evaluator walks a Loop/If body once, but ORT runs a Loop body per iteration and
-        // allocates per iteration; the pass would be optimizing a number that is not what runs.
-        // Measured on the LSTM training step, letting it act raised the real peak by a quarter
-        // while the model claimed a small saving. Until bodies are modelled per iteration, a
-        // graph with a scope is handed back as it came.
-        if (baselineEval.PeakMemoryBytes < MinimumPeakBytesToOptimize || graph.Nodes.Any(n => n.IsOpenNode()))
-        {
-            return new GraphOptimizationResult
-            {
-                StrategyName = "Baseline",
-                OptimizedGraph = graph,
-                ShapeInfo = shapeInfo,
-                Evaluation = baselineEval,
-                AllStrategies = [("Baseline", baselineEval, graph)],
-            };
-        }
-
         // The one objective every candidate is finally judged by, normalized to the graph we
         // started from so the weights behave identically at every model size.
         var selection = new ComputeMemoryObjective(_computeFactor, _memoryFactor, baselineEval);
@@ -200,6 +193,46 @@ internal class MemoryAwareGraphOptimizer
         {
             ("Baseline", baselineEval, graph, shapeInfo),
         };
+
+        // A step that writes its state in place keeps a pair only where every reader of the state
+        // runs before its update, whatever the backend folds. Ordering the updates after those
+        // readers (StateReadOrdering) is a candidate of its own, kept where it scores better than
+        // the graph as it came, and then what every strategy below starts from. It is weighed
+        // before the size threshold, so a small step keeps its pairs too: the trial is one
+        // evaluation, and each pair is a buffer the size of the state it writes over.
+        var start = new Candidate(graph, shapeInfo);
+        var startEval = baselineEval;
+        if (_evaluator.State is { WrittenInPlace: true } state)
+        {
+            var (ordered, orderedShapeInfo) = StateReadOrdering.Apply(graph, shapeInfo, state.Pairs);
+            if (!ReferenceEquals(ordered, graph))
+            {
+                var orderedEval = _evaluator.Evaluate(ordered, orderedShapeInfo);
+                if (selection.Score(orderedEval) < selection.Score(baselineEval))
+                {
+                    strategies.Add((OrderedStateReads, orderedEval, ordered, orderedShapeInfo));
+                    (start, startEval) = (new Candidate(ordered, orderedShapeInfo), orderedEval);
+                }
+            }
+        }
+
+        // The evaluator walks a Loop/If body once, but ORT runs a Loop body per iteration and
+        // allocates per iteration; the pass would be optimizing a number that is not what runs.
+        // Measured on the LSTM training step, letting it act raised the real peak by a quarter
+        // while the model claimed a small saving. Until bodies are modelled per iteration, a
+        // graph with a scope is handed back as it came.
+        if (baselineEval.PeakMemoryBytes < MinimumPeakBytesToOptimize || graph.Nodes.Any(n => n.IsOpenNode()))
+        {
+            var kept = strategies[^1];
+            return new GraphOptimizationResult
+            {
+                StrategyName = kept.Name,
+                OptimizedGraph = kept.Graph,
+                ShapeInfo = kept.ShapeInfo,
+                Evaluation = kept.Evaluation,
+                AllStrategies = strategies.Select(s => (s.Name, s.Evaluation, s.Graph)).ToList(),
+            };
+        }
 
         var scheduler = new MemoryAwareScheduler();
         var rematerializer = new Rematerializer(selection, _maxRematerializationIterations, _evaluator);
@@ -215,9 +248,8 @@ internal class MemoryAwareGraphOptimizer
 
         Candidate Reorder(Candidate c) => new(scheduler.Reorder(c.Graph, c.ShapeInfo), c.ShapeInfo);
 
-        var start = new Candidate(graph, shapeInfo);
-        strategies.Add(RunAlternatingStrategy("RematReorder", selection, start, baselineEval, Remat, Reorder));
-        strategies.Add(RunAlternatingStrategy("ReorderRemat", selection, start, baselineEval, Reorder, Remat));
+        strategies.Add(RunAlternatingStrategy("RematReorder", selection, start, startEval, Remat, Reorder));
+        strategies.Add(RunAlternatingStrategy("ReorderRemat", selection, start, startEval, Reorder, Remat));
 
         var best = strategies.OrderBy(s => selection.Score(s.Evaluation)).First();
 

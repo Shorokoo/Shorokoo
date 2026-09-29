@@ -94,6 +94,9 @@ internal class GraphEvaluator
         _state = state;
     }
 
+    /// <summary>The state every graph this evaluates carries across runs; none when null.</summary>
+    internal StepState? State => _state;
+
     /// <summary>
     /// The state pairs of this evaluator's <see cref="StepState"/> that <paramref name="graph"/>
     /// writes in place, by position: those <see cref="OutputAliasProof"/> proves over it whose

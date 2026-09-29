@@ -201,6 +201,19 @@ public partial class ThreeInputMixedModel
     }
 }
 
+/// <summary>A linear layer, then one weight read twice: as the transposed projection in and as the
+/// projection back out.</summary>
+[Module]
+public partial class TiedWeightMlp
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+    {
+        var h = Linear.Model(Scalar(32L), Scalar(true)).Call(x);
+        var tied = KaimingUniform.Init([Scalar(32L), Scalar(32L)]);
+        return h.MatMul(tied.Transpose(1L, 0L)).Relu().MatMul(tied);
+    }
+}
+
 /// <summary>Two same-shaped parameters drawn from their own streams, the first scaling the input
 /// and the second offsetting it.</summary>
 [Module]
@@ -3112,7 +3125,7 @@ public class TrainingRigTrainingLoopCoverageTests
             SGDOptimizer.ComputationGraph, [4L, 5L, 8L], 0.01f);
         matmul.TrainStep(ckpt, matmul.InputDef.FromOrderedData(TensorData([4L, 5L, 8L], new float[160])),
             matmul.TargetDef.FromOrderedData(TensorData([4L, 4L], new float[16])));
-        Assert.Equal([(0, 0)], matmul.MarkedStatePairs(Assert.Single(matmul.CompiledTrainStepShapeKeys)));
+        Assert.Equal([(0, 0), (1, 1)], matmul.MarkedStatePairs(Assert.Single(matmul.CompiledTrainStepShapeKeys)));
     }
 
     [Fact]
@@ -3508,9 +3521,7 @@ public class TrainingRigTrainingLoopCoverageTests
         Assert.NotEmpty(FlattenStruct(stepped.TrainableParams));
     }
 
-    // A resident step writes only 50 of its 56 state outputs over the state it consumed:
-    // https://github.com/Shorokoo/Shorokoo/issues/453
-    [Fact(Skip = "Shorokoo/Shorokoo#453: a resident step writes 50 of its 56 state outputs over the state it consumed")]
+    [Fact]
     public void TestAResidentRunWritesEveryStateOutputOverTheStateItConsumedCoverage()
     {
         using var context = new ComputeContext();
@@ -3524,6 +3535,33 @@ public class TrainingRigTrainingLoopCoverageTests
         for (int i = 0; i < 4; i++) run.Step(input.Shared(), target.Shared());
         Assert.Equal(4 * 56L, context.AliasedOutputs);
     }
+
+    private static (float[] Values, long Aliased) ResidentRun(ComputationGraph model, long outputs, bool aliasing)
+    {
+        using var context = new ComputeContext { OutputAliasing = aliasing };
+        var sample = TensorData([2L, 8L], [.. Enumerable.Range(0, 16).Select(i => i / 16f)]);
+        var rig = TrainingRig.FromScratch(model, L2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph,
+            [sample.CopyTo(ComputeContext.Host)], new AdamWOptimizerHyperparameters { LearningRate = 0.01f }, runtimeContext: context);
+        var input = rig.InputDef.FromOrderedData(sample);
+        var target = rig.TargetDef.FromOrderedData(TensorData([2L, outputs], [.. Enumerable.Range(0, (int)(2 * outputs)).Select(i => i / 32f)]));
+        using var run = rig.BeginResidentRun();
+        for (int i = 0; i < 3; i++) run.Step(input.Shared(), target.Shared());
+        var final = run.StepToCheckpoint(input.Shared(), target.Shared());
+        return ([.. FlattenStruct(final.TrainableParams), .. FlattenStruct(final.OptimizerState)], context.AliasedOutputs);
+    }
+
+    [Fact]
+    public void TestAResidentRunWritesATiedWeightOverTheWeightItConsumedCoverage()
+    {
+        var (aliased, written) = ResidentRun(TiedWeightMlp.ComputationGraph, 32L, aliasing: true);
+        Assert.Equal(4 * 12L, written);
+        Assert.Equal(ResidentRun(TiedWeightMlp.ComputationGraph, 32L, aliasing: false).Values, aliased);
+    }
+
+    [Fact]
+    public void TestAResidentRunWritingEveryStateOutputInPlaceTrainsExactlyAsOneThatDoesNotCoverage()
+        => Assert.Equal(ResidentRun(Modules.PlainTinyMlpStack.ComputationGraph, 16L, aliasing: false).Values,
+            ResidentRun(Modules.PlainTinyMlpStack.ComputationGraph, 16L, aliasing: true).Values);
 
     [Fact]
     public void TestTheMemoryPassModelsAStepWritingItsStateOverTheStateItConsumedCoverage()

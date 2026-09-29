@@ -24,6 +24,18 @@ namespace Shorokoo.Core.Backends;
 public readonly record struct OutputAlias(string Output, string Input);
 
 /// <summary>
+/// A state pair Shorokoo's own graph would prove but for the order some of its readers run in: see
+/// <see cref="OutputAliasProof.Unordered"/>. Positions are into the graph's nodes.
+/// </summary>
+/// <param name="Pair">The pair, by position: output <c>Output</c> of the graph, input <c>Input</c>.</param>
+/// <param name="Writer">The node writing the output.</param>
+/// <param name="Readers">Each reader of the input that is not an ancestor of the writer: one node
+/// (<c>First</c> equal to <c>Last</c>), or an opaque region of them — a scope, from its <c>OPEN</c>
+/// to its <c>CLOSE</c>.</param>
+internal sealed record UnorderedStatePair(
+    (int Output, int Input) Pair, int Writer, IReadOnlyList<(int First, int Last)> Readers);
+
+/// <summary>
 /// Which outputs of an ONNX graph may be written into the memory of which of its inputs — the proof
 /// behind output aliasing (<see cref="OutputAlias"/>). It answers for the graph it is given, so a
 /// backend that rewrites a graph before running it asks again of the graph it runs.
@@ -114,11 +126,71 @@ public static class OutputAliasProof
     /// that reads whatever the region reads. So a value such a region reads is refused as an
     /// input, and one it writes as an output, exactly as the rule refuses what a subgraph touches;
     /// and the region still orders what follows it.</para>
+    ///
+    /// <para>This graph is the one a backend receives, not the one it runs, and the proof counts
+    /// the readers a backend's rewrites can create. A backend creates a reader of the input only
+    /// by folding away work that depended on the input alone — two transposes that cancel, a
+    /// reshape or cast undone by another — so that a node which read the result reads the input
+    /// itself. Here, then, a node also reads the input when it reads a value computed from the
+    /// input, its views and constants alone (the outputs of <c>Shape</c> and <c>Size</c> count as
+    /// constants, as a backend folds them where shapes are known), other than through the output's
+    /// writer; each such node must be an ancestor of the writer like any other reader, and a
+    /// subgraph referring to such a value refuses the pair. That covers every reader folding can
+    /// make, so a pair proved here survives whatever the backend folds, and the backend's own proof
+    /// over the graph it runs (<see cref="Prove(GraphProto, IEnumerable{OutputAlias})"/>) stays
+    /// exact. The writer's own reads of such values are not held against it: a fold that turns one
+    /// into a read of the input as its second operand is refused by that backend proof, never
+    /// written in place.</para>
     /// </summary>
     internal static IReadOnlyList<(int Output, int Input)> Prove(
         InternalComputationGraph graph, IReadOnlyList<(int Output, int Input)> candidates)
+        => [.. Classify(graph, candidates, provedOnly: true).Select(pair => pair.Pair)];
+
+    /// <summary>
+    /// The pairs of <paramref name="candidates"/> Shorokoo's own <paramref name="graph"/> would
+    /// prove — as <see cref="Prove(InternalComputationGraph, IReadOnlyList{ValueTuple{int, int}})"/>
+    /// proves them, counting the readers folding can make — were each of its readers an ancestor
+    /// of its writer, in the order they were given, with the readers that are not. A pair with no
+    /// such reader is proved; the others are what ordering the writer after those readers would
+    /// prove (<see cref="Shorokoo.Core.AutoDiffCheckpointing.StateReadOrdering"/>). Each input
+    /// backs at most one pair, and each output at most one, the first candidate listed taking both.
+    /// </summary>
+    internal static IReadOnlyList<UnorderedStatePair> Unordered(
+        InternalComputationGraph graph, IReadOnlyList<(int Output, int Input)> candidates)
+        => Classify(graph, candidates, provedOnly: false);
+
+    private static List<UnorderedStatePair> Classify(
+        InternalComputationGraph graph, IReadOnlyList<(int Output, int Input)> candidates, bool provedOnly)
     {
         if (candidates.Count == 0) return [];
+        var (proto, spans) = Project(graph);
+        var index = new GraphIndex(proto);
+        var takenInputs = new HashSet<int>();
+        var takenOutputs = new HashSet<int>();
+        var found = new List<UnorderedStatePair>();
+        foreach (var (output, input) in candidates)
+        {
+            if (output < 0 || output >= proto.Outputs.Count || input < 0 || input >= proto.Inputs.Count) continue;
+            if (takenInputs.Contains(input) || takenOutputs.Contains(output)) continue;
+            var alias = new OutputAlias(proto.Outputs[output].Name, proto.Inputs[input].Name);
+            if (index.Unordered(alias, foldable: true) is not { } unordered) continue;
+            if (provedOnly && unordered.Readers.Count > 0) continue;
+            takenInputs.Add(input);
+            takenOutputs.Add(output);
+            found.Add(new UnorderedStatePair(
+                (output, input), spans[unordered.Writer].First, [.. unordered.Readers.Select(r => spans[r])]));
+        }
+        return found;
+    }
+
+    /// <summary>
+    /// <paramref name="graph"/> as the ONNX structure the rule reads (see
+    /// <see cref="Prove(InternalComputationGraph, IReadOnlyList{ValueTuple{int, int}})"/>), with,
+    /// for each node of it, the positions in <paramref name="graph"/>'s nodes it stands for: one
+    /// node, or the whole of an opaque region.
+    /// </summary>
+    private static (GraphProto Proto, List<(int First, int Last)> Spans) Project(InternalComputationGraph graph)
+    {
         var names = new Dictionary<FastTensorKey, string>();
         string Name(FastTensorKey? key)
         {
@@ -129,10 +201,9 @@ public static class OutputAliasProof
         }
 
         var proto = new GraphProto();
-        var inputs = graph.Inputs;
-        var outputs = graph.Outputs;
-        foreach (var input in inputs) proto.Inputs.Add(new ValueInfoProto { Name = Name(input) });
-        foreach (var output in outputs) proto.Outputs.Add(new ValueInfoProto { Name = Name(output) });
+        var spans = new List<(int First, int Last)>();
+        foreach (var input in graph.Inputs) proto.Inputs.Add(new ValueInfoProto { Name = Name(input) });
+        foreach (var output in graph.Outputs) proto.Outputs.Add(new ValueInfoProto { Name = Name(output) });
 
         var nodes = graph.Nodes;
         var end = graph.BodyEnd;
@@ -153,6 +224,7 @@ public static class OutputAliasProof
                 foreach (var input in node.Inputs) projected.Inputs.Add(Name(input));
                 foreach (var output in node.Outputs) projected.Outputs.Add(Name(output));
                 proto.Nodes.Add(projected);
+                spans.Add((i, i));
                 continue;
             }
 
@@ -172,19 +244,10 @@ public static class OutputAliasProof
             body.Nodes.Add(reader);
             region.Attributes.Add(new AttributeProto { Name = "body", Type = AttributeProto.AttributeType.Graph, G = body });
             proto.Nodes.Add(region);
+            spans.Add((i, last));
             i = last;
         }
-
-        var named = new List<OutputAlias>(candidates.Count);
-        var positions = new Dictionary<OutputAlias, (int Output, int Input)>();
-        foreach (var (output, input) in candidates)
-        {
-            if (output < 0 || output >= outputs.Count || input < 0 || input >= inputs.Count) continue;
-            var alias = new OutputAlias(proto.Outputs[output].Name, proto.Inputs[input].Name);
-            named.Add(alias);
-            positions.TryAdd(alias, (output, input));
-        }
-        return Prove(proto, named).Select(alias => positions[alias]).ToArray();
+        return (proto, spans);
     }
 
     /// <summary>
@@ -246,6 +309,9 @@ public static class OutputAliasProof
         private readonly int[] _visited;
         private int _stamp;
 
+        // What Constants() found, once it has been asked.
+        private HashSet<string>? _constants;
+
         internal GraphIndex(GraphProto graph)
         {
             _nodes = graph.Nodes;
@@ -287,15 +353,24 @@ public static class OutputAliasProof
         }
 
         /// <summary>Whether this graph proves <paramref name="alias"/>.</summary>
-        internal bool Proves(OutputAlias alias)
+        internal bool Proves(OutputAlias alias) => Unordered(alias, foldable: false) is { Readers.Count: 0 };
+
+        /// <summary>
+        /// Null where this graph refuses <paramref name="alias"/> whatever order its nodes run in;
+        /// otherwise the node writing the output, and the readers of the input that are not its
+        /// ancestors — none where the graph proves the pair. With <paramref name="foldable"/>, a
+        /// node reading a value computed from the input and constants alone is a reader too (see
+        /// <see cref="AddFoldableReaders"/>).
+        /// </summary>
+        internal (int Writer, List<int> Readers)? Unordered(OutputAlias alias, bool foldable)
         {
             var (input, output) = (alias.Input, alias.Output);
-            if (!_inputs.Contains(input) || _initializers.Contains(input)) return false;
+            if (!_inputs.Contains(input) || _initializers.Contains(input)) return null;
             if (!_outputs.TryGetValue(output, out var listed) || listed != 1 || _inputs.Contains(output))
-                return false;
-            if (!_producer.TryGetValue(output, out var writer)) return false;
+                return null;
+            if (!_producer.TryGetValue(output, out var writer)) return null;
             var p = _nodes[writer];
-            if (HoldsSubgraph(p) || !TypesAgree(input, output)) return false;
+            if (HoldsSubgraph(p) || !TypesAgree(input, output)) return null;
 
             // The input and every view of it, and the nodes that read any of them.
             var views = new HashSet<string>(StringComparer.Ordinal) { input };
@@ -304,7 +379,7 @@ public static class OutputAliasProof
             pending.Enqueue(input);
             while (pending.TryDequeue(out var name))
             {
-                if (_outputs.ContainsKey(name) || _referencedBySubgraphs.Contains(name)) return false;
+                if (_outputs.ContainsKey(name) || _referencedBySubgraphs.Contains(name)) return null;
                 if (!_consumers.TryGetValue(name, out var consumers)) continue;
                 foreach (var n in consumers)
                 {
@@ -321,8 +396,69 @@ public static class OutputAliasProof
                 }
             }
 
-            if (readers.Remove(writer) && !WritesInPlace(p, views)) return false;
-            return readers.Count == 0 || AllAncestorsOf(writer, readers);
+            if (readers.Remove(writer) && !WritesInPlace(p, views)) return null;
+            if (foldable && !AddFoldableReaders(views, writer, readers)) return null;
+            return (writer, NotAncestorsOf(writer, readers));
+        }
+
+        /// <summary>
+        /// Adds to <paramref name="readers"/> every node other than <paramref name="writer"/>
+        /// reading a value computed from <paramref name="views"/> — the input and its views — and
+        /// constants alone: what a backend can fold into a read of the input. Such a value is one
+        /// written by a node whose every input is one of them or a constant (<see cref="Constants"/>),
+        /// the writer's own outputs excepted. False where a subgraph refers to one of them, which
+        /// the pair cannot survive as it cannot survive a subgraph referring to a view.
+        /// </summary>
+        private bool AddFoldableReaders(HashSet<string> views, int writer, HashSet<int> readers)
+        {
+            var constants = Constants();
+            var derived = new HashSet<string>(views, StringComparer.Ordinal);
+            var pending = new Queue<string>(views);
+            bool DerivedOrConstant(string name) => name.Length == 0 || derived.Contains(name) || constants.Contains(name);
+            while (pending.TryDequeue(out var name))
+            {
+                if (_referencedBySubgraphs.Contains(name)) return false;
+                if (!_consumers.TryGetValue(name, out var consumers)) continue;
+                foreach (var n in consumers)
+                {
+                    var node = _nodes[n];
+                    if (n == writer || ReadsOnlyAShape(node)) continue;
+                    readers.Add(n);
+                    if (!node.Inputs.All(DerivedOrConstant)) continue;
+                    if (_captured.TryGetValue(n, out var captured) && !captured.All(DerivedOrConstant)) continue;
+                    foreach (var produced in node.Outputs)
+                        if (produced.Length > 0 && derived.Add(produced)) pending.Enqueue(produced);
+                }
+            }
+            return true;
+        }
+
+        /// <summary>
+        /// The values a backend can know before the run begins: the initializers, the outputs of
+        /// the standard <c>Shape</c> and <c>Size</c>, which it folds where shapes are known, and
+        /// whatever a node computes from those alone — a <c>Constant</c> and any other node reading
+        /// nothing among them. Counting a value constant that is not only widens what
+        /// <see cref="AddFoldableReaders"/> counts as a reader.
+        /// </summary>
+        private HashSet<string> Constants()
+        {
+            if (_constants is not null) return _constants;
+            var constants = new HashSet<string>(_initializers, StringComparer.Ordinal);
+            for (var changed = true; changed;)
+            {
+                changed = false;
+                for (int n = 0; n < _nodes.Count; n++)
+                {
+                    var node = _nodes[n];
+                    var known = ReadsOnlyAShape(node)
+                        || (node.Inputs.All(i => i.Length == 0 || constants.Contains(i))
+                            && (!_captured.TryGetValue(n, out var captured) || captured.All(constants.Contains)));
+                    if (!known) continue;
+                    foreach (var output in node.Outputs)
+                        if (output.Length > 0 && constants.Add(output)) changed = true;
+                }
+            }
+            return _constants = constants;
         }
 
         /// <summary>Whether <paramref name="p"/> reads the input — through one of
@@ -333,19 +469,21 @@ public static class OutputAliasProof
                && views.Contains(p.Inputs[0]) && !views.Contains(p.Inputs[1]);
 
         /// <summary>
-        /// Whether every one of <paramref name="readers"/> is an ancestor of node
-        /// <paramref name="writer"/>, walking back from it along the edges that order execution
-        /// whatever a runtime folds: explicit inputs, except those of a node that reads only a
-        /// shape, and the outer values a node's subgraphs read other than through a shape.
+        /// Those of <paramref name="readers"/> that are not ancestors of node
+        /// <paramref name="writer"/>, in node order, walking back from it along the edges that
+        /// order execution whatever a runtime folds: explicit inputs, except those of a node that
+        /// reads only a shape, and the outer values a node's subgraphs read other than through a
+        /// shape.
         /// </summary>
-        private bool AllAncestorsOf(int writer, HashSet<int> readers)
+        private List<int> NotAncestorsOf(int writer, HashSet<int> readers)
         {
+            if (readers.Count == 0) return [];
             var stamp = ++_stamp;
             var missing = readers.Count;
             var pending = new Stack<int>();
             _visited[writer] = stamp;
             pending.Push(writer);
-            while (pending.TryPop(out var n))
+            while (missing > 0 && pending.TryPop(out var n))
             {
                 var node = _nodes[n];
                 if (ReadsOnlyAShape(node)) continue;
@@ -355,11 +493,11 @@ public static class OutputAliasProof
                     if (input.Length == 0 || !_producer.TryGetValue(input, out var producer)) continue;
                     if (_visited[producer] == stamp) continue;
                     _visited[producer] = stamp;
-                    if (readers.Contains(producer) && --missing == 0) return true;
+                    if (readers.Contains(producer)) missing--;
                     pending.Push(producer);
                 }
             }
-            return false;
+            return [.. readers.Where(r => _visited[r] != stamp).Order()];
         }
 
         /// <summary>

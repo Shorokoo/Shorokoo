@@ -507,6 +507,28 @@ namespace Shorokoo.Tests.Modules
             => FloatMismatch(((Tensor<float32>)dq).Transpose().Reshape(Vector(-1L)), expected);
     }
 
+    /// <summary>DequantizeLinear with a zero point, of int8 and int16 tensors, each read through a
+    /// Reshape (× 0.5) and through a Transpose (× 0.25).</summary>
+    [Module]
+    public partial class QeeDequantizeWithZeroPointReshapeTransposeAuditCheck
+    {
+        public static Scalar<bit> Inline(Tensor<int8> a, Tensor<int16> b)
+        {
+            var mismatch =
+                Reshaped(OnnxOp.DequantizeLinear(a, Scalar(0.5f), Scalar((sbyte)2), null), Vector(49f, -4f, 0f)) +
+                Transposed(OnnxOp.DequantizeLinear(a.Reshape(Vector(1L, 3L)), Scalar(0.25f), Scalar((sbyte)-2), null), Vector(25.5f, -1f, 1f)) +
+                Reshaped(OnnxOp.DequantizeLinear(b, Scalar(0.5f), Scalar((short)-2), null), Vector(501f, -2f, 2f)) +
+                Transposed(OnnxOp.DequantizeLinear(b.Reshape(Vector(1L, 3L)), Scalar(0.25f), Scalar((short)2), null), Vector(249.5f, -2f, 0f));
+            return mismatch < Scalar(1L);
+        }
+
+        private static Scalar<int64> Reshaped(Variable dq, Vector<float32> expected)
+            => FloatMismatch(((Tensor<float32>)dq).Reshape(Vector(-1L)), expected);
+
+        private static Scalar<int64> Transposed(Variable dq, Vector<float32> expected)
+            => FloatMismatch(((Tensor<float32>)dq).Transpose().Reshape(Vector(-1L)), expected);
+    }
+
     /// <summary>DequantizeLinear of an int32 [1, 3] tensor with no zero point and a one-element
     /// scale along axis 0, read through a Reshape: [1000, −6, 2] × 0.5 = [500, −3, 1].</summary>
     [Module]

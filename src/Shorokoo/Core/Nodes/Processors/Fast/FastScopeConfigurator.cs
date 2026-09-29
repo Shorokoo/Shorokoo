@@ -425,7 +425,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// the condition of an <c>If</c> sharing it with a branch is, or after it closes, is placed
         /// outside it, and so outside every scope nested in it. The graph is in linear order, so
         /// walking it backwards settles every reader of a node before the node itself. A node a
-        /// scope requires (MustIn) keeps its placement.
+        /// scope requires (MustIn) keeps its placement; one a scope nested in the scope it is taken
+        /// out of requires is a body value read outside its body, and is refused as
+        /// <see cref="DecidePlacement"/> refuses one.
         ///
         /// <para>A boundary reads from inside scope S when it is S's <c>CLOSE</c>, or a boundary of
         /// a scope nested in S; S's own <c>OPEN</c> reads from outside.</para>
@@ -476,8 +478,14 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 {
                     if (!dec[s] || st[s] == NodeStatus.MustIn || rs.TrueForAll(r => ReadsFromInside(r, s))) continue;
                     for (int t = 0; t < scopes.Count; t++)
-                        if ((t == s || inAByStructure[s, t]) && st[t] != NodeStatus.MustIn)
-                            dec[t] = false;
+                    {
+                        if (t != s && !inAByStructure[s, t]) continue;
+                        if (st[t] == NodeStatus.MustIn)
+                            throw new InvalidOperationException(
+                                $"Node {node.OpCode} (Key={node.Key}) is required inside " +
+                                $"{scopes[t].Kind} scope #{t} but forced out of an enclosing scope.");
+                        dec[t] = false;
+                    }
                 }
             }
         }

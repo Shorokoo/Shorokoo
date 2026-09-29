@@ -158,8 +158,9 @@ public abstract class OrtBackend : IShorokooBackend
     /// <param name="graphOptimization">The ORT graph-optimization level to apply.</param>
     /// <param name="logSeverity">The minimum severity ORT logs at.</param>
     /// <param name="deviceMemory">The arena settings this session is built with.</param>
-    /// <param name="diagnostics">What the session records about itself. Its default records
-    /// nothing, which is what every session gets unless a context asked otherwise.</param>
+    /// <param name="diagnostics">What the session records about itself, and whether it computes
+    /// deterministically. Its default records nothing and leaves the runtime's kernels as they are,
+    /// which is what every session gets unless a context asked otherwise.</param>
     public IShorokooSession CreateSession(
         ReadOnlyMemory<byte> modelBytes,
         ShorokooGraphOptimization graphOptimization,

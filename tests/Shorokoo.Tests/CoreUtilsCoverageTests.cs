@@ -1170,7 +1170,7 @@ public class CoreUtilsCoverageTests
     }
 
     [Fact]
-    public void TestADeterministicContextBuildsItsSessionsDeterministicAndComputesWhatAnyOtherDoes()
+    public void TestADeterministicContextBuildsAndRunsItsSessionsAndComputesWhatAnyOtherDoes()
     {
         using var deterministic = new ComputeContext { Diagnostics = new DiagnosticSettings { DeterministicCompute = true } };
         using var plain = new ComputeContext();

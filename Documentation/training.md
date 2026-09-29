@@ -767,7 +767,8 @@ var (resumedRig, resumed) = TrainingRig.Load("run.skpt", runtimeContext: Determi
 ```
 
 ONNX Runtime then runs the deterministic CUDA kernel of every operator that has one, which can
-cost the card some speed; where an operator has none, it says so in its log at warning severity.
+cost the card some speed. An operator with no deterministic kernel runs the one it has, so its
+results can still vary; ONNX Runtime names only some of them in its log.
 The setting changes nothing on the CPU backends, which are reproducible either way, and the
 PyTorch and JAX backends do not apply it. Pass `new RngConfig { MasterSeed = … }` to re-roll all
 streams coherently, or `RngConfig.NonDeterministic()` for per-run variation.
@@ -828,7 +829,8 @@ A process's private bytes (its commit charge) are more than what it holds:
 
 What a rig itself holds is the model's state once over at most. A rig built from scratch keeps its
 initial values — parameters, model state and optimizer state — for `CreateInitialCheckpoint`. A
-rig from `TrainingRig.Load` keeps none: it computes them the first time something asks, since the
+rig from `TrainingRig.Load` keeps none, where every parameter declares a concrete shape (the
+case for a model built by Shorokoo): it computes them the first time something asks, since the
 checkpoint it loads replaces them. A resident run holds the state on its device; each checkpoint it
 hands out is a host copy of the whole state, held for as long as you hold the checkpoint.
 

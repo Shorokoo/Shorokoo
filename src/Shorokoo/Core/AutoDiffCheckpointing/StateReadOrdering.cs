@@ -29,26 +29,30 @@ namespace Shorokoo.Core.AutoDiffCheckpointing;
 /// an empty slice of the reader's output — <c>Reshape(Slice(out, [0], [0], [0]), [-1])</c>, the
 /// first zero rows along its first axis (a scalar is first reshaped to one element), so zero
 /// elements whatever the output's shape, a zero-element output included, and a slice reads only
-/// what it keeps — casts it to the anchor's element type, and concatenates it onto a small value
-/// the writer depends on (the anchor):
-/// <c>Reshape(Concat(Reshape(anchor, [-1]), empty…), shape(anchor))</c>. Concatenating
-/// zero elements is exactly the anchor, bit for bit, for every value including NaN and
-/// infinity; nothing is multiplied or added. The one consumer on the writer's side that read the
-/// anchor reads the concatenation instead, so it — and the writer after it — waits for every
-/// reader. The anchor is found walking back from the writer along the edges that order execution,
-/// among nodes no reader depends on: the first floating-point input of at most
-/// <see cref="MaxAnchorElements"/> elements (<see cref="Anchorable"/>), preferring one that is not
-/// a constant, whose value a backend would otherwise fold.
-/// For AdamW that is the decay factor of <c>param * (1 - lr * weightDecay)</c> or the step size;
-/// for SGD, the learning rate. A backend folds none of it: a <c>Slice</c> of a value computed at
+/// what it keeps — casts it to the anchor's element type, and concatenates it onto a scalar
+/// the writer depends on (the anchor): <c>Reshape(Concat(Reshape(anchor, [-1]), empty…), [])</c>.
+/// Every shape this names is the same whatever shapes a run is fed, so the graph ordered for one
+/// batch size runs at every other. Concatenating zero elements is exactly the anchor, bit for bit,
+/// for every value including NaN and infinity; nothing is multiplied or added. The one consumer
+/// on the writer's side that read the anchor reads the concatenation instead, so it — and the
+/// writer after it — waits for every reader. The anchor is found in the update itself: walking
+/// back from the writer through elementwise arithmetic (<see cref="UpdateOps"/>) that no reader
+/// depends on, the first floating-point scalar operand (<see cref="Anchorable"/>), preferring one
+/// that is not a constant. For AdamW that is the decay factor of
+/// <c>param * (1 - lr * weightDecay)</c> or the step size; for SGD, the learning rate. A value
+/// whose shape follows the batch is never one, since a scalar's shape follows nothing, and
+/// neither is an operand a backend reads to infer a shape — a <c>Resize</c> scale, a
+/// <c>Range</c> bound — since no such operator is elementwise; so the ordering changes no shape
+/// a backend infers. A backend folds none of it: a <c>Slice</c> of a value computed at
 /// run time is not a constant, and a <c>Concat</c> with a non-constant input is kept — ONNX
 /// Runtime keeps the dependency through its training-step optimizations, and writes every pair of
 /// a step so ordered in place.</para>
 ///
 /// <para><b>What is left alone.</b> A pair one of whose readers depends on the writer cannot be
-/// ordered — the reader needs the update — and a pair with no small anchor outside every reader's
-/// ancestry is left rather than routed through a state-sized operand, which would cost a pass
-/// over it; a reader that is a scope, or writes no tensor it can be sliced from, is left too.
+/// ordered — the reader needs the update — and a pair whose update has no scalar operand outside
+/// every reader's ancestry is left rather than routed through a state-sized operand, which would
+/// cost a pass over it; a reader that is a scope, or writes no tensor it can be sliced from — a
+/// sequence, say — is left too.
 /// Such a pair keeps whatever order it had, and whether it is written in place is for the proof
 /// to say. A graph holding a scope is handed back as it came, as the rest of the memory-aware
 /// pass hands it back.</para>
@@ -61,9 +65,6 @@ namespace Shorokoo.Core.AutoDiffCheckpointing;
 /// </summary>
 internal static class StateReadOrdering
 {
-    /// <summary>The most elements an anchor may have: the concatenation copies it once.</summary>
-    internal const long MaxAnchorElements = 64;
-
     /// <summary>
     /// <paramref name="graph"/> with the writer of each pair of <paramref name="pairs"/> it can
     /// order placed after every reader of that pair's input, and shape information covering every
@@ -92,7 +93,7 @@ internal static class StateReadOrdering
             var writer = nodes[pair.Writer];
             var readers = dag.Unordered(writer, pair.Readers.Select(r => nodes[r.First]));
             if (readers is null || readers.Count == 0) continue;
-            var outputs = readers.Select(reader => SliceableOutput(reader, shapes)).ToList();
+            var outputs = readers.Select(reader => SliceableOutput(reader, dag, shapes)).ToList();
             if (outputs.Any(o => o is null)) continue;
             if (Anchor(dag, writer, readers, inputs[pair.Pair.Input], shapes) is not var (consumer, slot, index, anchor, anchorInfo))
                 continue;
@@ -113,14 +114,10 @@ internal static class StateReadOrdering
                         new TensorShapeInfo(new Shape(0L), anchorInfo.DType, null)));
             }
 
-            var rank = anchorInfo.Shape.Dims.Length;
-            var flatInfo = new TensorShapeInfo(new Shape(anchorInfo.ElementCount), anchorInfo.DType, null);
-            var flatAnchor = rank == 1 ? anchor
-                : Add(added, shapes, OpCodes.RESHAPE, [], [anchor, constants.Vector(-1L)], flatInfo);
-            slices.Insert(0, flatAnchor);
+            var flatInfo = new TensorShapeInfo(new Shape(1L), anchorInfo.DType, null);
+            slices.Insert(0, Add(added, shapes, OpCodes.RESHAPE, [], [anchor, constants.Vector(-1L)], flatInfo));
             var joined = Add(added, shapes, OpCodes.CONCAT, new() { [OnnxOpAttributeNames.AttrAxis] = 0L }, slices, flatInfo);
-            var reshaped = rank == 1 ? joined
-                : Add(added, shapes, OpCodes.RESHAPE, [], [joined, constants.Vector(anchorInfo.Shape.Dims)], anchorInfo);
+            var reshaped = Add(added, shapes, OpCodes.RESHAPE, [], [joined, constants.Vector()], anchorInfo);
 
             consumer.FullInputs[slot][index] = reshaped;
             (insertBefore.TryGetValue(consumer, out var before) ? before : insertBefore[consumer] = []).AddRange(added);
@@ -145,16 +142,17 @@ internal static class StateReadOrdering
     }
 
     /// <summary>
-    /// The anchor for <paramref name="writer"/>: walking back from it, breadth first, along the
-    /// edges that order execution and among the nodes none of <paramref name="readers"/> depends
-    /// on, the first input of a standard ONNX node that <see cref="Anchorable"/> admits — one no
-    /// constant writes if there is one — other than <paramref name="state"/> itself. Null where
-    /// there is none.
+    /// The anchor for <paramref name="writer"/>: walking back from it, breadth first, through the
+    /// update — the elementwise arithmetic of <see cref="UpdateOps"/> that none of
+    /// <paramref name="readers"/> depends on — the first operand of one of its nodes that
+    /// <see cref="Anchorable"/> admits, other than <paramref name="state"/> itself; one no constant
+    /// writes if there is one. Null where there is none.
     /// </summary>
     private static (FastNode Consumer, string Slot, int Index, FastTensorKey Anchor, TensorShapeInfo Info)? Anchor(
         Dag dag, FastNode writer, IReadOnlyList<FastNode> readers, FastTensorKey state,
         IDictionary<FastTensorKey, TensorShapeInfo> shapes)
     {
+        if (!IsUpdateOp(writer)) return null;
         var excluded = dag.AncestorsOf(readers);
         (FastNode, string, int, FastTensorKey, TensorShapeInfo)? constant = null;
         var seen = new HashSet<FastNode> { writer };
@@ -162,28 +160,38 @@ internal static class StateReadOrdering
         pending.Enqueue(writer);
         while (pending.TryDequeue(out var node))
         {
-            if (Dag.ReadsOnlyAShape(node)) continue;
-            if (node.TargetFunction is null && Definitions.VanillaOpNames.Contains(node.OpCode))
-                foreach (var (slot, keys) in node.FullInputs.OrderBy(s => s.Key, System.StringComparer.Ordinal))
-                    for (int i = 0; i < keys.Count; i++)
-                    {
-                        if (keys[i] is not { } key || key.Equals(state)) continue;
-                        if (!shapes.TryGetValue(key, out var info) || !Anchorable(info)) continue;
-                        if (!dag.WrittenByConstant(key)) return (node, slot, i, key, info);
-                        constant ??= (node, slot, i, key, info);
-                    }
+            foreach (var (slot, keys) in node.FullInputs.OrderBy(s => s.Key, System.StringComparer.Ordinal))
+                for (int i = 0; i < keys.Count; i++)
+                {
+                    if (keys[i] is not { } key || key.Equals(state)) continue;
+                    if (!shapes.TryGetValue(key, out var info) || !Anchorable(info) || !dag.IsDenseTensor(key)) continue;
+                    if (!dag.WrittenByConstant(key)) return (node, slot, i, key, info);
+                    constant ??= (node, slot, i, key, info);
+                }
             foreach (var producer in dag.Producers(node))
-                if (!excluded.Contains(producer) && seen.Add(producer)) pending.Enqueue(producer);
+                if (IsUpdateOp(producer) && !excluded.Contains(producer) && seen.Add(producer)) pending.Enqueue(producer);
         }
         return constant;
     }
 
-    /// <summary>Whether a value can anchor: a floating-point value — never a shape, an index or
-    /// a bound, which a kernel may read on the host or a backend fold at load — of at least one
-    /// and at most <see cref="MaxAnchorElements"/> elements, its shape known.</summary>
+    /// <summary>The operations an update is computed with: elementwise arithmetic, each of whose
+    /// operands is data — never a shape, a size, an index or a bound, which a backend reads to
+    /// infer a shape or folds at load.</summary>
+    private static readonly HashSet<string> UpdateOps =
+    [
+        OpCodes.ADD, OpCodes.SUB, OpCodes.MUL, OpCodes.DIV, OpCodes.POW, OpCodes.NEG, OpCodes.SQRT,
+        OpCodes.RECIPROCAL, OpCodes.ABS, OpCodes.SIGN, OpCodes.MAX, OpCodes.MIN, OpCodes.SUM, OpCodes.MEAN,
+        OpCodes.EXP, OpCodes.LOG, OpCodes.TANH, OpCodes.SIGMOID, OpCodes.ERF, OpCodes.CLIP, OpCodes.WHERE,
+        OpCodes.CAST, OpCodes.IDENTITY,
+    ];
+
+    private static bool IsUpdateOp(FastNode node) => node.TargetFunction is null && UpdateOps.Contains(node.OpCode);
+
+    /// <summary>Whether a value can anchor: a floating-point scalar — rank zero, so of one element
+    /// whatever shapes a run is fed — as an optimizer's hyperparameters and the step sizes
+    /// computed from them are.</summary>
     private static bool Anchorable(TensorShapeInfo info)
-        => info.ElementCount is >= 1 and <= MaxAnchorElements && info.Shape.Dims.All(d => d >= 0)
-           && FloatingPointTypes.Contains(info.DType);
+        => info.Shape.Dims.Length == 0 && FloatingPointTypes.Contains(info.DType);
 
     private static readonly HashSet<DType> FloatingPointTypes = [DType.Float16, DType.BFloat16, DType.Float32, DType.Float64];
 
@@ -195,12 +203,13 @@ internal static class StateReadOrdering
     ];
 
     /// <summary>An output of <paramref name="reader"/> an empty slice can be taken of and cast:
-    /// the first whose shape is known and whose type <c>Cast</c> takes.</summary>
+    /// the first that is a tensor (<see cref="Dag.IsDenseTensor"/>), its shape known and its type
+    /// one <c>Cast</c> takes.</summary>
     private static (FastTensorKey Output, TensorShapeInfo Info)? SliceableOutput(
-        FastNode reader, IDictionary<FastTensorKey, TensorShapeInfo> shapes)
+        FastNode reader, Dag dag, IDictionary<FastTensorKey, TensorShapeInfo> shapes)
     {
         foreach (var output in reader.Outputs)
-            if (output is { } key && shapes.TryGetValue(key, out var info)
+            if (output is { } key && dag.IsDenseTensor(key) && shapes.TryGetValue(key, out var info)
                 && info.Shape.Dims.All(d => d >= 0) && CastableTypes.Contains(info.DType))
                 return (key, info);
         return null;
@@ -265,6 +274,9 @@ internal static class StateReadOrdering
             foreach (var c in consumers[next])
                 if (--waiting[c] == 0) ready.Enqueue(c, c);
         }
+        if (order.Count != body.Count)
+            throw new System.InvalidOperationException(
+                $"Ordering the state updates left {body.Count - order.Count} of {body.Count} nodes on a cycle.");
         return order;
     }
 
@@ -275,6 +287,7 @@ internal static class StateReadOrdering
     private sealed class Dag
     {
         private readonly Dictionary<FastTensorKey, FastNode> _producer = [];
+        private readonly Dictionary<FastTensorKey, bool> _dense = [];
 
         public Dag(IEnumerable<FastNode> nodes)
         {
@@ -291,6 +304,31 @@ internal static class StateReadOrdering
         public void Added(IEnumerable<FastNode> added)
         {
             foreach (var node in added) Record(node);
+        }
+
+        /// <summary>
+        /// Whether <paramref name="key"/> is a tensor — not a sequence, an optional or a struct — by
+        /// what writes it: a tensor input of the graph, or an output of a standard ONNX node whose
+        /// definition makes every output a tensor, or makes none anything else and reads only
+        /// tensors — an output whose structure follows its inputs'.
+        /// </summary>
+        public bool IsDenseTensor(FastTensorKey key)
+        {
+            if (_dense.TryGetValue(key, out var known)) return known;
+            _dense[key] = false;
+            return _dense[key] = _producer.TryGetValue(key, out var node) && WritesTensors(node);
+        }
+
+        private bool WritesTensors(FastNode node)
+        {
+            if (node.OpCode == InternalOpCodes.MODEL_TENSOR_INPUT) return true;
+            if (node.TargetFunction is not null || !Definitions.VanillaOpNames.Contains(node.OpCode)) return false;
+            var structures = Definitions.NodeDefinitions[node.OpCode].VariantDefinitions
+                .SelectMany(variant => variant.OutputDefs)
+                .Select(output => output.StructureDef.HardCodedValue).ToList();
+            if (structures.Any(structure => structure is { } s && s != DataStructure.Tensor)) return false;
+            return structures.All(structure => structure is not null)
+                || node.Inputs.All(input => input is not { } k || IsDenseTensor(k));
         }
 
         /// <summary>Whether a <c>Constant</c> writes <paramref name="key"/>.</summary>

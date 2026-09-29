@@ -78,7 +78,7 @@ rises only for post-21 attributes on imported (or `NodeBuilder`-built) nodes
 each either throws `NotImplementedException` or is lowered to opset-21 primitives; an imported
 post-21 operator is kept and raises the stamp to its floor. A graph built through
 `Ops`/`OnnxOp` always exports at opset 21 (`.srk` keeps operators as authored and stamps
-accordingly). Models up to opset 26 run on the bundled ONNX Runtime 1.26. See
+accordingly). Models up to opset 26 run on the bundled ONNX Runtime 1.30. See
 [limitations.md](limitations.md) for the stamping policy and
 [operator-support.md](operator-support.md) per operator.
 

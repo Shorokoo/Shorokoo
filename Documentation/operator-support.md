@@ -1,7 +1,7 @@
 # Operator support matrix
 
 Shorokoo supports the standard `ai.onnx` domain from **opset 21** up to **opset 26**, the
-maximum implemented by the bundled ONNX Runtime 1.26; import does not convert older models.
+maximum the bundled ONNX Runtime 1.30 loads; import does not convert older models.
 Exported models are stamped at the
 **opset-21 baseline**; only a few post-21 attributes on imported (or
 `NodeBuilder`-built) nodes raise the stamp, and no post-21 operator reaches an

@@ -427,7 +427,7 @@ included, are unaffected. Declare the struct as an `IStruct` interface instead.
 
 Import reads every standard-domain (`ai.onnx`) node against its current definition (opset 21,
 or the operator's own opset for an operator introduced after 21, with the attributes opsets
-22–26 add; the range of the bundled ONNX Runtime 1.26, which pins ONNX 1.21). It does not
+22–26 add; the range the bundled ONNX Runtime 1.30 loads). It does not
 check the opset the model declares and converts nothing. **Models older than opset 21 are not
 supported, and their behaviour is undefined**: import does not refuse them, and where an
 operator's signature changed after the model's opset, either of these can happen:
@@ -456,7 +456,7 @@ authored graph never emits one:
   authored and stamps at 24.
 
 The baseline is 21 rather than 26 because the stamp selects ONNX Runtime kernel
-versions, and ORT 1.26's CPU provider lacks some: it registers no opset-22 kernels
+versions, and ORT 1.30's CPU provider lacks some: it registers no opset-22 kernels
 for `GlobalLpPool` or `RandomNormalLike`, so a model stamped at opset ≥ 22 fails to
 load where the opset-21 model runs.
 

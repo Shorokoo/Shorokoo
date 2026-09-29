@@ -779,9 +779,9 @@ folder and load the second with `IsolatedBackend`:
      is the usual route, and this recipe cuts that route on purpose. -->
 <PackageReference Include="Shorokoo.OnnxRuntime" Version="..." />
 
-<PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.26.0"
+<PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.30.0"
                   ExcludeAssets="all" GeneratePathProperty="true" />
-<PackageReference Include="Microsoft.ML.OnnxRuntime.Gpu.Linux" Version="1.26.0"
+<PackageReference Include="Microsoft.ML.OnnxRuntime.Gpu.Linux" Version="1.30.0"
                   ExcludeAssets="all" GeneratePathProperty="true" />
 
 <ShorokooBackendNatives BackendId="cpu"

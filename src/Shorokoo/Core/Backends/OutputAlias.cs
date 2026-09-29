@@ -128,19 +128,21 @@ public static class OutputAliasProof
     /// and the region still orders what follows it.</para>
     ///
     /// <para>This graph is the one a backend receives, not the one it runs, and the proof counts
-    /// the readers a backend's rewrites can create. A backend creates a reader of the input only
-    /// by folding away work that depended on the input alone — two transposes that cancel, a
-    /// reshape or cast undone by another — so that a node which read the result reads the input
-    /// itself. Here, then, a node also reads the input when it reads a value computed from the
-    /// input, its views and constants alone (the outputs of <c>Shape</c> and <c>Size</c> count as
-    /// constants, as a backend folds them where shapes are known), other than through the output's
-    /// writer; each such node must be an ancestor of the writer like any other reader, and a
-    /// subgraph referring to such a value refuses the pair. That covers every reader folding can
-    /// make, so a pair proved here survives whatever the backend folds, and the backend's own proof
-    /// over the graph it runs (<see cref="Prove(GraphProto, IEnumerable{OutputAlias})"/>) stays
-    /// exact. The writer's own reads of such values are not held against it: a fold that turns one
-    /// into a read of the input as its second operand is refused by that backend proof, never
-    /// written in place.</para>
+    /// the readers a backend's folding can create out of the input. Folding away work that
+    /// depended on the input alone — two transposes that cancel, a reshape or cast undone by
+    /// another — turns a node which read the result into a reader of the input itself. Here, then,
+    /// a node also reads the input when it reads a value computed from the input, its views and
+    /// constants alone (the outputs of <c>Shape</c> and <c>Size</c> count as constants, as a
+    /// backend folds them where shapes are known), other than through the output's writer; each
+    /// such node must be an ancestor of the writer like any other reader, and a subgraph referring
+    /// to such a value refuses the pair. That covers the readers such folding makes. It does not
+    /// cover every rewrite a backend makes — a fusion can place the node it creates where no node
+    /// of this graph stood, as a <c>MatMul</c> and the <c>Add</c> after it fused into one
+    /// <c>Gemm</c> at the <c>Add</c> — so this proof is the model's estimate, and the backend's own
+    /// proof over the graph it runs (<see cref="Prove(GraphProto, IEnumerable{OutputAlias})"/>)
+    /// decides what is written in place. The writer's own reads of such values are not held
+    /// against it: a fold that turns one into a read of the input as its second operand is refused
+    /// by that backend proof, never written in place.</para>
     /// </summary>
     internal static IReadOnlyList<(int Output, int Input)> Prove(
         InternalComputationGraph graph, IReadOnlyList<(int Output, int Input)> candidates)

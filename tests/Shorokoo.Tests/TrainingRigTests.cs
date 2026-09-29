@@ -3524,6 +3524,24 @@ public class TrainingRigTrainingLoopCoverageTests
         for (int i = 0; i < 4; i++) run.Step(input.Shared(), target.Shared());
         Assert.Equal(4 * 56L, context.AliasedOutputs);
     }
+
+    // The memory-aware pass models the same peak whether or not the step writes its state in place:
+    // https://github.com/Shorokoo/Shorokoo/issues/464
+    [Fact(Skip = "Shorokoo/Shorokoo#464: the memory-aware pass does not model a step writing its state over the state it consumed")]
+    public void TestTheMemoryPassModelsAStepWritingItsStateOverTheStateItConsumedCoverage()
+    {
+        long ModelledPeak(ComputeContext context)
+        {
+            var sample = TensorData([2L, 8L], [.. Enumerable.Range(0, 16).Select(i => i / 16f)]);
+            var rig = TrainingRig.FromScratch(
+                Modules.PlainTinyMlpStack.ComputationGraph, L2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph,
+                [sample.CopyTo(ComputeContext.Host)], new AdamWOptimizerHyperparameters { LearningRate = 0.01f }, runtimeContext: context);
+            return rig.OptimizationResult.Evaluation.PeakMemoryBytes;
+        }
+        using var aliased = new ComputeContext();
+        using var unaliased = new ComputeContext { OutputAliasing = false };
+        Assert.True(ModelledPeak(aliased) < ModelledPeak(unaliased));
+    }
 }
 
 [Trait("Domain", "Training")]

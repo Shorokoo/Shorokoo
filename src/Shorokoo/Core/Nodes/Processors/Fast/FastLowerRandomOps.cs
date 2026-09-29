@@ -212,7 +212,14 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// as ONNX local FunctionProtos, so the call survives to the ONNX model as a
         /// Functions-domain call node (see FastOpsetResolver).
         /// </summary>
-        private static void LowerKeyedRngToFunctionCall(FastNode node)
+        private static void LowerKeyedRngToFunctionCall(FastNode node) => LowerKeyedRngToFunctionCall(node, chunked: false);
+
+        /// <summary>
+        /// <see cref="LowerKeyedRngToFunctionCall(FastNode)"/>, calling the draw's chunked form
+        /// where <paramref name="chunked"/> is set (<see cref="RngAlgorithms.GetChunkedFunction"/>):
+        /// the same values, for a draw that runs once and is dropped — parameter initialization.
+        /// </summary>
+        internal static void LowerKeyedRngToFunctionCall(FastNode node, bool chunked)
         {
             var algorithm = node.Attributes.GetStringVal(ShrkAttrRngAlgorithm)
                 ?? RngAlgorithms.Default;
@@ -233,7 +240,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 _ => throw new InvalidOperationException(
                     $"LowerKeyedRngToFunctionCall: unexpected opcode '{node.OpCode}'."),
             };
-            var fn = RngAlgorithms.GetFunction(algorithm, kind, bitsDtype);
+            var fn = chunked && node.OpCode != InternalOpCodes.SHRK_RNG_SPLIT
+                ? RngAlgorithms.GetChunkedFunction(algorithm, kind, bitsDtype)
+                : RngAlgorithms.GetFunction(algorithm, kind, bitsDtype);
 
             var invokeAttrDefs = Definitions.NodeDefinitions[InternalOpCodes.FUNCTION_INVOKE].AttributeDefs;
             node.OpCode = InternalOpCodes.FUNCTION_INVOKE;

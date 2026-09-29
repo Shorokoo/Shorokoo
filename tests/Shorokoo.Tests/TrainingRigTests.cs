@@ -162,6 +162,15 @@ public partial class TwoParamsFirstTooLargeModel
 }
 
 [Module]
+public partial class ThreeParamsMiddleTooLargeModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+        => x * Zeros.Init([Scalar(4L)]).Reduce(ReduceKind.Mean, null, keepDims: false).Scalar()
+             * Zeros.Init([Scalar(1L << 25), Scalar(1L << 25)]).Reduce(ReduceKind.Mean, null, keepDims: false).Scalar()
+             * Zeros.Init([Scalar(4L)]).Reduce(ReduceKind.Mean, null, keepDims: false).Scalar();
+}
+
+[Module]
 public partial class ParamSizeOverflowingModel
 {
     public static Tensor<float32> Inline(Tensor<float32> x)
@@ -677,6 +686,20 @@ public class TrainingRigFromScratchCoverageTests
         Assert.NotNull(bound);
         Assert.NotNull(ctx.Compile(bound));
     }
+
+    private static int RigBuildSessions(ComputationGraph model)
+    {
+        var backend = new SessionCountingBackend(DefaultBackend.Instance);
+        using var ctx = new ComputeContext(backend);
+        TrainingRig.FromScratch(model, L2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph,
+            [TensorData([1L, 4L], new float[4])], new AdamWOptimizerHyperparameters { LearningRate = 0.01f },
+            mergeContext: ctx, runtimeContext: ctx);
+        return backend.Sessions;
+    }
+
+    [Fact]
+    public void TestSameShapedParametersShareTheirRigBuildSessions()
+        => Assert.Equal(RigBuildSessions(RngInitSameShapeStack2.ComputationGraph), RigBuildSessions(RngInitSameShapeStack8.ComputationGraph));
 
     [Fact]
     public void TestASpecializedModuleGraphTrainsWithItsHypersBakedOutOfTheInputList()
@@ -1513,7 +1536,7 @@ public class TrainingRigCompositionCoverageTests
         Assert.IsNotType<ComputeContextException>(
             Record.Exception(() => otherArch.InitializeTrainableParams()));
 
-        // Each parameter initializes in its own session, so the failure names the one that
+        // Each parameter initializes in a run of its own, so the failure names the one that
         // actually failed — here the smaller of the two, which is initialized first — and lists
         // the larger only as context.
         var two = TwoParamsFirstTooLargeModel.ComputationGraph.ToInternal();
@@ -1523,6 +1546,23 @@ public class TrainingRigCompositionCoverageTests
         Assert.Contains("[33554432, 33554432] = 4.00 PiB failed", twoEx.Message);
         Assert.Contains("[67108864, 33554432] = 8.00 PiB", twoEx.Message);
         Assert.Contains("1 of 2", twoEx.Message);
+    }
+
+    [Fact]
+    public void TestAnAllocationFailureAmongRunsSideBySideNamesItsParameterAndLeavesNoSession()
+    {
+        var arch = ThreeParamsMiddleTooLargeModel.ComputationGraph.ToInternal().ToConcreteArchitecture(
+            [TensorData([1L, 4L], [1f, 2f, 3f, 4f])]);
+        var backend = new SessionCountingBackend(DefaultBackend.Instance);
+        using var ctx = new ComputeContext(backend);
+        using (Shorokoo.Core.Nodes.Processors.Fast.FastInitializeModelParams.DecideSideBySide(true))
+        {
+            var ex = Assert.Throws<ComputeContextException>(() => arch.InitializeTrainableParams(computeContext: ctx));
+            Assert.Contains("[33554432, 33554432] = 4.00 PiB failed", ex.Message);
+            Assert.Contains("1 of 3", ex.Message);
+        }
+        Assert.Equal(2, backend.SingleThreaded);
+        Assert.Equal(0, backend.Live);
     }
 
     [Fact]
@@ -2550,7 +2590,7 @@ public class TrainingRigTrainingLoopCoverageTests
         var rankOnly = FastOnnxModelBuilder.BuildInternalOnnxModel(graph, prepForOnnx: true);
 
         Assert.Equal(dims, concrete.Graph.Inputs.Select(vi => vi.Type.TensorType.Shape.Dims.Select(d => d.DimValue).ToArray()));
-        Assert.All(rankOnly.Graph.Inputs, vi => Assert.Null(vi.Type.TensorType.Shape));
+        Assert.All(rankOnly.Graph.Inputs, vi => Assert.DoesNotContain(vi.Type.TensorType.Shape?.Dims ?? [], d => d.ShouldSerializeDimValue()));
         Assert.Equal(0, OrtOptimizedNodeCount(concrete, "Shape"));
         Assert.NotEqual(0, OrtOptimizedNodeCount(rankOnly, "Shape"));
 

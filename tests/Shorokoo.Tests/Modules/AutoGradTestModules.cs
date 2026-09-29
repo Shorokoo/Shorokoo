@@ -2837,6 +2837,167 @@ namespace Shorokoo.Tests.Modules
     }
 
     /// <summary>
+    /// A static-rank [2, 3, 4] batch times a static-rank [4, 2] matrix under weights 1..12: dL/db
+    /// sums aᵀ·w over the batch, dL/da is w·bᵀ, both checked against a reference built from
+    /// batched ops.
+    /// </summary>
+    [Module]
+    public partial class AutoGradMatMulBatchTimesMatrixCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x)
+        {
+            var a = (Tensor<float32>)OnnxOp.Identity(x, rank: 3);
+            var b = (Tensor<float32>)OnnxOp.Identity(OnnxOp.Reshape(
+                Vector(0.5f, -1f, 2f, 1.5f, -0.25f, 3f, 1f, -2f), Vector(4L, 2L), allowZero: false), rank: 2);
+            var w = (Tensor<float32>)OnnxOp.Reshape(
+                Vector(1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f, 9f, 10f, 11f, 12f), Vector(2L, 3L, 2L), allowZero: false);
+            var loss = ((Tensor<float32>)OnnxOp.MatMul(a, b) * w).Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+            var grads = Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad([(IValue)a, b], loss);
+            var expectedA = (Tensor<float32>)OnnxOp.MatMul(w, b.Transpose(1L, 0L));
+            var expectedB = ((Tensor<float32>)OnnxOp.MatMul(a.Transpose(0L, 2L, 1L), w))
+                .Reduce(ReduceKind.Sum, axes: Vector(0L), keepDims: false);
+            var errA = ((Tensor<float32>)grads[0]! - expectedA).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
+            var errB = ((Tensor<float32>)grads[1]! - expectedB).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
+            return (errA < Scalar(1e-4f)) & (errB < Scalar(1e-4f));
+        }
+    }
+
+    /// <summary>
+    /// A static-rank batch <c>x</c> times a static-rank [K, n] matrix of ones, K being x's last dim,
+    /// under unit weights: both gradients must match the batched reference in shape and value, a
+    /// zero-sized K or n included.
+    /// </summary>
+    internal static class AutoGradMatMulBatchTimesMatrix
+    {
+        internal static Scalar<bit> Check(Tensor<float32> x, long n)
+        {
+            var a = (Tensor<float32>)OnnxOp.Identity(x, rank: 3);
+            var b = (Tensor<float32>)OnnxOp.Identity(OnnxOp.Expand(Scalar(1f),
+                OnnxOp.Concat([OnnxOp.Shape(x, start: -1), Vector(n)], axis: 0)), rank: 2);
+            var w = (Tensor<float32>)OnnxOp.Expand(Scalar(1f), OnnxOp.Concat([OnnxOp.Shape(x, end: -1), Vector(n)], axis: 0));
+            var loss = ((Tensor<float32>)OnnxOp.MatMul(a, b) * w).Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+            var grads = Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad([(IValue)a, b], loss);
+            var expectedA = (Tensor<float32>)OnnxOp.MatMul(w, b.Transpose(1L, 0L));
+            var expectedB = ((Tensor<float32>)OnnxOp.MatMul(a.Transpose(0L, 2L, 1L), w))
+                .Reduce(ReduceKind.Sum, axes: Vector(0L), keepDims: false);
+            return Matches((Tensor<float32>)grads[0]!, expectedA) & Matches((Tensor<float32>)grads[1]!, expectedB);
+        }
+
+        private static Scalar<bit> Matches(Tensor<float32> actual, Tensor<float32> expected)
+        {
+            var shapeGap = ((Tensor<int64>)OnnxOp.Shape(actual) - (Tensor<int64>)OnnxOp.Shape(expected)).Abs()
+                .Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+            var valueGap = (actual - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+            return (shapeGap == Scalar(0L)) & (valueGap < Scalar(1e-4f));
+        }
+    }
+
+    [Module]
+    public partial class AutoGradMatMulBatchTimesMatrixOfTwoColumnsCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x) => AutoGradMatMulBatchTimesMatrix.Check(x, 2L);
+    }
+
+    [Module]
+    public partial class AutoGradMatMulBatchTimesMatrixOfNoColumnsCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x) => AutoGradMatMulBatchTimesMatrix.Check(x, 0L);
+    }
+
+    /// <summary>
+    /// The 2-D companion of <see cref="AutoGradMatMulBatchTimesMatrixCheck"/>: a static-rank
+    /// [3, 4] times a static-rank [4, 2] under weights 1..6.
+    /// </summary>
+    [Module]
+    public partial class AutoGradMatMulMatrixTimesMatrixCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x)
+        {
+            var a = (Tensor<float32>)OnnxOp.Identity(x, rank: 2);
+            var b = (Tensor<float32>)OnnxOp.Identity(OnnxOp.Reshape(
+                Vector(0.5f, -1f, 2f, 1.5f, -0.25f, 3f, 1f, -2f), Vector(4L, 2L), allowZero: false), rank: 2);
+            var w = (Tensor<float32>)OnnxOp.Reshape(Vector(1f, 2f, 3f, 4f, 5f, 6f), Vector(3L, 2L), allowZero: false);
+            var loss = ((Tensor<float32>)OnnxOp.MatMul(a, b) * w).Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+            var grads = Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad([(IValue)a, b], loss);
+            var expectedA = (Tensor<float32>)OnnxOp.MatMul(w, b.Transpose(1L, 0L));
+            var expectedB = (Tensor<float32>)OnnxOp.MatMul(a.Transpose(1L, 0L), w);
+            var errA = ((Tensor<float32>)grads[0]! - expectedA).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
+            var errB = ((Tensor<float32>)grads[1]! - expectedB).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
+            return (errA < Scalar(1e-4f)) & (errB < Scalar(1e-4f));
+        }
+    }
+
+    /// <summary>
+    /// An unknown-rank [4] vector times a static-rank [4, 2] matrix under weights [3, -2]: dL/da is
+    /// b·w and dL/db the outer product a·wᵀ.
+    /// </summary>
+    [Module]
+    public partial class AutoGradMatMulVectorTimesMatrixCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float32> a)
+        {
+            var b = (Tensor<float32>)OnnxOp.Identity(OnnxOp.Reshape(
+                Vector(0.5f, -1f, 2f, 1.5f, -0.25f, 3f, 1f, -2f), Vector(4L, 2L), allowZero: false), rank: 2);
+            var w = Vector(3f, -2f);
+            var loss = ((Tensor<float32>)OnnxOp.MatMul(a, b) * w).Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+            var grads = Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad([(IValue)a, b], loss);
+            var expectedA = (Tensor<float32>)OnnxOp.MatMul(b, w);
+            var expectedB = (Tensor<float32>)OnnxOp.Unsqueeze(a, Vector(1L)) * (Tensor<float32>)OnnxOp.Unsqueeze(w, Vector(0L));
+            var errA = ((Tensor<float32>)grads[0]! - expectedA).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
+            var errB = ((Tensor<float32>)grads[1]! - expectedB).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
+            return (errA < Scalar(1e-4f)) & (errB < Scalar(1e-4f));
+        }
+    }
+
+    /// <summary>
+    /// An unknown-rank batched MatMul with no rows, <c>expand(a, lhs)</c> times
+    /// <c>expand(a, rhs)</c>: the product is empty, so dL/da = 0 through the rank-agnostic
+    /// last-two-dims transpose of a zero-sized operand.
+    /// </summary>
+    internal static class AutoGradMatMulUnknownRankEmpty
+    {
+        internal static Scalar<bit> Check(Scalar<float32> a, long[] lhs, long[] rhs)
+        {
+            var A = (Tensor<float32>)OnnxOp.Expand(a, Vector(lhs));
+            var B = (Tensor<float32>)OnnxOp.Expand(a, Vector(rhs));
+            var loss = ((Tensor<float32>)OnnxOp.MatMul(A, B)).Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+            var grad = Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(a, loss);
+            return grad.Abs() < Scalar(1e-5f);
+        }
+    }
+
+    /// <summary>
+    /// A static-rank batched MatMul with no rows, [2, 0, 3] times [2, 3, 2]: the product is
+    /// empty, so dL/da = 0 through the static-perm last-two-dims transposes.
+    /// </summary>
+    [Module]
+    public partial class AutoGradMatMulKnownRankNoRowsCheck
+    {
+        public static Scalar<bit> Inline(Scalar<float32> a)
+        {
+            var A = (Tensor<float32>)OnnxOp.Identity(OnnxOp.Expand(a, Vector(2L, 0L, 3L)), rank: 3);
+            var B = (Tensor<float32>)OnnxOp.Identity(OnnxOp.Expand(a, Vector(2L, 3L, 2L)), rank: 3);
+            var loss = ((Tensor<float32>)OnnxOp.MatMul(A, B)).Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+            var grad = Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(a, loss);
+            return grad.Abs() < Scalar(1e-5f);
+        }
+    }
+
+    [Module]
+    public partial class AutoGradMatMulUnknownRankNoRowsCheck
+    {
+        public static Scalar<bit> Inline(Scalar<float32> a)
+            => AutoGradMatMulUnknownRankEmpty.Check(a, [2L, 0L, 3L], [2L, 3L, 2L]);
+    }
+
+    [Module]
+    public partial class AutoGradMatMulUnknownRankRank4NoRowsCheck
+    {
+        public static Scalar<bit> Inline(Scalar<float32> a)
+            => AutoGradMatMulUnknownRankEmpty.Check(a, [1L, 2L, 0L, 3L], [1L, 2L, 3L, 2L]);
+    }
+
+    /// <summary>
     /// Unknown-rank batched MatMul: no Identity rank stamp, so the operands' Rank is
     /// null and the MatMul gradient takes the rank-agnostic last-two-dims transpose
     /// fallback (collapse leading dims → swap → restore) instead of the static perm.
@@ -3775,6 +3936,148 @@ namespace Shorokoo.Tests.Modules
         }
     }
 
+    /// <summary>
+    /// dL/dtable of <c>Sum(Gather(table, indices, axis 0) · weights)</c> against an expected
+    /// gradient, in shape and in value — an empty gradient included.
+    /// </summary>
+    internal static class AutoGradGatherTable
+    {
+        internal static Scalar<bit> Check<T>(Tensor<T> table, Variable indices, Tensor<T> weights, Tensor<T> expected)
+            where T : FloatLike
+        {
+            var gathered = (Tensor<T>)OnnxOp.Gather(table, indices, axis: 0);
+            var loss = (Scalar<T>)(Variable)(gathered * weights).Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+            var grad = (Tensor<T>)Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad([(IValue)table], loss)[0]!;
+            var shapeGap = ((Tensor<int64>)OnnxOp.Shape(grad) - (Tensor<int64>)OnnxOp.Shape(expected)).Abs()
+                .Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+            var valueGap = ((Tensor<float32>)OnnxOp.Cast((grad - expected).Abs(), saturate: null, to: DType.Float32))
+                .Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+            return (shapeGap == Scalar(0L)) & (valueGap < Scalar(1e-5f));
+        }
+
+        internal static Tensor<float32> Matrix(long rows, long cols, params float[] values)
+            => (Tensor<float32>)OnnxOp.Reshape(Vector(values), Vector(rows, cols), allowZero: false);
+    }
+
+    /// <summary><see cref="AutoGradGatherTableRowsCheck"/> with int32 indices.</summary>
+    [Module]
+    public partial class AutoGradGatherTableRowsInt32IndicesCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float32> table)
+            => AutoGradGatherTable.Check(table, Vector(3, -1, 0, 3, -4),
+                AutoGradGatherTable.Matrix(5, 2, 1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f, 9f, 10f),
+                AutoGradGatherTable.Matrix(4, 2, 14f, 16f, 0f, 0f, 0f, 0f, 11f, 14f));
+    }
+
+    /// <summary>A rank-0 index reads one row of a [4, 2] table: only that row has a gradient.</summary>
+    [Module]
+    public partial class AutoGradGatherTableScalarIndexCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float32> table)
+            => AutoGradGatherTable.Check(table, Scalar(2L), Vector(3f, -2f),
+                AutoGradGatherTable.Matrix(4, 2, 0f, 0f, 0f, 0f, 3f, -2f, 0f, 0f));
+    }
+
+    /// <summary>No index reads a [4, 2] table, so its gradient is all zeros at its shape.</summary>
+    [Module]
+    public partial class AutoGradGatherTableNoIndicesCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float32> table)
+            => AutoGradGatherTable.Check(table, Vector<int64>.Empty,
+                (Tensor<float32>)OnnxOp.Expand(Scalar(1f), Vector(0L, 2L)),
+                (Tensor<float32>)OnnxOp.Expand(Scalar(0f), Vector(4L, 2L)));
+    }
+
+    /// <summary><see cref="AutoGradGatherTableRowsCheck"/> on a float64 table, whose float32 loss
+    /// reads the weighted rows through a Cast.</summary>
+    [Module]
+    public partial class AutoGradGatherTableRowsFloat64Check
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x)
+        {
+            var table = x.Cast<float64>();
+            var gathered = (Tensor<float64>)OnnxOp.Gather(table, Vector(3L, -1L, 0L, 3L, -4L), axis: 0);
+            var weights = AutoGradGatherTable.Matrix(5, 2, 1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f, 9f, 10f).Cast<float64>();
+            var loss = (gathered * weights).Cast<float32>().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+            var grad = (Tensor<float64>)Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad([(IValue)table], loss)[0]!;
+            var expected = AutoGradGatherTable.Matrix(4, 2, 14f, 16f, 0f, 0f, 0f, 0f, 11f, 14f);
+            return (grad.Cast<float32>() - expected).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar() < Scalar(1e-5f);
+        }
+    }
+
+    /// <summary>A rank-1 [4] table — a per-token bias — read at 3, 3 (as -1) and 0 under weights
+    /// 1..3.</summary>
+    [Module]
+    public partial class AutoGradGatherVectorRowsCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float32> table)
+            => AutoGradGatherTable.Check(table, Vector(3L, -1L, 0L), Vector(1f, 2f, 3f), Vector(3f, 0f, 0f, 3f));
+    }
+
+    /// <summary><see cref="AutoGradGatherVectorRowsCheck"/> with the table's rank stated.</summary>
+    [Module]
+    public partial class AutoGradGatherStaticRankVectorRowsCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float32> table)
+            => AutoGradGatherTable.Check((Tensor<float32>)OnnxOp.Identity(table, rank: 1),
+                Vector(3L, -1L, 0L), Vector(1f, 2f, 3f), Vector(3f, 0f, 0f, 3f));
+    }
+
+    /// <summary>A [3, 0] table read at [2, 2] indices: its gradient is empty at the table's shape.</summary>
+    [Module]
+    public partial class AutoGradGatherZeroWidthTableMultiDimIndicesCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float32> table)
+            => AutoGradGatherTable.Check(table,
+                OnnxOp.Reshape(Vector(2L, 0L, 2L, 1L), Vector(2L, 2L), allowZero: false),
+                (Tensor<float32>)OnnxOp.Expand(Scalar(1f), Vector(2L, 2L, 0L)),
+                (Tensor<float32>)OnnxOp.Expand(Scalar(0f), Vector(3L, 0L)));
+    }
+
+    /// <summary>
+    /// Axis-0 Gather of table rows with repeats and negative spellings: rows 3, 3 (as -1), 0, 3
+    /// and 0 (as -4) of a [4, 2] table under weights 1..10, so dL/dtable sums each row's weights
+    /// and leaves the unread rows 1 and 2 at zero.
+    /// </summary>
+    [Module]
+    public partial class AutoGradGatherTableRowsCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float32> table)
+        {
+            var weights = (Tensor<float32>)OnnxOp.Reshape(
+                Vector(1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f, 9f, 10f), Vector(5L, 2L), allowZero: false);
+            var gathered = (Tensor<float32>)OnnxOp.Gather(table, Vector(3L, -1L, 0L, 3L, -4L), axis: 0);
+            var loss = (gathered * weights).Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+            var grad = Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(table, loss);
+            var expected = (Tensor<float32>)OnnxOp.Reshape(
+                Vector(14f, 16f, 0f, 0f, 0f, 0f, 11f, 14f), Vector(4L, 2L), allowZero: false);
+            return (grad - expected).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar() < Scalar(1e-5f);
+        }
+    }
+
+    /// <summary>
+    /// Axis-0 Gather of a rank-3 [3, 2, 2] table at [2, 2] indices naming rows 2, 0, 2 and 2 (as
+    /// -1) under weights 1..16: row 2 sums three [2, 2] weight blocks, row 0 takes one, row 1
+    /// none.
+    /// </summary>
+    [Module]
+    public partial class AutoGradGatherTableBlocksMultiDimIndicesCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float32> table)
+        {
+            var weights = (Tensor<float32>)OnnxOp.Reshape(
+                Vector(1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f, 9f, 10f, 11f, 12f, 13f, 14f, 15f, 16f),
+                Vector(2L, 2L, 2L, 2L), allowZero: false);
+            var indices = (Tensor<int64>)OnnxOp.Reshape(Vector(2L, 0L, 2L, -1L), Vector(2L, 2L), allowZero: false);
+            var gathered = (Tensor<float32>)OnnxOp.Gather(table, indices, axis: 0);
+            var loss = (gathered * weights).Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+            var grad = Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(table, loss);
+            var expected = (Tensor<float32>)OnnxOp.Reshape(
+                Vector(5f, 6f, 7f, 8f, 0f, 0f, 0f, 0f, 23f, 26f, 29f, 32f), Vector(3L, 2L, 2L), allowZero: false);
+            return (grad - expected).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar() < Scalar(1e-5f);
+        }
+    }
+
     [Module]
     public partial class AutoGradGatherNonZeroAxisOneDimIndicesCheck
     {
@@ -3792,8 +4095,8 @@ namespace Shorokoo.Tests.Modules
     /// <summary>
     /// Unknown-rank companion to <see cref="AutoGradGatherNonZeroAxisOneDimIndicesCheck"/>:
     /// no Identity rank stamp, so `data` has a null static Rank and the Gather gradient
-    /// takes its rank-agnostic collapse-to-3-D scatter (instead of a rank-length transpose
-    /// perm, which previously threw for a non-zero axis on null-rank data). Same result:
+    /// takes its rank-agnostic collapse-to-3-D scatter (a rank-length transpose perm needs a
+    /// static rank). Same result:
     /// gather column 1 of 3a²-free data → sum = 2a, dL/da = 2.
     /// </summary>
     [Module]
@@ -3807,6 +4110,42 @@ namespace Shorokoo.Tests.Modules
             var loss = gathered.Reduce(ReduceKind.Sum, keepDims: false).Scalar();
             var grad = Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(a, loss);
             return (grad - Scalar(2f)).Abs() < Scalar(1e-5f);
+        }
+    }
+
+    /// <summary>
+    /// Column 1 of an unknown-rank [0, 3] table: nothing is gathered, so dL/da = 0 through the
+    /// rank-agnostic collapse-to-3-D scatter with a zero-sized leading dim.
+    /// </summary>
+    [Module]
+    public partial class AutoGradGatherNonZeroAxisUnknownRankZeroLeadCheck
+    {
+        public static Scalar<bit> Inline(Scalar<float32> a)
+        {
+            var data = (Tensor<float32>)OnnxOp.Expand(a, Vector(0L, 3L));
+            var gathered = (Tensor<float32>)OnnxOp.Gather(data, Vector(1L), axis: 1);
+            var loss = gathered.Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+            var grad = Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(a, loss);
+            return grad.Abs() < Scalar(1e-5f);
+        }
+    }
+
+    /// <summary>
+    /// Column 1 of a static-rank [0, 3] table at [1, 1] indices: nothing is gathered, so dL/da = 0
+    /// through the multi-dim-index flatten with a zero-sized leading dim.
+    /// </summary>
+    [Module]
+    public partial class AutoGradGatherNonZeroAxisMultiDimIndicesZeroLeadCheck
+    {
+        public static Scalar<bit> Inline(Scalar<float32> a)
+        {
+            var data = (Tensor<float32>)OnnxOp.Identity(OnnxOp.Expand(a, Vector(0L, 3L)), rank: 2);
+            var indices = (Tensor<int64>)OnnxOp.Identity(
+                OnnxOp.Reshape(Vector(1L), Vector(1L, 1L), allowZero: false), rank: 2);
+            var gathered = (Tensor<float32>)OnnxOp.Gather(data, indices, axis: 1);
+            var loss = gathered.Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+            var grad = Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(a, loss);
+            return grad.Abs() < Scalar(1e-5f);
         }
     }
 
@@ -5236,8 +5575,7 @@ namespace Shorokoo.Tests.Modules
     }
 
     /// <summary>Same as Positive but with coordinateTransformationMode=Output_half_pixel
-    /// (previously spelled via the misleading positional CoordinateTransformationMode
-    /// .Half_pixel_symmetric — same "output_half_pixel" wire value). dL/da = 34.</summary>
+    /// (the "output_half_pixel" wire value). dL/da = 34.</summary>
     [Module]
     public partial class AutoGradRoiAlignOutputHalfPixelCheck
     {
@@ -5830,6 +6168,22 @@ namespace Shorokoo.Tests.Modules
             var loss = a.Cast<float64>().Cast<float32>();
             var grad = Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(a, loss);
             return (grad - Scalar(1f)).Abs() < Scalar(1e-5f);
+        }
+    }
+
+    /// <summary>
+    /// a squared in float64 between two Casts: the gradient reaching the float64 Mul is float64,
+    /// so dL/da = 2a.
+    /// </summary>
+    [Module]
+    public partial class AutoGradFloat64ProductBetweenCastsCheck
+    {
+        public static Scalar<bit> Inline(Scalar<float32> a)
+        {
+            var wide = a.Cast<float64>();
+            var loss = (wide * wide).Cast<float32>();
+            var grad = Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(a, loss);
+            return (grad - Scalar(2f) * a).Abs() < Scalar(1e-5f);
         }
     }
 

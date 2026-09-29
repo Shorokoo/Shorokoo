@@ -1,3 +1,5 @@
+using Shorokoo.Core.AutoDiffCheckpointing;
+using Shorokoo.Core.Graph;
 using Shorokoo.Core.Nodes.Processors.Helpers;
 using Shorokoo.Runtime;
 using Shorokoo.Modules.Losses;
@@ -749,6 +751,41 @@ public class NNLibraryOptimizerTrainingCoverageTests
             [2L, 2L], [1f, 2f, 3f, 4f], [0f, 0f, 0f, 0f], 0.01f, -0.8f, 1e-30f, 1e-3f, 1.0f, 0.0f);
         CoverTrainStepMovesNonScalarParam(AnalyticMatMulModel.ComputationGraph, LambOptimizer.ComputationGraph,
             [2L, 2L], [1f, 2f, 3f, 4f], [0f, 0f, 0f, 0f], 0.01f, 0.9f, 0.999f, 1e-6f, 0.01f);
+    }
+
+    private static int StepOpsSized(long elements, ComputationGraph model, long[] tokens,
+        ComputationGraph optimizerGraph, params Hyperparameter[] hyperparams)
+    {
+        var rig = TrainingRig.FromScratch(model, L2Loss.ComputationGraph, optimizerGraph,
+            [new TensorDataModelParam("tokens", ModelParamType.InputParam,
+                TensorData(tokens, Enumerable.Range(0, (int)tokens.Aggregate(1L, (p, d) => p * d)).Select(i => (long)(i * 7 % 64)).ToArray()))],
+            hyperparams);
+        var step = rig.TrainingStepPureGraph.ToInternal();
+        var shapes = new ShapeInferenceInterpreter().Infer(step, rig.OptimizationInputs);
+        return step.Nodes.Take(step.BodyEnd).Skip(step.InputCount)
+            .Count(n => shapes.GetTensorInfo(new FastTensorKey(n.Key, 0))?.ElementCount == elements);
+    }
+
+    [Fact]
+    public void TestAGatheredTableStepMakesOneTableSizedGradientAndTheFewestUpdatePasses()
+    {
+        var table = NNGatheredTableModel.ComputationGraph;
+        Assert.Equal(3, StepOpsSized(64 * 4, table, [3L], SGDOptimizer.ComputationGraph, 0.1f));
+        Assert.Equal(13, StepOpsSized(64 * 4, table, [3L], AdamOptimizer.ComputationGraph, 0.001f, 0.9f, 0.999f, 1e-8f));
+        Assert.Equal(14, StepOpsSized(64 * 4, table, [3L], AdamWOptimizer.ComputationGraph, 0.001f, 0.9f, 0.999f, 1e-8f, 0.01f));
+        Assert.Equal(13, StepOpsSized(64 * 4, table, [3L], AdamWOptimizer.ComputationGraph, 0.001f, 0.9f, 0.999f, 1e-8f, 0f));
+        Assert.Equal(14, StepOpsSized(64 * 4, table, [3L], AdamWOptimizer.ComputationGraph,
+            new AdamWOptimizerHyperparameters { WeightDecay = Hyperparameter.Runtime() }.InOptimizerOrder()));
+        Assert.Equal(4, StepOpsSized(64, NNGatheredBiasModel.ComputationGraph, [3L], SGDOptimizer.ComputationGraph, 0.1f));
+    }
+
+    [Fact]
+    public void TestAMatMulWeightStepMakesOneWeightSizedGradientAndTransposesTheWeightOnce()
+    {
+        var projection = NNGatheredTableProjectionModel.ComputationGraph;
+        Assert.Equal(4, StepOpsSized(4 * 48, projection, [3L], SGDOptimizer.ComputationGraph, 0.1f));
+        Assert.Equal(4, StepOpsSized(4 * 48, projection, [2L, 3L], SGDOptimizer.ComputationGraph, 0.1f));
+        Assert.Equal(3, StepOpsSized(64 * 4, projection, [2L, 3L], SGDOptimizer.ComputationGraph, 0.1f));
     }
 
     /// <summary>End-to-end convergence. Adam and LAMB on the wide, perfectly realizable

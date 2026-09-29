@@ -679,18 +679,30 @@ internal static class RuntimeRng
 
     /// <summary>The high half of the 128-bit product a·b — Lemire's multiply-shift, which scales a
     /// draw onto [0, b) without a division. ONNX has no 128-bit type, so this is the schoolbook
-    /// 32-bit split; every intermediate stays under 2^64. <paramref name="b"/> is the call's total
-    /// weight, so all four products broadcast a tensor against a scalar.</summary>
+    /// 32-bit split; every intermediate stays under 2^64.</summary>
     private static Tensor<uint64> DenseMulHigh(Tensor<uint64> a, Tensor<uint64> b)
+        => DenseMulHigh(a, Halves(b));
+
+    /// <summary>The low and high 32 bits of a 64-bit value, each as a uint64 — the split
+    /// <see cref="DenseMulHigh(Tensor{uint64}, Tensor{uint64})"/> takes of each operand, made once
+    /// for an operand several products share.</summary>
+    private static (Tensor<uint64> Low, Tensor<uint64> High) Halves(Tensor<uint64> v)
+        => (OnnxOp.BitwiseAnd(v, Scalar(0xFFFF_FFFFUL)).uint64(), ShiftDown(v, Scalar(32UL)));
+
+    /// <summary>
+    /// <see cref="DenseMulHigh(Tensor{uint64}, Tensor{uint64})"/> over a <paramref name="b"/>
+    /// already split. With a = a1·2^32 + a0 and b likewise, the product is
+    /// a1b1·2^64 + (a1b0 + a0b1)·2^32 + a0b0, and its high half carries the two middle terms in
+    /// one at a time: t = a1b0 + (a0b0 >> 32) and u = a0b1 + (t mod 2^32) are each at most
+    /// (2^32-1)^2 + 2^32-1, under 2^64, so neither wraps, and the high half is
+    /// a1b1 + (t >> 32) + (u >> 32) — exactly, with no rounding anywhere.
+    /// </summary>
+    private static Tensor<uint64> DenseMulHigh(Tensor<uint64> a, (Tensor<uint64> Low, Tensor<uint64> High) b)
     {
-        var mask = Scalar(0xFFFF_FFFFUL);
-        var (a0, a1) = (OnnxOp.BitwiseAnd(a, mask).uint64(), ShiftDown(a, Scalar(32UL)));
-        var (b0, b1) = (OnnxOp.BitwiseAnd(b, mask).uint64(), ShiftDown(b, Scalar(32UL)));
-        var (low, mid1, mid2) = (a0 * b0, a1 * b0, a0 * b1);
-        var carry = ShiftDown(low, Scalar(32UL))
-                  + OnnxOp.BitwiseAnd(mid1, mask).uint64() + OnnxOp.BitwiseAnd(mid2, mask).uint64();
-        return a1 * b1 + ShiftDown(mid1, Scalar(32UL)) + ShiftDown(mid2, Scalar(32UL))
-             + ShiftDown(carry, Scalar(32UL));
+        var (a0, a1) = Halves(a);
+        var t = a1 * b.Low + ShiftDown(a0 * b.Low, Scalar(32UL));
+        var u = a0 * b.High + OnnxOp.BitwiseAnd(t, Scalar(0xFFFF_FFFFUL)).uint64();
+        return a1 * b.High + ShiftDown(t, Scalar(32UL)) + ShiftDown(u, Scalar(32UL));
     }
 
     /// <summary>
@@ -731,9 +743,23 @@ internal static class RuntimeRng
         Vector<int64> shape, Scalar<uint64> key, Scalar<uint64> substreamIndex,
         Scalar<float32> low, Scalar<float32> high, int rounds = Threefry2x32.Rounds)
     {
+        var table = BuildDenseTable(low, high);
+        return UniformOfDraw(table, Draw(ElementCount(shape), key, substreamIndex, rounds)).Reshape(shape);
+    }
+
+    /// <summary>The dense uniform's decode of the generator values <paramref name="draw"/> under
+    /// <paramref name="table"/>, one float per value, flat — elementwise, so any run of the
+    /// stream's values decodes to the same floats as the whole draw does there.</summary>
+    private static Tensor<float32> UniformOfDraw(
+        (Tensor<uint64> Threshold, Tensor<int64> Base, Tensor<int64> Class,
+         Tensor<int64> Width, Tensor<int64> Shift, Tensor<int64> Negative,
+         Tensor<int64> Geometric, Tensor<int64> Lattice, Tensor<int64> FloorClass,
+         Tensor<float32> Spacing, Tensor<bit> UseFixed, Tensor<float32> Fixed,
+         Tensor<uint64> Total) table,
+        Tensor<uint64> draw)
+    {
         var (threshold, bases, classes, widths, shifts, negatives, geometrics, lattices,
-             floorClass, spacing, useFixed, fixedValue, total) = BuildDenseTable(low, high);
-        var draw = Draw(ElementCount(shape), key, substreamIndex, rounds);
+             floorClass, spacing, useFixed, fixedValue, total) = table;
         // The whole draw, scaled onto the weight axis: floor(draw*total / 2^64). A total of 0 is
         // the 2^64 sentinel, where the scaling is the identity — mulhi by 0 is 0, so adding the
         // draw back covers that case without a branch.
@@ -819,7 +845,7 @@ internal static class RuntimeRng
 
         var drawn = (Tensor<float32>)OnnxOp.Where(
             (Tensor<bit>)OnnxOp.Greater(lattice, Scalar(0L)), latticeValue, ordinalValue);
-        return ((Tensor<float32>)OnnxOp.Where(useFixed, fixedValue, drawn)).Reshape(shape);
+        return (Tensor<float32>)OnnxOp.Where(useFixed, fixedValue, drawn);
     }
 
     // ── The standard normal (piece table) ───────────────────────────────────────────────
@@ -980,11 +1006,13 @@ internal static class RuntimeRng
 
         // Horner, not a chain of explicit powers: one multiply-high per degree rather than two, and
         // one truncation rather than two. The accumulator cannot overflow — every coefficient is
-        // non-negative and they sum to under 2^64, and MulHigh(a, x) <= a.
+        // non-negative and they sum to under 2^64, and MulHigh(a, x) <= a. x is split into its halves
+        // once, for every step.
+        var xHalves = Halves(x);
         var series = NormalCoef(row, DenseNormalTable.Degree);
         for (int k = DenseNormalTable.Degree - 1; k >= 1; k--)
-            series = DenseMulHigh(series, x) + NormalCoef(row, k);
-        series = DenseMulHigh(series, x);
+            series = DenseMulHigh(series, xHalves) + NormalCoef(row, k);
+        series = DenseMulHigh(series, xHalves);
 
         // The magnitude's index within its piece: the series' top IndexBits, once the class-start
         // quarter ulp is in. The Min cannot fire — the sum is a uint64 and the shift leaves
@@ -1100,4 +1128,127 @@ internal static class RuntimeRng
     public static Tensor<uint64> BitsU64(
         Vector<int64> shape, Scalar<uint64> key, Scalar<uint64> substreamIndex, int rounds = Threefry2x32.Rounds)
         => Draw(ElementCount(shape), key, substreamIndex, rounds).Reshape(shape);
+
+    // ── Chunked draws ───────────────────────────────────────────────────────────────────
+    // The same draws, the stream's positions walked a chunk at a time by a loop rather than all at
+    // once. Every transform above is elementwise over the generator's values — the dense uniform's
+    // table is built from the bounds alone, before any value is read — so a chunk of positions
+    // decodes to exactly the floats the whole draw has there, and the chunks, stacked and cut back
+    // to the draw's size, ARE the whole draw, bit for bit. What differs is only what is live at
+    // once: one chunk's intermediates — hundreds of full-size integer passes a value — rather than
+    // the whole draw's, so the working memory is bounded by the chunk whatever the draw's size, and
+    // each pass runs over data that stays in cache. The chunk's size is an input, so one function
+    // serves the CPU's cache-sized chunk and a device's larger one alike. Parameter initialization
+    // draws this way (see RngAlgorithms.GetChunkedFunction); a runtime feed keeps the whole-draw
+    // form.
+
+    /// <summary>Stream positions per loop trip of a chunked draw on the CPU: 2^16 values of
+    /// 8 bytes keep each of the draw's passes within a core's cache, where a pass costs a fraction
+    /// of what it does streaming from memory.</summary>
+    internal const long CpuChunkPositions = 1L << 16;
+
+    /// <summary>Stream positions per loop trip of a chunked draw on a device. A trip costs the
+    /// device a launch per pass whatever its size, so a card wants far fewer trips than the CPU's
+    /// chunk would make — a 38 M-element table would take ~590 — and it wants them bounded all the
+    /// same: 2^20 positions hold a trip's live intermediates to around a hundred MiB (a few dozen
+    /// 8 MiB tensors), and the same table takes 37 trips.</summary>
+    internal const long DeviceChunkPositions = 1L << 20;
+
+    /// <summary>The substream-folded key <see cref="Draw"/> draws under.</summary>
+    private static (Tensor<uint32> k0, Tensor<uint32> k1) FoldedKey(
+        Scalar<uint64> key, Scalar<uint64> substreamIndex, int rounds)
+    {
+        var (k0, k1) = Words(key);
+        var (d0, d1) = Words(substreamIndex);
+        return Bijection(d0, d1, k0, k1, rounds);
+    }
+
+    /// <summary>
+    /// <paramref name="decode"/> of the generator's values at stream positions
+    /// <c>[0, positionCount)</c>, drawn <paramref name="chunkPositions"/> at a time, flat — at least
+    /// <paramref name="positionCount"/> decoded positions' worth, since the last chunk runs whole;
+    /// the caller cuts it to size.
+    /// </summary>
+    private static Vector<T> ChunkedDraw<T>(
+        Scalar<int64> positionCount, Scalar<uint64> key, Scalar<uint64> substreamIndex, int rounds,
+        Scalar<int64> chunkPositions, Func<Tensor<uint64>, Tensor<T>> decode) where T : IVarType
+    {
+        var (dk0, dk1) = FoldedKey(key, substreamIndex, rounds);
+        // Every trip draws the same count, as a loop's stacked output needs; a draw smaller than a
+        // chunk is one trip of exactly its own size, and at least one position keeps the divisor
+        // live for an empty draw, which runs no trip.
+        var chunk = positionCount.Min(chunkPositions).Max(Scalar(1L));
+        var chunks = (positionCount + chunk - Scalar(1L)) / chunk;
+        Tensor<T>? stacked = null;
+        foreach (var ctx in LoopAPI.Iterate(chunks))
+        {
+            var start = ctx.IterationIndex * chunk;
+            var (c0, c1) = Words(OnnxOp.Range(start, start + chunk, Scalar(1L)).int64().Cast<uint64>());
+            var (x0, x1) = Bijection(c0, c1, dk0, dk1, rounds);
+            stacked = ctx.Scan(decode(Pack(x0, x1)));
+        }
+        return stacked!.Value.Reshape(Vector(-1L)).Vec();
+    }
+
+    /// <summary><see cref="Uniform"/>, drawn a chunk at a time.</summary>
+    public static Tensor<float32> UniformChunked(
+        Vector<int64> shape, Scalar<uint64> key, Scalar<uint64> substreamIndex,
+        Scalar<float32> low, Scalar<float32> high, Scalar<int64> chunkPositions,
+        int rounds = Threefry2x32.Rounds)
+    {
+        var table = BuildDenseTable(low, high);
+        var n = ElementCount(shape);
+        return ChunkedDraw(n, key, substreamIndex, rounds, chunkPositions, v => UniformOfDraw(table, v))
+            .Slice(Scalar(0L), n).Reshape(shape);
+    }
+
+    /// <summary><see cref="Normal"/>, drawn a chunk at a time.</summary>
+    public static Tensor<float32> NormalChunked(
+        Vector<int64> shape, Scalar<uint64> key, Scalar<uint64> substreamIndex,
+        Scalar<float32> mean, Scalar<float32> scale, Scalar<int64> chunkPositions,
+        int rounds = Threefry2x32.Rounds)
+    {
+        var n = ElementCount(shape);
+        return ChunkedDraw(n, key, substreamIndex, rounds, chunkPositions, NormalOfDraw)
+            .Slice(Scalar(0L), n).Reshape(shape) * scale + mean;
+    }
+
+    /// <summary><see cref="PackedLanes"/>, drawn a chunk at a time.</summary>
+    private static Vector<uint64> PackedLanesChunked(
+        Vector<int64> shape, Scalar<uint64> key, Scalar<uint64> substreamIndex, int width, int rounds,
+        Scalar<int64> chunkPositions)
+    {
+        long lanes = 64 / width;
+        Scalar<int64> n = ElementCount(shape);
+        return ChunkedDraw((n + Scalar(lanes - 1)) / Scalar(lanes), key, substreamIndex, rounds, chunkPositions,
+                v => ShiftDown(v.Reshape(Vector(-1L, 1L)), VectorRange(0UL, 64UL, (ulong)width)).Reshape(Vector(-1L)))
+            .Slice(Scalar(0L), n);
+    }
+
+    /// <summary><see cref="BitsU8"/>, drawn a chunk at a time.</summary>
+    public static Tensor<uint8> BitsU8Chunked(
+        Vector<int64> shape, Scalar<uint64> key, Scalar<uint64> substreamIndex, Scalar<int64> chunkPositions,
+        int rounds = Threefry2x32.Rounds)
+        => PackedLanesChunked(shape, key, substreamIndex, 8, rounds, chunkPositions).Cast<uint8>().Reshape(shape);
+
+    /// <summary><see cref="BitsU16"/>, drawn a chunk at a time.</summary>
+    public static Tensor<uint16> BitsU16Chunked(
+        Vector<int64> shape, Scalar<uint64> key, Scalar<uint64> substreamIndex, Scalar<int64> chunkPositions,
+        int rounds = Threefry2x32.Rounds)
+        => PackedLanesChunked(shape, key, substreamIndex, 16, rounds, chunkPositions).Cast<uint16>().Reshape(shape);
+
+    /// <summary><see cref="BitsU32"/>, drawn a chunk at a time.</summary>
+    public static Tensor<uint32> BitsU32Chunked(
+        Vector<int64> shape, Scalar<uint64> key, Scalar<uint64> substreamIndex, Scalar<int64> chunkPositions,
+        int rounds = Threefry2x32.Rounds)
+        => PackedLanesChunked(shape, key, substreamIndex, 32, rounds, chunkPositions).Cast<uint32>().Reshape(shape);
+
+    /// <summary><see cref="BitsU64"/>, drawn a chunk at a time.</summary>
+    public static Tensor<uint64> BitsU64Chunked(
+        Vector<int64> shape, Scalar<uint64> key, Scalar<uint64> substreamIndex, Scalar<int64> chunkPositions,
+        int rounds = Threefry2x32.Rounds)
+    {
+        var n = ElementCount(shape);
+        return ChunkedDraw(n, key, substreamIndex, rounds, chunkPositions, v => v).Slice(Scalar(0L), n).Reshape(shape);
+    }
 }

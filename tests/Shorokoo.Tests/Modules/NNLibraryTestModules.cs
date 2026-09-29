@@ -2455,6 +2455,32 @@ public partial class NNWideRegressionModel
         => Linear.Model(Scalar(400L), Scalar(true)).Call(input);
 }
 
+/// <summary>A <c>[64, 4]</c> table read at the batch's tokens: an embedding lookup, the shape of
+/// every trainable table a step touches only a few rows of.</summary>
+[Module]
+public partial class NNGatheredTableModel
+{
+    public static Tensor<float32> Inline(Tensor<int64> tokens)
+        => Normal.Init(Vector(64L, 4L)).Gather(tokens);
+}
+
+/// <summary>A <c>[64]</c> table read at the batch's tokens: a per-token bias.</summary>
+[Module]
+public partial class NNGatheredBiasModel
+{
+    public static Tensor<float32> Inline(Tensor<int64> tokens)
+        => Normal.Init(Vector(64L)).Gather(tokens);
+}
+
+/// <summary><see cref="NNGatheredTableModel"/> projected by a <c>[4, 48]</c> weight: the shape of
+/// an embedding feeding a linear layer.</summary>
+[Module]
+public partial class NNGatheredTableProjectionModel
+{
+    public static Tensor<float32> Inline(Tensor<int64> tokens)
+        => Normal.Init(Vector(64L, 4L)).Gather(tokens).MatMul(Normal.Init(Vector(4L, 48L)));
+}
+
 /// <summary>Tiny conv net: Conv2d(2, k3, s1, p1) → ReLU → GlobalAvgPool → [N, 2] logits.</summary>
 [Module]
 public partial class NNTinyConvClassifier

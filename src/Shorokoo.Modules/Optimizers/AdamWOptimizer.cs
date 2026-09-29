@@ -19,6 +19,13 @@ namespace Shorokoo.Modules.Optimizers;
 ///   v_hat = v_new / (1 - beta2^t_new)
 ///   param_new = param * (1 - learningRate * weightDecay) - learningRate * m_hat / (sqrt(v_hat) + epsilon)
 ///
+/// The graph computes the Adam step exactly as <see cref="AdamOptimizer"/> does, with the bias
+/// corrections folded into scalars:
+///   param_new = param * (1 - learningRate * weightDecay)
+///               - (m_new / (sqrt(v_new) + epsilon * sqrt(c2))) * (learningRate * sqrt(c2) / c1)
+/// with c1 = 1 - beta1^t_new and c2 = 1 - beta2^t_new — six passes over the parameter after the
+/// moment updates, where the m_hat / v_hat form above takes eight.
+///
 /// The timestep t is carried as a scalar optimizer-state tensor alongside the param-shaped
 /// m and v, exactly as in <see cref="AdamOptimizer"/> — one float per parameter, broadcast
 /// against m̂ / v̂. At weightDecay = 0 this is <see cref="AdamOptimizer"/> step for step;
@@ -62,15 +69,16 @@ public partial class AdamWOptimizer
         var newM = beta1 * m + (one - beta1) * grad;
         var newV = beta2 * v + (one - beta2) * grad * grad;
 
-        // Bias correction.
-        var mHat = newM / (one - (Tensor<float32>)OnnxOp.Pow(beta1, newStep));
-        var vHat = newV / (one - (Tensor<float32>)OnnxOp.Pow(beta2, newStep));
+        // Bias correction, folded into two scalars (see the summary).
+        var biasCorrection1 = one - (Tensor<float32>)OnnxOp.Pow(beta1, newStep);
+        var sqrtBiasCorrection2 = (one - (Tensor<float32>)OnnxOp.Pow(beta2, newStep)).Sqrt();
+        var stepSize = learningRate * sqrtBiasCorrection2 / biasCorrection1;
 
         // Decoupled weight decay: applied directly to parameters.
         var decayedParam = currentParam * (one - learningRate * weightDecay);
 
         // Parameter update: bias-corrected Adam step.
-        var updatedParam = decayedParam - learningRate * mHat / (vHat.Sqrt() + epsilon);
+        var updatedParam = decayedParam - newM / (newV.Sqrt() + epsilon * sqrtBiasCorrection2) * stepSize;
 
         // Register state updates (same order as the state declarations: m, v, step).
         Globals.StateUpdate(m, newM);

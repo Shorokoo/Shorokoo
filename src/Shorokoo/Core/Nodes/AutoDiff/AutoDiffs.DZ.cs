@@ -211,6 +211,28 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         [AutoDiff(MATMUL)]
         public static Variable?[] MatMul<T>(Tensor<T> a, Tensor<T> b, Tensor<T> grad) where T : IVarType
         {
+            // A matrix b — a weight, typically — broadcasts against nothing but a's batch dims, so
+            // neither gradient needs the reverse-broadcast reduction, whatever a's rank: grad·bᵀ is
+            // a's shape already (a 1-D a included, which MatMul promotes and demotes alike), and
+            // aᵀ·grad sums over a's batch dims when they are folded into its rows, inside the one
+            // MatMul. Each transpose is then a plain 2-D Transpose straight into a MatMul, which a
+            // backend can fold into the MatMul itself rather than copying the weight.
+            if (b.Rank == 2)
+            {
+                Tensor<T> aGradDirect = OnnxOp.MatMul(grad, b.Transpose(1L, 0L));
+                if (a.Rank == 2)
+                    return [aGradDirect, (Tensor<T>)OnnxOp.MatMul(a.Transpose(1L, 0L), grad)];
+
+                // Every dim is stated, and allowzero keeps a zero-sized one: a -1 cannot be inferred
+                // beside a zero, and without allowzero a 0 would copy a's dim instead.
+                Tensor<int64> rows = OnnxOp.ReduceProd(OnnxOp.Shape(a, end: -1), keepdims: true);   // [B·M]
+                Tensor<T> aRows = OnnxOp.Reshape(
+                    a, OnnxOp.Concat([rows, OnnxOp.Shape(b, start: 0, end: 1)], axis: 0), allowZero: true);    // [B·M, K]
+                Tensor<T> gradRows = OnnxOp.Reshape(
+                    grad, OnnxOp.Concat([rows, OnnxOp.Shape(b, start: 1)], axis: 0), allowZero: true);         // [B·M, N]
+                return [aGradDirect, (Tensor<T>)OnnxOp.MatMul(aRows.Transpose(1L, 0L), gradRows)];
+            }
+
             // For 2D: d(A@B)/dA = grad @ B^T, d(A@B)/dB = A^T @ grad
             // For batched matmul, transpose the last two dims
             var bTransposed = TransposeLastTwoDims(b);
@@ -253,16 +275,19 @@ namespace Shorokoo.Core.Nodes.AutoDiff
             // leading dims. The shapes are read at runtime via Shape, so this needs no
             // static rank. Operands always have rank >= 2 here — a matmul never contracts a
             // statically-rank-<2 operand, so that degenerate case does not reach this point.
+            // Every dim is stated, and allowzero keeps a zero-sized one: a -1 cannot be inferred
+            // beside a zero, and without allowzero a 0 would copy whatever dim sits at its position.
             Tensor<int64> lastTwo = OnnxOp.Shape(tensor, start: -2);                      // [M, N]
-            Tensor<int64> collapsedShape = OnnxOp.Concat([Vector(-1L), lastTwo], axis: 0); // [-1, M, N]
-            Tensor<T> collapsed = OnnxOp.Reshape(tensor, collapsedShape, allowZero: false); // (B', M, N)
+            Tensor<int64> batch = OnnxOp.ReduceProd(OnnxOp.Shape(tensor, end: -2), keepdims: true); // [B']
+            Tensor<int64> collapsedShape = OnnxOp.Concat([batch, lastTwo], axis: 0);      // [B', M, N]
+            Tensor<T> collapsed = OnnxOp.Reshape(tensor, collapsedShape, allowZero: true); // (B', M, N)
             var swapped = collapsed.Transpose(0L, 2L, 1L);                                      // (B', N, M)
 
             Tensor<int64> leading = OnnxOp.Shape(tensor, end: -2);                         // [d0 .. d_{r-3}]
             Tensor<int64> mDim = OnnxOp.Shape(tensor, start: -2, end: -1);                 // [M]
             Tensor<int64> nDim = OnnxOp.Shape(tensor, start: -1);                          // [N]
             Tensor<int64> restoredShape = OnnxOp.Concat([leading, nDim, mDim], axis: 0);   // [..., N, M]
-            return OnnxOp.Reshape(swapped, restoredShape, allowZero: false);
+            return OnnxOp.Reshape(swapped, restoredShape, allowZero: true);
         }
 
         // ===== Identity Operation =====

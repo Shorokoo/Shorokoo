@@ -561,9 +561,16 @@ is counted once — see [inference.md](inference.md#a-contexts-device-memory-bud
 
 `FromScratch` concretizes, composes the loss, runs autograd, lowers the optimizer, and runs shape
 inference and graph optimization, all on `MergeContext`. It also runs each trainable parameter's
-initializer and each optimizer-state initializer per parameter, one backend session per parameter,
-so build time grows linearly with the parameter count; peak host memory grows by a few hundred bytes
-per parameter element.
+initializer and each optimizer-state initializer per parameter. Parameters with the same
+initializer and shape share one initialization session, and optimizer-state initializers share one
+per parameter dtype, so a model whose layers repeat builds a handful of sessions however
+deep it is; what grows with the parameter count is the drawing itself. On a CPU context the draws
+run side by side, each on a single thread, as many at once as there are cores and as fits
+comfortably in memory — unless one parameter holds more than half of the model's elements, when
+they run one after another, each over every core, as they do on a card. The values are the same
+either way. A random initializer draws a bounded chunk of values at a time, so peak host memory is
+the values produced so far plus, per draw in progress, a few copies of that parameter's value and
+one chunk's working memory.
 
 `TrainingRig.Load` repeats all of this except concretization (it reads the saved architecture) and
 the model's initializers: it uses zero stand-ins of the declared shape, since the checkpoint

@@ -58,8 +58,8 @@ public abstract class OrtBackend : IShorokooBackend
     /// <param name="cudaDeviceId">
     /// The CUDA device the provider appended above allocates on, or <c>null</c> when it is
     /// not a CUDA provider. It names the arena that
-    /// <see cref="RunSettings.ShrinkArenaAfterRun"/> shrinks, so a backend that does not
-    /// allocate on a card passes <c>null</c> and its sessions ignore the setting.
+    /// <see cref="RunSettings.ShrinkArenaAfterRun"/> shrinks: that card's, or the host's where it
+    /// is <c>null</c>.
     /// </param>
     /// <exception cref="ArgumentException"><paramref name="cudaDeviceId"/> disagrees with
     /// <paramref name="device"/>, or is negative.</exception>
@@ -166,7 +166,7 @@ public abstract class OrtBackend : IShorokooBackend
         ShorokooLogSeverity logSeverity,
         DeviceMemorySettings deviceMemory,
         DiagnosticSettings diagnostics)
-        => Build(modelBytes, graphOptimization, logSeverity, deviceMemory, diagnostics, outputAliases: null);
+        => Build(modelBytes, graphOptimization, logSeverity, deviceMemory, diagnostics, outputAliases: null, intraOpThreads: 0);
 
     /// <summary>
     /// <see cref="CreateSession(ReadOnlyMemory{byte}, ShorokooGraphOptimization, ShorokooLogSeverity, DeviceMemorySettings, DiagnosticSettings)"/>,
@@ -211,11 +211,30 @@ public abstract class OrtBackend : IShorokooBackend
         DeviceMemorySettings deviceMemory,
         DiagnosticSettings diagnostics,
         IReadOnlyList<OutputAlias> outputAliases)
+        => CreateSession(
+            modelBytes, graphOptimization, logSeverity, deviceMemory, diagnostics, outputAliases,
+            intraOpThreads: 0);
+
+    /// <summary>
+    /// <see cref="CreateSession(ReadOnlyMemory{byte}, ShorokooGraphOptimization, ShorokooLogSeverity, DeviceMemorySettings, DiagnosticSettings, IReadOnlyList{OutputAlias})"/>,
+    /// with ONNX Runtime's intra-op thread pool sized to <paramref name="intraOpThreads"/>: 1 runs
+    /// every operator on the thread that called the run, for sessions run side by side; 0 leaves
+    /// ONNX Runtime's own default, a thread per core.
+    /// </summary>
+    public IShorokooSession CreateSession(
+        ReadOnlyMemory<byte> modelBytes,
+        ShorokooGraphOptimization graphOptimization,
+        ShorokooLogSeverity logSeverity,
+        DeviceMemorySettings deviceMemory,
+        DiagnosticSettings diagnostics,
+        IReadOnlyList<OutputAlias> outputAliases,
+        int intraOpThreads)
     {
         ArgumentNullException.ThrowIfNull(outputAliases);
+        ArgumentOutOfRangeException.ThrowIfNegative(intraOpThreads);
         return Build(
             modelBytes, graphOptimization, logSeverity, deviceMemory, diagnostics,
-            outputAliases.Count == 0 ? null : outputAliases);
+            outputAliases.Count == 0 ? null : outputAliases, intraOpThreads);
     }
 
     // The most bytes of initializers a session built while writing its graph out keeps as it was
@@ -228,14 +247,15 @@ public abstract class OrtBackend : IShorokooBackend
         ShorokooLogSeverity logSeverity,
         DeviceMemorySettings deviceMemory,
         DiagnosticSettings diagnostics,
-        IReadOnlyList<OutputAlias>? outputAliases)
+        IReadOnlyList<OutputAlias>? outputAliases,
+        int intraOpThreads)
     {
         ArgumentNullException.ThrowIfNull(deviceMemory);
         ArgumentNullException.ThrowIfNull(diagnostics);
         // One copy for however many sessions are built from it: ORT takes the model as an array.
         var model = modelBytes.ToArray();
         BuiltSession New(string? optimizedDirectory) => NewSession(
-            model, graphOptimization, logSeverity, deviceMemory, diagnostics, optimizedDirectory);
+            model, graphOptimization, logSeverity, deviceMemory, diagnostics, optimizedDirectory, intraOpThreads);
         if (outputAliases is null) return Wrap(New(optimizedDirectory: null), []);
 
         var optimizedDirectory = TempDirectory("shorokoo-optimized-");
@@ -312,7 +332,8 @@ public abstract class OrtBackend : IShorokooBackend
         ShorokooLogSeverity logSeverity,
         DeviceMemorySettings deviceMemory,
         DiagnosticSettings diagnostics,
-        string? optimizedDirectory)
+        string? optimizedDirectory,
+        int intraOpThreads)
     {
         // The `using` is load-bearing, not tidiness. SessionOptions is a SafeHandle, so it
         // carries a critical finalizer that calls OrtReleaseSessionOptions, and ORT takes its
@@ -324,6 +345,7 @@ public abstract class OrtBackend : IShorokooBackend
         // process. Disposing in a finally keeps them rooted across the constructor.
         using var options = new SessionOptions();
         Configure(options, graphOptimization, logSeverity);
+        if (intraOpThreads > 0) options.IntraOpNumThreads = intraOpThreads;
         // Named before anything can throw, and made inside the try, by the call that points the
         // options into it: a setter there throwing after the folder was made would otherwise leave
         // it with no name for the catch to delete it by. The folder the graph is written into is
@@ -582,13 +604,13 @@ public abstract class OrtBackend : IShorokooBackend
     /// <summary>
     /// The arena ORT should shrink after a run — the value of its
     /// <c>memory.enable_memory_arena_shrinkage</c> run option — or <c>null</c> to leave the run
-    /// option off. Only a GPU backend names one: the entry says <i>which</i> arena to shrink, and
-    /// a CPU backend's device memory is not what <see cref="DeviceMemorySettings"/> is about.
+    /// option off. The entry says <i>which</i> arena to shrink: the card's on a GPU backend, where
+    /// a run's intermediates live, and the host's on a CPU backend.
     /// </summary>
     public static string? ArenaShrinkageRunConfig(int? cudaDeviceId, bool shrinkArenaAfterRun)
-        => cudaDeviceId is { } device && shrinkArenaAfterRun
-            ? $"gpu:{device.ToString(CultureInfo.InvariantCulture)}"
-            : null;
+        => !shrinkArenaAfterRun ? null
+            : cudaDeviceId is { } device ? $"gpu:{device.ToString(CultureInfo.InvariantCulture)}"
+            : "cpu:0";
 
     /// <summary>
     /// Copies a flat managed array into an ORT tensor of the given shape. Shorokoo's

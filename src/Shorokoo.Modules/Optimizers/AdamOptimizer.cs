@@ -19,6 +19,13 @@ namespace Shorokoo.Modules.Optimizers;
 ///   v_hat = v_new / (1 - beta2^t_new)
 ///   param_new = param - learningRate * m_hat / (sqrt(v_hat) + epsilon)
 ///
+/// The graph computes that update as
+///   param_new = param - (m_new / (sqrt(v_new) + epsilon * sqrt(c2))) * (learningRate * sqrt(c2) / c1)
+/// with c1 = 1 - beta1^t_new and c2 = 1 - beta2^t_new: the same quantity, with the bias
+/// corrections folded into scalars so that five passes over the parameter follow the moment
+/// updates, where the m_hat / v_hat form above takes seven. The update is a chain of elementwise ops, each a full pass over
+/// memory, so for a large parameter it is the passes, not the arithmetic, that set its cost.
+///
 /// The timestep t is carried as a scalar optimizer-state tensor alongside the
 /// param-shaped m and v. It is a single value (created by
 /// <see cref="OptimizerScalarZeros"/>) that broadcasts against m̂ / v̂ during the
@@ -60,11 +67,12 @@ public partial class AdamOptimizer
         var newM = beta1 * m + (one - beta1) * grad;
         var newV = beta2 * v + (one - beta2) * grad * grad;
 
-        // Bias correction.
-        var mHat = newM / (one - (Tensor<float32>)OnnxOp.Pow(beta1, newStep));
-        var vHat = newV / (one - (Tensor<float32>)OnnxOp.Pow(beta2, newStep));
+        // Bias correction, folded into two scalars (see the summary).
+        var biasCorrection1 = one - (Tensor<float32>)OnnxOp.Pow(beta1, newStep);
+        var sqrtBiasCorrection2 = (one - (Tensor<float32>)OnnxOp.Pow(beta2, newStep)).Sqrt();
+        var stepSize = learningRate * sqrtBiasCorrection2 / biasCorrection1;
 
-        var updatedParam = currentParam - learningRate * mHat / (vHat.Sqrt() + epsilon);
+        var updatedParam = currentParam - newM / (newV.Sqrt() + epsilon * sqrtBiasCorrection2) * stepSize;
 
         // Register state updates (same order as the state declarations: m, v, step).
         Globals.StateUpdate(m, newM);

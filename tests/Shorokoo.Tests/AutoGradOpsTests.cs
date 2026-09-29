@@ -306,6 +306,7 @@ public class AutoGradSequenceDftAndRuntimeInputOpsCoverageTests
     public void TestAutoGradRuntimeInputDrivenGradients()
     {
         Run<AutoGradCastRoundTripCheck>(2.0f);
+        Run<AutoGradFloat64ProductBetweenCastsCheck>(3.0f);
         Run<AutoGradIfRuntimeConditionTrueCheck>(2.0f, 3.0f);
         Run<AutoGradIfRuntimeConditionFalseCheck>(-1.0f, 3.0f);
         Run<AutoGradDftWithDftLengthCheck>(3.0f);
@@ -345,12 +346,28 @@ public class AutoGradIndexingOpsCoverageTests
     }
 
     [Fact]
+    public void TestAutoGradGatherAxis0TableGradients()
+    {
+        RunSmall<AutoGradGatherTableRowsCheck>([4L, 2L]);
+        RunSmall<AutoGradGatherTableRowsInt32IndicesCheck>([4L, 2L]);
+        RunSmall<AutoGradGatherTableRowsFloat64Check>([4L, 2L]);
+        RunSmall<AutoGradGatherTableScalarIndexCheck>([4L, 2L]);
+        RunSmall<AutoGradGatherTableNoIndicesCheck>([4L, 2L]);
+        RunSmall<AutoGradGatherVectorRowsCheck>([4L]);
+        RunSmall<AutoGradGatherStaticRankVectorRowsCheck>([4L]);
+        RunSmall<AutoGradGatherTableBlocksMultiDimIndicesCheck>([3L, 2L, 2L]);
+        RunSmall<AutoGradGatherZeroWidthTableMultiDimIndicesCheck>([3L, 0L]);
+    }
+
+    [Fact]
     public void TestAutoGradGatherNDWhereAndUniqueGradients()
     {
         Run<AutoGradGatherAxis0MultiDimIndicesCheck>(2f);
         Run<AutoGradGatherNonZeroAxisOneDimIndicesCheck>(3f);
         Run<AutoGradGatherNonZeroAxisOneDimIndicesUnknownRankCheck>(3f);
         Run<AutoGradGatherNonZeroAxisMultiDimIndicesCheck>(4f);
+        Run<AutoGradGatherNonZeroAxisUnknownRankZeroLeadCheck>(3f);
+        Run<AutoGradGatherNonZeroAxisMultiDimIndicesZeroLeadCheck>(3f);
         Run<AutoGradGatherNDCheck>(4f);
         Run<AutoGradGatherNDDuplicateIndicesCheck>(2f);
         Run<AutoGradGatherNDWithScaleCheck>(3f);
@@ -391,6 +408,21 @@ public class AutoGradMatrixPoolingAndConvOpsCoverageTests
     }
 
     [Fact]
+    public void TestAutoGradBatchedMatMulWithNoRowsGradients()
+    {
+        Run<AutoGradMatMulUnknownRankRank4NoRowsCheck>(2f);
+    }
+
+    // ONNX Runtime's batched FusedMatMul leaves its output unwritten when the contraction dim is 0:
+    // https://github.com/Shorokoo/Shorokoo/issues/451
+    [Fact(Skip = "ONNX Runtime batched FusedMatMul with a zero contraction dim: Shorokoo/Shorokoo#451")]
+    public void TestAutoGradBatchedMatMulWithNoRowsGradientsOnOrt()
+    {
+        Run<AutoGradMatMulKnownRankNoRowsCheck>(2f);
+        Run<AutoGradMatMulUnknownRankNoRowsCheck>(2f);
+    }
+
+    [Fact]
     public void TestAutoGradMatrixAndRoiAlignGradients()
     {
         Run<AutoGradEinsumMatmulBasicCheck>(3.0f);
@@ -404,6 +436,11 @@ public class AutoGradMatrixPoolingAndConvOpsCoverageTests
         Run<AutoGradGemmTransBCheck>(2f);
         Run<AutoGradMatMulKnownRankCheck>(2f);
         Run<AutoGradMatMulUnknownRankBatchedCheck>(2f);
+        RunSmall<AutoGradMatMulBatchTimesMatrixCheck>([2L, 3L, 4L]);
+        RunSmall<AutoGradMatMulMatrixTimesMatrixCheck>([3L, 4L]);
+        RunSmall<AutoGradMatMulVectorTimesMatrixCheck>([4L]);
+        RunSmall<AutoGradMatMulBatchTimesMatrixOfTwoColumnsCheck>([2L, 3L, 0L]);
+        RunSmall<AutoGradMatMulBatchTimesMatrixOfNoColumnsCheck>([2L, 3L, 4L]);
         Run<AutoGradReduceSumExplicitAxesKeepdimsTrueCheck>(2f);
         Run<AutoGradReduceSumExplicitAxesKeepdimsFalseCheck>(2f);
         Run<AutoGradReduceMeanExplicitAxesCheck>(2f);

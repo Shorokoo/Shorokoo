@@ -142,6 +142,23 @@ public interface IShorokooBackend
         IReadOnlyList<OutputAlias> outputAliases)
         => CreateSession(modelBytes, graphOptimization, logSeverity, deviceMemory, diagnostics);
 
+    // The same session, told how many threads one run of it may spread an operator over:
+    // intraOpThreads of 1 runs each operator on the calling thread alone, for a caller that runs
+    // several sessions side by side and would otherwise have every one of them claim every core;
+    // 0 leaves the count to the backend. Read while the session is built, like deviceMemory.
+    //
+    // The default drops the count and builds the ordinary session: a backend with no thread pool
+    // of its own to size, or one outside this repository, runs as it always does.
+    IShorokooSession CreateSession(
+        ReadOnlyMemory<byte> modelBytes,
+        ShorokooGraphOptimization graphOptimization,
+        ShorokooLogSeverity logSeverity,
+        DeviceMemorySettings deviceMemory,
+        DiagnosticSettings diagnostics,
+        IReadOnlyList<OutputAlias> outputAliases,
+        int intraOpThreads)
+        => CreateSession(modelBytes, graphOptimization, logSeverity, deviceMemory, diagnostics, outputAliases);
+
     // Whether this backend's sessions run a training step handed over in `format` (one of
     // TrainingFormats). Every backend runs TrainingFormats.Onnx -- a step whose gradient Shorokoo
     // has already written out as ordinary operators -- so that is the default and the only answer

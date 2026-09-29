@@ -1717,13 +1717,36 @@ namespace Shorokoo.Runtime
                 aliasCandidates);
         }
 
+        /// <summary>
+        /// Compiles <paramref name="graph"/> into a session built with
+        /// <paramref name="optimization"/> — for a caller that runs one graph many times, each run
+        /// computing something once as a one-shot run would, and so wants the profile a one-shot run
+        /// gets rather than the one a kept session does: parameter initialization and
+        /// optimizer-state seeding (see <see cref="IsFullyConstant"/>).
+        /// </summary>
+        /// <param name="graph">The graph to compile.</param>
+        /// <param name="optimization">The profile the session is built with.</param>
+        /// <param name="intraOpThreads">The threads one run of the session may spread an operator
+        /// over: 1 for a session run side by side with others, 0 for the backend's default.</param>
+        internal CompiledGraph Compile(
+            InternalComputationGraph graph, ShorokooGraphOptimization optimization, int intraOpThreads = 0)
+        {
+            graph.RequireRunnableOps("ComputeContext.Compile");
+            return CompileFromModel(
+                () => FastOnnxModelBuilder.BuildInternalOnnxModel(graph, prepForOnnx: true),
+                ResolveOriginalInputNames(graph), trainingStep: false, reusedAcrossShapes: false,
+                description: null, profile: optimization, intraOpThreads: intraOpThreads);
+        }
+
         private CompiledGraph CompileFromModel(
             Func<ModelProto> buildModel,
             string[] originalInputNames,
             bool trainingStep,
             bool reusedAcrossShapes,
             string? description,
-            IReadOnlyList<(int Output, int Input)>? aliasCandidates = null)
+            IReadOnlyList<(int Output, int Input)>? aliasCandidates = null,
+            ShorokooGraphOptimization? profile = null,
+            int intraOpThreads = 0)
         {
             RefuseHostContext("compile");
             var model = buildModel();
@@ -1733,7 +1756,7 @@ namespace Shorokoo.Runtime
             ProtoBuf.Serializer.Serialize(memoryStream, model);
             var modelData = memoryStream.ToArray();
 
-            var optimization = SessionOptimization(HasOptionalOps(model.Graph), trainingStep);
+            var optimization = profile ?? SessionOptimization(HasOptionalOps(model.Graph), trainingStep);
             // Settled here, not inside the session: CompiledGraph then reports the strategy this
             // session actually got rather than the Auto that asked for it.
             var deviceMemory = DeviceMemory.Resolve(reusedAcrossShapes);
@@ -1756,7 +1779,7 @@ namespace Shorokoo.Runtime
                     deviceMemory = deviceMemory with { LimitBytes = arena };
                     kept = modelData;
                 }
-                session = BuildSession(backend, modelData, optimization, deviceMemory, outputAliases);
+                session = BuildSession(backend, modelData, optimization, deviceMemory, outputAliases, intraOpThreads);
             }
             finally
             {
@@ -2123,10 +2146,11 @@ namespace Shorokoo.Runtime
         /// memory.</summary>
         internal IShorokooSession BuildSession(
             IShorokooBackend backend, byte[] modelData, ShorokooGraphOptimization optimization,
-            DeviceMemorySettings deviceMemory, IReadOnlyList<OutputAlias>? outputAliases = null)
+            DeviceMemorySettings deviceMemory, IReadOnlyList<OutputAlias>? outputAliases = null,
+            int intraOpThreads = 0)
             => backend.CreateSession(
                 modelData, optimization, ShorokooLogSeverity.Fatal, deviceMemory, Diagnostics,
-                outputAliases ?? []);
+                outputAliases ?? [], intraOpThreads);
 
         /// <summary>
         /// Whether the model takes no runtime input, so every node's value is already
@@ -2135,13 +2159,11 @@ namespace Shorokoo.Runtime
         /// <para>Such a graph is the one case where ORT's constant-folding pass computes the
         /// WHOLE graph at session build: it walks the nodes in order, evaluating each into a
         /// freshly allocated initializer, and the chain's intermediates pile up instead of
-        /// flowing through an execution plan that reuses buffers. Parameter initialization is
-        /// exactly this shape — <c>FastInitializeModelParams</c>
-        /// hands over an input-less graph of every parameter's keyed Threefry draw — so the fold
-        /// materialized every int64 intermediate of every draw at once. Rig construction then
-        /// cost kilobytes of host memory per parameter ELEMENT — a thousand times the 4 bytes the
-        /// fp32 parameter itself occupies — so a few-million-parameter model wanted tens of GB
-        /// and minutes just to build, and a GPT-sized embedding died with ORT's bare
+        /// flowing through an execution plan that reuses buffers. On a keyed Threefry draw — what
+        /// parameter initialization computes — the fold materializes every int64 intermediate of
+        /// the draw at once: kilobytes of host memory per parameter ELEMENT, a thousand times the
+        /// 4 bytes the fp32 parameter itself occupies, so a few-million-parameter model wants tens
+        /// of GB and minutes just to build, and a GPT-sized embedding dies with ORT's bare
         /// "bad allocation" (Shorokoo/Shorokoo#194, #195).</para>
         ///
         /// <para>Folding buys nothing here in any case. The session is built, run once and
@@ -2157,24 +2179,25 @@ namespace Shorokoo.Runtime
         /// fusions find nothing to work on. The caveat is that ORT's folding skips what it cannot
         /// evaluate (a node with no CPU kernel, a non-deterministic op), and an unfolded tail
         /// COULD have been fused before and is not now; no such difference has been observed.
-        /// <c>RngInitFrozenDerivationTests</c> asserts exact initial weights through this path
-        /// for a uniform, a raw-bits and a dense-normal initializer — which pins the values, not
-        /// the optimization level, since they are identical either way.</para>
+        /// <c>RngInitFrozenDerivationTests</c> asserts exact initial weights for a uniform, a
+        /// raw-bits and a dense-normal initializer — which pins the values, not the optimization
+        /// level, since they are identical either way.</para>
         ///
-        /// <para>The predicate is a property of the GRAPH, not of the caller, so it also catches
-        /// every other input-less one-shot: the RNG key resolver, optimizer-state seeding (which
-        /// bakes its inputs to constants and then clears them, so it is always input-less), and
-        /// <c>Eval</c>, which builds a zero-input graph unconditionally — so every eager
-        /// evaluation now takes this path. That breadth is intended: each is a constant computed
-        /// once and discarded, and the paragraph above applies to each unchanged. The
-        /// order-of-magnitude figures are measured on parameter initialization, which is the
-        /// shape that made it matter.</para>
+        /// <para>The predicate is a property of the GRAPH, not of the caller, so it catches
+        /// every input-less one-shot: the RNG key resolver and <c>Eval</c>, which builds a zero-input graph unconditionally — so every eager
+        /// evaluation takes this path. That breadth is intended: each is a constant computed
+        /// once and discarded, and the paragraph above applies to each unchanged.</para>
         ///
         /// <para>It is deliberately scoped to <see cref="RunFromModel"/>. A
         /// <see cref="CompileFromModel"/> session is kept and re-run, so there optimization is
         /// amortized and stays on — which is why a keyed feed inside a training-step or exported
         /// model still gets its constant key chain folded, as
-        /// <c>Documentation/rng-configuration.md</c> says it does.</para>
+        /// <c>Documentation/rng-configuration.md</c> says it does. Parameter initialization and
+        /// optimizer-state seeding are the kept sessions that ask for the same profile explicitly
+        /// (<see cref="Compile(InternalComputationGraph, ShorokooGraphOptimization, int)"/>): each takes
+        /// inputs — a parameter's stream key, or its value — so this predicate does not see it, but
+        /// each run still computes its values once, for which the reasons above hold
+        /// unchanged.</para>
         /// </summary>
         private static bool IsFullyConstant(GraphProto graph) => graph.Inputs.Count == 0;
 

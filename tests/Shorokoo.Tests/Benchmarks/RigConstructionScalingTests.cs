@@ -1,7 +1,5 @@
 using System.Diagnostics;
 using Shorokoo.Modules.Initializers;
-using Shorokoo.Modules.Losses;
-using Shorokoo.Modules.Optimizers;
 
 namespace Shorokoo.Tests.Benchmarks;
 
@@ -10,7 +8,7 @@ namespace Shorokoo.Tests.Benchmarks;
 [Module]
 public partial class RigScalingTableSmall
 {
-    public const long Rows = 1024L;
+    public const long Rows = 4096L;
     public static Tensor<float32> Inline(Tensor<float32> x)
         => x * NormalDist.Init(Vector(Rows, 384L), Scalar(0f), Scalar(0.02f))
                  .Reduce(ReduceKind.Mean, null, keepDims: false).Scalar();
@@ -21,7 +19,7 @@ public partial class RigScalingTableSmall
 [Module]
 public partial class RigScalingTableLarge
 {
-    public const long Rows = 4096L;
+    public const long Rows = 16384L;
     public static Tensor<float32> Inline(Tensor<float32> x)
         => x * NormalDist.Init(Vector(Rows, 384L), Scalar(0f), Scalar(0.02f))
                  .Reduce(ReduceKind.Mean, null, keepDims: false).Scalar();
@@ -41,6 +39,22 @@ public partial class RigScalingStack2
 public partial class RigScalingStack12
 {
     public static Tensor<float32> Inline(Tensor<float32> x) => RigScalingStack.Chain(x, 12);
+}
+
+/// <summary>12 trainable tables of 12 different shapes, <c>[4096 + i, 384]</c>: twelve slices,
+/// so twelve initialization sessions, which is what gives the retention arm twelve arenas to pin
+/// when a result is left on its session.</summary>
+[Module]
+public partial class RigScalingDistinct12
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+    {
+        var acc = x;
+        for (long i = 0; i < 12; i++)
+            acc *= NormalDist.Init(Vector(4096L + i, 384L), Scalar(0f), Scalar(0.02f))
+                     .Reduce(ReduceKind.Mean, null, keepDims: false).Scalar();
+        return acc;
+    }
 }
 
 internal static class RigScalingStack
@@ -63,28 +77,40 @@ internal static class RigScalingStack
 /// per-parameter session retains — each with a cause of its own, so one measurement cannot stand
 /// in for another.
 ///
-/// <para><b>Bytes per trainable element.</b> A backend that folds the whole input-less
+/// <para><b>Bytes per trainable element.</b> A backend folding the whole input-less
 /// initialization graph at session build costs ~4.4 KiB of host working set per parameter
-/// ELEMENT, ~1100x the 4 bytes the fp32 parameter occupies. Measured as the ADDITIONAL
-/// peak the large table needs over the small one, so the fixed process floor cancels and what
-/// remains is the per-element law — machine-independent in a way a wall clock is not.</para>
+/// ELEMENT, ~1100x the 4 bytes the fp32 parameter occupies, and a draw computed over a whole
+/// parameter at once still costs ~400 B, its integer intermediates all live together; a draw
+/// computed a chunk of positions at a time costs the parameter itself. Measured as the ADDITIONAL
+/// peak initializing the large table needs over the small one, so the fixed process floor cancels
+/// and what remains is the per-element law — machine-independent in a way a wall clock is not.
+/// Around initialization rather than a whole rig build, whose own fixed peaks — composing the
+/// training step — sit above anything a table's draw adds and would flatten the difference
+/// to nothing.</para>
 ///
 /// <para><b>Cost per trainable parameter.</b> Initializing every parameter in one session makes
 /// construction quadratic in the parameter count, since the backend's session build is
-/// superlinear in graph size; initialization runs one session per parameter, which is linear.
-/// Measured as a RATIO of per-parameter cost at the two ends of the range, so no absolute time
-/// budget is needed and it holds on any machine: linear keeps it near 1, the quadratic law puts
+/// superlinear in graph size. Each parameter runs on a session built for its own slice of the
+/// initialization graph, shared by the parameters whose slices match, which is at most linear. Measured as
+/// a RATIO of per-parameter cost at the two ends of the range, so no absolute time budget is
+/// needed and it holds on any machine: linear keeps it near 1, the quadratic law puts
 /// it near 6. What a ratio cannot see is a uniform constant-factor slowdown, and between 2 and 12
 /// parameters it does not separate mild superlinearity (N^1.3 lands at 1.7) from linear either.
 /// It pins the shape that broke, not every way construction could get slower.</para>
 ///
-/// <para><b>Bytes retained.</b> One session per parameter is only affordable because each result
-/// is copied off its session; a retained result keeps its session's whole arena alive, and a
+/// <para><b>Bytes retained.</b> Running the parameters on sessions of their own is only
+/// affordable because each result is copied off its session; a retained result keeps its session's whole arena alive, and a
 /// forced collection cannot reclaim it, since the values are genuinely referenced as the rig's
 /// initial weights. Measured around initialization alone, not around a whole
 /// <see cref="TrainingRig.FromScratch"/>: a rig legitimately retains 100-150 MiB of graphs and
-/// state, which is both larger and noisier than the signal. Optimizer-state seeding is the other
-/// per-parameter session loop that keeps its outputs, and it takes the same copy — but its graph
+/// state, which is both larger and noisier than the signal. And measured outside the managed
+/// heap, where an arena lives and a copied value does not: the heap's own commit and decommit
+/// around a collection moves tens of MiB either way. Measured over twelve tables of twelve shapes,
+/// so twelve sessions: sessions are shared by same-shaped parameters, and a result left on a
+/// session pins that session's arena, so it is the number of sessions, and the size of what they
+/// computed, that a regression here multiplies. A healthy reading is near zero, so a known native
+/// block is read too, to show the instrument sees one. Optimizer-state seeding is the other
+/// per-parameter run loop that keeps its outputs, and it takes the same copy — but its graph
 /// is a fill rather than a draw, so the arena it would pin is small enough to sit inside that
 /// noise, and no memory gate discriminates it. It is not pinned here.</para>
 ///
@@ -97,14 +123,19 @@ internal static class RigScalingStack
 [Collection(SerialMeasurement.Name)]
 public class RigConstructionScalingTests
 {
-    /// <summary>Measured ~400 B/element over a 0.5% spread; the law this catches is ~4.4 KiB.</summary>
-    private const double MemoryBudgetBytesPerElement = 1536.0;
+    /// <summary>Measured 14-18 B/element; a whole-parameter draw gives ~400, and a folded graph ~4.4 KiB.</summary>
+    private const double MemoryBudgetBytesPerElement = 128.0;
 
-    /// <summary>Measured 0.65-1.14 (linear); the quadratic law gives ~6.</summary>
+    /// <summary>Measured 0.2-0.4 (shared sessions, drawn side by side, make the deeper stack
+    /// cheaper per parameter); the quadratic law gives ~6.</summary>
     private const double MaxPerParameterCostGrowth = 2.0;
 
-    /// <summary>Measured 10-46 MiB across a 12-parameter initialization; uncopied, 379-481 MiB.</summary>
-    private const long RetainedBudgetBytes = 96L * 1024 * 1024;
+    /// <summary>Measured 3-23 MiB of native memory across a 12-session initialization; with the
+    /// results left on their sessions, 211-216 MiB, over three times the budget.</summary>
+    private const long RetainedBudgetBytes = 64L * 1024 * 1024;
+
+    /// <summary>The native memory the retention instrument is shown, to prove it reads one.</summary>
+    private const int ControlBytes = 64 * 1024 * 1024;
 
     private const int TimingRuns = 3;
     private const int StackParams = 12;
@@ -120,21 +151,31 @@ public class RigConstructionScalingTests
         // a timed region would put a second, unrelated cost into the ratio.
         var small = Concretize(RigScalingStack2.ComputationGraph);
         var large = Concretize(RigScalingStack12.ComputationGraph);
-        small.InitializeTrainableParams();   // pays the process's one-time JIT / first-touch cost
+        // Pays the process's one-time JIT / first-touch cost, in turn as the tables below run, so
+        // it cannot set a peak their single-parameter builds do not reach.
+        using (Shorokoo.Core.Nodes.Processors.Fast.FastInitializeModelParams.DecideSideBySide(false))
+            small.InitializeTrainableParams();
 
         // Peak working set is monotonic, so the two table builds have to be what raises it. That
         // holds while this class runs in a process of its own, which is how the release workflow
         // invokes it; the assertion below is what catches it if that ever stops being true,
         // rather than letting the arm read zero and pass.
+        var smallTable = Concretize(RigScalingTableSmall.ComputationGraph);
+        var largeTable = Concretize(RigScalingTableLarge.ComputationGraph);
         long peakBeforeTables = PeakWorkingSetBytes();
-        BuildRig(RigScalingTableSmall.ComputationGraph);
+        smallTable.InitializeTrainableParams();
         long peakAfterSmallTable = PeakWorkingSetBytes();
-        BuildRig(RigScalingTableLarge.ComputationGraph);
+        largeTable.InitializeTrainableParams();
         long peakGrowth = PeakWorkingSetBytes() - peakAfterSmallTable;
 
-        long before = LiveWorkingSetBytes();
-        var values = large.InitializeTrainableParams();
-        long retained = LiveWorkingSetBytes() - before;
+        // Warmed first, so what the allocators take or hand back on a first run is not counted
+        // against the one measured.
+        var distinct = Concretize(RigScalingDistinct12.ComputationGraph);
+        distinct.InitializeTrainableParams();
+        long before = LiveNativeBytes();
+        var values = distinct.InitializeTrainableParams();
+        long retained = LiveNativeBytes() - before;
+        long controlSeen = NativeBytesSeenOf(ControlBytes);
 
         double smallSeconds = BestInitSeconds(small);
         double largeSeconds = BestInitSeconds(large);
@@ -145,11 +186,13 @@ public class RigConstructionScalingTests
         // thing that would make a retention regression invisible.
         Assert.Equal(StackParams, values.ModelParams.Length);
 
-        // Both memory arms are differences that a saturated or reused peak can flatten to zero.
-        // Fail on a measurement that established nothing rather than divide by it and pass.
+        // Both memory arms are differences that a saturated or reused peak can flatten to zero,
+        // and a healthy retention reads near zero by design. Fail on a measurement that
+        // established nothing — a flat peak, or an instrument blind to a known native block —
+        // rather than divide by it and pass.
         Assert.True(peakAfterSmallTable > peakBeforeTables);
         Assert.True(peakGrowth > 0);
-        Assert.True(retained > 0);
+        Assert.True(controlSeen >= ControlBytes * 3L / 4);
 
         Assert.True(peakGrowth / (double)(LargeTableElements - SmallTableElements)
                     <= MemoryBudgetBytesPerElement);
@@ -162,12 +205,6 @@ public class RigConstructionScalingTests
         var g = model.ToInternal();
         return g.ToConcreteArchitecture([TensorData([1L], (float[])[1f])]);
     }
-
-    private static TrainingRig BuildRig(ComputationGraph model) =>
-        TrainingRig.FromScratch(
-            model, L1Loss.ComputationGraph, AdamOptimizer.ComputationGraph,
-            [new TensorDataModelParam("x", ModelParamType.InputParam, TensorData([1L], (float[])[1f]))],
-            new AdamOptimizerHyperparameters { LearningRate = 0.1f });
 
     private static double BestInitSeconds(InternalComputationGraph arch)
     {
@@ -188,14 +225,41 @@ public class RigConstructionScalingTests
         return proc.PeakWorkingSet64;
     }
 
-    /// <summary>Working set after a blocking full collection, so only real retention is counted.</summary>
-    private static long LiveWorkingSetBytes()
+    /// <summary>
+    /// The working set outside the managed heap, after a blocking full collection: what native
+    /// allocators hold. The values themselves are managed arrays, so a run that copies each result
+    /// off its session retains nothing here, and one that keeps a session's result keeps that
+    /// session's arena here. The managed heap is left out because its own commit and decommit —
+    /// tens of MiB either way around a collection — swamp the signal.
+    /// </summary>
+    /// <summary>
+    /// What <see cref="LiveNativeBytes"/> reads of <paramref name="bytes"/> taken outside the
+    /// managed heap and touched: the positive control for the retention arm, whose healthy reading
+    /// is near zero and so cannot show by itself that the instrument sees anything.
+    /// </summary>
+    private static long NativeBytesSeenOf(int bytes)
+    {
+        long before = LiveNativeBytes();
+        var block = System.Runtime.InteropServices.Marshal.AllocHGlobal(bytes);
+        try
+        {
+            for (int offset = 0; offset < bytes; offset += 4096)
+                System.Runtime.InteropServices.Marshal.WriteByte(block, offset, 1);
+            return LiveNativeBytes() - before;
+        }
+        finally
+        {
+            System.Runtime.InteropServices.Marshal.FreeHGlobal(block);
+        }
+    }
+
+    private static long LiveNativeBytes()
     {
         GC.Collect();
         GC.WaitForPendingFinalizers();
         GC.Collect();
         using var proc = Process.GetCurrentProcess();
         proc.Refresh();
-        return proc.WorkingSet64;
+        return proc.WorkingSet64 - GC.GetGCMemoryInfo().TotalCommittedBytes;
     }
 }

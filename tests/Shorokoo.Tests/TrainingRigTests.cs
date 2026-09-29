@@ -5502,6 +5502,27 @@ public class TrainingRigSkptCheckpointCoverageTests
         finally { if (File.Exists(path)) File.Delete(path); }
     }
 
+    [Fact]
+    public void TestACheckpointCanBeSavedOverTheFileItWasLoadedFromWhileItsRigIsBuiltCoverage()
+    {
+        var (_, ckpt, _, _) = BuildTrainedAdamWRig(steps: 1);
+        var path = TempPath("skpt_save_over") + ".skpt";
+        try
+        {
+            Persistence.SaveTrainingCheckpointToSkpt(ckpt, path);
+            var saved = false;
+            var (_, loaded) = TrainingRig.Load(path, progress: new SynchronousBuildProgress(report =>
+            {
+                if (saved || report.Phase != BuildPhase.TrainingStep) return;
+                Persistence.SaveTrainingCheckpointToSkpt(ckpt, path);
+                saved = true;
+            }));
+            Assert.True(saved);
+            Assert.Equal(1, loaded.Step);
+        }
+        finally { if (File.Exists(path)) File.Delete(path); }
+    }
+
     // Six of the 56 state outputs are no longer written over their inputs each step:
     // https://github.com/Shorokoo/Shorokoo/issues/453
     [Fact(Skip = "Shorokoo/Shorokoo#453: a resident step writes 50 of its 56 state outputs over the state it consumed")]

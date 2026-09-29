@@ -554,8 +554,9 @@ namespace Shorokoo.Tests.Modules
     /// <summary>
     /// LayerNormalization dx with a positive (non-default) axis on a 2-D input.
     /// x = c·a + c² with c = 1..8 reshaped [2,4], normalized over axis 1, with a
-    /// weighted loss so the gradient is non-trivial. Self-checking via two-sided
-    /// directional derivative on <c>a</c>. Exercises the axisAttr ≥ 0 branch of
+    /// weighted loss so the gradient is non-trivial. Self-checking against a central
+    /// difference in <c>a</c> with a step of 0.05: the loss is near 9, where float32 resolves about
+    /// 1e-6, so the difference moves it by thousands of ulps. Exercises the axisAttr ≥ 0 branch of
     /// <c>LayerNormalizationGradient</c>.
     /// </summary>
     [Module]
@@ -566,11 +567,9 @@ namespace Shorokoo.Tests.Modules
             var loss = LnLoss(a);
             var grad = Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(a, loss);
 
-            var h = Scalar(1e-3f);
-            var pert = h * grad;
-            var deriv = (LnLoss(a + pert) - LnLoss(a - pert)) / (Scalar(2f) * h);
-            var gradSq = grad * grad;
-            return (deriv - gradSq).Abs() < Scalar(1e-3f) * (gradSq.Abs() + Scalar(1f));
+            var h = Scalar(0.05f);
+            var deriv = (LnLoss(a + h) - LnLoss(a - h)) / (Scalar(2f) * h);
+            return (deriv - grad).Abs() < Scalar(2e-4f);
         }
 
         private static Scalar<float32> LnLoss(Scalar<float32> a)

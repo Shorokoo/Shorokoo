@@ -24,6 +24,19 @@ namespace Shorokoo.Tests.Utils
                         .SelectMany(tupleToArray)];
         }
 
+        /// <summary>
+        /// Whether <paramref name="module"/>, concretized at <paramref name="x"/> and compiled with
+        /// <paramref name="x"/>'s dimensions stated, gives an output of nonzero bytes: every check it
+        /// computes holds in a session the backend builds for those dimensions.
+        /// </summary>
+        public static bool AllTrueWithConcreteShapes(ComputationGraph module, TensorData x)
+        {
+            using var context = new ComputeContext();
+            using var compiled = context.Compile(module.ToInternal().ToConcreteArchitecture([x]).ToConcreteModel(), [x.Shape.Dims], trainingStep: false);
+            var bits = compiled.Execute(x.Shared())[0].ToTensorData().AccessRawMemory().ToArray();
+            return bits.Length > 0 && bits.All(b => b != 0);
+        }
+
         /// <summary>Value cap for the QEE pass — see <see cref="RunQuickEngineExecution"/>. Sized to
         /// clear coverage-module intermediates, not to be unbounded.</summary>
         private const int QeeValueCap = 65536;

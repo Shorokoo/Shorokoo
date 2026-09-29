@@ -345,19 +345,23 @@ shape and type.
     throws `UnsupportedDTypeException` (`OU002`). Accepted as ONNX Runtime's
     behaviour ([#432](https://github.com/Shorokoo/Shorokoo/issues/432)).
     An int64 or int32 `Range` counts its elements exactly on every backend, a span
-    `limit − start` beyond 2^53 or beyond its type included. ONNX Runtime's kernel
-    takes `limit − start` in the input type, which wraps beyond it, and computes the
-    count in double precision, so on ONNX Runtime an int64 `Range` is rewritten to
-    count in uint64 and scale a `Range(0, count, 1)` by `delta`, refusing a count no
-    tensor holds, and an int32 `Range` is rewritten the same way on its inputs cast
-    to int64, its elements cast back. Two forms are left as written. One whose three
-    inputs are `Constant`s spanning less than 2^53 for int64, or within int32 for
-    int32, the kernel counts exactly. One whose `delta` is a `Constant` 1 or −1 and
-    whose `start` is a `Constant` 0 for int32, or of magnitude below 2^62 for int64,
-    such as `Range(0, n, 1)`: the kernel counts an int32 one exactly, and an int64
-    one exactly for a span below 2^53; for a larger int64 span, whose count is 0 or
-    one no tensor holds, it refuses the call or gives no elements, and never a wrong
-    element ([#447](https://github.com/Shorokoo/Shorokoo/issues/447),
+    `limit − start` beyond 2^53 or beyond its type included, except as below.
+    ONNX Runtime's kernel takes `limit − start` in the input type, which wraps
+    beyond it, and computes the count in double precision, so on ONNX Runtime an
+    int64 `Range` is rewritten to count in uint64 and scale a `Range(0, count, 1)`
+    by `delta`, refusing a count no tensor holds, and an int32 `Range` is rewritten
+    the same way on its inputs cast to int64, its elements cast back. Two forms are
+    left as written. One whose three inputs are `Constant`s spanning less than
+    2^53 for int64, or within int32 for int32, the kernel counts exactly. One whose
+    `delta` is a `Constant` 1 or −1, whatever its `start` and `limit`, such as
+    `Range(0, n, 1)` or `Range(s, s + n, 1)`, so that a position or index `Range`
+    pays nothing: the kernel counts it exactly for a span below 2^53, and for a
+    larger span that does not wrap gives no elements or refuses the call, as the
+    spec's count is 0 or one no tensor holds. Where its span wraps its type, ONNX
+    Runtime gives the elements of the wrapped difference — `Range(long.MaxValue −
+    2, long.MinValue + 2, 1)` gives five where the spec gives none — or refuses
+    the call (`Tensor storage size overflowed`): accepted as ONNX Runtime's
+    behaviour ([#447](https://github.com/Shorokoo/Shorokoo/issues/447),
     [#450](https://github.com/Shorokoo/Shorokoo/issues/450)).
 
 ## Convolution & pooling
@@ -491,16 +495,23 @@ shape and type.
    or vector times a matrix and a vector times a vector as the spec does; for
    other operands with a dimension of 0 they can leave the output unwritten or
    give it the left operand's batch dimension where that is 1 and the right
-   one's is not, and a `FusedMatMul` that moves the batch axis of rank-3
-   operands can stop the process (SIGFPE) on some empty operands. Its backend
-   corrects this when the session is built with every input's dimensions
-   stated, as a training step is for the shapes it is fed: such a `MatMul`
-   becomes an `If` on either operand being empty, giving zeros of the product's
-   shape where one is, which ONNX Runtime folds away wherever the operands'
-   shapes follow from those dimensions. A `Constant` operand with a dimension
-   of 0 gives those zeros whatever the dimensions. A session built without
-   stated dimensions runs the `MatMul` as written: accepted as ONNX Runtime's
-   behaviour ([#451](https://github.com/Shorokoo/Shorokoo/issues/451)).
+   one's is not. Its backend corrects this when the session is built with every
+   input's dimensions stated, as a training step is for the shapes it is fed,
+   outside a loop body: the product goes through an `If` on either operand or
+   the product being empty, giving zeros of the product's shape where one is,
+   which ONNX Runtime folds away wherever the shapes follow from those
+   dimensions. Where an operand's shape is computed from the data (a
+   `NonZero`, a `TopK` with a computed `k`, a `Reshape` or `Expand` to a
+   computed shape) that `If` runs on every run, at the cost of a few shape
+   operations. A `Constant` operand with a dimension of 0 gives those zeros
+   whatever the dimensions. A session built without stated dimensions, and a
+   `MatMul` in a loop body, run the `MatMul` as written, and the kernel runs
+   on the empty operands in every session: it refuses an empty batch against
+   an operand with no batch dimension or one of 1, a `FusedMatMul` that moves
+   the batch axis of rank-3 operands can stop the process (SIGFPE), and a
+   wrongly shaped product can fail a run where ONNX Runtime reuses its memory.
+   Accepted as ONNX Runtime's behaviour
+   ([#451](https://github.com/Shorokoo/Shorokoo/issues/451)).
 
 ## Quantization
 

@@ -28,6 +28,7 @@ internal sealed class WorkaroundSite
     private readonly IReadOnlySet<FastTensorKey> read;
     private readonly SortedDictionary<int, ConstantRead> constantsRead = [];
     private readonly bool shapesAreConcrete;
+    private readonly bool inLoopBody;
 
     private WorkaroundSite(
         FastNode node,
@@ -37,9 +38,11 @@ internal sealed class WorkaroundSite
         (DType DType, int? Rank)?[] outputs,
         IReadOnlyDictionary<FastTensorKey, FastNode> producers,
         IReadOnlySet<FastTensorKey> read,
-        bool shapesAreConcrete)
+        bool shapesAreConcrete,
+        bool inLoopBody)
     {
-        this.shapesAreConcrete = shapesAreConcrete;
+        this.shapesAreConcrete = shapesAreConcrete && !inLoopBody;
+        this.inLoopBody = inLoopBody;
         this.node = node;
         this.inputKeys = inputKeys;
         this.outputKeys = outputKeys;
@@ -52,14 +55,16 @@ internal sealed class WorkaroundSite
     /// <summary>
     /// The site of <paramref name="node"/>, or null when the graph does not tell every present
     /// input's dtype, or some input is not a tensor: a call the pass leaves as it stands.
-    /// <paramref name="shapesAreConcrete"/> is <see cref="ShapesAreConcrete"/>.
+    /// <paramref name="shapesAreConcrete"/> says whether the model is built with every graph
+    /// input's dimensions stated, and <paramref name="inLoopBody"/> is <see cref="IsInLoopBody"/>.
     /// </summary>
     internal static WorkaroundSite? TryCreate(
         FastNode node,
         IReadOnlyDictionary<FastTensorKey, FastTensorInfo> tensorInfo,
         IReadOnlyDictionary<FastTensorKey, FastNode> producers,
         IReadOnlySet<FastTensorKey> read,
-        bool shapesAreConcrete = false)
+        bool shapesAreConcrete = false,
+        bool inLoopBody = false)
     {
         FastTensorKey?[] inputKeys = [.. node.Inputs.Select(k => k is { IsEmpty: false } ? k : null)];
         FastTensorKey?[] outputKeys = [.. node.Outputs.Select(k => k is { IsEmpty: false } ? k : null)];
@@ -79,16 +84,27 @@ internal sealed class WorkaroundSite
             if (outputKeys[i] is { } key && tensorInfo.TryGetValue(key, out var info))
                 outputs[i] = (info.DType, info.Rank);
 
-        return new WorkaroundSite(node, inputKeys, outputKeys, inputs, outputs, producers, read, shapesAreConcrete);
+        return new WorkaroundSite(node, inputKeys, outputKeys, inputs, outputs, producers, read, shapesAreConcrete, inLoopBody);
     }
 
     /// <summary>
-    /// Whether the model is built with every graph input's dimensions stated, so the backend knows
-    /// every shape the graph computes from them when it builds the session, and folds what is
+    /// Whether the model is built with every graph input's dimensions stated and the call is not
+    /// in a loop body (<see cref="IsInLoopBody"/>), so the backend knows the shapes the call reads
+    /// that the graph computes from those dimensions when it builds the session, and folds what is
     /// computed from those shapes alone. A replacement that decides by shape can then leave the
-    /// decision to that fold. The same for every call of one build.
+    /// decision to that fold. A shape computed from the data, a <c>NonZero</c>'s or one read from
+    /// a tensor's values by a <c>Reshape</c> or <c>Expand</c>, say, is known only when the model
+    /// runs, and a decision on it is made on every run.
     /// </summary>
     public bool ShapesAreConcrete => shapesAreConcrete;
+
+    /// <summary>
+    /// Whether the call is in the body of a <c>Loop</c> or a <c>SequenceMap</c>, which runs once
+    /// per iteration or element. A body's inputs are typed by rank alone, so the backend does not
+    /// fold a decision on their shapes when it builds the session, and such a decision would be
+    /// made again on every iteration: <see cref="ShapesAreConcrete"/> is false there.
+    /// </summary>
+    public bool IsInLoopBody => inLoopBody;
 
     /// <summary>The operator's op code.</summary>
     public string OpCode => node.OpCode;
@@ -190,9 +206,9 @@ internal sealed class WorkaroundSite
     }
 
     /// <summary>Everything besides constants that a replacement may depend on: the dtype and rank
-    /// of each output and whether it is read.</summary>
+    /// of each output and whether it is read, and <see cref="ShapesAreConcrete"/>.</summary>
     internal string OutputFingerprint()
-        => string.Join(";", Enumerable.Range(0, outputKeys.Length).Select(i =>
+        => (shapesAreConcrete ? "c;" : "s;") + string.Join(";", Enumerable.Range(0, outputKeys.Length).Select(i =>
             outputKeys[i] is null ? "~" : $"{OutputDTypeOf(i)},{OutputRankOf(i) ?? -1},{(IsOutputUsed(i) ? 'u' : '-')}"));
 
     private TensorAttribute? PeekConstant(int slot)

@@ -16,26 +16,32 @@ using static OpCodes;
 /// with a vector; and, where the left operand's batch dimension is 1 and the right one's is not,
 /// it gives the output the left operand's batch dimension. ONNX Runtime fuses a <c>Transpose</c>
 /// feeding a <c>MatMul</c> into a <c>com.microsoft</c> <c>FusedMatMul</c>, whose transposed
-/// operand also leaves a batched output unwritten, and whose batch-moving form stops the process
-/// on some empty operands. A matrix, or a vector, multiplied with a matrix, and a vector with a
-/// vector, are computed as the spec says.</para>
+/// operand also leaves a batched output unwritten. A matrix, or a vector, multiplied with a
+/// matrix, and a vector with a vector, are computed as the spec says.</para>
 ///
 /// <para>Every other call is rewritten only where the choice is made when the session is built.
 /// A <c>Constant</c> operand with a dimension of 0 makes the product zeros of its shape, and the
 /// call becomes those zeros (<see cref="ZerosOfTheProduct"/>); two <c>Constant</c> operands that
-/// are not empty keep the call as it stands. When the model states every input's dimensions,
-/// the call becomes an <c>If</c> on either operand having a dimension of 0, the zeros where one
-/// has and the call where none has, which ONNX Runtime folds away when it builds the session
-/// wherever the operands' shapes follow from those dimensions. Otherwise the call is left as it
-/// stands: the kernels' result is accepted where the shapes are known only when the model
-/// runs.</para>
+/// are not empty keep the call as it stands. When the model states every input's dimensions and
+/// the call is not in a loop body (<see cref="WorkaroundSite.ShapesAreConcrete"/>), the call's
+/// result goes through an <c>If</c> on either operand or the product having a dimension of 0,
+/// which gives zeros of the product's shape where one has and the result where none has. ONNX
+/// Runtime folds that <c>If</c> away when it builds the session wherever the shapes follow from
+/// those dimensions. Where an operand's shape is computed from the data — the output of a
+/// <c>NonZero</c>, of a <c>TopK</c> with a computed <c>k</c>, or of a <c>Reshape</c> to a computed
+/// shape — it is not folded, and costs a few shape operations and a pass-through of the product on
+/// every run. Otherwise the call is left as it stands: the kernels' result is accepted where the
+/// shapes are known only when the model runs.</para>
 ///
-/// <para>Where both operands may have a batch, rank 3 or more or unknown, the <c>If</c> holds the
-/// call in its other branch. Otherwise the call runs before the <c>If</c>, which hands its result
-/// on, and so reads the operands' shapes and not their memory: a training step is still marked to
-/// write an updated parameter over the one such a call reads, a matrix a batch is multiplied with.
-/// That <c>If</c> also asks whether the product is empty, which it is only where an operand is,
-/// and which keeps the call out of its branch.</para>
+/// <para>The call runs before the <c>If</c>, which reads the operands' shapes and the product, and
+/// never the operands' memory: a training step is still marked to write an updated parameter over
+/// the one the call reads. Asking whether the product is empty, which it is only where an operand
+/// is, keeps the call out of the branch. With the call inside the branch, ONNX Runtime fails to
+/// build some sessions in which it folds that <c>If</c> (a value the branch reads goes missing
+/// from the graph), models with every operand nonempty among them. So the kernels still run on
+/// empty operands, and what they do there that no result can correct is accepted: refusing an
+/// empty batch against an operand with no batch dimension or one of 1, and stopping the process
+/// in a <c>FusedMatMul</c> that moves the batch axis of rank-3 operands.</para>
 /// </summary>
 internal sealed class MatMulEmptyOperandWorkaround : KernelWorkaround
 {
@@ -53,12 +59,11 @@ internal sealed class MatMulEmptyOperandWorkaround : KernelWorkaround
     {
         var (a, b) = (inputs[0]!, inputs[1]!);
         var (shapeOfA, shapeOfB) = (Shape(a), Shape(b));
-        Variable Zeros(Variable like, Variable source) => ZerosOfTheProduct(shapeOfA, shapeOfB, site.RankOf(0), site.RankOf(1), like, source);
-        if (HasAnEmptyConstant(site)) return [Zeros(a, site.ConstantShapeOf(0) is null ? a : b)];
-        if (site.RankOf(0) is not < 3 && site.RankOf(1) is not < 3)
-            return [Ops.IfElse(HasNoElement(shapeOfA, shapeOfB), Zeros(a, site.ConstantShapeOf(0) is null ? a : b), MatMul(a, b))];
+        if (HasAnEmptyConstant(site))
+            return [ZerosOfTheProduct(shapeOfA, shapeOfB, site.RankOf(0), site.RankOf(1), a, site.ConstantShapeOf(0) is null ? a : b)];
         var product = MatMul(a, b);
-        return [Ops.IfElse(HasNoElement(shapeOfA, shapeOfB, Shape(product)), Zeros(product, product), product)];
+        return [Ops.IfElse(HasNoElement(shapeOfA, shapeOfB, Shape(product)),
+            ZerosOfTheProduct(shapeOfA, shapeOfB, site.RankOf(0), site.RankOf(1), product, product), product)];
     }
 
     /// <summary>Whether a tensor of one of <paramref name="shapes"/> is empty: whether a dimension

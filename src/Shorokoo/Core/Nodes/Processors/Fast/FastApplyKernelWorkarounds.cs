@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 using System.Text;
+using Shorokoo.Core.Factory;
 using Shorokoo.Core.Graph;
 using Shorokoo.Core.Lowering.KernelWorkarounds;
 using Shorokoo.Core.Nodes.NodeDefinitions;
@@ -41,7 +42,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// workarounds.</para>
     ///
     /// <para><b>Plans.</b> A replacement is built once per distinct shape of call — workaround,
-    /// input dtypes and ranks, attributes, outputs, and what it read of constants: the shape of one
+    /// input dtypes and ranks, attributes, outputs,
+    /// <see cref="WorkaroundSite.ShapesAreConcrete"/>, and what it read of constants: the shape of one
     /// read through <see cref="WorkaroundSite.ConstantShapeOf"/>, the value of one read through
     /// <see cref="WorkaroundSite.ConstantOf"/> — and reused for the rest of the call; nothing
     /// outlives it.</para>
@@ -58,8 +60,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     {
         /// <summary>
         /// Applies <paramref name="set"/> to <paramref name="graph"/> in place, and returns what it
-        /// spliced in. <paramref name="shapesAreConcrete"/> is what every site reports as
-        /// <see cref="WorkaroundSite.ShapesAreConcrete"/>.
+        /// spliced in. <paramref name="shapesAreConcrete"/> is what every site outside a loop body
+        /// reports as <see cref="WorkaroundSite.ShapesAreConcrete"/>; a site inside one reports
+        /// false (<see cref="WorkaroundSite.IsInLoopBody"/>).
         /// </summary>
         public static Splices Process(InternalComputationGraph graph, KernelWorkaroundSet? set, bool shapesAreConcrete = false)
         {
@@ -84,11 +87,23 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 // The last node kept so far that is numbered in place, which a dropped call's
                 // number is left unused after.
                 FastNodeKey? numbered = null;
+                // Per enclosing scope, whether it runs its body once per iteration or element.
+                var scopes = new Stack<bool>();
+                int loops = 0;
 
                 foreach (var node in graph.Nodes)
                 {
+                    if (FastOpsetResolver.IsOpenOpCode(node.OpCode))
+                    {
+                        bool loop = node.OpCode is OpCodes.LOOP_OPEN or OpCodes.SEQUENCE_MAP_OPEN;
+                        scopes.Push(loop);
+                        if (loop) loops++;
+                    }
+                    else if (FastOpsetResolver.IsCloseOpCode(node.OpCode) && scopes.TryPop(out var closed) && closed)
+                        loops--;
+
                     if (!workaround.OpCodes.Contains(node.OpCode)
-                        || WorkaroundSite.TryCreate(node, tensorInfo, producers, read, shapesAreConcrete) is not { } site
+                        || WorkaroundSite.TryCreate(node, tensorInfo, producers, read, shapesAreConcrete, inLoopBody: loops > 0) is not { } site
                         || !Applies(workaround, site, node))
                     {
                         newNodes.Add(node);

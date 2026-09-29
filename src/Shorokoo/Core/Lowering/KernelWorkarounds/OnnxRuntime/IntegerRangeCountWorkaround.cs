@@ -22,14 +22,16 @@ using static OpCodes;
 /// int16 <c>Range</c> is counted from a difference in a wider type, and every call of another type
 /// counts a span a double holds; both are left alone.</para>
 ///
-/// <para>A call whose three inputs are <c>Constant</c>s is left as it stands where their span is
-/// below 2^53 for int64, or within int32 for int32. So is a call whose <c>delta</c> is a
-/// <c>Constant</c> 1 or -1 and whose <c>start</c> is a <c>Constant</c> of a magnitude below 2^62
-/// for int64, or 0 for int32, as in <c>Range(0, n, 1)</c>. For int32, <c>limit - 0</c> never
-/// wraps, so the count is exact. For int64 the count is exact for a span below 2^53; for any other
-/// span the kernel's count is 0 or at least 2^53, the wrapped difference included, since it is
-/// then more than 2^62. A span of 2^53 or more has a spec count of 0 or one no tensor holds, so
-/// the kernel refuses such a call or gives no elements, and never gives a wrong element.</para>
+/// <para>A call whose <c>delta</c> is a <c>Constant</c> 1 or -1, as in <c>Range(0, n, 1)</c> or
+/// <c>Range(start, start + n, 1)</c>, is left as it stands, whatever its <c>start</c> and
+/// <c>limit</c>: the one form ordinary code builds, a position or index <c>Range</c>, pays nothing.
+/// Its span below 2^53 is counted exactly. A span that wraps its type, where <c>start</c> and
+/// <c>limit</c> are more than the type's range apart, is accepted as ONNX Runtime's result: the
+/// kernel gives elements the spec does not, counted from the wrapped difference, or refuses the
+/// call where that count is one no tensor holds. A span of 2^53 or more that does not wrap has a
+/// spec count of 0 or one no tensor holds, and the kernel gives no elements or refuses the call.
+/// A call whose three inputs are <c>Constant</c>s is left as it stands too where their span is
+/// below 2^53 for int64, or within int32 for int32.</para>
 ///
 /// <para>Every other call counts in uint64, an int32 call on its inputs cast to int64 and its
 /// elements cast back: the span and the magnitude of <c>delta</c> are taken as unsigned, which
@@ -46,8 +48,6 @@ internal sealed class IntegerRangeCountWorkaround : KernelWorkaround
 {
     private static readonly BigInteger ExactSpan = BigInteger.One << 53;
 
-    private const long SmallStart = 1L << 62;
-
     private const ulong RefusedCount = 1UL << 62;
 
     public override IReadOnlySet<string> OpCodes { get; } = new HashSet<string>([RANGE], StringComparer.Ordinal);
@@ -56,13 +56,11 @@ internal sealed class IntegerRangeCountWorkaround : KernelWorkaround
     {
         var wide = site.DTypeOf(0).IsSameElementTypeAs(DType.Int64);
         if (!wide && !site.DTypeOf(0).IsSameElementTypeAs(DType.Int32)) return false;
-        var (start, limit, delta) = (ConstantOf(site, 0, wide), ConstantOf(site, 1, wide), ConstantOf(site, 2, wide));
-        if (start is { } s && limit is { } l && delta is not null)
-        {
-            var span = (BigInteger)l - s;
-            return wide ? BigInteger.Abs(span) >= ExactSpan : span < int.MinValue || span > int.MaxValue;
-        }
-        return !(delta is 1L or -1L && (wide ? start is > -SmallStart and < SmallStart : start == 0L));
+        var delta = ConstantOf(site, 2, wide);
+        if (delta is 1L or -1L) return false;
+        if (delta is null || ConstantOf(site, 0, wide) is not { } start || ConstantOf(site, 1, wide) is not { } limit) return true;
+        var span = (BigInteger)limit - start;
+        return wide ? BigInteger.Abs(span) >= ExactSpan : span < int.MinValue || span > int.MaxValue;
     }
 
     private static long? ConstantOf(WorkaroundSite site, int input, bool wide)

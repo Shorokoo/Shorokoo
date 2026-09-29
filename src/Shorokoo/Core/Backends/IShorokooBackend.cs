@@ -127,7 +127,8 @@ public interface IShorokooBackend
     // such an output into the input's memory on a run that consumed that input (see
     // IShorokooSession.RunConsuming), where the two agree in memory, shape and element type.
     //
-    // The proof is over the model as handed over. A backend that rewrites the graph before it runs
+    // The proof is over the model as handed over, or over that model without the rewrites of the
+    // backend's own KernelWorkaroundSet (see there). A backend that rewrites the graph before it runs
     // it -- fusing nodes, and so changing which of them read an input -- binds only the pairs its
     // rewritten graph still proves: OutputAliasProof answers for a serialized model.
     //
@@ -176,6 +177,12 @@ public interface IShorokooBackend
     // otherwise than the ONNX spec says, each into an equivalent call they compute as the spec
     // does. They are applied to the model built for this backend's sessions only; the graph, an
     // exported file, generated C# and .srk keep every operator as written.
+    //
+    // The output-alias pairs a session is built with (see CreateSession) may be proved over the
+    // model built without the set, where the model built with it proves fewer: a rewrite that
+    // decides at run time reads its operands inside an If branch, which the proof refuses, though
+    // the runtime folds most such Ifs away. A backend naming a set therefore binds only the pairs
+    // the graph it runs proves again, as it does for a rewrite of its own.
     //
     // A decorator forwards this, as it forwards every member with a default body.
     string? KernelWorkaroundSet => null;

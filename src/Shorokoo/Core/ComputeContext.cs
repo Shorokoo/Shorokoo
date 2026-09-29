@@ -1691,7 +1691,13 @@ namespace Shorokoo.Runtime
         /// updated state into the state it replaces. Each is kept only where
         /// <see cref="OutputAliasProof"/> proves it over the model as built, and the session is built
         /// with those (<see cref="OutputAlias"/>); none on a context that aliases nothing
-        /// (<see cref="OutputAliasing"/>).</param>
+        /// (<see cref="OutputAliasing"/>). Where the backend's kernel workarounds leave the model
+        /// proving fewer, those the model built without them proves are kept instead: an <c>If</c>
+        /// a workaround builds reads its operands inside a branch, which the proof refuses, and
+        /// ONNX Runtime folds most such <c>If</c>s away when it builds the session. A backend with a
+        /// set of workarounds binds only the pairs the graph it runs proves again
+        /// (<see cref="IShorokooBackend.KernelWorkaroundSet"/>), so an <c>If</c> it keeps keeps the
+        /// input it reads unaliased.</param>
         /// <param name="trainingFormat">The format a training step is handed over in (see
         /// <see cref="TrainingFormats"/>). <see cref="TrainingFormats.OnnxAutoGrad"/> lets the step's
         /// one <c>AUTO_GRAD</c> node through, to be emitted as the gradient node this context's
@@ -1707,14 +1713,17 @@ namespace Shorokoo.Runtime
         {
             graph.RequireRunnableOps("ComputeContext.Compile", trainingFormat);
             var originalInputNames = ResolveOriginalInputNames(graph);
+            var workarounds = KernelWorkaroundRegistry.For(ResolvedBackend.KernelWorkaroundSet);
             return CompileFromModel(
                 () => FastOnnxModelBuilder.BuildInternalOnnxModel(graph, prepForOnnx: true, inputDims: inputDims,
-                    workarounds: KernelWorkaroundRegistry.For(ResolvedBackend.KernelWorkaroundSet)),
+                    workarounds: workarounds),
                 originalInputNames,
                 trainingStep,
                 reusedAcrossShapes,
                 description,
-                aliasCandidates);
+                aliasCandidates,
+                buildWithoutWorkarounds: workarounds.IsEmpty ? null
+                    : () => FastOnnxModelBuilder.BuildInternalOnnxModel(graph, prepForOnnx: true, inputDims: inputDims));
         }
 
         /// <summary>
@@ -1746,11 +1755,16 @@ namespace Shorokoo.Runtime
             string? description,
             IReadOnlyList<(int Output, int Input)>? aliasCandidates = null,
             ShorokooGraphOptimization? profile = null,
-            int intraOpThreads = 0)
+            int intraOpThreads = 0,
+            Func<ModelProto>? buildWithoutWorkarounds = null)
         {
             RefuseHostContext("compile");
             var model = buildModel();
             var outputAliases = MarkedAliases(model.Graph, aliasCandidates);
+            if (buildWithoutWorkarounds is not null && outputAliases.Count < (aliasCandidates?.Count ?? 0)
+                && MarkedAliases(buildWithoutWorkarounds().Graph, aliasCandidates) is { } asWritten
+                && asWritten.Count > outputAliases.Count)
+                outputAliases = asWritten;
 
             var memoryStream = new MemoryStream();
             ProtoBuf.Serializer.Serialize(memoryStream, model);

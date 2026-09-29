@@ -126,20 +126,37 @@ public class QeeImageRandomRnnAuditTests
     }
 
     [Fact]
-    public void TestAnInt64RangeWithAUnitStepCountsItsElementsExactly()
-    {
-        Int64UnitStepRangesCountTheirElementsExactly(ComputeContext.Default);
-        Assert.True(AutoTest.AdvancedTestGraph<IntegerRangeOfConstantsCheck>([], []));
-    }
+    public void TestAnInt64RangeWithAUnitStepCountsItsElementsExactly() => Int64UnitStepRangesCountTheirElementsExactly(ComputeContext.Default);
+
+    [Fact]
+    public void TestAnIntegerRangeOfConstantsCountsItsElementsExactly() => Assert.True(AutoTest.AdvancedTestGraph<IntegerRangeOfConstantsCheck>([], []));
 
     internal static void Int64UnitStepRangesCountTheirElementsExactly(ComputeContext c)
     {
-        Assert.True(UnitRanges(c, long.MaxValue - 2L, long.MinValue + 2L, [], []));
-        Assert.True(UnitRanges(c, long.MaxValue, long.MinValue, [], []));
         Assert.True(UnitRanges(c, -3L, 2L, [-3L, -2L, -1L, 0L, 1L], [2L, 1L, 0L, -1L, -2L]));
-        Assert.True(FromAConstantStart(c, long.MinValue));
         Assert.True(FromAConstantStart(c, (1L << 62) + 2L, 1L << 62, (1L << 62) + 1L));
         Assert.ThrowsAny<Exception>(() => Ranges(c, long.MinValue, long.MaxValue, 1L));
+    }
+
+    internal static void UnitStepRangesWhoseSpanWrapsTheirTypeAreEmpty(ComputeContext c)
+    {
+        Assert.True(UnitRanges(c, long.MaxValue - 2L, long.MinValue + 2L, [], []));
+        Assert.True(UnitRanges(c, long.MaxValue, long.MinValue, [], []));
+        Assert.True(FromAConstantStart(c, long.MinValue));
+        Assert.True(UnitRanges32(c, int.MaxValue - 2, int.MinValue + 2, [], []));
+        Assert.True(UnitRanges32(c, int.MaxValue, int.MinValue, [], []));
+        Assert.True(AutoTest.AdvancedTestGraph<UnitStepRangeOfConstantsWrappingItsTypeCheck>([], [], context: c));
+    }
+
+    [Fact]
+    public void TestTheQuickEngineGivesNoShapeToARangeOfMoreElementsThanAnInt64Counts()
+    {
+        var (s, l) = (InputScalar<int64>("s"), InputScalar<int64>("l"));
+        var g = new InternalComputationGraph([s, l], [OnnxOp.Range(s, l, Scalar(1L))]);
+        Shape? Count(long start, long limit) => ((RuntimeTensor)new QuickExecutionEngine().Run(g, TensorData(DType.Int64, [], start), TensorData(DType.Int64, [], limit))[g.Outputs[0]]).Shape;
+        Assert.Null(Count(long.MinValue, long.MaxValue));
+        Assert.Null(Count(-2L, long.MaxValue));
+        Assert.Equal([long.MaxValue], Count(-1L, long.MaxValue - 1L)!.Dims);
     }
 
     [Fact]
@@ -152,8 +169,6 @@ public class QeeImageRandomRnnAuditTests
         Assert.True(Ranges32(c, int.MaxValue - 2, int.MinValue + 2, 1));
         Assert.True(Ranges32(c, int.MinValue, int.MaxValue, -1));
         Assert.True(Ranges32(c, 5, -5, -3, 5, 2, -1, -4));
-        Assert.True(UnitRanges32(c, int.MaxValue - 2, int.MinValue + 2, [], []));
-        Assert.True(UnitRanges32(c, int.MaxValue, int.MinValue, [], []));
         Assert.True(UnitRanges32(c, -3, 2, [-3, -2, -1, 0, 1], [2, 1, 0, -1, -2]));
     }
 

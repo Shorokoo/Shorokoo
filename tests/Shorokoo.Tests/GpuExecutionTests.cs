@@ -29,6 +29,19 @@ public partial class AttentionLayerModel
     public static Tensor<float32> Inline(Tensor<float32> x) => TransformerEncoderLayer.Call(64L, 4L, 256L, true, x);
 }
 
+/// <summary>Sixty-four 64-by-64 weights, each its own parameter of one shape, so that initializing
+/// the model runs one draw session sixty-four times over.</summary>
+[Module]
+public partial class SquareStackModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+    {
+        for (int i = 0; i < 64; i++)
+            x = x.MatMul(Shorokoo.Modules.Initializers.XavierUniform.Init([Scalar(64L), Scalar(64L)]));
+        return x;
+    }
+}
+
 /// <summary>
 /// What the CUDA execution provider actually does, run rather than read: a graph on the card, the
 /// device-memory budget and the shrinking arena a resident training loop needs, and the memory
@@ -85,6 +98,19 @@ public class GpuExecutionTests
         }
 
         Assert.Equal(Train().Select(BitConverter.SingleToInt32Bits), Train().Select(BitConverter.SingleToInt32Bits));
+    }
+
+    [CudaFact]
+    public void CudaProvider_RigsFromOneSeedStartFromTheSameWeights()
+    {
+        var x = TensorData([2L, 64L], new float[128]);
+        float[] Initial() => Weights(TrainingRig.FromScratch(
+            SquareStackModel.ComputationGraph, L2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph, [x],
+            new AdamWOptimizerHyperparameters { LearningRate = 1e-3f },
+            runtimeContext: new ComputeContext(), rngConfig: new RngConfig { MasterSeed = 7 }).CreateInitialCheckpoint());
+
+        var first = Initial();
+        for (int i = 0; i < 4; i++) Assert.Equal(first, Initial());
     }
 
     /// <summary>

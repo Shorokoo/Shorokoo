@@ -1742,7 +1742,8 @@ namespace Shorokoo.Runtime
         {
             graph.RequireRunnableOps("ComputeContext.Compile");
             return CompileFromModel(
-                () => FastOnnxModelBuilder.BuildInternalOnnxModel(graph, prepForOnnx: true),
+                () => FastOnnxModelBuilder.BuildInternalOnnxModel(graph, prepForOnnx: true,
+                    workarounds: KernelWorkaroundRegistry.For(ResolvedBackend.KernelWorkaroundSet)),
                 ResolveOriginalInputNames(graph), trainingStep: false, reusedAcrossShapes: false,
                 description: null, profile: optimization, intraOpThreads: intraOpThreads);
         }

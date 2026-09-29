@@ -126,9 +126,12 @@ public abstract class OrtBackend : IShorokooBackend
     /// <summary>
     /// <see cref="KernelWorkaroundSets.OnnxRuntime"/>: the rewrites around ONNX Runtime's kernels,
     /// on every execution provider, since each rewrite computes what the operator it replaces
-    /// computes.
+    /// computes; and on a CUDA backend <see cref="KernelWorkaroundSets.OnnxRuntimeCuda"/>, those
+    /// and the rewrites around what the CUDA provider alone does otherwise.
     /// </summary>
-    public string? KernelWorkaroundSet => KernelWorkaroundSets.OnnxRuntime;
+    public string? KernelWorkaroundSet => _cudaDeviceId is null
+        ? KernelWorkaroundSets.OnnxRuntime
+        : KernelWorkaroundSets.OnnxRuntimeCuda;
 
     /// <summary>
     /// Creates an ORT inference session over a serialized ONNX model, on this backend's

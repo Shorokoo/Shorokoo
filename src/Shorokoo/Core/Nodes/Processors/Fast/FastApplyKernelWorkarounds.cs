@@ -80,6 +80,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
                 tensorInfo ??= FastTensorInfoProcessor.BuildTensorInfoLookup(graph);
                 var producers = graph.BuildProducerByOutputMap();
+                var outsideBody = OutsideBody(graph, producers);
                 var read = ReadKeys(graph);
                 var plans = new Dictionary<string, List<CachedPlan>>(StringComparer.Ordinal);
                 var rewired = new Dictionary<FastTensorKey, FastTensorKey>();
@@ -103,7 +104,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                         loops--;
 
                     if (!workaround.OpCodes.Contains(node.OpCode)
-                        || WorkaroundSite.TryCreate(node, tensorInfo, producers, read, shapesAreConcrete, inLoopBody: loops > 0) is not { } site
+                        || WorkaroundSite.TryCreate(node, tensorInfo, producers, read, shapesAreConcrete, inLoopBody: loops > 0, outsideBody: outsideBody(node)) is not { } site
                         || !Applies(workaround, site, node))
                     {
                         newNodes.Add(node);
@@ -150,6 +151,32 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             return tensorInfo is null
                 ? Splices.None
                 : new Splices(minted, hosts, [.. graph.Nodes.Select(n => n.Key)], gaps, leadingGap, tensorInfo);
+        }
+
+        /// <summary>
+        /// For a node of <paramref name="graph"/>, the test <see cref="WorkaroundSite.IsFromOutsideBody"/>
+        /// answers of its inputs: whether a value comes from outside the innermost loop or branch
+        /// body the node is in — its producer stands no later than the body's open node, which
+        /// itself produces the body's inputs, or it has none. Null for a node in no body.
+        /// </summary>
+        private static Func<FastNode, Func<FastTensorKey, bool>?> OutsideBody(
+            InternalComputationGraph graph, IReadOnlyDictionary<FastTensorKey, FastNode> producers)
+        {
+            var position = new Dictionary<FastNodeKey, int>(graph.Nodes.Count);
+            var enclosing = new Dictionary<FastNodeKey, int>(graph.Nodes.Count);
+            var open = new Stack<int>();
+            for (int i = 0; i < graph.Nodes.Count; i++)
+            {
+                var node = graph.Nodes[i];
+                if (FastOpsetResolver.IsCloseOpCode(node.OpCode) && open.Count > 0) open.Pop();
+                position[node.Key] = i;
+                enclosing[node.Key] = open.Count > 0 ? open.Peek() : -1;
+                if (FastOpsetResolver.IsOpenOpCode(node.OpCode)) open.Push(i);
+            }
+            return node => enclosing.TryGetValue(node.Key, out var body) && body >= 0
+                ? key => !producers.TryGetValue(key, out var producer)
+                         || !position.TryGetValue(producer.Key, out var at) || at <= body
+                : null;
         }
 
         private static bool Applies(KernelWorkaround workaround, WorkaroundSite site, FastNode node)

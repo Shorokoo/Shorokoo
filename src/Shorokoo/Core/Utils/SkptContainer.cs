@@ -67,15 +67,14 @@ namespace Shorokoo.Core.Utils
     /// independent of the .skpt writer, which doubles as a standardness check), read from the file
     /// as each is asked for.
     ///
-    /// <para>Each entry is read once, into an array of its own size, and nothing else is held: a
-    /// checkpoint's state entries are most of the file, so holding the whole file — or an entry in
-    /// a growable buffer and again in the copy taken off it — made a resume allocate the state
-    /// several times over on its way in. That memory is the .NET heap's, which keeps it committed
-    /// after the arrays are collected, so a resumed process went on holding it.</para>
+    /// <para>Each entry is read once, into an array of its own size, and nothing else is held. A
+    /// checkpoint's state entries are most of the file, and the .NET heap keeps what it allocates
+    /// committed after the arrays are collected, so reading the state in more than once would leave
+    /// a resumed process holding it several times over.</para>
     ///
-    /// <para>The file is opened for reading and shared for reading and deleting, so a checkpoint
-    /// being read can still be replaced under its name — as saving a newer one to the same path
-    /// does.</para>
+    /// <para>The file stays open for as long as the container does, shared for reading only, and
+    /// Windows refuses to replace a file that is open: a caller disposes the container as soon as
+    /// it has read what it needs, so a checkpoint can be saved over the one it read.</para>
     /// </summary>
     internal sealed class SkptZipContainer : SkptContainer
     {
@@ -91,7 +90,7 @@ namespace Shorokoo.Core.Utils
 
         internal static SkptZipContainer OpenFile(string filePath)
         {
-            var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
+            var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read);
             try
             {
                 return new SkptZipContainer(

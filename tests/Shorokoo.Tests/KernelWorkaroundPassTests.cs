@@ -268,8 +268,16 @@ public class KernelWorkaroundPassTests
         Assert.True(CudaMaxes(InBody(u, (outer, carried) => OnnxOp.BitShift(carried, Scalar(1u), BitShiftDirection.Right))) > 0);
         Assert.True(CudaMaxes(InBody(w, (outer, carried) => OnnxOp.BitwiseOr(outer, carried + Scalar(1UL)))) > 0);
         Assert.True(CudaMaxes(InBody(i, (outer, carried) => OnnxOp.BitwiseAnd(outer, carried))) > 0);
+        Assert.True(CudaMaxes(InBody(u, (outer, carried) => OnnxOp.BitwiseXor(OnnxOp.Identity(outer, null), Scalar(5u)))) > 0);
+        Assert.True(CudaMaxes(InBody(u, (outer, carried) => OnnxOp.BitwiseXor(OnnxOp.Cast(outer, null, DType.UInt32), Scalar(5u)))) > 0);
+        Assert.True(CudaMaxes(Concrete(KernelWorkaroundRandomNormalInLoop.ComputationGraph, TensorData(DType.Float32, [2L], 2f, 3f))) > 0);
         Assert.Equal(0, CudaMaxes(InBody(u, (outer, carried) => OnnxOp.BitwiseXor(carried + Scalar(1u), carried * Scalar(3u)))));
         Assert.Equal(0, CudaMaxes(InBody(w, (outer, carried) => OnnxOp.Equal(outer, carried))));
+        Assert.Single(AllNodes(Session(InBody(u, (outer, carried) => (Tensor<uint32>)OnnxOp.BitwiseXor(outer, carried + Scalar(1u)) + (Tensor<uint32>)OnnxOp.BitwiseXor(carried + Scalar(2u), outer)),
+            KernelWorkaroundRegistry.OnnxRuntimeCuda)).Where(n => n.OpType == MAX).Select(n => n.Inputs[0]).Distinct());
+        Assert.True(CudaMaxes(InBranch(u, outer => OnnxOp.BitwiseXor(outer, Scalar(5u)))) > 0);
+        Assert.True(CudaMaxes(InNestedBody(u, outer => OnnxOp.BitwiseXor(outer, Scalar(5u)))) > 0);
+        Assert.Contains(AllNodes(Optimized(Session(InBody(u, (outer, carried) => OnnxOp.BitwiseXor(outer, Scalar(5u))), KernelWorkaroundRegistry.OnnxRuntimeCuda))), n => n.OpType == MAX);
         Assert.Equal(0, CudaMaxes(Graph(u, OnnxOp.BitwiseXor(u, u))));
         Assert.Equal(0, AllNodes(Session(InBody(u, (outer, carried) => OnnxOp.BitwiseXor(outer, carried)), KernelWorkaroundRegistry.OnnxRuntime)).Count(n => n.OpType == MAX));
     }
@@ -610,6 +618,27 @@ public class KernelWorkaroundPassTests
         var carried = x;
         foreach (var ctx in LoopAPI.Iterate(Scalar(3L)))
             carried = (Tensor<T>)OnnxOp.Add(carried, OnnxOp.CastLike(call(x, carried), carried, null));
+        return new([x], [carried]);
+    }
+
+    private static InternalComputationGraph InBranch(Tensor<uint32> x, Func<Tensor<uint32>, Variable> call)
+    {
+        Tensor<uint32> outer = x * Scalar(3u);
+        return new([x], [Shorokoo.Core.Nodes.Ops.IfElse((Scalar<bit>)OnnxOp.Less(OnnxOp.ReduceMin(x, keepdims: false), Scalar(3u)),
+            (Tensor<uint32>)call(outer), outer + Scalar(1u))]);
+    }
+
+    private static InternalComputationGraph InNestedBody(Tensor<uint32> x, Func<Tensor<uint32>, Variable> call)
+    {
+        var carried = x;
+        foreach (var ctx in LoopAPI.Iterate(Scalar(2L)))
+        {
+            Tensor<uint32> outer = carried * Scalar(3u);
+            var inner = carried;
+            foreach (var innerCtx in LoopAPI.Iterate(Scalar(2L)))
+                inner = inner + (Tensor<uint32>)call(outer);
+            carried = inner;
+        }
         return new([x], [carried]);
     }
 
@@ -970,6 +999,18 @@ public partial class KernelWorkaroundMatMulAndNoopReduceInLoop
         var a = x;
         foreach (var ctx in LoopAPI.Iterate(x.Reduce(ReduceKind.Min, keepDims: false).Scalar().Cast<int64>()))
             a = (Tensor<float32>)OnnxOp.ReduceSum(OnnxOp.MatMul(a, a), null, true, true);
+        return a;
+    }
+}
+
+[Module]
+public partial class KernelWorkaroundRandomNormalInLoop
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+    {
+        var a = x;
+        foreach (var ctx in LoopAPI.Iterate(Scalar(3L)))
+            a = a + RandomNormal((Vector<int64>)OnnxOp.Shape(a), Scalar(0f), Scalar(1f));
         return a;
     }
 }

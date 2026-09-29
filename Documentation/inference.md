@@ -948,10 +948,13 @@ Console.WriteLine($"the card at its peak {DeviceMemory.PeakUsedBytes / (1024 * 1
   `nvidia-smi` lists per process where it can.
 - `ProcessBytes` is read from DXGI for a Windows card driven by WDDM (a GeForce, or any card
   driving a display), where `nvidia-smi` prints `[N/A]` for it, and from NVML everywhere else. It
-  is `null` where neither attributes memory to this process: off Windows without NVML, or in a
-  container whose process ids NVML does not see.
+  is `null` where neither answers for the card: where DXGI does not, and NVML is not installed,
+  gives no per-process figure, or does not see this process's id, as in a container with its own
+  process-id namespace. The two figures of one reading are taken one after the other, so while
+  this process allocates on another thread its share can momentarily read above the card's.
 - The peaks are the largest of your own `Sample()` calls; nothing samples on its own. A
-  sample costs about a microsecond, so one per step is cheap — and, unlike an external poller
+  sample cost about a microsecond on an RTX 4090 under WDDM, and NVML's process list about 120
+  microseconds, so one per step is cheap — and, unlike an external poller
   such as `nvidia-smi`, cannot miss the step.
 - With no CUDA runtime both return `null`, so the calls can stay in CPU code.
 - The first reading initializes this process's CUDA context (a few hundred MiB) if none exists;
@@ -1058,7 +1061,7 @@ no budget), `AllocationCount`, `ArenaExtensionCount`, `ArenaShrinkageCount` and
 
 - `RequestedInUseBytes` is the part of `InUseBytes` the callers asked for; the rest is what the
   arena added to round each allocation up to its block sizes. A backend whose allocator does not
-  round (JAX) reports `InUseBytes` here.
+  report what was requested (JAX) reports `InUseBytes` here, rounding included.
 - `TotalAllocatedBytes` is not a bound on card usage — it can exceed the card's capacity; use
   `DeviceMemory.Read()` for that.
 - `MaxInUseBytes` is a lifetime high-water mark; it cannot be reset and shrinkage does not
@@ -1169,7 +1172,7 @@ second read returns the same trace. `Nodes` is in execution order; inserted `Mem
 
 | what | where | cost | null / none when |
 |---|---|---|---|
-| `DeviceMemory.Read()` | static, the whole card, and this process's share of it | a few microseconds | no CUDA runtime; `ProcessBytes` alone is null where the driver attributes no memory to this process |
+| `DeviceMemory.Read()` | static, the whole card, and this process's share of it | about a microsecond through DXGI; about 120 microseconds through NVML | no CUDA runtime; `ProcessBytes` alone is null where the driver attributes no memory to this process |
 | `CompiledGraph.ReadArenaStatistics()` | one session's allocator | a call into the backend | the backend reports no arena |
 | `CompiledGraph.ReadPinnedArenaStatistics()` | one session's pinned host arena | a call into the backend | the backend stages nothing (every CPU one) |
 | `ComputeContext.ReadDeviceMemoryUse()` | what the context holds in its memory, against its budget | a walk over its list | never null; `LimitBytes` is null with no budget in force |

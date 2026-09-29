@@ -22,17 +22,21 @@ public readonly record struct DeviceMemoryReading(long UsedBytes, long FreeBytes
 ///
 /// <para><see cref="Read"/> and <see cref="Sample"/> call the CUDA runtime's
 /// <c>cudaMemGetInfo</c> directly and return <c>null</c> when there is no CUDA runtime to
-/// call. That reads the <i>device</i> — every process on it — in about a microsecond. Beside
-/// it they read what <i>this process</i> holds there,
-/// <see cref="DeviceMemoryReading.ProcessBytes"/>, from whatever the driver answers through:
-/// DXGI for a Windows card driven by WDDM, and NVML for any other. Calling one per training step
-/// is the way to catch a peak that a half-second <c>nvidia-smi</c> poll steps straight over. The
+/// call. That reads the <i>device</i> — every process on it. Beside it they read what <i>this
+/// process</i> holds there, <see cref="DeviceMemoryReading.ProcessBytes"/>, from whatever the
+/// driver answers through: DXGI for a Windows card driven by WDDM, and NVML for any other. Measured
+/// on an RTX 4090 under WDDM, a whole reading costs about a microsecond; NVML's list of the
+/// processes on a card took about 120 microseconds there. Calling one per training step is the way
+/// to catch a peak that a half-second <c>nvidia-smi</c> poll steps straight over. The
 /// device read is whichever is current for the calling thread — device 0, because that is the
 /// device the shipped GPU backends use.</para>
 ///
-/// <para>The process figure is <c>null</c> where the driver will not attribute device memory to
-/// a process: off Windows, where NVML is not installed or does not list this process under its own
-/// id, as in a container with its own process-id namespace.</para>
+/// <para>The process figure is <c>null</c> where neither answers for the card: where DXGI does
+/// not, and NVML is not installed, gives no figure for a process — as it does for a WDDM card —
+/// or does not list this process under its own id, as in a container with its own process-id
+/// namespace. The two figures of a reading are read one after the other, so while this process
+/// allocates or frees on another thread, a reading can put its share a little above or below
+/// what the card held at the same instant.</para>
 ///
 /// <para>The peak is process-wide because it is an observation of one process's run, and it
 /// moves only when you call <see cref="Sample"/>. For the settings that <i>configure</i>

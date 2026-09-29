@@ -137,10 +137,13 @@ internal sealed class WorkaroundSite
     public int? RankOf(int slot) => slot < inputs.Length && inputs[slot] is { } d ? d.Rank : null;
 
     /// <summary>
-    /// Whether the call is in a loop or branch body and input slot <paramref name="slot"/> is a
-    /// value that body did not compute: one from an enclosing scope, or one of the body's own
-    /// inputs, such as the iteration number or a loop-carried value. False for an absent slot, and
-    /// for every slot of a call outside any body.
+    /// Whether input slot <paramref name="slot"/> is a value the call's body did not compute: one
+    /// from an enclosing scope, or one of the body's own inputs, such as the iteration number or a
+    /// loop-carried value — and at a function body's top level, one of the function's inputs,
+    /// which come from wherever the function is called. A value is traced back through an
+    /// <c>Identity</c> and a <c>Cast</c> to the type it already has, which the runtime removes.
+    /// False for an absent slot, and for every slot of a call outside any body of a graph that is
+    /// not a function's.
     /// </summary>
     public bool IsFromOutsideBody(int slot) => slot < outsideBody.Length && outsideBody[slot];
 

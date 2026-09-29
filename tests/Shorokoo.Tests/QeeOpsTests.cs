@@ -723,6 +723,9 @@ public class QeeIntegerWidthTests
         Assert.Equal(2147483647L, Backend<QeeI32ReduceSumRuntime>(TensorData(DType.Int32, [2L], 2147483647, 2147483647)));
         Assert.Equal(-2L, Folded<QeeI32ReduceSumFolded>(DType.Int32));
         Assert.Equal(9007199254740992L, Backend<QeeI64ReduceSumRuntime>(TensorData(DType.Int64, [2L], 9007199254740993L, 0L)));
+        Assert.Equal(2147483647L, Backend<QeeI32ReduceProdRuntime>(TensorData(DType.Int32, [2L], 65536, 65536)));
+        Assert.Equal(2147483647L, Backend<QeeI32ReduceL1Runtime>(TensorData(DType.Int32, [2L], 2147483647, 2147483647)));
+        Assert.Equal(2147483647L, Backend<QeeI32ReduceSumSquareRuntime>(TensorData(DType.Int32, [2L], 65536, 65536)));
     }
 
     // The widths ONNX's Mean type constraint rejects, so there is no backend to compare against —
@@ -1030,6 +1033,15 @@ public class QeeUInt64SignedOperatorTests
 
 [Module] public partial class QeeI64ReduceSumRuntime { public static Tensor<int64> Inline(Tensor<int64> v)
     => v.Reduce(ReduceKind.Sum, null, true); }
+
+[Module] public partial class QeeI32ReduceProdRuntime { public static Tensor<int32> Inline(Tensor<int32> v)
+    => v.Reduce(ReduceKind.Prod, null, true); }
+
+[Module] public partial class QeeI32ReduceL1Runtime { public static Tensor<int32> Inline(Tensor<int32> v)
+    => v.Reduce(ReduceKind.L1, null, true); }
+
+[Module] public partial class QeeI32ReduceSumSquareRuntime { public static Tensor<int32> Inline(Tensor<int32> v)
+    => v.Reduce(ReduceKind.SumSquare, null, true); }
 
 // Width-boundary arithmetic, each as a folded constant and as a backend-executed runtime value.
 // Consumed by TestFoldedIntegerArithmeticMatchesTheBackend.

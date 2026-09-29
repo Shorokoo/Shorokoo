@@ -1577,7 +1577,7 @@ namespace Shorokoo.Core.Factory
         /// </summary>
         private static Dictionary<FastTensorKey, FastTensorInfo>? RunPrePasses(
             InternalComputationGraph graph, bool prepForOnnx, bool applyExecutionLowerings, KernelWorkaroundSet? workarounds,
-            bool shapesAreConcrete, Func<InternalComputationGraph, bool> needsLookup)
+            bool shapesAreConcrete, Func<InternalComputationGraph, bool> needsLookup, bool isFunctionBody = false)
         {
             FastLowerAttributeTensorOps.Process(graph);
             if (applyExecutionLowerings) FastLowerStateUpdateLinksForInference.Process(graph);
@@ -1606,7 +1606,7 @@ namespace Shorokoo.Core.Factory
             // the export lowerings sit before them. What it splices in, and what the later passes
             // add only for that, is numbered last, so every value the graph holds without it keeps
             // its name.
-            var splices = FastApplyKernelWorkarounds.Process(graph, workarounds, shapesAreConcrete);
+            var splices = FastApplyKernelWorkarounds.Process(graph, workarounds, shapesAreConcrete, isFunctionBody);
             FastAddIdentityForOuterScopeValues.Process(graph);
             if (prepForOnnx) FastPrepForOnnx.Process(graph);
             // The lookup before the call-stack strip: the Variable-level rebuild it takes gives a
@@ -1699,7 +1699,7 @@ namespace Shorokoo.Core.Factory
             // the input types.
             var fnTensorInfoLookup = RunPrePasses(fnFast, prepForOnnx, applyExecutionLowerings, workarounds, shapesAreConcrete,
                 body => body.Nodes.Any(n => n.OpCode == OpCodes.LOOP_CLOSE || n.OpCode == OpCodes.IF_CLOSE
-                    || forSession && n.OpCode == OpCodes.DEQUANTIZE_LINEAR));
+                    || forSession && n.OpCode == OpCodes.DEQUANTIZE_LINEAR), isFunctionBody: true);
             fnFast.ConfigureScopes();
 
             var fnGraphProto = BuildGraphProto(

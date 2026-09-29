@@ -38,6 +38,13 @@ internal abstract class KernelWorkaround
     /// </summary>
     public abstract Variable?[] Rewrite(WorkaroundSite site, Variable?[] inputs);
 
+    /// <summary>
+    /// Whether <see cref="Applies"/> asks <see cref="WorkaroundSite.IsFromOutsideBody"/>. Working
+    /// that out lays the graph's scopes out as the model is emitted, so a site of a workaround
+    /// that does not ask answers false for every slot and the pass does no such work for it.
+    /// </summary>
+    public virtual bool ReadsBodies => false;
+
     /// <summary>The name this workaround is known by in a plan cache key and a message.</summary>
     public virtual string Name => GetType().FullName ?? GetType().Name;
 }

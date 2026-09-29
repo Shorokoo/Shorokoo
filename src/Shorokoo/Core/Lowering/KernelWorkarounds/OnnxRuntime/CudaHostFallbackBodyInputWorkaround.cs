@@ -10,7 +10,8 @@ using static OpCodes;
 /// A bitwise call — <c>BitwiseAnd</c>, <c>BitwiseOr</c>, <c>BitwiseXor</c>, <c>BitwiseNot</c> or
 /// <c>BitShift</c> — inside a loop or branch body, over an int32, int64, uint32 or uint64 value the
 /// body did not compute: one from an enclosing scope, or one of the body's own inputs, such as a
-/// loop-carried value.
+/// loop-carried value. A function's inputs count as such at its body's top level, since the
+/// runtime puts the body in place wherever the function is called, a loop body among them.
 ///
 /// <para>ONNX Runtime's CUDA execution provider has no kernel for the bitwise operators, so it runs
 /// such a call on the CPU and copies its operands off the card. Inside a body, the copy of a value
@@ -35,6 +36,8 @@ internal sealed class CudaHostFallbackBodyInputWorkaround : KernelWorkaround
 {
     public override IReadOnlySet<string> OpCodes { get; } =
         new HashSet<string>([BITWISE_AND, BITWISE_OR, BITWISE_XOR, BITWISE_NOT, BIT_SHIFT], StringComparer.Ordinal);
+
+    public override bool ReadsBodies => true;
 
     public override bool Applies(WorkaroundSite site)
         => Enumerable.Range(0, site.InputCount).Any(slot => Taken(site, slot));

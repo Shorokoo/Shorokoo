@@ -16,7 +16,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// dim from the direct producer, so those are excluded; <c>-1</c> derives from the invariant
     /// element count and composes fine). Bypassed producers keep serving any other consumers.
     ///
-    /// <para>The static reshape then reads the chain's root directly, so it no longer waits on
+    /// <para>The static reshape then reads the chain's root directly, so it does not wait on
     /// reshapes whose shapes are computed at run time — GroupNorm's shape-restoring reshape, which
     /// feeds from <c>Shape(x)</c>, say — and a chain step nothing else reads drops out of the
     /// model with the rest of the dead nodes.</para>

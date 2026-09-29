@@ -8,8 +8,10 @@ using static OnnxOp;
 using static OpCodes;
 
 /// <summary>
-/// An int64 <c>Range</c>, rewritten so that its element count is exact when ONNX Runtime's kernel
-/// cannot count it exactly (Shorokoo/Shorokoo#447, Shorokoo/Shorokoo#450).
+/// An integer <c>Range</c>, rewritten so that its element count is exact where ONNX Runtime cannot
+/// count it exactly (Shorokoo/Shorokoo#447, Shorokoo/Shorokoo#450): an int64 one its kernel
+/// miscounts, and an int32 one of three constants whose span leaves int32, which its shape
+/// inference miscounts.
 ///
 /// <para>The kernel converts <c>start</c> and <c>limit</c> to double precision, and counts the
 /// elements as <c>ceil((limit - start) / delta)</c> in double precision. An int64 beyond 2^53 is
@@ -17,15 +19,21 @@ using static OpCodes;
 /// short it is: <c>Range(2^62, 2^62 + 2, 1)</c> gives no element where the spec gives two, and
 /// <c>Range(2^62, 2^62 + 1000, 1)</c> gives 1024. Where <c>start</c> and <c>limit</c> both lie
 /// within 2^53 of 0 and are less than 2^53 apart, the count is exact, since the double quotient is
-/// never rounded onto an integer. Every other element type is counted from values a double holds
-/// exactly, and is left alone.</para>
+/// never rounded onto an integer.</para>
+///
+/// <para>An int32 <c>Range</c> the kernel counts exactly, from values a double holds exactly. Where
+/// all three inputs are constants, though, ONNX Runtime also infers the output's length when it
+/// builds the session, and that count goes wrong when <c>limit - start</c> leaves int32:
+/// <c>Range(int.MinValue, int.MaxValue, 2^30)</c> has four elements, the length inferred is eight,
+/// and a node that reuses the output's buffer fails the run. Such a call is rewritten; every other
+/// int32 call, and every other element type, is left as it stands.</para>
 ///
 /// <para>A call is left as it stands where the kernel's count is right: three <c>Constant</c>s
 /// within those bounds, and a call whose <c>delta</c> is a <c>Constant</c> 1 or -1 and whose
 /// <c>start</c> or <c>limit</c> is a <c>Constant</c> within 2^52 of 0, as in <c>Range(0, n, 1)</c>,
-/// the form ordinary code builds for a position or index, which so pays nothing. Its other end is
-/// either within 2^53 of 0, and then counted exactly, or 2^52 or more away, a count no tensor holds,
-/// which the kernel refuses.</para>
+/// the form ordinary code builds for a position or index, which so pays nothing. With a unit step
+/// the count is the span itself: within 2^53 it is counted exactly, and beyond that it is more
+/// elements than a tensor holds, which the kernel refuses.</para>
 ///
 /// <para>Every other call counts in uint64: the span and the magnitude of <c>delta</c> are taken as
 /// unsigned, which holds every span of two int64s, and the count is the exact ceiling

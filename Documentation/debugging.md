@@ -198,7 +198,7 @@ that meets one gets ONNX Runtime's result:
   window whose input elements are all −inf takes a padded position before them as its first
   maximum: its index names the padding, such as −1. The values are right
   ([#437](https://github.com/Shorokoo/Shorokoo/issues/437)).
-- An int32 or int64 `ReduceSum`, `ReduceMean`, `ReduceProd`, `ReduceL1` or `ReduceSumSquare`
-  accumulates in double precision and clamps the result to the type's range, where Shorokoo's
+- On ONNX Runtime's CPU provider, an int32 or int64 `ReduceSum`, `ReduceMean`, `ReduceProd`,
+  `ReduceL1` or `ReduceSumSquare` accumulates in double precision and clamps the result to the type's range, where Shorokoo's
   folding wraps as two's complement: int32 `ReduceSum([2147483647, 2147483647])` gives 2147483647,
   not −2, and an int64 group is rounded once its accumulation passes 2^53.

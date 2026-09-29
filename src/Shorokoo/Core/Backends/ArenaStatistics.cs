@@ -62,8 +62,8 @@ public enum MemoryFigureKind
 /// what the card is carrying, read <see cref="DeviceMemory"/>.</param>
 /// <param name="RequestedInUseBytes">Bytes the callers asked for and have not given back: the part of
 /// <paramref name="InUseBytes"/> they requested, without what the arena added to round each
-/// allocation up to its own block sizes. A backend whose allocator does not round reports
-/// <paramref name="InUseBytes"/> here.</param>
+/// allocation up to its own block sizes. A backend whose allocator does not report what was
+/// requested reports <paramref name="InUseBytes"/> here, rounding included.</param>
 public readonly record struct ArenaStatistics(
     long InUseBytes,
     long LimitBytes,

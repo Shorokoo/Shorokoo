@@ -526,7 +526,7 @@ public class GpuExecutionTests
     }
 
     /// <summary>
-    /// The nine arena figures off a CUDA allocator, which is what the whole statistics surface
+    /// The ten arena figures off a CUDA allocator, which is what the whole statistics surface
     /// rests on and what no CPU machine can ask for: the allocator is built by name and a box
     /// without a card refuses it, so only the failure path has ever run. And what the arena holds
     /// before the first run — the session's weights, out of this same arena, so run 1's peak is
@@ -706,8 +706,6 @@ public class GpuExecutionTests
             var grew = DeviceMemory.PeakUsedBytes - idle!.Value.UsedBytes;
             Assert.True(grew >= stats.PeakBytes);
             Assert.True(DeviceMemory.PeakUsedBytes < idle.Value.TotalBytes);
-            Assert.True(DeviceMemory.PeakProcessBytes - idle.Value.ProcessBytes >= stats.PeakBytes);
-            Assert.True(DeviceMemory.PeakProcessBytes <= DeviceMemory.PeakUsedBytes);
         }
         finally
         {
@@ -726,8 +724,9 @@ public class GpuExecutionTests
         Assert.True(DeviceMemory.Read()!.Value.ProcessBytes > 0);
 
         var held = ctx.AllocateUninitialized<float32>(new Shape(256L << 20));
-        var reading = DeviceMemory.Read()!.Value;
-        held.Delete();
+        DeviceMemoryReading reading;
+        try { reading = DeviceMemory.Read()!.Value; }
+        finally { held.Delete(); }
 
         Assert.True(reading.ProcessBytes >= 1L << 30);
         Assert.True(reading.ProcessBytes <= reading.UsedBytes);

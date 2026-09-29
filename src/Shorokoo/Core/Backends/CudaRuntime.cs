@@ -74,7 +74,7 @@ internal static class CudaRuntime
     internal static string? TryGetPciBusId(int device)
     {
         if (Bind() is null || _getPciBusId is not { } getPciBusId) return null;
-        // The documented form is 13 characters and a terminator; the headroom is for nothing.
+        // The form is 12 characters, domain:bus:device.function, and a terminator; the rest is spare.
         var buffer = new byte[64];
         if (getPciBusId(buffer, buffer.Length, device) != 0) return null;
         int end = Array.IndexOf(buffer, (byte)0);

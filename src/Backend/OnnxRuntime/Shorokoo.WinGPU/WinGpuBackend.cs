@@ -7,7 +7,7 @@ namespace Shorokoo.WinGPU;
 /// Runtime sessions with the <b>CUDA execution provider appended on device 0</b>; ORT
 /// falls back to the CPU provider for any node CUDA cannot run. It ships in the
 /// <c>Shorokoo.WinGPU</c> package, which brings the CUDA-flavored native ONNX Runtime and
-/// needs a CUDA 12.x runtime installed on the machine.
+/// needs a CUDA 13.x runtime installed on the machine.
 ///
 /// <para>Naming it in your code is <b>optional</b>. Referencing the package copies
 /// <c>Shorokoo.WinGPU.dll</c> next to <c>Shorokoo.dll</c>, where

@@ -15,7 +15,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.ML.OnnxRuntime.Managed" Version="1.26.0" />
+    <PackageReference Include="Microsoft.ML.OnnxRuntime.Managed" Version="1.30.0" />
   </ItemGroup>
 
   <!-- NuGet auto-imports build/<PackageId>.targets for a DIRECT PackageReference and

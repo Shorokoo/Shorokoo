@@ -12,10 +12,10 @@ namespace Shorokoo.Core.Backends;
 /// </summary>
 internal static class CudaRuntime
 {
-    /// <summary>CUDA Toolkit 12.x ships its runtime under an OS-specific name.</summary>
+    /// <summary>CUDA Toolkit 13.x ships its runtime under an OS-specific name.</summary>
     private static string LibraryName => RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
-        ? "cudart64_12.dll"
-        : "libcudart.so.12";
+        ? "cudart64_13.dll"
+        : "libcudart.so.13";
 
     // Cdecl on x64, where it is the only convention, which is the only architecture Shorokoo
     // builds for; cudart declares its entry points CUDARTAPI, i.e. __stdcall on 32-bit Windows.

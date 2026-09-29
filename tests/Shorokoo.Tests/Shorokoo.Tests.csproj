@@ -117,7 +117,7 @@
     Shorokoo.LinuxGPU references it, so this costs a file copy and no download.
   -->
   <ItemGroup Condition="$([MSBuild]::IsOSPlatform('Linux'))">
-    <PackageReference Include="Microsoft.ML.OnnxRuntime.Gpu.Linux" Version="1.26.0"
+    <PackageReference Include="Microsoft.ML.OnnxRuntime.Gpu.Linux" Version="1.30.0"
                       ExcludeAssets="all" GeneratePathProperty="true" />
     <ShorokooBackendNatives BackendId="cuda" Condition="'$(ShorokooDeployGpuBackend)' != 'true'"
       Include="$(PkgMicrosoft_ML_OnnxRuntime_Gpu_Linux)\runtimes\linux-x64\native\libonnxruntime.so;$(PkgMicrosoft_ML_OnnxRuntime_Gpu_Linux)\runtimes\linux-x64\native\libonnxruntime_providers_shared.so" />
@@ -127,7 +127,7 @@
        second runtime beside the stock CPU one the WinCPU reference deploys. Without
        ShorokooDeployGpuBackend the CUDA provider's own DLL is left out, exactly as on Linux. -->
   <ItemGroup Condition="$([MSBuild]::IsOSPlatform('Windows'))">
-    <PackageReference Include="Microsoft.ML.OnnxRuntime.Gpu.Windows" Version="1.26.0"
+    <PackageReference Include="Microsoft.ML.OnnxRuntime.Gpu.Windows" Version="1.30.0"
                       ExcludeAssets="all" GeneratePathProperty="true" />
     <ShorokooBackendNatives BackendId="cuda" Condition="'$(ShorokooDeployGpuBackend)' != 'true'"
       Include="$(PkgMicrosoft_ML_OnnxRuntime_Gpu_Windows)\runtimes\win-x64\native\onnxruntime.dll;$(PkgMicrosoft_ML_OnnxRuntime_Gpu_Windows)\runtimes\win-x64\native\onnxruntime_providers_shared.dll" />

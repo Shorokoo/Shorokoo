@@ -4,4 +4,4 @@ using Shorokoo.Core.Backends;
 // so BackendPackage.Probe can turn it away on the wrong machine before anything native is touched.
 [assembly: ShorokooBackend("linux", "x64", "cuda",
     Natives = "libonnxruntime.so;libonnxruntime_providers_cuda.so;libonnxruntime_providers_shared.so",
-    RequiresCudaRuntime = "12")]
+    RequiresCudaRuntime = "13")]

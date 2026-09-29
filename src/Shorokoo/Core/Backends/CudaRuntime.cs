@@ -4,7 +4,9 @@ namespace Shorokoo.Core.Backends;
 
 /// <summary>
 /// The thin bit of the CUDA runtime library Shorokoo calls itself, outside ONNX Runtime:
-/// <c>cudaMemGetInfo</c>, which <see cref="DeviceMemory"/> reports. The library is resolved
+/// <c>cudaMemGetInfo</c>, which <see cref="DeviceMemory"/> reports, and the two questions that
+/// name the device it read — <c>cudaGetDevice</c> and <c>cudaDeviceGetPCIBusId</c> — which
+/// <see cref="ProcessDeviceMemory"/> needs to find the same card elsewhere. The library is resolved
 /// by name and its exports bound lazily, so nothing here requires a CUDA machine to load — every entry point
 /// simply reports failure when the runtime is absent.
 /// </summary>
@@ -20,8 +22,16 @@ internal static class CudaRuntime
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate int MemGetInfo(out nuint free, out nuint total);
 
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate int GetDevice(out int device);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate int GetPciBusId(byte[] pciBusId, int length, int device);
+
     private static readonly object _gate = new();
     private static MemGetInfo? _memGetInfo;
+    private static GetDevice? _getDevice;
+    private static GetPciBusId? _getPciBusId;
     private static bool _bound;
 
     /// <summary>
@@ -44,6 +54,33 @@ internal static class CudaRuntime
         return true;
     }
 
+    /// <summary>
+    /// The CUDA device current for the calling thread — the one <see cref="TryMemGetInfo"/>
+    /// reads. False, with <paramref name="device"/> zero, where the runtime cannot say.
+    /// </summary>
+    internal static bool TryGetDevice(out int device)
+    {
+        device = 0;
+        if (Bind() is null || _getDevice is not { } getDevice) return false;
+        return getDevice(out device) == 0;
+    }
+
+    /// <summary>
+    /// The PCI bus id of CUDA device <paramref name="device"/>, written
+    /// <c>domain:bus:device.function</c> — the one name for a card that the CUDA runtime and
+    /// NVML agree on whatever order each enumerates the cards in. Null where the runtime cannot
+    /// say.
+    /// </summary>
+    internal static string? TryGetPciBusId(int device)
+    {
+        if (Bind() is null || _getPciBusId is not { } getPciBusId) return null;
+        // The documented form is 13 characters and a terminator; the headroom is for nothing.
+        var buffer = new byte[64];
+        if (getPciBusId(buffer, buffer.Length, device) != 0) return null;
+        int end = Array.IndexOf(buffer, (byte)0);
+        return System.Text.Encoding.ASCII.GetString(buffer, 0, end < 0 ? buffer.Length : end);
+    }
+
     private static MemGetInfo? Bind()
     {
         lock (_gate)
@@ -54,13 +91,19 @@ internal static class CudaRuntime
                 if (!NativeLibrary.TryLoad(LibraryName, out var library)) return null;
                 if (NativeLibrary.TryGetExport(library, "cudaMemGetInfo", out var export))
                     // The library stays loaded on purpose: the delegate points into it.
+                {
                     _memGetInfo = Marshal.GetDelegateForFunctionPointer<MemGetInfo>(export);
+                    if (NativeLibrary.TryGetExport(library, "cudaGetDevice", out var getDevice))
+                        _getDevice = Marshal.GetDelegateForFunctionPointer<GetDevice>(getDevice);
+                    if (NativeLibrary.TryGetExport(library, "cudaDeviceGetPCIBusId", out var getPciBusId))
+                        _getPciBusId = Marshal.GetDelegateForFunctionPointer<GetPciBusId>(getPciBusId);
+                }
                 else
                     NativeLibrary.Free(library);
             }
             // Binding is best effort -- a reading is worth nothing next to failing a run, and
             // TryMemGetInfo promises to report rather than throw.
-            catch (Exception) { _memGetInfo = null; }
+            catch (Exception) { _memGetInfo = null; _getDevice = null; _getPciBusId = null; }
             finally { _bound = true; }
             return _memGetInfo;
         }

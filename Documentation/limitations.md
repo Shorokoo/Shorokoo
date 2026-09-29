@@ -274,7 +274,7 @@ outputs in host memory on every execution provider, including ones flagged in
 loaded through `IsolatedBackend.Load` or `BackendPackage.TryLoad`, and a sequence
 moves to another context element by element.
 
-### Device-memory readings are the device's, and device 0's
+### Device-memory readings are process-wide, and device 0's
 
 Device-memory configuration is per context, session and run
 (`ComputeContext.DeviceMemory`, `RunSettings`; see
@@ -283,12 +283,13 @@ host can have separate budgets and arena strategies.
 
 Reporting is process-wide. `DeviceMemory.Read()` and `Sample()` query the CUDA
 device current for the calling thread (device 0, which the shipped GPU backends
-use) and return the whole device's usage, including other processes.
-`PeakUsedBytes` is one record for the process. `CompiledGraph.ReadArenaStatistics()`
-reads one session's arena and `ComputeContext.ReadDeviceMemoryUse()` what a
-context holds against its budget (see
-[What one session's arena did](inference.md#what-one-sessions-arena-did)); nothing
-reports this process's total share of the card.
+use) and return the whole device's usage, including other processes, and this
+process's share of it (`ProcessBytes`). `PeakUsedBytes` and `PeakProcessBytes`
+are one record each for the process: two contexts training side by side in one
+process share them, and neither can be split between contexts.
+`CompiledGraph.ReadArenaStatistics()` reads one session's arena and
+`ComputeContext.ReadDeviceMemoryUse()` what a context holds against its budget
+(see [What one session's arena did](inference.md#what-one-sessions-arena-did)).
 
 ### Backprop through dynamic loops
 

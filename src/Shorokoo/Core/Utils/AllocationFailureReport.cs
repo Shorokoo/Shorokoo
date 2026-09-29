@@ -305,7 +305,8 @@ namespace Shorokoo.Core.Utils
         {
             if (device.Reading is not DeviceMemoryReading d) return null;
             var text = $"Device: {Bytes(d.UsedBytes)} of {Bytes(d.TotalBytes)} in use across all "
-                       + $"processes, {Bytes(d.FreeBytes)} free";
+                       + (d.ProcessBytes is long own ? $"processes, {Bytes(own)} of it this process's" : "processes")
+                       + $", {Bytes(d.FreeBytes)} free";
             if (device.ArenaLimitBytes is long limit)
                 text += $"; this session's arena is capped at {Bytes(limit)} — what its context's "
                       + "device-memory budget (DeviceMemorySettings.LimitBytes) left it once the "

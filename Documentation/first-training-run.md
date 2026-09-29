@@ -156,12 +156,14 @@ var logits = ComputeContext.Default.Execute(inference, vx)[0].ToTensorData();   
 
 ```csharp
 if (DeviceMemory.Read() is { } card)   // null with no CUDA runtime
-    Console.WriteLine($"device: {card.UsedBytes >> 20} of {card.TotalBytes >> 20} MiB used, all processes");
+    Console.WriteLine($"device: {card.UsedBytes >> 20} of {card.TotalBytes >> 20} MiB used, all processes; "
+                      + $"this process {card.ProcessBytes >> 20} MiB");
 using (var p = System.Diagnostics.Process.GetCurrentProcess())
     Console.WriteLine($"host working set {p.WorkingSet64 >> 20} MiB");
 ```
 
-`DeviceMemory.Read()` reports the whole card, every process included. The other readings, and
+`DeviceMemory.Read()` reports the whole card, every process included, and `ProcessBytes` this
+process's own share of it. The other readings, and
 what each covers, are in [Device memory](inference.md#device-memory-gpu-backends).
 
 The batch helper used above:
@@ -195,8 +197,9 @@ None of these shows in a small first run. Each can end a long one.
   Windows (WDDM), device memory is charged to the process's commit, so a host memory limit
   also caps device memory:
   [When a training step runs out of memory](training.md#when-a-training-step-runs-out-of-memory).
-- **Device-memory readings.** They cover the whole card or one arena, never this process
-  alone: [limitations.md](limitations.md#device-memory-readings-are-the-devices-and-device-0s).
+- **Device-memory readings.** They are one record for the whole process and read device 0 only,
+  and this process's share of the card can be unavailable in a container:
+  [limitations.md](limitations.md#device-memory-readings-are-process-wide-and-device-0s).
 - **Reproducibility.** A fixed seed reproduces a run bit for bit on the CPU backend, including
   across a save and resume. On a GPU it does so only on the ONNX Runtime backends, and only on a
   context that asks for deterministic compute: [Seeding the run](training.md#seeding-the-run).

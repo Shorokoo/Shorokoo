@@ -60,10 +60,10 @@ internal sealed class MatMulEmptyOperandWorkaround : KernelWorkaround
         var (a, b) = (inputs[0]!, inputs[1]!);
         var (shapeOfA, shapeOfB) = (Shape(a), Shape(b));
         if (HasAnEmptyConstant(site))
-            return [ZerosOfTheProduct(shapeOfA, shapeOfB, site.RankOf(0), site.RankOf(1), a, site.ConstantShapeOf(0) is null ? a : b)];
+            return [ZerosOfTheProduct(shapeOfA, shapeOfB, site.RankOf(0), site.RankOf(1), a)];
         var product = MatMul(a, b);
         return [Ops.IfElse(HasNoElement(shapeOfA, shapeOfB, Shape(product)),
-            ZerosOfTheProduct(shapeOfA, shapeOfB, site.RankOf(0), site.RankOf(1), product, product), product)];
+            ZerosOfTheProduct(shapeOfA, shapeOfB, site.RankOf(0), site.RankOf(1), product), product)];
     }
 
     /// <summary>Whether a tensor of one of <paramref name="shapes"/> is empty: whether a dimension
@@ -77,11 +77,9 @@ internal sealed class MatMulEmptyOperandWorkaround : KernelWorkaround
     /// operand's shape less its last axis, then to the right operand's less its contraction axis,
     /// the second-to-last or, for a vector, its only one. Each keeps an axis of 1 in place of the
     /// other's, as the batch dimensions broadcast, unless the other operand is a vector, whose axis
-    /// the product drops. With a rank unknown, that axis is kept or not at run time. The zero is
-    /// <see cref="BranchValues.Zero"/> of <paramref name="source"/>, so the zeros are never a
-    /// constant ONNX Runtime computes when it builds the session.
+    /// the product drops. With a rank unknown, that axis is kept or not at run time.
     /// </summary>
-    private static Variable ZerosOfTheProduct(Variable shapeOfA, Variable shapeOfB, int? rankA, int? rankB, Variable like, Variable source)
+    private static Variable ZerosOfTheProduct(Variable shapeOfA, Variable shapeOfB, int? rankA, int? rankB, Variable like)
     {
         var (none, one) = (Globals.Vector(Array.Empty<long>()), Globals.Vector(1L));
         Variable Axes(Variable shape, long from, long to) => Slice(shape, Globals.Vector(from), Globals.Vector(to));
@@ -95,6 +93,6 @@ internal sealed class MatMulEmptyOperandWorkaround : KernelWorkaround
         var left = Concat([Axes(shapeOfA, 0L, -1L), UnlessVector(one, rankB, shapeOfB)], 0);
         var right = Concat([Axes(shapeOfB, 0L, -2L), UnlessVector(one, rankA, shapeOfA),
             UnlessVector(Axes(shapeOfB, -1L, long.MaxValue), rankB, shapeOfB)], 0);
-        return Expand(Expand(CastLike(BranchValues.Zero(source), like, saturate: null), left), right);
+        return Expand(Expand(CastLike(Globals.Scalar(0L), like, saturate: null), left), right);
     }
 }

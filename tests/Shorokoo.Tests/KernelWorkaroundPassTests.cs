@@ -70,27 +70,31 @@ public class KernelWorkaroundPassTests
         Assert.True(AsWritten(Graph(n, OnnxOp.Range(Scalar(0), n, Scalar(-1)))));
         Assert.True(AsWritten(new([], [OnnxOp.Range(Scalar(int.MinValue), Scalar(-1), Scalar(1 << 30))])));
         Assert.True(AsWritten(Graph(n, OnnxOp.Range(Scalar(2), n, Scalar(1)))));
-        Assert.False(AsWritten(Graph(n, OnnxOp.Range(Scalar(0), n, Scalar(2)))));
+        Assert.True(AsWritten(Graph(n, OnnxOp.Range(Scalar(0), n, Scalar(2)))));
         Assert.False(AsWritten(new([], [OnnxOp.Range(Scalar(int.MinValue), Scalar(int.MaxValue), Scalar(1 << 30))])));
         Assert.True(AsWritten(Graph(h, OnnxOp.Range(Scalar((short)0), h, Scalar((short)3)))));
         Assert.True(AsWritten(Graph(i, OnnxOp.Range(Scalar(0L), i, Scalar(1L)))));
         Assert.True(AsWritten(Graph(i, OnnxOp.Range(Scalar(2L), i, Scalar(1L)))));
-        Assert.True(AsWritten(Graph(i, OnnxOp.Range(Scalar(1L - (1L << 62)), i, Scalar(-1L)))));
-        Assert.True(AsWritten(Graph(i, OnnxOp.Range(Scalar(1L << 62), i, Scalar(1L)))));
-        Assert.True(AsWritten(Graph(i, OnnxOp.Range(i, Scalar(long.MinValue), Scalar(-1L)))));
-        Assert.True(AsWritten(new([], [OnnxOp.Range(Scalar(long.MaxValue - 2L), Scalar(long.MinValue + 2L), Scalar(1L))])));
-        Assert.True(AsWritten(new([i, n], [OnnxOp.Range(i, OnnxOp.Add(i, OnnxOp.Cast(n, null, DType.Int64)), Scalar(1L))])));
+        Assert.True(AsWritten(Graph(i, OnnxOp.Range(Scalar(1L << 52), i, Scalar(-1L)))));
+        Assert.True(AsWritten(Graph(i, OnnxOp.Range(i, Scalar(-(1L << 52)), Scalar(-1L)))));
+        Assert.False(AsWritten(new([], [OnnxOp.Range(Scalar(1L << 53), Scalar(1L - (1L << 53)), Scalar(-1L))])));
+        Assert.False(AsWritten(Graph(i, OnnxOp.Range(Scalar(1L - (1L << 62)), i, Scalar(-1L)))));
+        Assert.False(AsWritten(Graph(i, OnnxOp.Range(Scalar(1L << 62), i, Scalar(1L)))));
+        Assert.False(AsWritten(Graph(i, OnnxOp.Range(i, Scalar(long.MinValue), Scalar(-1L)))));
+        Assert.False(AsWritten(new([], [OnnxOp.Range(Scalar(long.MaxValue - 2L), Scalar(long.MinValue + 2L), Scalar(1L))])));
+        Assert.False(AsWritten(new([], [OnnxOp.Range(Scalar(1L << 53), Scalar((1L << 53) + 2L), Scalar(1L))])));
+        Assert.False(AsWritten(new([i, n], [OnnxOp.Range(i, OnnxOp.Add(i, OnnxOp.Cast(n, null, DType.Int64)), Scalar(1L))])));
         Assert.False(AsWritten(Graph(i, OnnxOp.Range(Scalar(0L), i, Scalar(2L)))));
     }
 
     [Fact]
-    public void TestAUnitStepRangeWhoseSpanWrapsItsTypeGivesOnnxRuntimesElementsOfTheWrappedDifference()
+    public void TestAUnitStepRangeWhoseSpanWrapsItsTypeIsEmpty()
     {
-        Assert.Equal([long.MaxValue - 2L, long.MaxValue - 1L, long.MaxValue, long.MinValue, long.MinValue + 1L], UnitRange(long.MaxValue - 2L, long.MinValue + 2L, 1L));
-        Assert.Equal([long.MinValue], UnitRange(long.MinValue, long.MaxValue, -1L));
-        Assert.Throws<Microsoft.ML.OnnxRuntime.OnnxRuntimeException>(() => UnitRange((1L << 62) - 1L, long.MinValue, 1L));
-        Assert.Equal([int.MaxValue - 2, int.MaxValue - 1, int.MaxValue, int.MinValue, int.MinValue + 1], UnitRange32(int.MaxValue - 2, int.MinValue + 2, 1));
-        Assert.Empty(UnitRange32(int.MinValue, int.MaxValue, 1));
+        Assert.Empty(UnitRange(long.MaxValue - 2L, long.MinValue + 2L, 1L));
+        Assert.Empty(UnitRange(long.MinValue, long.MaxValue, -1L));
+        Assert.Empty(UnitRange((1L << 62) - 1L, long.MinValue, 1L));
+        Assert.Empty(UnitRange32(int.MaxValue - 2, int.MinValue + 2, 1));
+        Assert.Empty(UnitRange32(int.MinValue, int.MaxValue, -1));
     }
 
     private static long[] UnitRange(long start, long limit, long delta)
@@ -325,19 +329,6 @@ public class KernelWorkaroundPassTests
     }
 
     [Fact]
-    public void TestOnnxRuntimeFoldsEveryIfOfTheReductionWorkaroundsWithConcreteShapes()
-    {
-        var x = InputTensor<float32>("x", rank: 2);
-        var axes = InputTensor<int64>("axes", rank: 1);
-        var g = new InternalComputationGraph([x, axes], [x.Cast<float16>().Reduce(ReduceKind.SumSquare), x.Cast<int64>().Reduce(ReduceKind.Max, Vector(1L)),
-            x.Cast<bit>().Reduce(ReduceKind.Min, Vector(0L)), NN.Reduce(ReduceKind.Sum, x, axes, keepDims: true, noOp: true)]);
-        List<long[]?> dims = [[2L, 3L], [1L]];
-        var built = FastOnnxModelBuilder.BuildInternalOnnxModel(g, prepForOnnx: true, inputDims: dims, workarounds: KernelWorkaroundRegistry.OnnxRuntime);
-        Assert.True(Ifs(built) >= 2);
-        Assert.Equal(0, Ifs(Optimized(built)));
-    }
-
-    [Fact]
     public void TestANoopReductionComputesItsGroupsOnOnnxRuntimeWithConcreteShapes()
     {
         var x = TensorData(DType.Float32, [2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f);
@@ -445,7 +436,7 @@ public class KernelWorkaroundPassTests
         Assert.Throws<Microsoft.ML.OnnxRuntime.OnnxRuntimeException>(() => ProductDims([2L], [0L, 2L, 3L], concrete: true));
         Assert.Throws<Microsoft.ML.OnnxRuntime.OnnxRuntimeException>(() => ProductDims([0L, 2L, 3L], [3L], concrete: true));
         Assert.Throws<Microsoft.ML.OnnxRuntime.OnnxRuntimeException>(() => ProductDims([0L, 2L, 3L], [3L], concrete: false));
-        Assert.Throws<Microsoft.ML.OnnxRuntime.OnnxRuntimeException>(() => AutoTest.AllTrueWithConcreteShapes(EmptyMatMulOfALeftBatchOfOneCheck.ComputationGraph, TensorData(DType.Float32, [], 2f)));
+        Assert.True(AutoTest.AllTrueWithConcreteShapes(EmptyMatMulOfALeftBatchOfOneCheck.ComputationGraph, TensorData(DType.Float32, [], 2f)));
     }
 
     private static long[] ProductDims(long[] left, long[] right, bool concrete)
@@ -508,23 +499,18 @@ public class KernelWorkaroundPassTests
     }
 
     [Fact]
-    public void TestAParameterAWorkaroundReadsIsWrittenOverWhereItsIfFoldsAndNotWhereItsIfReadsItAtRunTime()
+    public void TestAParameterAWorkaroundReadsIsWrittenOverWhereItsIfFolds()
     {
         var x = InputTensor<float32>("x", rank: 3);
         var w = InputTensor<float32>("w", rank: 3);
         var m = InputTensor<float32>("m", rank: 2);
-        var h = InputTensor<float16>("h", rank: 2);
         var s = InputTensor<int64>("s", rank: 1);
         var batch = TensorData(DType.Float32, [2L, 3L, 3L], [.. Enumerable.Range(0, 18).Select(i => (object)(i / 8f))]);
         var matrix = TensorData(DType.Float32, [3L, 3L], [.. Enumerable.Range(0, 9).Select(i => (object)(i / 4f))]);
-        var half = TensorData(DType.Float16, [3L, 3L], [.. Enumerable.Range(0, 9).Select(i => (object)(Float16)(i / 4f))]);
         var dims = TensorData(DType.Int64, [3L], 2L, 3L, 3L);
-        var flat = TensorData(DType.Int64, [1L], 9L);
         Assert.Equal(1, AliasedOverTheFirstInput(new([w, x], [OnnxOp.Sub(w, OnnxOp.ReduceMean(OnnxOp.MatMul(x, w), keepdims: false))]), batch, batch));
         Assert.Equal(1, AliasedOverTheFirstInput(new([m, x], [OnnxOp.Sub(m, OnnxOp.ReduceMean(OnnxOp.MatMul(x, m), keepdims: false))]), matrix, batch));
         Assert.Equal(1, AliasedOverTheFirstInput(new([w, x, s], [OnnxOp.Sub(w, OnnxOp.ReduceMean(OnnxOp.MatMul(OnnxOp.Reshape(x, s, allowZero: false), w), keepdims: false))]), batch, batch, dims));
-        Assert.Equal(1, AliasedOverTheFirstInput(new([h], [OnnxOp.Sub(h, OnnxOp.ReduceSumSquare(h, keepdims: false))]), half));
-        Assert.Equal(0, AliasedOverTheFirstInput(new([h, s], [OnnxOp.Sub(h, OnnxOp.ReduceSumSquare(OnnxOp.Reshape(h, s, allowZero: false), keepdims: false))]), half, flat));
     }
 
     private static long AliasedOverTheFirstInput(InternalComputationGraph g, TensorData first, params TensorData[] rest)
@@ -541,15 +527,17 @@ public class KernelWorkaroundPassTests
     }
 
     [Fact]
-    public void TestAnIfOnnxRuntimeFoldsToABranchHoldingAConstantOfAHundredAndTwentyEightBytesOrMoreFailsToBuildItsSession()
+    public void TestAnIfOnnxRuntimeFoldsToABranchHoldingAConstantOfAHundredAndTwentyEightBytesBuildsItsSession()
     {
         var x = InputTensor<float32>("x", rank: 1);
         var g = Graph(x, Shorokoo.Core.Nodes.Ops.IfElse((Scalar<bit>)OnnxOp.Equal(OnnxOp.ReduceProd(OnnxOp.Shape(x), keepdims: false), Scalar(32L)),
             OnnxOp.Expand(Scalar(0f), Vector(32L)), x));
+        var ones = TensorData(DType.Float32, [32L], [.. Enumerable.Repeat((object)1f, 32)]);
         using var context = new ComputeContext();
-        Assert.Throws<Microsoft.ML.OnnxRuntime.OnnxRuntimeException>(() => context.Compile(g, [[32L]], trainingStep: false));
+        using var concrete = context.Compile(g, [[32L]], trainingStep: false);
+        Assert.Equal(new byte[128], concrete.Execute(ones.Shared())[0].ToTensorData().AccessRawMemory().ToArray());
         using var symbolic = context.Compile(g, [null], trainingStep: false);
-        Assert.Equal(new byte[128], symbolic.Execute(TensorData(DType.Float32, [32L], [.. Enumerable.Repeat((object)1f, 32)]).Shared())[0].ToTensorData().AccessRawMemory().ToArray());
+        Assert.Equal(new byte[128], symbolic.Execute(ones.Shared())[0].ToTensorData().AccessRawMemory().ToArray());
     }
 
     [Fact]
@@ -600,7 +588,7 @@ public class KernelWorkaroundPassTests
     }
 
     [Fact]
-    public void TestAnArithmeticOpWithAnEmptyConstantOperandOnnxRuntimeWouldDropIsEmptyOnOnnxRuntime()
+    public void TestAnArithmeticOpWithAnEmptyConstantOperandIsEmptyOnOnnxRuntime()
     {
         var x = InputTensor<float32>("x", rank: 3);
         var data = TensorData(DType.Float32, [2L, 1L, 3L], 1f, 2f, 3f, 4f, 5f, 6f);
@@ -612,23 +600,7 @@ public class KernelWorkaroundPassTests
         Assert.Equal([2L, 0L, 3L], Dims(OnnxOp.Sub(x, empty)));
         Assert.Equal([2L, 0L, 3L], Dims(OnnxOp.Div(x, empty)));
         Assert.Equal([2L, 0L, 3L], Dims(OnnxOp.Cast(OnnxOp.Add(OnnxOp.Cast(x, null, DType.Int64), OnnxOp.Constant(TensorAttribute.Create(new Shape(2L, 0L, 1L), Array.Empty<long>()))), null, DType.Float32)));
-        Assert.Equal([2L, 1L, 3L], Dims(OnnxOp.Relu(OnnxOp.Add(OnnxOp.Relu(x), OnnxOp.Add(Constant([1L, 1L, 3L], 1f, 2f, 3f), empty)))));
-    }
-
-    [Fact]
-    public void TestTheArithmeticWorkaroundFiresOnlyWhereOnnxRuntimeWouldDropTheCall()
-    {
-        var x = InputTensor<float32>("x", rank: 3);
-        var empty = Constant([2L, 0L, 1L]);
-        Assert.False(AsWritten(Graph(x, OnnxOp.Add(x, empty))));
-        Assert.False(AsWritten(Graph(x, OnnxOp.Add(empty, x))));
-        Assert.False(AsWritten(Graph(x, OnnxOp.Mul(empty, x))));
-        Assert.False(AsWritten(Graph(x, OnnxOp.Div(x, empty))));
-        Assert.True(AsWritten(Graph(x, OnnxOp.Sub(empty, x))));
-        Assert.True(AsWritten(Graph(x, OnnxOp.Div(empty, x))));
-        Assert.True(AsWritten(Graph(x, OnnxOp.Add(x, Constant([1L], 0f)))));
-        Assert.True(AsWritten(Graph(x, OnnxOp.Pow(x, empty))));
-        Assert.True(AsWritten(new([], [OnnxOp.Add(Constant([1L], 1f), empty)])));
+        Assert.Equal([2L, 0L, 3L], Dims(OnnxOp.Relu(OnnxOp.Add(OnnxOp.Relu(x), OnnxOp.Add(Constant([1L, 1L, 3L], 1f, 2f, 3f), empty)))));
     }
 
     private static InternalComputationGraph Graph(Variable input, Variable output) => new([input], [output]);

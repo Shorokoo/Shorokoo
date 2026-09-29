@@ -121,10 +121,11 @@ internal class TensorManipulationPerf : IOpPerf
                 };
             }
 
-            case SLICE:
+            case SLICE when KeepsWholeOuterSlabs(input.InputShapes[0], outputShape):
             {
-                // A strided copy of the region it keeps: it reads what it writes, however large
-                // the tensor it is cut from, and a slice of nothing costs its launch alone.
+                // Whole slabs along the outermost axis, each one contiguous: the copy reads the
+                // bytes it writes and no others, however large the tensor it is cut from, and a
+                // slice of nothing costs its launch alone. Any other slice keeps the default price.
                 return new OpPerfResult
                 {
                     ComputeTime = OpCostModel.Survival(input, OpCostModel.Copy(2.0 * outputShape.MemoryBytes)),
@@ -134,7 +135,7 @@ internal class TensorManipulationPerf : IOpPerf
 
             default:
             {
-                // Concat, Split, Pad, Tile, Gather*, Range, ConstantOfShape, …: a strided copy
+                // Concat, Split, Slice, Pad, Tile, Gather*, Range, ConstantOfShape, …: a strided copy
                 return new OpPerfResult
                 {
                     ComputeTime = OpCostModel.Survival(input, OpCostModel.Copy(moved)),
@@ -142,6 +143,16 @@ internal class TensorManipulationPerf : IOpPerf
                 };
             }
         }
+    }
+
+    /// <summary>Whether a slice keeps nothing, or only whole slabs along the outermost axis: every
+    /// other axis of <paramref name="output"/> as long as <paramref name="input"/>'s.</summary>
+    private static bool KeepsWholeOuterSlabs(TensorShapeInfo? input, TensorShapeInfo output)
+    {
+        if (output.ElementCount == 0) return true;
+        if (input is null) return false;
+        var (inDims, outDims) = (input.Shape.Dims, output.Shape.Dims);
+        return inDims.Length > 0 && inDims.Length == outDims.Length && inDims.Skip(1).SequenceEqual(outDims.Skip(1));
     }
 
     private static long[]? Perm(OpPerfInput input)

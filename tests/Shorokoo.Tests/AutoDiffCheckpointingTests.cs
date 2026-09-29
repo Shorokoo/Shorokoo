@@ -745,7 +745,7 @@ public class AutoDiffCheckpointingCoverageTests
         var (checkpointed, _, _) = MlpStackRig(Modules.CheckpointedTinyMlpStack.ComputationGraph, [2L, 8L]);
 
         Assert.True(plain.PreOptimizationEval.PeakMemoryBytes < MemoryAwareGraphOptimizer.MinimumPeakBytesToOptimize);
-        Assert.DoesNotContain("Remat", plain.OptimizationResult.StrategyName);
+        Assert.Contains(plain.OptimizationResult.StrategyName, ["Baseline", MemoryAwareGraphOptimizer.OrderedStateReads]);
         Assert.True(NodeCount(checkpointed) > NodeCount(plain));
         Assert.True(checkpointed.OptimizationResult.Evaluation.PeakMemoryBytes <= plain.OptimizationResult.Evaluation.PeakMemoryBytes);
     }

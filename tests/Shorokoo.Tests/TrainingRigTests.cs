@@ -214,6 +214,19 @@ public partial class TiedWeightMlp
     }
 }
 
+/// <summary>Module state whose update is read beside the state it replaces, by one node.</summary>
+[Module]
+public partial class StateReadWithItsUpdateModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> input)
+    {
+        var seen = InitRunningMean.Init(input.ShapeTensor());
+        var updated = seen + Scalar(1f);
+        Globals.StateUpdate(seen, updated);
+        return input * Ones.Init([Scalar(2L)]) + updated * seen;
+    }
+}
+
 /// <summary>A hidden linear layer of sixteen units and a ReLU, then a linear layer of eight.</summary>
 [Module]
 public partial class TwoLayerMlp
@@ -3134,6 +3147,13 @@ public class TrainingRigTrainingLoopCoverageTests
         matmul.TrainStep(ckpt, matmul.InputDef.FromOrderedData(TensorData([4L, 5L, 8L], new float[160])),
             matmul.TargetDef.FromOrderedData(TensorData([4L, 4L], new float[16])));
         Assert.Equal([(0, 0), (1, 1)], matmul.MarkedStatePairs(Assert.Single(matmul.CompiledTrainStepShapeKeys)));
+
+        var x = TensorData([2L], 1f, 2f);
+        var stateful = TrainingRig.FromScratch(StateReadWithItsUpdateModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            [new TensorDataModelParam(StateReadWithItsUpdateModel.ComputationGraph.InputNames[0]!, ModelParamType.InputParam, x)], 0.1f);
+        stateful.TrainStep(stateful.CreateInitialCheckpoint(), NNLibraryTrainingFixtures.MakeBatch("input", "ModelInput", x),
+            NNLibraryTrainingFixtures.MakeBatch("targets", "Target", TensorData([2L], 0f, 0f)));
+        Assert.Equal([(0, 0)], stateful.MarkedStatePairs(Assert.Single(stateful.CompiledTrainStepShapeKeys)));
     }
 
     [Fact]

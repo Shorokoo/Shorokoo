@@ -34,6 +34,7 @@ public class OpsPerfCostModelTests
     private static double Add(long n, long m) => Cost(ADD, [T(n, m), T(n, m)], [T(n, m)]);
     private static double MatMul(long m, long k, long n) => Cost(MATMUL, [T(m, k), T(k, n)], [T(m, n)]);
     private static double Transpose(long n, long m, long[] perm) => Cost(TRANSPOSE, [T(n, m)], [T(m, n)], new() { ["perm"] = perm });
+    private static double Slice(long[] x, long[] y) => Cost(SLICE, [T(x), I(1), I(1), I(1)], [T(y)]);
     private static double Conv(long[] x, long[] w, long[] y) => Cost(CONV, [T(x), T(w), T(w[0])], [T(y)], new() { ["group"] = 1L, ["kernel_shape"] = (long[])[w[2], w[3]] });
 
     [Fact]
@@ -64,6 +65,16 @@ public class OpsPerfCostModelTests
         Assert.True(Cost(GELU, [T(1024, 1024)], [T(1024, 1024)]) > Cost(RELU, [T(1024, 1024)], [T(1024, 1024)]));
         Assert.True(Cost(CONCAT, [T(256, 512), T(256, 512)], [T(512, 512)]) > Add(512, 512));
         Assert.True(Conv([32, 8, 64, 64], [32, 8, 64, 64], [32, 32, 3, 3]) > Conv([8, 32, 64, 64], [32, 32, 3, 3], [8, 32, 64, 64]));
+    }
+
+    [Fact]
+    public void TestASliceIsPricedByWhatItReadsCoverage()
+    {
+        Assert.True(Slice([1024, 1024], [0, 1024]) < Add(16, 16));
+        Assert.True(Slice([1024, 1024], [1024, 0]) < Add(16, 16));
+        Assert.True(Slice([1024, 1024], [1024, 1]) > Slice([1024, 1024], [1, 1024]));
+        Assert.True(Slice([1024, 1024], [1024, 512]) > Slice([1024, 1024], [512, 1024]));
+        Assert.True(Slice([4, 256, 256], [4, 256, 1]) > Slice([4, 256, 256], [1, 256, 256]));
     }
 
     [Fact]

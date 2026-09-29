@@ -35,6 +35,7 @@ public class OpsPerfCostModelTests
     private static double MatMul(long m, long k, long n) => Cost(MATMUL, [T(m, k), T(k, n)], [T(m, n)]);
     private static double Transpose(long n, long m, long[] perm) => Cost(TRANSPOSE, [T(n, m)], [T(m, n)], new() { ["perm"] = perm });
     private static double Slice(long[] x, long[] y) => Cost(SLICE, [T(x), I(1), I(1), I(1)], [T(y)]);
+    private static double Slice(long[] x, long[] y, long step) => Cost(SLICE, [T(x), I(1), I(1), I(1), new(new Shape(1L), DType.Int64, TensorAttribute.Create(new Shape(1L), step))], [T(y)]);
     private static double Conv(long[] x, long[] w, long[] y) => Cost(CONV, [T(x), T(w), T(w[0])], [T(y)], new() { ["group"] = 1L, ["kernel_shape"] = (long[])[w[2], w[3]] });
 
     [Fact]
@@ -75,6 +76,8 @@ public class OpsPerfCostModelTests
         Assert.True(Slice([1024, 1024], [1024, 1]) > Slice([1024, 1024], [1, 1024]));
         Assert.True(Slice([1024, 1024], [1024, 512]) > Slice([1024, 1024], [512, 1024]));
         Assert.True(Slice([4, 256, 256], [4, 256, 1]) > Slice([4, 256, 256], [1, 256, 256]));
+        Assert.Equal(Slice([1024, 1024], [512, 1024]), Slice([1024, 1024], [512, 1024], step: 1));
+        Assert.True(Slice([1024, 1024], [512, 1024], step: 2) > Slice([1024, 1024], [512, 1024]));
     }
 
     [Fact]

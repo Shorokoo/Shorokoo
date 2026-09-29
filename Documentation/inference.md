@@ -1051,11 +1051,14 @@ if (compiled.ReadArenaStatistics() is { } arena)
                     + $"{arena.TotalAllocatedBytes} taken from the device");
 ```
 
-`ArenaStatistics` has nine figures: `InUseBytes`, `MaxInUseBytes`, `MaxAllocSizeBytes`,
-`TotalAllocatedBytes`, `LimitBytes` (the session's arena limit; `-1` with no budget),
-`AllocationCount`, `ArenaExtensionCount`, `ArenaShrinkageCount` and `ReserveCount`. It is
-`null` on a backend that reports none.
+`ArenaStatistics` has ten figures: `InUseBytes`, `RequestedInUseBytes`, `MaxInUseBytes`,
+`MaxAllocSizeBytes`, `TotalAllocatedBytes`, `LimitBytes` (the session's arena limit; `-1` with
+no budget), `AllocationCount`, `ArenaExtensionCount`, `ArenaShrinkageCount` and
+`ReserveCount`. It is `null` on a backend that reports none.
 
+- `RequestedInUseBytes` is the part of `InUseBytes` the callers asked for; the rest is what the
+  arena added to round each allocation up to its block sizes. A backend whose allocator does not
+  round (JAX) reports `InUseBytes` here.
 - `TotalAllocatedBytes` is not a bound on card usage — it can exceed the card's capacity; use
   `DeviceMemory.Read()` for that.
 - `MaxInUseBytes` is a lifetime high-water mark; it cannot be reset and shrinkage does not
@@ -1074,7 +1077,7 @@ if (compiled.ReadPinnedArenaStatistics() is { } pinned)
     Console.WriteLine($"{pinned.MaxInUseBytes} of pinned host memory at its highest");
 ```
 
-Same nine figures, not included in `ReadArenaStatistics()`; `null` on CPU backends. Zero for a
+Same ten figures, not included in `ReadArenaStatistics()`; `null` on CPU backends. Zero for a
 graph that stays on the card.
 
 ### Per-run statistics on the context

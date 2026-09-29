@@ -84,6 +84,7 @@ public class PyTorchCudaHardwareTests
         Assert.Equal(-1, before.LimitBytes);
         Assert.True(after.InUseBytes >= before.InUseBytes + 16 * mebibyte);
         Assert.True(after.MaxInUseBytes >= after.InUseBytes && after.TotalAllocatedBytes >= after.InUseBytes);
+        Assert.True(after.RequestedInUseBytes >= before.RequestedInUseBytes + 16 * mebibyte && after.RequestedInUseBytes <= after.InUseBytes);
         Assert.True(after.AllocationCount > before.AllocationCount);
         Assert.Equal(mebibyte, tight.ReadArenaStatistics()!.Value.LimitBytes);
         Assert.Contains("LimitBytes", Assert.Throws<InvalidOperationException>(() => Kept(tight)).Message);

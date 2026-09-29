@@ -544,6 +544,7 @@ public class GpuExecutionTests
         var built = Assert.IsType<ArenaStatistics>(compiled.ReadArenaStatistics());
         Assert.Equal(ArenaProbeModels.WeightBytes, built.MaxInUseBytes);
         Assert.Equal(ArenaProbeModels.WeightBytes, built.InUseBytes);
+        Assert.Equal(ArenaProbeModels.WeightBytes, built.RequestedInUseBytes);
         Assert.Equal(ArenaProbeModels.WeightBytes, built.MaxAllocSizeBytes);
         Assert.Equal(ArenaProbeModels.WeightBytes, built.TotalAllocatedBytes);
         Assert.Equal(1L, built.AllocationCount);

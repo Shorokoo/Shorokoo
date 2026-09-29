@@ -72,10 +72,10 @@ internal static class OrtArenaStats
     private static readonly string[] _statisticNames =
     [
         "InUse", "Limit", "MaxAllocSize", "MaxInUse", "NumAllocs",
-        "NumArenaExtensions", "NumArenaShrinkages", "NumReserves", "TotalAllocated",
+        "NumArenaExtensions", "NumArenaShrinkages", "NumReserves", "RequestedInUse", "TotalAllocated",
     ];
 
-    /// <summary>The nine figures a session allocator answers with, which
+    /// <summary>The ten figures a session allocator answers with, which
     /// <see cref="Read"/> maps onto <see cref="ArenaStatistics"/>.</summary>
     internal static IReadOnlyList<string> StatisticNames => _statisticNames;
 
@@ -169,7 +169,7 @@ internal static class OrtArenaStats
 
     /// <summary>
     /// <paramref name="allocator"/>'s arena figures, or <c>null</c> when
-    /// <see cref="ReadRaw"/> answers with nothing or without one of the nine
+    /// <see cref="ReadRaw"/> answers with nothing or without one of the ten
     /// <see cref="ArenaStatistics"/> is. A name the runtime grows later is ignored rather than
     /// fatal; that one appeared is what the guard test says.
     /// </summary>
@@ -195,6 +195,7 @@ internal static class OrtArenaStats
             ArenaExtensionCount: figures["NumArenaExtensions"],
             ArenaShrinkageCount: figures["NumArenaShrinkages"],
             ReserveCount: figures["NumReserves"],
-            TotalAllocatedBytes: figures["TotalAllocated"]);
+            TotalAllocatedBytes: figures["TotalAllocated"],
+            RequestedInUseBytes: figures["RequestedInUse"]);
     }
 }

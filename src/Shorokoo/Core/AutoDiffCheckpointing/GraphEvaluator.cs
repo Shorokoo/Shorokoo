@@ -1,4 +1,5 @@
 using Shorokoo.Core.AutoDiffCheckpointing.OpsPerf;
+using Shorokoo.Core.Backends;
 using Shorokoo.Core.Graph;
 using Shorokoo.Core.AutoDiffCheckpointing;
 using Shorokoo.Graph;
@@ -30,6 +31,29 @@ internal enum EvaluationOrder
 }
 
 /// <summary>
+/// The state a graph carries from one run to the next — a training step's parameters, model state
+/// and optimizer state — as <see cref="GraphEvaluator"/> charges it.
+///
+/// <para>Each pair names, by position, an output that is the updated value of a state field and
+/// the input it replaces. The caller feeds each such input and keeps it until the run ends: ONNX
+/// Runtime holds every fed input for the whole run, and a consumed one cannot come back part-way
+/// through. So a state input is charged from the first position to the last, read or not. Where
+/// <see cref="WrittenInPlace"/> holds and <see cref="OutputAliasProof"/> proves a pair over the
+/// graph evaluated — and the two agree in shape and element type, as a backend requires before it
+/// binds them — the output is written into the input's buffer (<see cref="OutputAlias"/>) and the
+/// pair is charged that one buffer; any other pair holds both, the input for the run and the
+/// output from its writer on. The proof is asked of each graph evaluated, so a rewrite that
+/// breaks one — a reader of the input moved past the output's writer, a recomputation reading it
+/// late — is charged the output it can no longer write in place.</para>
+/// </summary>
+/// <param name="Pairs">Each updated state output with the state input it replaces, by position:
+/// output <c>Output</c> of the graph, input <c>Input</c>.</param>
+/// <param name="WrittenInPlace">Whether the run writes a proven pair's output into its input's
+/// memory: what the compute context the graph runs on does
+/// (<see cref="Shorokoo.Runtime.ComputeContext.OutputAliasing"/>).</param>
+internal sealed record StepState(IReadOnlyList<(int Output, int Input)> Pairs, bool WrittenInPlace);
+
+/// <summary>
 /// Evaluates a <see cref="InternalComputationGraph"/>'s performance by walking through nodes in
 /// execution order, tracking cumulative compute time and peak memory usage.
 ///
@@ -44,6 +68,8 @@ internal enum EvaluationOrder
 ///   shares that buffer, and never into a fed input.
 /// - Shape/Size read metadata only; ORT folds them under static shapes, so they neither load
 ///   nor hold their input.
+/// - The state a step carries (<see cref="StepState"/>) is held for the whole run, and an updated
+///   state output the step provably writes over the state it replaces shares that state's buffer.
 ///
 /// Uses ShapeInference data and per-op performance models to produce estimates.
 /// </summary>
@@ -51,15 +77,43 @@ internal class GraphEvaluator
 {
     private readonly OpPerfRegistry _perfRegistry;
     private readonly bool _modelOrtBufferReuse;
+    private readonly StepState? _state;
 
     /// <param name="perfRegistry">The per-op estimators to price nodes with; the default registry when null.</param>
     /// <param name="modelOrtBufferReuse">Model ORT's static buffer reuse (see <c>AllocationPlan</c>).
     /// False counts plain liveness — what an allocator that returned every dead buffer at once
     /// would need — which is a lower bound ORT's plan never reaches on a real training step.</param>
-    public GraphEvaluator(OpPerfRegistry? perfRegistry = null, bool modelOrtBufferReuse = true)
+    /// <param name="state">The state every graph this evaluates carries across runs, charged as
+    /// <see cref="StepState"/> describes; none when null. A pass that hands this evaluator to each
+    /// of its strategies scores every candidate with the state it will run with, so a candidate
+    /// that keeps a pair written in place outscores one that loses it.</param>
+    public GraphEvaluator(OpPerfRegistry? perfRegistry = null, bool modelOrtBufferReuse = true, StepState? state = null)
     {
         _perfRegistry = perfRegistry ?? new OpPerfRegistry();
         _modelOrtBufferReuse = modelOrtBufferReuse;
+        _state = state;
+    }
+
+    /// <summary>
+    /// The state pairs of this evaluator's <see cref="StepState"/> that <paramref name="graph"/>
+    /// writes in place, by position: those <see cref="OutputAliasProof"/> proves over it whose
+    /// output and input <paramref name="shapeInfo"/> gives one shape and element type. None where
+    /// the evaluator carries no state or the state is not written in place.
+    /// </summary>
+    internal IReadOnlyList<(int Output, int Input)> StatePairsWrittenInPlace(
+        InternalComputationGraph graph, ShapeInferenceResult shapeInfo)
+    {
+        if (_state is not { WrittenInPlace: true, Pairs.Count: > 0 }) return [];
+        var inputs = graph.Inputs;
+        var outputs = graph.Outputs;
+        var inPlace = new List<(int Output, int Input)>();
+        foreach (var pair in OutputAliasProof.Prove(graph, _state.Pairs))
+            if (shapeInfo.GetTensorInfo(outputs[pair.Output]) is { } output
+                && shapeInfo.GetTensorInfo(inputs[pair.Input]) is { } input
+                && output.MemoryBytes == input.MemoryBytes
+                && AllocationPlan.ShapeKey(output) == AllocationPlan.ShapeKey(input))
+                inPlace.Add(pair);
+        return inPlace;
     }
 
     /// <summary>
@@ -83,17 +137,40 @@ internal class GraphEvaluator
         var consumerOpCodes = BuildConsumerOpCodes(nodes);
         var graphOutputs = new HashSet<FastTensorKey>(graph.Outputs);
         // Never recycled into and never written in place: the fed inputs, and the initializers
-        // ORT keeps (constants, parameter data). Their buffers are still released at their last
-        // read, so the model charges them only while they are read, not for the whole run as ORT
-        // in fact does; that understates a step whose initializers are large next to its
+        // ORT keeps (constants, parameter data). A state input is held for the whole run, as ORT
+        // holds it (see StepState); every other one's buffer is released at its last read, so the
+        // model charges it only while it is read, not for the whole run as ORT in fact does. That
+        // understates a step whose other inputs and initializers are large next to its
         // activations, and is the next fidelity gap to close after the two the benchmark names.
-        var graphInputs = new HashSet<FastTensorKey>(graph.Inputs);
+        var inputs = graph.Inputs;
+        var graphInputs = new HashSet<FastTensorKey>(inputs);
         foreach (var node in nodes)
             if (node.IsModelInput() || node.IsModelParamData() || node.OpCode == Shorokoo.Core.Nodes.NodeDefinitions.OpCodes.CONSTANT)
                 foreach (var output in node.Outputs)
                     if (output is not null) graphInputs.Add(output.Value);
 
         var plan = new AllocationPlan(graphOutputs, graphInputs, _modelOrtBufferReuse);
+
+        // The state: each input held from the first position, and each output its step writes in
+        // place bound to the buffer of the input it replaces, to be placed there by its writer.
+        var heldBuffer = new Dictionary<FastTensorKey, int>();
+        var writtenInPlace = new Dictionary<FastTensorKey, int>();
+        var statePairsInPlace = new List<(int Output, int Input)>();
+        if (_state is not null)
+        {
+            var outputs = graph.Outputs;
+            foreach (var (output, input) in _state.Pairs)
+                if (input >= 0 && input < inputs.Count && output >= 0 && output < outputs.Count
+                    && !heldBuffer.ContainsKey(inputs[input])
+                    && shapeInfo.GetTensorInfo(inputs[input]) is { } info)
+                    heldBuffer[inputs[input]] = plan.Hold(inputs[input], info);
+            foreach (var (output, input) in StatePairsWrittenInPlace(graph, shapeInfo))
+                if (heldBuffer.TryGetValue(inputs[input], out var buffer))
+                {
+                    writtenInPlace[outputs[output]] = buffer;
+                    statePairsInPlace.Add((output, input));
+                }
+        }
         var extraAtPos = new long[walk.Length];
         var computeAtPos = new double[walk.Length];
         var opCodeAtPos = new string[walk.Length];
@@ -140,6 +217,12 @@ internal class GraphEvaluator
 
                 var outputInfo = shapeInfo.GetTensorInfo(output.Value);
                 if (outputInfo is null) continue;
+
+                if (writtenInPlace.TryGetValue(output.Value, out var stateBuffer))
+                {
+                    plan.Place(stateBuffer, output.Value, outputInfo.MemoryBytes);
+                    continue;
+                }
 
                 FastTensorKey? reused = null;
                 if (!readsMetadataOnly
@@ -213,6 +296,7 @@ internal class GraphEvaluator
             TotalComputeTime = cumulativeComputeTime,
             PeakMemoryBytes = peakMemoryBytes,
             OrderFidelity = OrtExecutionOrder.Fidelity(nodes, ortWalk),
+            StateWrittenInPlace = statePairsInPlace,
             NodeDetails = nodeDetails,
         };
     }
@@ -234,6 +318,10 @@ internal class GraphEvaluator
     /// mmap/munmap trace this reproduces ORT's allocation count and the size histogram at the
     /// peak to within one buffer; plain free-at-last-use undercounts the optimized graphs by
     /// a third, because an early free buys nothing until a same-shape tensor is born.</para>
+    ///
+    /// <para>A held buffer — a state input (<see cref="StepState"/>) — is occupied from the first
+    /// position to the last whoever reads it, and the state output written in place is placed in
+    /// it rather than given one of its own.</para>
     /// </summary>
     private sealed class AllocationPlan
     {
@@ -246,6 +334,7 @@ internal class GraphEvaluator
             public int End = int.MaxValue;
             public bool IsGraphInput;
             public bool IsGraphOutput;
+            public bool IsHeld;
         }
 
         private readonly Dictionary<FastTensorKey, int> _bufferOf = new();
@@ -270,7 +359,7 @@ internal class GraphEvaluator
 
         public bool IsGraphOutput(FastTensorKey key) => _buffers[_bufferOf[key]].IsGraphOutput;
 
-        private static string ShapeKey(TensorShapeInfo info)
+        public static string ShapeKey(TensorShapeInfo info)
             => info.DType + "[" + string.Join(",", info.Shape.Dims) + "]";
 
         public void Allocate(FastTensorKey key, TensorShapeInfo info, int pos)
@@ -306,12 +395,33 @@ internal class GraphEvaluator
         }
 
         public void Alias(FastTensorKey source, FastTensorKey alias, long aliasBytes)
+            => Place(_bufferOf[source], alias, aliasBytes);
+
+        /// <summary>A fed input's buffer, held from the first position to the last; its id.</summary>
+        public int Hold(FastTensorKey key, TensorShapeInfo info)
         {
-            var id = _bufferOf[source];
+            _buffers.Add(new Buffer
+            {
+                Bytes = info.MemoryBytes,
+                Shape = ShapeKey(info),
+                Aliases = 1,
+                Start = 0,
+                IsGraphInput = true,
+                IsGraphOutput = _graphOutputs.Contains(key),
+                IsHeld = true,
+            });
+            _bufferOf[key] = _buffers.Count - 1;
+            return _buffers.Count - 1;
+        }
+
+        /// <summary>Puts <paramref name="key"/> in buffer <paramref name="id"/>, whether or not
+        /// any key still names it.</summary>
+        public void Place(int id, FastTensorKey key, long bytes)
+        {
             var buffer = _buffers[id];
-            if (aliasBytes > buffer.Bytes) buffer.Bytes = aliasBytes;
+            if (bytes > buffer.Bytes) buffer.Bytes = bytes;
             buffer.Aliases++;
-            _bufferOf[alias] = id;
+            _bufferOf[key] = id;
         }
 
         public void Release(FastTensorKey key, int pos)
@@ -320,7 +430,7 @@ internal class GraphEvaluator
             _bufferOf.Remove(key);
             var buffer = _buffers[id];
             buffer.Aliases--;
-            if (buffer.Aliases > 0 || buffer.IsGraphOutput) return;
+            if (buffer.Aliases > 0 || buffer.IsGraphOutput || buffer.IsHeld) return;
             buffer.End = pos;
             if (_reuse && !buffer.IsGraphInput) _free.Add(id);
         }

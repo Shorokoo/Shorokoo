@@ -3525,9 +3525,7 @@ public class TrainingRigTrainingLoopCoverageTests
         Assert.Equal(4 * 56L, context.AliasedOutputs);
     }
 
-    // The memory-aware pass models the same peak whether or not the step writes its state in place:
-    // https://github.com/Shorokoo/Shorokoo/issues/464
-    [Fact(Skip = "Shorokoo/Shorokoo#464: the memory-aware pass does not model a step writing its state over the state it consumed")]
+    [Fact]
     public void TestTheMemoryPassModelsAStepWritingItsStateOverTheStateItConsumedCoverage()
     {
         long ModelledPeak(ComputeContext context)

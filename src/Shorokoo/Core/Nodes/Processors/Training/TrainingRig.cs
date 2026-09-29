@@ -4751,12 +4751,19 @@ namespace Shorokoo
                     + "at that parameter's own shape; a hyperparameter or optimizer state of another "
                     + "shape broadcasts against it instead of scaling it.");
             }
-            var baselineEval = new Shorokoo.Core.AutoDiffCheckpointing.GraphEvaluator().Evaluate(graph, shapeInfo);
+            // The pass models the step as it runs: its state held for the whole run, and each
+            // updated field the step provably writes over the field it replaces charged in that
+            // field's memory -- unless the context the step runs on writes nothing in place. A rig
+            // whose runtime context is still the unread default models the default's aliasing,
+            // since reading the default resolves a backend.
+            var evaluator = new Shorokoo.Core.AutoDiffCheckpointing.GraphEvaluator(state: new StepState(
+                StateAliasCandidates(), _runtimeContext?.OutputAliasing ?? true));
+            var baselineEval = evaluator.Evaluate(graph, shapeInfo);
             GraphOptimizationResult optResult;
             if (TrainingBackend.LowersAutoGrad)
             {
                 Stage("OptimizeTrainingStepGraph");
-                var optimizer = new MemoryAwareGraphOptimizer(shapeInference: shapeInferencer);
+                var optimizer = new MemoryAwareGraphOptimizer(evaluator: evaluator, shapeInference: shapeInferencer);
                 optResult = optimizer.OptimizeWithShapeInfo(graph, shapeInfo);
             }
             else

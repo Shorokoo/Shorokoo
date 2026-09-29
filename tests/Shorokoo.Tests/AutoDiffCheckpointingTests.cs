@@ -382,6 +382,68 @@ public class AutoDiffCheckpointingCoverageTests
         }
     }
 
+    private static readonly StepState StateInPlace = new([(0, 0)], WrittenInPlace: true);
+    private static readonly StepState StateHeld = new([(0, 0)], WrittenInPlace: false);
+
+    private static (InternalComputationGraph Graph, ShapeInferenceResult ShapeInfo) StateGraph(
+        Func<Tensor<float32>, Tensor<float32>, Variable[]> outputs, long[]? stateShape = null)
+    {
+        var p = InputTensor<float32>("p", rank: 2);
+        var g = InputTensor<float32>("g", rank: 2);
+        var graph = new InternalComputationGraph([p, g], [.. outputs(p, g)]);
+        return (graph, Infer(graph, stateShape ?? [512, 512], [512, 512]));
+    }
+
+    private static GraphEvaluationResult EvalState(
+        StepState? state, Func<Tensor<float32>, Tensor<float32>, Variable[]> outputs, long[]? stateShape = null)
+    {
+        var (graph, shapeInfo) = StateGraph(outputs, stateShape);
+        return new GraphEvaluator(state: state).Evaluate(graph, shapeInfo);
+    }
+
+    private static Variable Looped(Tensor<float32> p, Tensor<float32> g)
+    {
+        Variable carried = g;
+        foreach (var _ in LoopAPI.Iterate(Scalar(2L)))
+            carried = OnnxOp.Add(carried, p);
+        return carried;
+    }
+
+    [Fact]
+    public void TestAStateOutputWrittenInPlaceIsChargedInItsInputsBufferCoverage()
+    {
+        Assert.Equal(2 * Mb, EvalState(StateInPlace, (p, g) => [OnnxOp.Sub(p, g)]).PeakMemoryBytes);
+        Assert.Equal(3 * Mb, EvalState(StateHeld, (p, g) => [OnnxOp.Sub(p, g)]).PeakMemoryBytes);
+        Assert.Equal(3 * Mb, EvalState(null, (p, g) => [OnnxOp.Sub(p, g)]).PeakMemoryBytes);
+        Assert.Equal(Mb + 4, EvalState(StateInPlace, (p, g) => [OnnxOp.Sub(p, OnnxOp.ReduceSum(p))]).PeakMemoryBytes);
+        Assert.Equal(2 * Mb + 4, EvalState(StateHeld, (p, g) => [OnnxOp.Sub(p, OnnxOp.ReduceSum(p))]).PeakMemoryBytes);
+        Assert.Equal(2 * Mb + 4, EvalState(StateHeld, (p, g) => [OnnxOp.ReduceSum(g)]).PeakMemoryBytes);
+        Assert.Equal(Mb + 4, EvalState(null, (p, g) => [OnnxOp.ReduceSum(g)]).PeakMemoryBytes);
+        Assert.Equal([(0, 0)], EvalState(StateInPlace, (p, g) => [OnnxOp.Sub(p, g)]).StateWrittenInPlace);
+        Assert.Empty(EvalState(StateHeld, (p, g) => [OnnxOp.Sub(p, g)]).StateWrittenInPlace);
+
+        var (graph, shapeInfo) = StateGraph((p, g) => [OnnxOp.Sub(p, g)]);
+        var optimized = new MemoryAwareGraphOptimizer(evaluator: new GraphEvaluator(state: StateInPlace), shapeInference: new ShapeInferenceInterpreter(CpuContext))
+            .OptimizeWithShapeInfo(graph, shapeInfo);
+        Assert.Equal([(0, 0)], optimized.Evaluation.StateWrittenInPlace);
+        Assert.Equal(2 * Mb, optimized.Evaluation.PeakMemoryBytes);
+    }
+
+    [Fact]
+    public void TestAStateOutputItsGraphCannotProveIsChargedBesideItsInputCoverage()
+    {
+        Assert.Equal(4 * Mb, EvalState(StateInPlace, (p, g) => [OnnxOp.Sub(p, g), OnnxOp.Neg(p)]).PeakMemoryBytes);
+        Assert.Equal(EvalState(StateHeld, (p, g) => [OnnxOp.Sub(p, g), OnnxOp.Neg(p)]).PeakMemoryBytes,
+            EvalState(StateInPlace, (p, g) => [OnnxOp.Sub(p, g), OnnxOp.Neg(p)]).PeakMemoryBytes);
+        Assert.Empty(EvalState(StateInPlace, (p, g) => [OnnxOp.Sub(p, g), OnnxOp.Neg(p)]).StateWrittenInPlace);
+        Assert.Empty(EvalState(StateInPlace, (p, g) => [OnnxOp.Sub(g, p)]).StateWrittenInPlace);
+        Assert.Empty(EvalState(StateInPlace, (p, g) => [OnnxOp.Relu(p)]).StateWrittenInPlace);
+        Assert.Empty(EvalState(StateInPlace, (p, g) => [OnnxOp.Sub(p, g), OnnxOp.Reshape(p, Vector(512L * 512L), allowZero: false)]).StateWrittenInPlace);
+        Assert.Empty(EvalState(StateInPlace, (p, g) => [OnnxOp.Sub(p, Looped(p, g))]).StateWrittenInPlace);
+        Assert.Empty(EvalState(StateInPlace, (p, g) => [OnnxOp.Sub(p, g)], stateShape: [1, 512]).StateWrittenInPlace);
+        Assert.Empty(EvalState(new StepState([(1, 0), (0, 2)], WrittenInPlace: true), (p, g) => [OnnxOp.Sub(p, g)]).StateWrittenInPlace);
+    }
+
     private static bool Recomputable(Variable input, Variable output)
     {
         var g = new InternalComputationGraph([input], [output]);

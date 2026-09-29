@@ -1,4 +1,7 @@
 using Shorokoo.Core.Factory.IR;
+using Shorokoo.Core.Graph;
+using Shorokoo.Core.Nodes.NodeDefinitions;
+using Shorokoo.Graph;
 
 namespace Shorokoo.Core.Backends;
 
@@ -94,6 +97,94 @@ public static class OutputAliasProof
             proven.Add(candidate);
         }
         return proven;
+    }
+
+    /// <summary>
+    /// The pairs of <paramref name="candidates"/> — by position, output <c>Output</c> into input
+    /// <c>Input</c> — that Shorokoo's own <paramref name="graph"/> proves, in the order they were
+    /// given: the rule above, asked of the ONNX graph <paramref name="graph"/> is emitted as, so a
+    /// pass rewriting the graph can see which of its pairs a rewrite keeps without emitting it. A
+    /// candidate naming a position the graph does not have is no candidate.
+    ///
+    /// <para>The projection keeps what the rule reads — each node's op type, the values it reads
+    /// and writes, the graph's inputs and outputs — and leaves out types, which it states nowhere;
+    /// a caller holding shapes compares them itself. What it cannot give an ONNX meaning is made
+    /// opaque, never lenient: a scope (<c>OPEN</c>..<c>CLOSE</c>, the body of a <c>Loop</c> or
+    /// <c>If</c>) and a Shorokoo-internal or function node each become one node holding a subgraph
+    /// that reads whatever the region reads. So a value such a region reads is refused as an
+    /// input, and one it writes as an output, exactly as the rule refuses what a subgraph touches;
+    /// and the region still orders what follows it.</para>
+    /// </summary>
+    internal static IReadOnlyList<(int Output, int Input)> Prove(
+        InternalComputationGraph graph, IReadOnlyList<(int Output, int Input)> candidates)
+    {
+        if (candidates.Count == 0) return [];
+        var names = new Dictionary<FastTensorKey, string>();
+        string Name(FastTensorKey? key)
+        {
+            if (key is not { } k) return "";
+            if (!names.TryGetValue(k, out var name))
+                names[k] = name = names.Count.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            return name;
+        }
+
+        var proto = new GraphProto();
+        var inputs = graph.Inputs;
+        var outputs = graph.Outputs;
+        foreach (var input in inputs) proto.Inputs.Add(new ValueInfoProto { Name = Name(input) });
+        foreach (var output in outputs) proto.Outputs.Add(new ValueInfoProto { Name = Name(output) });
+
+        var nodes = graph.Nodes;
+        var end = graph.BodyEnd;
+        for (int i = graph.InputCount; i < end; i++)
+        {
+            var node = nodes[i];
+            var last = i;
+            if (node.IsOpenNode())
+                for (int depth = 0; last < end; last++)
+                {
+                    if (nodes[last].IsOpenNode()) depth++;
+                    else if (nodes[last].IsCloseNode() && --depth == 0) break;
+                }
+            else if (node.TargetFunction is null
+                     && Definitions.VanillaOpNames.Contains(node.OpCode))
+            {
+                var projected = new NodeProto { OpType = node.OpCode };
+                foreach (var input in node.Inputs) projected.Inputs.Add(Name(input));
+                foreach (var output in node.Outputs) projected.Outputs.Add(Name(output));
+                proto.Nodes.Add(projected);
+                continue;
+            }
+
+            // Opaque: the region's outputs on the outer node, and everything it reads from outside
+            // itself on the one node of a subgraph it holds.
+            last = Math.Min(last, end - 1);
+            var region = new NodeProto { OpType = node.OpCode };
+            var reader = new NodeProto { OpType = node.OpCode };
+            for (int r = i; r <= last; r++)
+                foreach (var output in nodes[r].Outputs)
+                    if (output is not null) region.Outputs.Add(Name(output));
+            var written = new HashSet<string>(region.Outputs, StringComparer.Ordinal);
+            for (int r = i; r <= last; r++)
+                foreach (var input in nodes[r].Inputs)
+                    if (input is not null && !written.Contains(Name(input))) reader.Inputs.Add(Name(input));
+            var body = new GraphProto();
+            body.Nodes.Add(reader);
+            region.Attributes.Add(new AttributeProto { Name = "body", Type = AttributeProto.AttributeType.Graph, G = body });
+            proto.Nodes.Add(region);
+            i = last;
+        }
+
+        var named = new List<OutputAlias>(candidates.Count);
+        var positions = new Dictionary<OutputAlias, (int Output, int Input)>();
+        foreach (var (output, input) in candidates)
+        {
+            if (output < 0 || output >= outputs.Count || input < 0 || input >= inputs.Count) continue;
+            var alias = new OutputAlias(proto.Outputs[output].Name, proto.Inputs[input].Name);
+            named.Add(alias);
+            positions.TryAdd(alias, (output, input));
+        }
+        return Prove(proto, named).Select(alias => positions[alias]).ToArray();
     }
 
     /// <summary>

@@ -123,6 +123,13 @@ internal class MemoryAwareGraphOptimizer
     private readonly double _memoryFactor;
     private readonly int _maxRematerializationIterations;
 
+    /// <summary>
+    /// A pass scoring every graph it considers — the baseline, each checkpoint segment, each
+    /// rematerialization and each reordering — with <paramref name="evaluator"/>, the default
+    /// evaluator when null. Give that evaluator the step's <see cref="StepState"/> and every
+    /// candidate is scored with the state it will run with, written in place where the candidate
+    /// still proves it.
+    /// </summary>
     public MemoryAwareGraphOptimizer(
         double computeFactor = DefaultComputeWeight,
         double memoryFactor = DefaultMemoryWeight,

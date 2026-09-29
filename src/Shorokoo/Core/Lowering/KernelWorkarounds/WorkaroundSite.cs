@@ -9,7 +9,8 @@ namespace Shorokoo.Core.Lowering.KernelWorkarounds;
 /// <summary>
 /// What a <see cref="KernelWorkaround"/> may know about one call when the model is built: the
 /// operator, its attributes, the dtype and rank of each input and output slot, which slots are
-/// present, which outputs anything reads, and the value of an input a <c>Constant</c> produces.
+/// present, which inputs come from outside the loop or branch body the call is in, which outputs
+/// anything reads, and the value of an input a <c>Constant</c> produces.
 ///
 /// <para>Reading a constant is recorded, so a replacement built from one call's constant is reused
 /// only for calls whose constant agrees in what was read: its value, through
@@ -24,6 +25,7 @@ internal sealed class WorkaroundSite
     private readonly FastTensorKey?[] outputKeys;
     private readonly (DType DType, int? Rank)?[] inputs;
     private readonly (DType DType, int? Rank)?[] outputs;
+    private readonly bool[] outsideBody;
     private readonly IReadOnlyDictionary<FastTensorKey, FastNode> producers;
     private readonly IReadOnlySet<FastTensorKey> read;
     private readonly SortedDictionary<int, ConstantRead> constantsRead = [];
@@ -36,11 +38,13 @@ internal sealed class WorkaroundSite
         FastTensorKey?[] outputKeys,
         (DType DType, int? Rank)?[] inputs,
         (DType DType, int? Rank)?[] outputs,
+        bool[] outsideBody,
         IReadOnlyDictionary<FastTensorKey, FastNode> producers,
         IReadOnlySet<FastTensorKey> read,
         bool shapesAreConcrete,
         bool inLoopBody)
     {
+        this.outsideBody = outsideBody;
         this.shapesAreConcrete = shapesAreConcrete && !inLoopBody;
         this.inLoopBody = inLoopBody;
         this.node = node;
@@ -56,7 +60,9 @@ internal sealed class WorkaroundSite
     /// The site of <paramref name="node"/>, or null when the graph does not tell every present
     /// input's dtype, or some input is not a tensor: a call the pass leaves as it stands.
     /// <paramref name="shapesAreConcrete"/> says whether the model is built with every graph
-    /// input's dimensions stated, and <paramref name="inLoopBody"/> is <see cref="IsInLoopBody"/>.
+    /// input's dimensions stated, <paramref name="inLoopBody"/> is <see cref="IsInLoopBody"/>, and
+    /// <paramref name="outsideBody"/> tells, of an input, <see cref="IsFromOutsideBody"/>; without
+    /// it, no input is.
     /// </summary>
     internal static WorkaroundSite? TryCreate(
         FastNode node,
@@ -64,7 +70,8 @@ internal sealed class WorkaroundSite
         IReadOnlyDictionary<FastTensorKey, FastNode> producers,
         IReadOnlySet<FastTensorKey> read,
         bool shapesAreConcrete = false,
-        bool inLoopBody = false)
+        bool inLoopBody = false,
+        Func<FastTensorKey, bool>? outsideBody = null)
     {
         FastTensorKey?[] inputKeys = [.. node.Inputs.Select(k => k is { IsEmpty: false } ? k : null)];
         FastTensorKey?[] outputKeys = [.. node.Outputs.Select(k => k is { IsEmpty: false } ? k : null)];
@@ -84,7 +91,8 @@ internal sealed class WorkaroundSite
             if (outputKeys[i] is { } key && tensorInfo.TryGetValue(key, out var info))
                 outputs[i] = (info.DType, info.Rank);
 
-        return new WorkaroundSite(node, inputKeys, outputKeys, inputs, outputs, producers, read, shapesAreConcrete, inLoopBody);
+        bool[] outside = [.. inputKeys.Select(k => k is { } key && outsideBody is not null && outsideBody(key))];
+        return new WorkaroundSite(node, inputKeys, outputKeys, inputs, outputs, outside, producers, read, shapesAreConcrete, inLoopBody);
     }
 
     /// <summary>
@@ -127,6 +135,14 @@ internal sealed class WorkaroundSite
 
     /// <summary>The rank of input slot <paramref name="slot"/>, when the graph tells it.</summary>
     public int? RankOf(int slot) => slot < inputs.Length && inputs[slot] is { } d ? d.Rank : null;
+
+    /// <summary>
+    /// Whether the call is in a loop or branch body and input slot <paramref name="slot"/> is a
+    /// value that body did not compute: one from an enclosing scope, or one of the body's own
+    /// inputs, such as the iteration number or a loop-carried value. False for an absent slot, and
+    /// for every slot of a call outside any body.
+    /// </summary>
+    public bool IsFromOutsideBody(int slot) => slot < outsideBody.Length && outsideBody[slot];
 
     /// <summary>Whether output slot <paramref name="slot"/> is produced.</summary>
     public bool IsOutputPresent(int slot) => slot < outputKeys.Length && outputKeys[slot] is not null;
@@ -205,10 +221,12 @@ internal sealed class WorkaroundSite
         return true;
     }
 
-    /// <summary>Everything besides constants that a replacement may depend on: the dtype and rank
-    /// of each output and whether it is read, and <see cref="ShapesAreConcrete"/>.</summary>
+    /// <summary>Everything besides constants and the input descriptors that a replacement may depend
+    /// on: which inputs come from outside the body, the dtype and rank of each output and whether it
+    /// is read, and <see cref="ShapesAreConcrete"/>.</summary>
     internal string OutputFingerprint()
-        => (shapesAreConcrete ? "c;" : "s;") + string.Join(";", Enumerable.Range(0, outputKeys.Length).Select(i =>
+        => new string([.. outsideBody.Select(o => o ? 'o' : '-')]) + "|" + (shapesAreConcrete ? "c;" : "s;")
+        + string.Join(";", Enumerable.Range(0, outputKeys.Length).Select(i =>
             outputKeys[i] is null ? "~" : $"{OutputDTypeOf(i)},{OutputRankOf(i) ?? -1},{(IsOutputUsed(i) ? 'u' : '-')}"));
 
     private TensorAttribute? PeekConstant(int slot)

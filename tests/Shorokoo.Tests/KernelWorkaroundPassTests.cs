@@ -243,11 +243,58 @@ public class KernelWorkaroundPassTests
     [Fact]
     public void TestOnlyTheOnnxRuntimeBackendsNameAWorkaroundSet()
     {
-        Assert.Same(KernelWorkaroundRegistry.OnnxRuntime, KernelWorkaroundRegistry.For(DefaultBackend.Instance.KernelWorkaroundSet));
+        Assert.Same(DefaultBackend.Instance.Description.Device == ComputeDevice.Cuda ? KernelWorkaroundRegistry.OnnxRuntimeCuda : KernelWorkaroundRegistry.OnnxRuntime,
+            KernelWorkaroundRegistry.For(DefaultBackend.Instance.KernelWorkaroundSet));
+        Assert.Same(KernelWorkaroundRegistry.OnnxRuntimeCuda, KernelWorkaroundRegistry.For(KernelWorkaroundSets.OnnxRuntimeCuda));
+        Assert.Equal(KernelWorkaroundRegistry.OnnxRuntime.Workarounds.Select(w => w.Name),
+            KernelWorkaroundRegistry.OnnxRuntimeCuda.Workarounds.SkipLast(1).Select(w => w.Name));
         Assert.True(KernelWorkaroundRegistry.For(((IShorokooBackend)new TorchCpuBackend()).KernelWorkaroundSet).IsEmpty);
         Assert.True(KernelWorkaroundRegistry.For(((IShorokooBackend)new JaxCpuBackend()).KernelWorkaroundSet).IsEmpty);
         Assert.True(KernelWorkaroundRegistry.For(((IShorokooBackend)HostBackend.Instance).KernelWorkaroundSet).IsEmpty);
         Assert.True(KernelWorkaroundRegistry.For("none of them").IsEmpty);
+    }
+
+    [Fact]
+    public void TestTheCudaSetTakesWhatABodyDidNotComputeThroughMaxBeforeACallTheProviderRunsOnTheCpu()
+    {
+        var u = InputTensor<uint32>("u", rank: 1);
+        var w = InputTensor<uint64>("w", rank: 1);
+        var i = InputTensor<int64>("i", rank: 1);
+        Assert.True(CudaMaxes(InBody(u, (outer, carried) => OnnxOp.BitwiseXor(outer, Scalar(5u)))) > 0);
+        Assert.True(CudaMaxes(InBody(u, (outer, carried) => OnnxOp.BitShift(carried, Scalar(1u), BitShiftDirection.Right))) > 0);
+        Assert.True(CudaMaxes(InBody(w, (outer, carried) => OnnxOp.Equal(outer, carried + Scalar(1UL)))) > 0);
+        Assert.True(CudaMaxes(InBody(i, (outer, carried) => OnnxOp.BitwiseAnd(outer, carried))) > 0);
+        Assert.Equal(0, CudaMaxes(InBody(u, (outer, carried) => OnnxOp.BitwiseXor(carried + Scalar(1u), carried * Scalar(3u)))));
+        Assert.Equal(0, CudaMaxes(InBody(i, (outer, carried) => OnnxOp.Equal(outer, carried))));
+        Assert.Equal(0, CudaMaxes(Graph(u, OnnxOp.BitwiseXor(u, u))));
+        Assert.Equal(0, AllNodes(Session(InBody(u, (outer, carried) => OnnxOp.BitwiseXor(outer, carried)), KernelWorkaroundRegistry.OnnxRuntime)).Count(n => n.OpType == MAX));
+    }
+
+    [Fact]
+    public void TestTheCudaSetComputesWhatTheCallsItRewritesCompute()
+    {
+        var u = InputTensor<uint32>("u", rank: 1);
+        var w = InputTensor<uint64>("w", rank: 1);
+        var us = TensorData([3L], [1u, 6u, 0xFFFFFFFFu]);
+        var ws = TensorData([3L], [1UL, 7UL, 0xFFFFFFFFFFFFFFFFUL]);
+        Assert.True(AsWrittenOnCuda(InBody(u, (outer, carried) => OnnxOp.BitShift(outer, Scalar(1u), BitShiftDirection.Right)), us));
+        Assert.True(AsWrittenOnCuda(InBody(u, (outer, carried) => OnnxOp.BitShift(carried, Scalar(3u), BitShiftDirection.Left)), us));
+        Assert.True(AsWrittenOnCuda(InBody(u, (outer, carried) => OnnxOp.BitwiseXor(outer, carried)), us));
+        Assert.True(AsWrittenOnCuda(InBody(u, (outer, carried) => OnnxOp.BitwiseNot(outer)), us));
+        Assert.True(AsWrittenOnCuda(InBody(w, (outer, carried) => OnnxOp.BitwiseOr(carried, Scalar(8UL))), ws));
+        Assert.True(AsWrittenOnCuda(InBody(w, (outer, carried) => OnnxOp.Equal(outer, carried)), ws));
+    }
+
+    [Fact]
+    public void TestAGraphCompiledForAOneShotProfileIsBuiltWithTheBackendsWorkarounds()
+    {
+        var c = InputTensor<bit>("c", rank: 1);
+        var x = InputTensor<uint64>("x", rank: 1);
+        var g = new InternalComputationGraph([c, x], [OnnxOp.Where(c, x, OnnxOp.Add(x, x))]);
+        using var context = new ComputeContext();
+        using var compiled = context.Compile(g, ShorokooGraphOptimization.DisableAll);
+        var selected = compiled.Execute(TensorData([2L], [true, false]).Shared(), TensorData([2L], [3UL, 5UL]).Shared())[0].ToTensorData();
+        Assert.Equal([3UL, 10UL], selected.As<uint64>().CopyMemory<ulong>());
     }
 
     [Fact]
@@ -585,6 +632,21 @@ public class KernelWorkaroundPassTests
     }
 
     private static InternalComputationGraph Graph(Variable input, Variable output) => new([input], [output]);
+
+    private static InternalComputationGraph InBody<T>(Tensor<T> x, Func<Tensor<T>, Tensor<T>, Variable> call) where T : IVarType
+    {
+        var carried = x;
+        foreach (var ctx in LoopAPI.Iterate(Scalar(3L)))
+            carried = (Tensor<T>)OnnxOp.Add(carried, OnnxOp.CastLike(call(x, carried), carried, null));
+        return new([x], [carried]);
+    }
+
+    private static int CudaMaxes(InternalComputationGraph g)
+        => AllNodes(Session(g, KernelWorkaroundRegistry.OnnxRuntimeCuda)).Count(n => n.OpType == MAX)
+         - AllNodes(Session(g, null)).Count(n => n.OpType == MAX);
+
+    private static bool AsWrittenOnCuda(InternalComputationGraph g, TensorData x)
+        => Run(g, Session(g, null), [x]).Zip(Run(g, Session(g, KernelWorkaroundRegistry.OnnxRuntimeCuda), [x])).All(p => p.First.SequenceEqual(p.Second));
 
     private static bool AsWritten(InternalComputationGraph g)
         => Bytes(Session(g, null)).SequenceEqual(Bytes(Session(g, KernelWorkaroundRegistry.OnnxRuntime)));

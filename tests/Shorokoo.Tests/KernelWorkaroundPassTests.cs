@@ -386,21 +386,31 @@ public class KernelWorkaroundPassTests
         Assert.Equal(OpTypes(Optimized(withoutIt)), OpTypes(Optimized(concrete)));
     }
 
-    // #455: ONNX Runtime fails to build a session in which it folded an If to a branch holding a constant of 128 bytes or more
-    [Fact(Skip = "#455: ONNX Runtime fails to build a session in which it folded an If to a branch holding a constant of 128 bytes or more")]
-    public void TestAnIfOnnxRuntimeFoldsToABranchHoldingAConstantOfAHundredAndTwentyEightBytesOrMoreBuildsItsSession()
+    [Fact]
+    public void TestAnIfOnnxRuntimeFoldsToABranchHoldingAConstantOfAHundredAndTwentyEightBytesOrMoreFailsToBuildItsSession()
     {
         var x = InputTensor<float32>("x", rank: 1);
+        var g = Graph(x, Shorokoo.Core.Nodes.Ops.IfElse((Scalar<bit>)OnnxOp.Equal(OnnxOp.ReduceProd(OnnxOp.Shape(x), keepdims: false), Scalar(32L)),
+            OnnxOp.Expand(Scalar(0f), Vector(32L)), x));
+        using var context = new ComputeContext();
+        Assert.Throws<Microsoft.ML.OnnxRuntime.OnnxRuntimeException>(() => context.Compile(g, [[32L]], trainingStep: false));
+        using var symbolic = context.Compile(g, [null], trainingStep: false);
+        Assert.Equal(new byte[128], symbolic.Execute(TensorData(DType.Float32, [32L], [.. Enumerable.Repeat((object)1f, 32)]).Shared())[0].ToTensorData().AccessRawMemory().ToArray());
+    }
+
+    [Fact]
+    public void TestAWorkaroundIfOnnxRuntimeFoldsToItsEmptySideBuildsItsSession()
+    {
         var i = InputTensor<int32>("i", rank: 2);
+        var b = InputTensor<float32>("b", rank: 3);
         byte[] Run(InternalComputationGraph g, TensorData data)
         {
             using var context = new ComputeContext();
             using var compiled = context.Compile(g, [data.Shape.Dims], trainingStep: false);
             return compiled.Execute(data.Shared())[0].ToTensorData().AccessRawMemory().ToArray();
         }
-        Assert.Equal(new byte[128], Run(Graph(x, Shorokoo.Core.Nodes.Ops.IfElse((Scalar<bit>)OnnxOp.Equal(OnnxOp.ReduceProd(OnnxOp.Shape(x), keepdims: false), Scalar(32L)),
-            OnnxOp.Expand(Scalar(0f), Vector(32L)), x)), TensorData(DType.Float32, [32L], [.. Enumerable.Repeat((object)1f, 32)])));
-        Assert.Equal(160, Run(Graph(i, i.Reduce(ReduceKind.Max, Vector(0L))), TensorData(DType.Int32, [0L, 40L], Array.Empty<object>())).Length);
+        Assert.Equal([.. Enumerable.Repeat((byte[])[0, 0, 0, 0x80], 40).SelectMany(e => e)], Run(Graph(i, i.Reduce(ReduceKind.Max, Vector(0L))), TensorData(DType.Int32, [0L, 40L], Array.Empty<object>())));
+        Assert.Equal(new byte[512], Run(Graph(b, OnnxOp.MatMul(b, OnnxOp.Transpose(b, [0L, 2L, 1L]))), TensorData(DType.Float32, [2L, 8L, 0L], Array.Empty<object>())));
     }
 
     [Fact]

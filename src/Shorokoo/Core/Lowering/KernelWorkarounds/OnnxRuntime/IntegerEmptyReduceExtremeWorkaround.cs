@@ -25,7 +25,9 @@ using static OpCodes;
 /// branch. Every other call becomes an <c>If</c> on the input's element count being 0, counted as
 /// the product of its shape so that ONNX Runtime folds the <c>If</c> away when the model states
 /// the input's dimensions: the other side is the plain operator, and the empty side expands the
-/// identity to the shape the plain operator gives the input.</para>
+/// identity to the shape the plain operator gives the input, a shape ONNX Runtime does not compute
+/// when it builds the session (<see cref="BranchValues"/>). An empty <c>Constant</c> input takes
+/// the expanded identity alone.</para>
 /// </summary>
 internal sealed class IntegerEmptyReduceExtremeWorkaround : KernelWorkaround
 {
@@ -62,8 +64,10 @@ internal sealed class IntegerEmptyReduceExtremeWorkaround : KernelWorkaround
             => max ? OnnxOp.ReduceMax(data, axes, keepDims, noOp) : OnnxOp.ReduceMin(data, axes, keepDims, noOp);
 
         // The plain operator on the empty side gives the output's shape, over an input it runs on.
+        var shape = OnnxOp.Shape(Plain(input), null, null);
+        if (site.ConstantShapeOf(0) is not null) return [OnnxOp.Expand(ReductionIdentity(dtype, max)!, shape)];
         return [Ops.IfElse(Reductions.IsEmpty(input),
-            OnnxOp.Expand(ReductionIdentity(dtype, max)!, OnnxOp.Shape(Plain(input), null, null)), Plain(input))];
+            OnnxOp.Expand(ReductionIdentity(dtype, max)!, BranchValues.Unfolded(shape, input)), Plain(input))];
     }
 
     private static bool IsUnsigned(DType dtype)

@@ -168,11 +168,13 @@ alone. Where only the input's shape at run time decides whether a call is affect
 the plain call's result for every other input, in one of two forms. The `If`s count the input's
 elements as the product of its shape, and ONNX Runtime folds each away when it builds the session
 wherever that shape follows from the model's stated input dimensions; an `If` over a shape that
-depends on the data runs with the session. The other rewrites — `noop_with_empty_axes` without stated
+depends on the data runs with the session. A branch value an `If` holds only on the side the input's
+shape selects is built from the input, never from constants alone, so the `If` ONNX Runtime folds
+never leaves it a constant it computed. The other rewrites — `noop_with_empty_axes` without stated
 dimensions, negative axes, and a bool `ReduceMax`/`ReduceMin` — have no branch: one graph, built
 from the input's shape and axes, is right for every input.
 
-Six more ONNX Runtime faults, besides the float `MaxPool` indices of the table's `MaxPool` row
+Seven more ONNX Runtime faults, besides the float `MaxPool` indices of the table's `MaxPool` row
 ([#437](https://github.com/Shorokoo/Shorokoo/issues/437)), have no workaround, since none can be told
 apart without a cost on every call of its operator. They are accepted as ONNX Runtime's behaviour,
 and a model that meets one gets ONNX Runtime's result:
@@ -184,6 +186,12 @@ and a model that meets one gets ONNX Runtime's result:
   `FusedMatMul` moving the batch axis of rank-3 operands can stop the process (SIGFPE) on some
   empty operands. With the dimensions stated, as a training step's session is for the shapes it is
   fed, the `MatMul` row of the table corrects it ([#451](https://github.com/Shorokoo/Shorokoo/issues/451)).
+- A session in which ONNX Runtime has folded an `If` to a branch holding a constant of 128 bytes or
+  more fails to build, throwing `OnnxRuntimeException`
+  (`!utils::HasExternalDataInMemory(tensor_proto)`). It folds an `If` whose condition it computes
+  when it builds the session, from constants and the stated input dimensions; a branch value
+  computed from the model's inputs, rather than from constants alone, avoids it. The table's
+  `If`s never hold such a constant ([#455](https://github.com/Shorokoo/Shorokoo/issues/455)).
 - An `Add`, `Sub`, `Mul` or `Div` whose empty operand ONNX Runtime computes from constants when it
   builds the session, rather than a `Constant` of the model, or whose operands are both
   `Constant`s, is removed as the table's row describes, giving the other operand ([#454](https://github.com/Shorokoo/Shorokoo/issues/454)).

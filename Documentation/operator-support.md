@@ -690,7 +690,7 @@ String operators are non-differentiable.
 
 | Op | Build & run | QEE | Gradient |
 |---|---|---|---|
-| If | ✅ | ✅ | ✅ [1] |
+| If | ✅ [5] | ✅ | ✅ [1] |
 | Loop | ✅ | 🟡 [2] | 🟡 [3] |
 | Scan | ❌ [4] | ❌ [4] | ❌ [4] |
 
@@ -702,6 +702,15 @@ String operators are non-differentiable.
 4. A model containing `Scan` is rejected at import; see
    [limitations.md](limitations.md). Use an explicit `Loop` (in Shorokoo,
    `LoopAPI` with `ctx.Scan`).
+5. ONNX Runtime fails to build a session in which it has folded an `If` to a
+   branch holding a constant of 128 bytes or more: the build throws
+   `OnnxRuntimeException` (`!utils::HasExternalDataInMemory(tensor_proto)`). It
+   folds an `If` whose condition it computes when it builds the session, from
+   constants and the input dimensions the session states. Accepted as ONNX
+   Runtime's behaviour; a branch value computed from the model's inputs, rather
+   than from constants alone, avoids it. The `If`s its backend's own rewrites
+   build never hold such a constant
+   ([#455](https://github.com/Shorokoo/Shorokoo/issues/455)).
 
 ## Shorokoo-specific operators
 

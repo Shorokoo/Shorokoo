@@ -17,19 +17,16 @@ internal static class KernelWorkaroundRegistry
     /// rewrite reduces is never negative; the crop-and-resize roi before the cubic resize layout,
     /// and both before the resize axes, since the calls they build keep the call's <c>axes</c>;
     /// the <c>MatMul</c> after the reductions, since the reductions it builds take no axes and
-    /// need none of their rewrites. The integer <c>Range</c> count and the arithmetic with an
-    /// empty constant come after every other rewrite that builds a <c>Range</c> or an <c>Add</c>,
-    /// <c>Sub</c>, <c>Mul</c> or <c>Div</c>, so such a call is looked at like one written in the
-    /// model; neither builds a call the other rewrites, so their order between them changes
-    /// nothing. <c>Where</c> last, since earlier rewrites, the integer <c>Range</c> count among
-    /// them, build <c>Where</c>s of their own.
+    /// need none of their rewrites. The int64 <c>Range</c> count comes after every other rewrite
+    /// that builds a <c>Range</c>, so such a call is looked at like one written in the model.
+    /// <c>Where</c> last, since earlier rewrites, the <c>Range</c> count among them, build
+    /// <c>Where</c>s of their own.
     /// </summary>
     public static KernelWorkaroundSet OnnxRuntime { get; } = new(KernelWorkaroundSets.OnnxRuntime,
     [
         new ReduceNegativeAxesWorkaround(),
         new ReduceNoopEmptyAxesWorkaround(),
-        new Float16EmptyReduceWorkaround(),
-        new IntegerEmptyReduceExtremeWorkaround(),
+        new BoolEmptyReduceExtremeWorkaround(),
         new MaxPoolLowestValueIndexWorkaround(),
         new PoolPaddingWorkaround(),
         new ConvTransposeSamePaddingWorkaround(),
@@ -39,7 +36,6 @@ internal static class KernelWorkaroundRegistry
         new ResizeAxesSubsetWorkaround(),
         new IntegerRangeCountWorkaround(),
         new MatMulEmptyOperandWorkaround(),
-        new ArithmeticEmptyConstantWorkaround(),
         new WhereTypesWorkaround(),
     ]);
 

@@ -8,45 +8,40 @@ using static OnnxOp;
 using static OpCodes;
 
 /// <summary>
-/// An int64 or int32 <c>Range</c>, rewritten so that its element count is exact when
-/// <c>limit - start</c> is beyond what ONNX Runtime's kernel counts exactly (Shorokoo/Shorokoo#447,
-/// Shorokoo/Shorokoo#450).
+/// An int64 <c>Range</c>, rewritten so that its element count is exact when ONNX Runtime's kernel
+/// cannot count it exactly (Shorokoo/Shorokoo#447, Shorokoo/Shorokoo#450).
 ///
-/// <para>The kernel takes <c>limit - start</c> in the input type, which wraps for a span beyond
-/// it, and counts the elements as <c>ceil((limit - start) / delta)</c> in double precision, which
-/// rounds an int64 span beyond 2^53. Either can give a wrong count: <c>Range(0, 2^62 + 1, 2^61)</c>
-/// gives two elements where the spec gives three, <c>Range(long.MaxValue - 2, long.MinValue + 2,
-/// 1)</c> gives five where the spec gives none, and the int32 <c>Range(int.MinValue, int.MaxValue,
-/// 2^30)</c> gives none where the spec gives four. A difference that neither wraps nor exceeds 2^53
-/// is exact, and the double quotient is never rounded onto an integer, so the count is exact. An
-/// int16 <c>Range</c> is counted from a difference in a wider type, and every call of another type
-/// counts a span a double holds; both are left alone.</para>
+/// <para>The kernel converts <c>start</c> and <c>limit</c> to double precision, and counts the
+/// elements as <c>ceil((limit - start) / delta)</c> in double precision. An int64 beyond 2^53 is
+/// rounded on the way, so a <c>Range</c> that starts or ends there can have a wrong count, however
+/// short it is: <c>Range(2^62, 2^62 + 2, 1)</c> gives no element where the spec gives two, and
+/// <c>Range(2^62, 2^62 + 1000, 1)</c> gives 1024. Where <c>start</c> and <c>limit</c> both lie
+/// within 2^53 of 0 and are less than 2^53 apart, the count is exact, since the double quotient is
+/// never rounded onto an integer. Every other element type is counted from values a double holds
+/// exactly, and is left alone.</para>
 ///
-/// <para>A call whose <c>delta</c> is a <c>Constant</c> 1 or -1, as in <c>Range(0, n, 1)</c> or
-/// <c>Range(start, start + n, 1)</c>, is left as it stands, whatever its <c>start</c> and
-/// <c>limit</c>: the one form ordinary code builds, a position or index <c>Range</c>, pays nothing.
-/// Its span below 2^53 is counted exactly. A span that wraps its type, where <c>start</c> and
-/// <c>limit</c> are more than the type's range apart, is accepted as ONNX Runtime's result: the
-/// kernel gives elements the spec does not, counted from the wrapped difference, or refuses the
-/// call where that count is one no tensor holds. A span of 2^53 or more that does not wrap has a
-/// spec count of 0 or one no tensor holds, and the kernel gives no elements or refuses the call.
-/// A call whose three inputs are <c>Constant</c>s is left as it stands too where their span is
-/// below 2^53 for int64, or within int32 for int32.</para>
+/// <para>A call is left as it stands where the kernel's count is right: three <c>Constant</c>s
+/// within those bounds, and a call whose <c>delta</c> is a <c>Constant</c> 1 or -1 and whose
+/// <c>start</c> or <c>limit</c> is a <c>Constant</c> within 2^52 of 0, as in <c>Range(0, n, 1)</c>,
+/// the form ordinary code builds for a position or index, which so pays nothing. Its other end is
+/// either within 2^53 of 0, and then counted exactly, or 2^52 or more away, a count no tensor holds,
+/// which the kernel refuses.</para>
 ///
-/// <para>Every other call counts in uint64, an int32 call on its inputs cast to int64 and its
-/// elements cast back: the span and the magnitude of <c>delta</c> are taken as unsigned, which
-/// holds every span of two int64s, and the count is the exact ceiling
+/// <para>Every other call counts in uint64: the span and the magnitude of <c>delta</c> are taken as
+/// unsigned, which holds every span of two int64s, and the count is the exact ceiling
 /// <c>(span - 1) / |delta| + 1</c>, or 0 where <c>limit</c> does not lie beyond <c>start</c> in
 /// the direction of <c>delta</c>. A count above 2^62, which no tensor holds, is taken as 2^62,
 /// which ONNX Runtime refuses to allocate. The elements are <c>Range(0, count, 1) · delta +
 /// start</c>, whose count ONNX Runtime computes exactly, since a count a tensor can hold is below
 /// 2^53; each element lies between <c>start</c> and <c>limit</c>, so the int64 product and sum
-/// give it exactly, and an int32 call's elements are int32s. A <c>delta</c> of 0 reaches that
-/// <c>Range</c> as its step, which ONNX Runtime refuses as it refuses the call as written.</para>
+/// give it exactly. A <c>delta</c> of 0 reaches that <c>Range</c> as its step, which ONNX Runtime
+/// refuses as it refuses the call as written.</para>
 /// </summary>
 internal sealed class IntegerRangeCountWorkaround : KernelWorkaround
 {
     private static readonly BigInteger ExactSpan = BigInteger.One << 53;
+
+    private static readonly BigInteger UnitEnd = BigInteger.One << 52;
 
     private const ulong RefusedCount = 1UL << 62;
 
@@ -54,18 +49,23 @@ internal sealed class IntegerRangeCountWorkaround : KernelWorkaround
 
     public override bool Applies(WorkaroundSite site)
     {
-        var wide = site.DTypeOf(0).IsSameElementTypeAs(DType.Int64);
-        if (!wide && !site.DTypeOf(0).IsSameElementTypeAs(DType.Int32)) return false;
-        var delta = ConstantOf(site, 2, wide);
-        if (delta is 1L or -1L) return false;
-        if (delta is null || ConstantOf(site, 0, wide) is not { } start || ConstantOf(site, 1, wide) is not { } limit) return true;
-        var span = (BigInteger)limit - start;
-        return wide ? BigInteger.Abs(span) >= ExactSpan : span < int.MinValue || span > int.MaxValue;
+        if (site.DTypeOf(0).IsSameElementTypeAs(DType.Int32))
+            return ConstantOf(site, 0) is { } first && ConstantOf(site, 1) is { } last && ConstantOf(site, 2) is not null
+                && ((long)last - first is < int.MinValue or > int.MaxValue);
+        if (!site.DTypeOf(0).IsSameElementTypeAs(DType.Int64)) return false;
+        if (ConstantOf(site, 2) is not { } delta) return true;
+        var (start, limit) = (ConstantOf(site, 0), ConstantOf(site, 1));
+        if (start is { } s && limit is { } l)
+            return !(Within(s, ExactSpan) && Within(l, ExactSpan) && BigInteger.Abs((BigInteger)l - s) < ExactSpan);
+        return !(delta is 1L or -1L && (start is { } a && Within(a, UnitEnd) || limit is { } b && Within(b, UnitEnd)));
     }
 
-    private static long? ConstantOf(WorkaroundSite site, int input, bool wide)
+    private static bool Within(long value, BigInteger bound) => BigInteger.Abs(value) <= bound;
+
+    private static long? ConstantOf(WorkaroundSite site, int input)
         => site.ConstantShapeOf(input) is null ? null
-            : wide ? site.ConstantOf(input)!.Elements<long>()[0] : site.ConstantOf(input)!.Elements<int>()[0];
+            : site.DTypeOf(0).IsSameElementTypeAs(DType.Int64) ? site.ConstantOf(input)!.Elements<long>()[0]
+            : site.ConstantOf(input)!.Elements<int>()[0];
 
     public override Variable?[] Rewrite(WorkaroundSite site, Variable?[] inputs)
     {

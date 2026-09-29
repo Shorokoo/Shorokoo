@@ -95,10 +95,10 @@ public class QeeNormLinalgAuditTests
     }
 
     [Fact]
-    public void TestOnnxRuntimeLayerNormalizationOfRowsWithALargeMeanIsFarFromItsFunctionBodyOrNaN()
+    public void TestLayerNormalizationOfRowsWithALargeMeanAgreesWithItsFunctionBody()
     {
-        Assert.True(AutoTest.AdvancedTestGraph<LayerNormalizationOfALargeMeanFarFromItsFunctionBodyCheck>([], LargeMeanRows));
-        Assert.True(AutoTest.AdvancedTestGraph<LayerNormalizationOfALargeMeanFarFromItsFunctionBodyCheck>([], RowsAroundAHundred(0.01f)));
+        Assert.True(AutoTest.AdvancedTestGraph<LayerNormalizationOfALargeMeanCheck>([], LargeMeanRows));
+        Assert.True(AutoTest.AdvancedTestGraph<LayerNormalizationOfALargeMeanCheck>([], RowsAroundAHundred(0.01f)));
     }
 
     internal static TensorData[] LargeMeanRows => RowsAroundAHundred(0.1f);

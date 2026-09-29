@@ -1773,12 +1773,12 @@ namespace Shorokoo.Tests.Modules
         public static Tensor<utf8> Inline(Tensor<utf8> x) => NN.StringNormalizer(x, caseChangeAction: "LOWER", stopwords: ["a"]);
     }
 
-    /// <summary>A string normalized in a locale no machine has, beside a weighted output.</summary>
+    /// <summary>A string normalized in a locale whose name no runtime accepts, beside a weighted output.</summary>
     [Module]
     public partial class UnknownLocaleNormalizerBesideAWeightLayer
     {
         public static (Tensor<utf8>, Tensor<float32>) Inline(Tensor<utf8> s, Tensor<float32> y)
-            => (NN.StringNormalizer(s, caseChangeAction: "LOWER", locale: "xx_XX", stopwords: ["a"]),
+            => (NN.StringNormalizer(s, caseChangeAction: "LOWER", locale: "!!", stopwords: ["a"]),
                 y * InitSimple.Init(y.ShapeTensor()));
     }
 

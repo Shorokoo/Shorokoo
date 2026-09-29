@@ -3491,6 +3491,23 @@ public class TrainingRigTrainingLoopCoverageTests
         Assert.All(stepped.OptimizerState.Fields.Values, f => Assert.True(((TensorData)f).IsHostResident));
         Assert.NotEmpty(FlattenStruct(stepped.TrainableParams));
     }
+
+    // A resident step writes only 50 of its 56 state outputs over the state it consumed:
+    // https://github.com/Shorokoo/Shorokoo/issues/453
+    [Fact(Skip = "Shorokoo/Shorokoo#453: a resident step writes 50 of its 56 state outputs over the state it consumed")]
+    public void TestAResidentRunWritesEveryStateOutputOverTheStateItConsumedCoverage()
+    {
+        using var context = new ComputeContext();
+        var sample = TensorData([2L, 8L], [.. Enumerable.Range(0, 16).Select(i => i / 16f)]);
+        var rig = TrainingRig.FromScratch(
+            Modules.PlainTinyMlpStack.ComputationGraph, L2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph,
+            [sample.CopyTo(ComputeContext.Host)], new AdamWOptimizerHyperparameters { LearningRate = 0.01f }, runtimeContext: context);
+        var input = rig.InputDef.FromOrderedData(sample);
+        var target = rig.TargetDef.FromOrderedData(TensorData([2L, 16L], [.. Enumerable.Range(0, 32).Select(i => i / 32f)]));
+        using var run = rig.BeginResidentRun();
+        for (int i = 0; i < 4; i++) run.Step(input.Shared(), target.Shared());
+        Assert.Equal(4 * 56L, context.AliasedOutputs);
+    }
 }
 
 [Trait("Domain", "Training")]
@@ -5474,6 +5491,51 @@ public class TrainingRigSkptCheckpointCoverageTests
                 FlattenStruct(loadedRig.CreateInitialCheckpoint().OptimizerState));
             Assert.Equal(FlattenStruct(eager.OptimizerState),
                 FlattenStruct(loadedRig.LoadCheckpointFromSkpt(path, CheckpointComponents.InferenceState).OptimizerState));
+        }
+        finally { if (File.Exists(path)) File.Delete(path); }
+    }
+
+    [Fact]
+    public void TestLoadBuildsTheRigWithoutRunningASessionWhereAFreshBuildRunsItsInitializersCoverage()
+    {
+        static ComputeContext Counting() => new() { Diagnostics = new DiagnosticSettings { CollectRunStatistics = true } };
+        var (_, ckpt, _, _) = BuildTrainedAdamWRig(steps: 1);
+        var path = TempPath("skpt_no_runs") + ".skpt";
+        try
+        {
+            Persistence.SaveTrainingCheckpointToSkpt(ckpt, path);
+            using var loading = Counting();
+            var (_, loaded) = TrainingRig.Load(path, mergeContext: loading);
+            Assert.Equal(1, loaded.Step);
+            Assert.Equal(0L, loading.RunStats.RunCount);
+
+            using var building = Counting();
+            _ = TrainingRig.FromScratch(
+                ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
+                AdamWOptimizer.ComputationGraph, ScalarMultiplyBatches().sample,
+                new AdamWOptimizerHyperparameters { LearningRate = 0.1f }, mergeContext: building);
+            Assert.True(building.RunStats.RunCount > 0);
+        }
+        finally { if (File.Exists(path)) File.Delete(path); }
+    }
+
+    [Fact]
+    public void TestACheckpointCanBeSavedOverTheFileItWasLoadedFromWhileItsRigIsBuiltCoverage()
+    {
+        var (_, ckpt, _, _) = BuildTrainedAdamWRig(steps: 1);
+        var path = TempPath("skpt_save_over") + ".skpt";
+        try
+        {
+            Persistence.SaveTrainingCheckpointToSkpt(ckpt, path);
+            var saved = false;
+            var (_, loaded) = TrainingRig.Load(path, progress: new SynchronousBuildProgress(report =>
+            {
+                if (saved || report.Phase != BuildPhase.TrainingStep) return;
+                Persistence.SaveTrainingCheckpointToSkpt(ckpt, path);
+                saved = true;
+            }));
+            Assert.True(saved);
+            Assert.Equal(1, loaded.Step);
         }
         finally { if (File.Exists(path)) File.Delete(path); }
     }

@@ -1169,6 +1169,16 @@ public class CoreUtilsCoverageTests
         Assert.Same(placement, compiled.ReadNodePlacement());
     }
 
+    [Fact]
+    public void TestADeterministicContextBuildsAndRunsItsSessionsAndComputesWhatAnyOtherDoes()
+    {
+        using var deterministic = new ComputeContext { Diagnostics = new DiagnosticSettings { DeterministicCompute = true } };
+        using var plain = new ComputeContext();
+        Assert.Equal(
+            Doubling(plain).Execute(ThreeFloats())[0].ToTensorData().CopyMemory<float>(),
+            Doubling(deterministic).Execute(ThreeFloats())[0].ToTensorData().CopyMemory<float>());
+    }
+
     /// <summary>
     /// The grouping, on a shape no CPU-only machine can produce: a graph ORT split across two
     /// providers. Busiest provider first, byte counts summed per provider, and the nodes in

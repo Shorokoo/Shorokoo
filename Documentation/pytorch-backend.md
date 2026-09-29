@@ -210,6 +210,7 @@ What a run does with the settings every backend is handed, on each device:
 | **`RunSettings.ShrinkArenaAfterRun`** | ignored | `torch.cuda.empty_cache()` after the run |
 | **Arena statistics** / `RunStats` | none | torch's caching allocator on the device |
 | **`TraceNodePlacement`** | every node on `cpu` | every node on `cuda:N` |
+| **`DeterministicCompute`** | not applied | not applied: torch's kernels run as they otherwise would |
 | **Log severity** | Python warnings a run raises are shown at `Warning` and below, not above | same |
 
 **Output aliasing.** An output paired with a consumed input (as the training rig pairs each

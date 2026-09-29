@@ -592,7 +592,8 @@ namespace Shorokoo
             ModelId[] TrainableModelIds,
             ModelId[] StateModelIds,
             IReadOnlyDictionary<string, TensorAttribute> ParamSlots,
-            IReadOnlyDictionary<string, TensorAttribute> StateSlots);
+            IReadOnlyDictionary<string, TensorAttribute> StateSlots,
+            IReadOnlyDictionary<string, TensorAttribute> OptStateSlots);
 
         /// <summary>
         /// The rig's initial trainable-parameter <b>values</b>, running the deferred initializers on
@@ -1668,7 +1669,10 @@ namespace Shorokoo
                 checkpoint.ModelState,
                 deferred is null ? Described(_initialStateFields) : Described(deferred.StateSlots),
                 "model-state");
-            AssertValuesCompatible(checkpoint.OptimizerState, Described(_initialOptStateFields), "optimizer-state");
+            AssertValuesCompatible(
+                checkpoint.OptimizerState,
+                deferred is null ? Described(_initialOptStateFields) : Described(deferred.OptStateSlots),
+                "optimizer-state");
             // Rebuilt against THIS rig's defs, not carried over: the checks above establish the two
             // agree field for field, but a checkpoint read straight from a file carries a def
             // reconstructed from that file, whose field ORDER is the file's. Everything that indexes
@@ -3994,6 +3998,53 @@ namespace Shorokoo
             };
 
         /// <summary>
+        /// Descriptions of the initial optimizer-state fields — shape and dtype, and the values of a
+        /// small one — inferred from the optimizer's split-off state-init graph over the parameters'
+        /// descriptions (<paramref name="paramSlots"/>), standing in for a zero gradient too, without
+        /// running the graph: what a deferred build (Shorokoo/Shorokoo#327) needs of them. Null where
+        /// the inference leaves any output without a shape, for the caller to run the graph instead.
+        ///
+        /// <para>Running it is what a deferred build did before it had parameter values: once per
+        /// parameter, in a session of its own with the parameter and its gradient written into the
+        /// model, each allocating several copies of the parameter — all to produce values the
+        /// checkpoint being loaded then replaces, and which the rig held on to for its life.</para>
+        /// </summary>
+        private Dictionary<string, TensorAttribute>? DescribeInitialOptStateFields(
+            TensorData[] hyperSeeds, ComputeContext ctx, Dictionary<string, TensorAttribute> paramSlots)
+        {
+            const int readThreshold = ShapeInferenceInterpreter.MaxSmallTensorElements;
+            // The state initializers are function calls, which the inference does not look into, so
+            // it reads a copy with their bodies spliced in.
+            var stateInitGraph = _optimizerStateInitGraph!.Clone();
+            Shorokoo.Core.Nodes.Processors.Fast.FastInlineModulesAndFunctions.Process(stateInitGraph);
+            var statesPerParam = OptimizerStateDef.Fields.Length / TrainableParamStructDef.Fields.Length;
+            var inferencer = new ShapeInferenceInterpreter(ctx);
+            IRuntimeTensor[] hypers = [.. hyperSeeds.Select(h => TensorDataConverter.ToRuntimeInput(h, readThreshold))];
+            var slots = new Dictionary<string, TensorAttribute>(StringComparer.Ordinal);
+            for (var paramIdx = 0; paramIdx < TrainableParamStructDef.Fields.Length; paramIdx++)
+            {
+                var param = paramSlots[TrainableParamStructDef.Fields[paramIdx].Name];
+                // The parameter's stand-in serves for its gradient too: zeros of its shape and dtype.
+                var standIn = TensorDataConverter.ToRuntimeTensor(param, readThreshold);
+                var inferred = inferencer.Infer(stateInitGraph, [.. hypers, standIn, standIn]);
+                for (var s = 0; s < statesPerParam; s++)
+                {
+                    if (inferred.GetTensorInfo(stateInitGraph.Outputs[s]) is not { } info) return null;
+                    slots[OptimizerStateDef.Fields[paramIdx * statesPerParam + s].Name] =
+                        info.Data ?? TensorAttribute.WithoutValues(info.Shape, info.DType);
+                }
+            }
+            return slots;
+        }
+
+        /// <summary>The descriptions of a value family whose values are in hand.</summary>
+        private static Dictionary<string, TensorAttribute> DescribedSlots(Dictionary<string, IData> fields)
+            => fields.Where(kv => kv.Value is TensorData).ToDictionary(
+                kv => kv.Key,
+                kv => TensorAttribute.WithoutValues(((TensorData)kv.Value).Shape, ((TensorData)kv.Value).DType),
+                StringComparer.Ordinal);
+
+        /// <summary>
         /// Runs the optimizer's split-off state-init graph once per trainable parameter, binding its
         /// hyperparameter inputs to <paramref name="hyperSeeds"/> (in optimizer order), the parameter's
         /// value from <paramref name="paramValueFor"/>, and a zero gradient; returns the initial
@@ -4515,11 +4566,6 @@ namespace Shorokoo
                 }
             }
 
-            if (paramValuesById is null)
-                _deferredInit = new DeferredInitialization(
-                    concreteArch, ctx, rngConfig, [.. trainableModelIds], [.. stateModelIds],
-                    paramSlots, stateSlots);
-
             // Initial optimizer state: run the optimizer's state initializers once per trainable
             // parameter, binding the optimizer's hyperparameter inputs to their value at the initial
             // counters (the single value route — baked constant, or scheduler graph evaluated via
@@ -4527,6 +4573,7 @@ namespace Shorokoo
             // value, and a zero gradient. The state-init graph carries the [StateInitializer]
             // functions split out of the optimizer graph by FastNormalizeOptimizerGraph.
             _initialOptStateFields = new Dictionary<string, IData>();
+            var optStateSlots = new Dictionary<string, TensorAttribute>(StringComparer.Ordinal);
             if (OptimizerStateDef.Fields.Length > 0)
             {
                 var stateInitGraph = _optimizerStateInitGraph
@@ -4549,11 +4596,28 @@ namespace Shorokoo
                 // internal 0 placeholder here (shape only — the state init is shape-driven); the real
                 // value is required (and recomputed) in CreateInitialCheckpoint(hyperparameters), and
                 // the no-arg CreateInitialCheckpoint fails loud on the _stateInitNeedsRuntimeHypers flag.
+                //
+                // A deferred build has no parameter values to seed them from, and the values it would
+                // seed from zeros are only ever read for their shapes before EnsureInitialValues
+                // recomputes them: a checkpoint about to be loaded replaces them. So it describes
+                // them, as it does the parameters, by inferring the state-init graph's outputs over
+                // the parameters' descriptions — and runs the graph only where the inference leaves
+                // an output undescribed.
                 Stage("InitializeOptimizerState");
-                _initialOptStateFields = ComputeInitialOptStateFields(
-                    ResolveStateInitHyperValues(null, throwOnMissingConsumed: false), ctx,
-                    paramValuesById is not null ? NameValueOf(_initialParamFields) : ZerosOf(paramSlots));
+                var hyperSeeds = ResolveStateInitHyperValues(null, throwOnMissingConsumed: false);
+                if (paramValuesById is not null)
+                    _initialOptStateFields = ComputeInitialOptStateFields(hyperSeeds, ctx, NameValueOf(_initialParamFields));
+                else if (DescribeInitialOptStateFields(hyperSeeds, ctx, paramSlots) is { } described)
+                    optStateSlots = described;
+                else
+                    _initialOptStateFields = ComputeInitialOptStateFields(hyperSeeds, ctx, ZerosOf(paramSlots));
             }
+
+            if (paramValuesById is null)
+                _deferredInit = new DeferredInitialization(
+                    concreteArch, ctx, rngConfig, [.. trainableModelIds], [.. stateModelIds],
+                    paramSlots, stateSlots,
+                    optStateSlots.Count > 0 ? optStateSlots : DescribedSlots(_initialOptStateFields));
 
             // Step 2: shape-infer the model to get its prediction, then derive the target exemplar
             // from the loss's own target input (see DeriveTargetExemplar — the prediction answers
@@ -4604,7 +4668,7 @@ namespace Shorokoo
             foreach (var f in ModelStateDef.Fields)
                 allInputs[idx++] = FieldExemplar(_initialStateFields, stateSlots, f.Name);
             foreach (var f in OptimizerStateDef.Fields)
-                allInputs[idx++] = TensorDataConverter.ToRuntimeInput(_initialOptStateFields[f.Name], readThreshold);
+                allInputs[idx++] = FieldExemplar(_initialOptStateFields, optStateSlots, f.Name);
 
             // Schedule-less runtime hyperparameter fields: seed shape inference / optimization with
             // their default (initial) scalar values. At run time these are supplied per step.

@@ -2821,7 +2821,7 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
         var split = new NodeProto { OpType = "StringSplit", Name = "split0", Outputs = { "y", "n" } };
         split.Attributes.Add(StringAttribute("delimiter", " "));
         var normalize = new NodeProto { OpType = "StringNormalizer", Name = "normalize0", Outputs = { "y" } };
-        normalize.Attributes.AddRange([StringAttribute("case_change_action", "LOWER"), StringAttribute("locale", "xx_XX")]);
+        normalize.Attributes.AddRange([StringAttribute("case_change_action", "LOWER"), StringAttribute("locale", "!!")]);
         var splitPath = ForeignStringModelFile(split);
         var normalizePath = ForeignStringModelFile(normalize);
 

@@ -72,4 +72,21 @@ public sealed record DiagnosticSettings
     /// this by <see cref="Shorokoo.Runtime.CompiledGraph.OutputPlacement"/>.</para>
     /// </summary>
     public bool TraceNodePlacement { get; init; }
+
+    /// <summary>
+    /// Whether the sessions this context compiles compute bit for bit the same result every time
+    /// they are run on the same inputs. Off by default, which on a CUDA card is not so: kernels there
+    /// add up partial results in whatever order the card's threads finish, so two training runs from
+    /// one seed and one data order agree only to about the last digit of the loss, from the first
+    /// steps on. With this on, ONNX Runtime runs the deterministic kernel wherever an operator has
+    /// both — at some cost in speed on the card — and two such runs, a run resumed from a
+    /// checkpoint included, are bit-identical.
+    ///
+    /// <para>The ONNX Runtime CPU backends are bit-reproducible either way, so this changes nothing
+    /// there. It is an ONNX Runtime session setting: the PyTorch and JAX backends build their
+    /// sessions as they otherwise would. Like <see cref="TraceNodePlacement"/> it is read when a
+    /// session is built, so it takes a context that carries it from the start — a training rig's
+    /// <c>runtimeContext</c>, or the one a checkpoint is loaded onto.</para>
+    /// </summary>
+    public bool DeterministicCompute { get; init; }
 }

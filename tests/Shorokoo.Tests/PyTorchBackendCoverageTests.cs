@@ -86,7 +86,7 @@ public class PyTorchBackendCoverageTests
         Assert.Contains("https://download.pytorch.org/whl/cpu", cpu.IndexArguments);
         Assert.NotEqual(cpu.Hash, moved.Hash);
         Assert.Equal(Path.Combine("/cache", "shorokoo", "python-envs"),
-            PythonEnvironmentResolver.CacheRoot(new(), name => name == "XDG_CACHE_HOME" ? "/cache" : null));
+            PythonEnvironmentResolver.CacheRoot(new(), name => name == "XDG_CACHE_HOME" ? "/cache" : null, windows: false));
     }
 
     [Fact]
@@ -772,8 +772,9 @@ public class PyTorchBackendCoverageTests
         Assert.Equal(home, PythonEnvironment.PythonHomeOf(home + Path.DirectorySeparatorChar, windows: true));
         Assert.Equal([Path.Combine(home, "python312.dll")], PythonEnvironment.LibPythonCandidates(home, version, windows: true));
         Assert.Equal(Path.Combine(env, "Lib", "site-packages"), PythonEnvironment.SitePackagesOf(env, version, windows: true));
-        Assert.Equal(Path.Combine("/opt", "py"), PythonEnvironment.PythonHomeOf(Path.Combine("/opt", "py", "bin"), windows: false));
-        Assert.Contains(Path.Combine("/opt", "py", "lib", "libpython3.12.so"), PythonEnvironment.LibPythonCandidates(Path.Combine("/opt", "py"), version, windows: false));
+        var py = Path.Combine(Path.GetTempPath(), "py");
+        Assert.Equal(py, PythonEnvironment.PythonHomeOf(Path.Combine(py, "bin"), windows: false));
+        Assert.Contains(Path.Combine(py, "lib", "libpython3.12.so"), PythonEnvironment.LibPythonCandidates(py, version, windows: false));
         Assert.Equal(Path.Combine(env, "lib", "python3.12", "site-packages"), PythonEnvironment.SitePackagesOf(env, version, windows: false));
         Assert.Equal(Path.Combine("LocalAppData", "shorokoo", "python-envs"),
             PythonEnvironmentResolver.CacheRoot(new(), name => name == "LOCALAPPDATA" ? "LocalAppData" : "/xdg", windows: true));
@@ -971,9 +972,14 @@ public class PyTorchBackendCoverageTests
         var installed = FakeUv("""
             echo "$@" >> LOG
             if [ "$1" = venv ]; then for last; do :; done; mkdir -p "$last"; fi
+            """, """
+            echo %*>>"LOG"
+            if not "%~1"=="venv" exit /b 0
+            for %%a in (%*) do set "last=%%~a"
+            mkdir "%last%"
             """);
-        var hung = FakeUv("sleep 20; exit 1", TimeSpan.FromSeconds(2));
-        var install = installed.Log.Single(line => line.StartsWith("pip install", StringComparison.Ordinal));
+        var hung = FakeUv("sleep 20; exit 1", "ping -n 21 127.0.0.1 >nul & exit /b 1", TimeSpan.FromSeconds(2));
+        var install = installed.Log.Single(line => line.StartsWith("pip install", StringComparison.Ordinal)).Replace("\"", "");
 
         Assert.Equal(PythonEnvironmentFailure.NotAVirtualEnvironment, installed.Failure);
         Assert.Contains($"--python {installed.Directory}", install);
@@ -1147,11 +1153,13 @@ public class PyTorchBackendCoverageTests
         return Serialize(graph);
     }
 
-    private static (PythonEnvironmentFailure Failure, string[] Log, string Directory, TimeSpan Took) FakeUv(string script, TimeSpan? timeout = null)
+    private static (PythonEnvironmentFailure Failure, string[] Log, string Directory, TimeSpan Took) FakeUv(string sh, string cmd, TimeSpan? timeout = null)
     {
         var root = Directory.CreateDirectory(Path.Combine(Path.GetTempPath(), "shorokoo-uv-" + Guid.NewGuid().ToString("N"))).FullName;
-        var (uv, log) = (Path.Combine(root, "uv"), Path.Combine(root, "log"));
-        File.WriteAllText(uv, "#!/bin/sh\n" + script.Replace("LOG", log) + "\n");
+        var (uv, log) = (Path.Combine(root, OperatingSystem.IsWindows() ? "uv.cmd" : "uv"), Path.Combine(root, "log"));
+        File.WriteAllText(uv, OperatingSystem.IsWindows()
+            ? "@echo off\r\n" + cmd.Replace("LOG", log).ReplaceLineEndings("\r\n") + "\r\n"
+            : "#!/bin/sh\n" + sh.Replace("LOG", log) + "\n");
         if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(uv, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
         var clock = System.Diagnostics.Stopwatch.StartNew();
         try

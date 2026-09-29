@@ -508,6 +508,9 @@ namespace Shorokoo
 
             var rngConfig = DeserializeRngConfig(rig.Rng, filePath);
 
+            // Everything the rebuild needs is read, so the file is let go before the rebuild, which
+            // can take minutes: while it is open, Windows refuses to save a checkpoint over it.
+            container.Dispose();
             return TrainingRig.ReconstructFromConstituents(
                 archGraph, lossGraph, optimizerGraph, hypers, names, rngConfig,
                 mergeContext, runtimeContext, trainingBackend, progress, deferInitialization);

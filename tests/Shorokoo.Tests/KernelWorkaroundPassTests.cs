@@ -375,8 +375,7 @@ public class KernelWorkaroundPassTests
         Assert.Equal(160, Run(Graph(i, i.Reduce(ReduceKind.Max, Vector(0L))), TensorData(DType.Int32, [0L, 40L], Array.Empty<object>())).Length);
     }
 
-    // #456: FastScopeConfigurator hoists a loop-invariant consumer out of a Loop body before its producer
-    [Fact(Skip = "#456: FastScopeConfigurator hoists a loop-invariant consumer out of a Loop body before its producer")]
+    [Fact]
     public void TestAnIfSplicedIntoALoopBodyKeepsTheLoopInvariantShapeItsConditionAndBranchShareBeforeBoth()
     {
         var x = TensorData(DType.Float32, [3L], 2f, 3f, 4f);

@@ -1404,3 +1404,21 @@ public partial class TargetsNamedInputModel
         return targets * weight;
     }
 }
+
+/// <summary>A scalar gain, a ReLU and a <c>SAME_UPPER</c> MaxPool whose stride exceeds its
+/// kernel.</summary>
+[Module]
+public partial class SameStridedMaxPoolModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> input)
+        => (Tensor<float32>)OnnxOp.MaxPool(OnnxOp.Relu(input * InitScalarWeight.Init(Vector(1L))), AutoPad.SameUpper, null, null, [1L, 1L], null, null, [2L, 2L]);
+}
+
+/// <summary>A scalar gain, a ReLU and a <c>SAME_LOWER</c> AveragePool that does not count its
+/// padding, whose stride exceeds its kernel.</summary>
+[Module]
+public partial class SameStridedAveragePoolModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> input)
+        => (Tensor<float32>)OnnxOp.AveragePool(OnnxOp.Relu(input * InitScalarWeight.Init(Vector(1L))), AutoPad.SameLower, null, null, null, [2L, 1L], null, [3L, 2L]);
+}

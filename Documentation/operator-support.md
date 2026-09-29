@@ -229,20 +229,17 @@ shape and type.
      otherwise ([#422](https://github.com/Shorokoo/Shorokoo/issues/422)).
    - `noop_with_empty_axes` set with no axes, or an empty axes tensor: ONNX Runtime
      reduces every axis of an empty input where the output is that empty input.
-     When the session's model states every input's dimensions, the call becomes an
-     `If` on the input and the axes being empty, each counted as the product of its
-     shape, keeping the plain call wherever the input is not empty. ONNX Runtime
-     folds the `If` away when it builds the session wherever those shapes follow
-     from the stated dimensions; where a shape depends on the data, the `If` runs
-     with the session. Otherwise the call keeps one reduction of the same data and
-     axes with `keepdims` 0, the reduced axes put back by an `Unsqueeze`, and an
-     empty input with empty axes is viewed with a trailing axis of one that alone
-     is reduced — no branch and no copy ([#409](https://github.com/Shorokoo/Shorokoo/issues/409)).
+     The call keeps one reduction of the same data and axes with `keepdims` 0, the
+     reduced axes put back by an `Unsqueeze`, and an empty input with empty axes is
+     viewed with a trailing axis of one that alone is reduced — no branch and no
+     copy ([#409](https://github.com/Shorokoo/Shorokoo/issues/409)).
    - A float16 `ReduceSumSquare`, `ReduceL1` or `ReduceLogSum` with no axes input:
      ONNX Runtime's kernel crashes the process on an empty input. The call becomes
      an `If` on the input's element count, the product of its shape, that reduces
-     an empty input in float32 and casts the result back; ONNX Runtime folds it as
-     above ([#411](https://github.com/Shorokoo/Shorokoo/issues/411)).
+     an empty input in float32 and casts the result back. ONNX Runtime folds the
+     `If` away when it builds the session wherever that shape follows from the
+     stated input dimensions; where it depends on the data, the `If` runs with the
+     session ([#411](https://github.com/Shorokoo/Shorokoo/issues/411)).
    - An integer or boolean `ReduceMax`/`ReduceMin`: ONNX Runtime gives an empty
      group 0 for every integer type, and throws when a reduced axis of a `bool`
      input has extent 0. A `bool` call becomes a uint8 `ReduceMax` of the input
@@ -398,7 +395,8 @@ shape and type.
    - **Padding** (`AveragePool`, `LpPool`, `MaxPool`): `SAME_UPPER`/`SAME_LOWER`
      with dilation above 1 or stride above the kernel, and explicit pads as large
      as the kernel, are rebuilt as `Pad`, a pool ONNX Runtime computes as the spec
-     does, and `Slice` ([#379](https://github.com/Shorokoo/Shorokoo/issues/379), [#408](https://github.com/Shorokoo/Shorokoo/issues/408)).
+     does, and `Slice`, with no branch; where the stated input dimensions leave
+     nothing to crop, ONNX Runtime removes the `Slice` when it builds the session ([#379](https://github.com/Shorokoo/Shorokoo/issues/379), [#408](https://github.com/Shorokoo/Shorokoo/issues/408)).
    - **`MaxPool` indices** over int8 or uint8: ONNX Runtime gives a window holding
      only the type's lowest value a wrong index. When the `Indices` output is
      read, the pool is computed over the input cast to float32 and its values cast

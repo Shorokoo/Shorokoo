@@ -148,7 +148,7 @@ so the `Where`s the reduction, pool and `Range` rewrites emit are covered by the
 | Operator | Scenario ONNX Runtime gets wrong | Rewrite | Issue |
 |---|---|---|---|
 | Every `Reduce*` | Negative axes on an empty input | Axes made non-negative, as a constant or in the graph | [#422](https://github.com/Shorokoo/Shorokoo/issues/422) |
-| Every `Reduce*` | `noop_with_empty_axes` set with no axes or an empty axes tensor, on an empty input | With every input's dimensions stated, an `If` on the input and axes being empty, which ONNX Runtime folds when it builds the session wherever their shapes follow from the stated dimensions; otherwise the same reduction with `keepdims` 0 and the reduced axes put back by `Unsqueeze`, an empty input viewed with a trailing axis of one that alone is reduced | [#409](https://github.com/Shorokoo/Shorokoo/issues/409) |
+| Every `Reduce*` | `noop_with_empty_axes` set with no axes or an empty axes tensor, on an empty input | The same reduction with `keepdims` 0 and the reduced axes put back by `Unsqueeze`, an empty input viewed with a trailing axis of one that alone is reduced, with no branch | [#409](https://github.com/Shorokoo/Shorokoo/issues/409) |
 | `ReduceSumSquare`, `ReduceL1`, `ReduceLogSum` | float16 with no axes input, on an empty input (the process crashes) | `If` on the element count; an empty input is reduced in float32 and cast back | [#411](https://github.com/Shorokoo/Shorokoo/issues/411) |
 | `ReduceMax`, `ReduceMin` | An empty group of an integer input (0 for every integer type); a reduced axis of extent 0 of a bool input (the kernel throws) | Integer: `If` on the element count, the empty branch filling the output shape with the spec's identity; bool: a uint8 `ReduceMax` cast back, over the negated input and negated back for `ReduceMin`, with no branch | [#382](https://github.com/Shorokoo/Shorokoo/issues/382) |
 | `MaxPool` | `Indices` read over int8 or uint8, with a window holding only the type's lowest value | Pooled as float32, values cast back; float16, float32 and float64 pools meet the same fault and are not rewritten ([#437](https://github.com/Shorokoo/Shorokoo/issues/437)) | [#420](https://github.com/Shorokoo/Shorokoo/issues/420) |
@@ -171,13 +171,15 @@ wherever that shape follows from the model's stated input dimensions. An `If` ov
 depends on the data — the output of a `NonZero`, of a `TopK` with a computed `k`, of a `Reshape` or
 `Expand` to a computed shape — is not folded: it runs on every run, at the cost of the few shape
 operations of its condition and the branch it takes. In the body of a `Loop` or `SequenceMap` the
-shapes are known only as the body runs, so there a rewrite that decides by an `If` ONNX Runtime
-folds takes the form it takes without stated dimensions, and the `MatMul` is left as written;
-an `If` there would run on every iteration. A branch value an `If` holds only on the side the input's
+shapes are known only as the body runs, so the `MatMul` is left as written there; an `If` there
+would run on every iteration. A branch value an `If` holds only on the side the input's
 shape selects is built from the input, never from constants alone, so the `If` ONNX Runtime folds
-never leaves it a constant it computed. The other rewrites — `noop_with_empty_axes` without stated
-dimensions, negative axes, and a bool `ReduceMax`/`ReduceMin` — have no branch: one graph, built
-from the input's shape and axes, is right for every input.
+never leaves it a constant it computed. The input an `If` of the reductions reads is read outside it
+too, through a `Reshape` to its own shape that costs no copy: ONNX Runtime fails to build a session
+(`Node input '…' is not a graph input, initializer, or output of a previous node`) in which it folds
+an `If` whose branches alone read a value that a `Shape` it folds also reads. The other rewrites —
+`noop_with_empty_axes`, negative axes, a bool `ReduceMax`/`ReduceMin` and the pool padding — have no
+branch: one graph, built from the input's shape and axes, is right for every input.
 
 The faults below are left alone — wholly, or in the cases a row of the table leaves out — as is
 the float `MaxPool` indices fault of the table's `MaxPool` row

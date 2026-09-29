@@ -273,7 +273,7 @@ public class KernelWorkaroundPassTests
         var step = TrainingStep();
         List<long[]?> dims = [.. step.InputNodes.Select(RepresentativeInputShapes.Get)];
         Assert.Equal(Ifs(Session(step, null)), Ifs(Session(step, KernelWorkaroundRegistry.OnnxRuntime)));
-        Assert.True(Ifs(FastOnnxModelBuilder.BuildInternalOnnxModel(step, prepForOnnx: true, inputDims: dims, workarounds: KernelWorkaroundRegistry.OnnxRuntime)) > 0);
+        Assert.Equal(Ifs(Session(step, null)), Ifs(FastOnnxModelBuilder.BuildInternalOnnxModel(step, prepForOnnx: true, inputDims: dims, workarounds: KernelWorkaroundRegistry.OnnxRuntime)));
         Assert.Equal(0, Ifs(Optimized(FastOnnxModelBuilder.BuildInternalOnnxModel(step, prepForOnnx: true, inputDims: dims, workarounds: KernelWorkaroundRegistry.OnnxRuntime))));
     }
 
@@ -286,7 +286,7 @@ public class KernelWorkaroundPassTests
             x.Cast<bit>().Reduce(ReduceKind.Min, Vector(0L)), NN.Reduce(ReduceKind.Sum, x, axes, keepDims: true, noOp: true)]);
         List<long[]?> dims = [[2L, 3L], [1L]];
         var built = FastOnnxModelBuilder.BuildInternalOnnxModel(g, prepForOnnx: true, inputDims: dims, workarounds: KernelWorkaroundRegistry.OnnxRuntime);
-        Assert.True(Ifs(built) >= 3);
+        Assert.True(Ifs(built) >= 2);
         Assert.Equal(0, Ifs(Optimized(built)));
     }
 
@@ -408,6 +408,29 @@ public class KernelWorkaroundPassTests
         using var context = new ComputeContext();
         using var compiled = context.Compile(new InternalComputationGraph([a, b], [OnnxOp.MatMul(a, b)]), concrete ? [left, right] : [null, null], trainingStep: false);
         return compiled.Execute(Ones(left).Shared(), Ones(right).Shared())[0].ToTensorData().Shape.Dims;
+    }
+
+    [Fact]
+    public void TestWorkaroundsOverValuesAShapeAlsoReadsBuildAndComputeOnOnnxRuntimeWithConcreteShapes()
+    {
+        Assert.True(AutoTest.AllTrueWithConcreteShapes(ChainedWorkaroundsReadByAShapeCheck.ComputationGraph,
+            TensorData(DType.Float32, [1L, 1L, 5L, 6L], [.. Enumerable.Range(0, 30).Select(i => (object)(float)(i % 5 - 1))])));
+        var a = InputTensor<float32>("a", rank: 2);
+        var r = OnnxOp.Relu(a);
+        Variable By(Variable v) => OnnxOp.Reshape(a, OnnxOp.Concat([Vector(-1L), OnnxOp.Shape(v, start: 1L)], 0L), true);
+        var (ints, halves) = (OnnxOp.Cast(r, null, DType.Int64), OnnxOp.Cast(r, null, DType.Float16));
+        var data = TensorData(DType.Float32, [3L, 4L], [.. Enumerable.Range(0, 12).Select(i => (object)(float)(i % 5 - 1))]);
+        Assert.True(AsComputedWithoutConcreteShapes(Graph(a, OnnxOp.Add(By(ints), OnnxOp.Cast(OnnxOp.ReduceMax(ints, Vector(1L), true, null), null, DType.Float32))), data));
+        Assert.True(AsComputedWithoutConcreteShapes(Graph(a, OnnxOp.Add(By(halves), OnnxOp.Cast(OnnxOp.ReduceSumSquare(halves, null, true, null), null, DType.Float32))), data));
+    }
+
+    [Fact]
+    public void TestANoopReductionOverATensorOfOnesOfAnInputsShapeBuildsItsSessionWithConcreteShapes()
+    {
+        var a = InputTensor<float32>("a", rank: 2);
+        var ones = (Tensor<float32>)OnnxOp.Expand(Scalar(1f), OnnxOp.Shape(a));
+        var data = TensorData(DType.Float32, [40L, 3L], [.. Enumerable.Range(0, 120).Select(i => (object)(float)i)]);
+        Assert.True(AsComputedWithoutConcreteShapes(Graph(a, OnnxOp.Add(a, NN.Reduce(ReduceKind.Sum, ones, null, keepDims: true, noOp: true))), data));
     }
 
     [Fact]
@@ -668,6 +691,10 @@ public class KernelWorkaroundPassTests
         Assert.Equal(Run(g, plain, x), Run(g, rewritten, x));
         Assert.Equal(asWritten, g.Nodes.Select(n => n.OpCode));
     }
+
+    private static bool AsComputedWithoutConcreteShapes(InternalComputationGraph g, TensorData x)
+        => Run(g, Session(g, KernelWorkaroundRegistry.OnnxRuntime), [x]).Single().SequenceEqual(Run(g,
+            FastOnnxModelBuilder.BuildInternalOnnxModel(g, prepForOnnx: true, inputDims: [x.Shape.Dims], workarounds: KernelWorkaroundRegistry.OnnxRuntime), [x]).Single());
 
     private static byte[][] Run(InternalComputationGraph g, ModelProto model, TensorData[] x)
         => [.. ComputeContext.Default.ExecuteModel(g, model, [.. x.Select(t => (IData)t.Shared())])
@@ -1005,5 +1032,32 @@ public partial class EmptyMatMulOfUnknownRankCheck
             & EmptyMatMul.Is(OnnxOp.MatMul(T([2L, 0L, 3L]).Transpose(0L, 2L, 1L), T([0L])), 2L, 3L)
             & EmptyMatMul.Is(OnnxOp.MatMul(T([0L]), T([0L])))
             & EmptyMatMul.Is(OnnxOp.MatMul(T([3L, 0L]), T([0L])), 3L);
+    }
+}
+
+[Module]
+public partial class ChainedWorkaroundsReadByAShapeCheck
+{
+    public static Tensor<bit> Inline(Tensor<float32> x)
+    {
+        var r = (Tensor<float32>)OnnxOp.Relu(x);
+        var pooled = (Tensor<float32>)OnnxOp.MaxPool(r, AutoPad.SameUpper, null, null, [1L, 1L], null, null, [2L, 2L]);
+        var strided = (Tensor<float32>)OnnxOp.Relu(OnnxOp.Slice(x, Vector(0L, 1L), Vector(5L, 6L), Vector(2L, 3L), Vector(2L, 2L)));
+        var counts = pooled.Cast<int64>();
+        var halves = pooled.Cast<float16>();
+        var kept = (Tensor<float32>)OnnxOp.Neg(pooled);
+        Tensor<bit> Regrouped(Variable v, long last)
+            => ((Tensor<float32>)OnnxOp.Reshape(x, OnnxOp.Concat([Vector(-1L), OnnxOp.Shape(v, start: 3L)], 0L), true) == x.Reshape(Vector(-1L, last))).Reshape(Vector(-1L));
+        return OnnxOp.Concat(
+        [
+            (pooled == strided).Reshape(Vector(-1L)),
+            (counts.Reduce(ReduceKind.Max, Vector(2L, 3L)) == strided.Reduce(ReduceKind.Max, Vector(2L, 3L)).Cast<int64>()).Reshape(Vector(-1L)),
+            (((Tensor<float16>)OnnxOp.ReduceSumSquare(halves, null, true, null)).Cast<float32>() == strided.Reduce(ReduceKind.SumSquare)).Reshape(Vector(-1L)),
+            (NN.Reduce(ReduceKind.Sum, kept, null, keepDims: true, noOp: true) == -strided).Reshape(Vector(-1L)),
+            Regrouped(r, 6L),
+            Regrouped(counts, 3L),
+            Regrouped(halves, 3L),
+            Regrouped(kept, 3L),
+        ], 0);
     }
 }

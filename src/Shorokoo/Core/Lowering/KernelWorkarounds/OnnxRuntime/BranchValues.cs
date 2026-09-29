@@ -11,7 +11,9 @@ using static OnnxOp;
 /// (Shorokoo/Shorokoo#455), and it computes a value when it builds the session wherever the value
 /// follows from constants and the shapes the model states. A branch value built from
 /// <see cref="Zero"/> follows from neither, so it is never such a constant, and it costs a few
-/// nodes on the side of the <c>If</c> that holds it alone.
+/// nodes on the side of the <c>If</c> that holds it alone. It also fails to build a session in
+/// which it has folded an <c>If</c> whose branches alone read a value outside it that a
+/// <c>Shape</c> it folds also reads (<see cref="Held"/>).
 /// </summary>
 internal static class BranchValues
 {
@@ -28,4 +30,16 @@ internal static class BranchValues
     /// <paramref name="source"/>: the same shape, which ONNX Runtime does not compute when it builds
     /// the session.</summary>
     public static Variable Unfolded(Variable shape, Variable source) => Add(shape, Zero(source));
+
+    /// <summary>
+    /// <paramref name="x"/> through a <c>Reshape</c> to its own shape, which ONNX Runtime computes
+    /// without a copy: the value an <c>If</c> and its condition read in place of
+    /// <paramref name="x"/>. When ONNX Runtime folds an <c>If</c>, the nodes of the branch it keeps
+    /// read <paramref name="x"/> without the graph recording it until that pass ends; folding a
+    /// later <c>Shape</c> of <paramref name="x"/> in the same pass then removes the node computing
+    /// <paramref name="x"/> where nothing else outside the <c>If</c> reads it, and the session fails
+    /// to build. The <c>Reshape</c> is such a reader, and the <c>If</c> and its condition are the
+    /// only readers of the value it gives.
+    /// </summary>
+    public static Variable Held(Variable x) => Reshape(x, Shape(x), allowZero: true);
 }

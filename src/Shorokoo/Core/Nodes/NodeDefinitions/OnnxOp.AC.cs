@@ -198,11 +198,10 @@ public static partial class OnnxOp
         => NodeBuilder.BuildNodeSingleOut(CUM_SUM, [x, axis], [(AttrExclusive, exclusive), (AttrReverse, reverse)]);
 
     /// <summary>Scaled dot-product attention returning only Y (ONNX Attention, opset 23+); no KV cache.
-    /// Not emittable today: Shorokoo exports a single opset-21 ONNX model, and a faithful lowering of
-    /// the fused op (causal/GQA/softcap/qk-output-mode variants, plus a proper non-fused autodiff rule)
-    /// is intricate enough to belong in core (deferred core work) — so this
-    /// throws rather than force a higher model opset. The ATTENTION op definition and QEE kernel are
-    /// retained.</summary>
+    /// Opset 21, the one opset Shorokoo writes, has no <c>Attention</c> node, and Shorokoo has no
+    /// lowering of it to opset-21 primitives (the causal/GQA/softcap/qk-output-mode variants with a
+    /// non-fused autodiff rule), so this entry point throws. Build attention from primitives
+    /// instead.</summary>
     public static Variable Attention(Variable q, Variable k, Variable v,
         Variable? attnMask = null, Variable? nonpadKvSeqlen = null,
         bool? isCausal = null, long? kvNumHeads = null, long? qNumHeads = null,
@@ -210,13 +209,12 @@ public static partial class OnnxOp
         long? softmaxPrecision = null)
         => throw new System.NotImplementedException(
             "Attention (ONNX opset 23) has no opset-21 equivalent, and Shorokoo emits a single " +
-            "opset-21 model. A faithful lowering plus a proper non-fused autodiff rule are deferred " +
-            "to the core project (build attention from primitives / a Transformer module).");
+            "opset-21 model. Build attention from primitives (or a Transformer module) instead.");
 
     /// <summary>Scaled dot-product attention with KV-cache update: returns (Y, present_key, present_value) (ONNX Attention, opset 23+).
-    /// Not emittable today for the same reason as <see cref="Attention"/> (single opset-21 export; the
-    /// KV-cache update and multi-output lowering belong in core), so this throws. The ATTENTION op
-    /// definition and QEE kernel are retained.</summary>
+    /// Opset 21 has no <c>Attention</c> node, and Shorokoo has no lowering of the KV-cache update and
+    /// its multiple outputs to opset-21 primitives, so this entry point throws, as
+    /// <see cref="Attention"/> does.</summary>
     public static (Variable y, Variable presentKey, Variable presentValue) AttentionWithKVCache(
         Variable q, Variable k, Variable v,
         Variable? attnMask = null, Variable? pastKey = null, Variable? pastValue = null,
@@ -225,24 +223,22 @@ public static partial class OnnxOp
         long? softmaxPrecision = null)
         => throw new System.NotImplementedException(
             "Attention with KV cache (ONNX opset 23) has no opset-21 equivalent, and Shorokoo emits a " +
-            "single opset-21 model. The KV-cache update and a proper non-fused autodiff rule are " +
-            "deferred to the core project.");
+            "single opset-21 model. Build attention and the cache update from primitives instead.");
 
     /// <summary>Reinterprets the tensor's bits as the same-width dtype <paramref name="to"/> (ONNX BitCast, opset 26+).
-    /// Not emittable today: Shorokoo exports a single opset-21 ONNX model, and a bit-pattern
-    /// reinterpretation has no opset-21 primitive equivalent, so this throws rather than force a
-    /// higher model opset. The BIT_CAST op definition and QEE kernel are retained.</summary>
+    /// Opset 21, the one opset Shorokoo writes, has no <c>BitCast</c> node, and no opset-21 primitive
+    /// reinterprets bit patterns, so this entry point throws.</summary>
     public static Variable BitCast(Variable input, DType to)
         => throw new System.NotImplementedException(
             "BitCast (ONNX opset 26) has no opset-21 primitive equivalent (no op reinterprets bit " +
             "patterns), and Shorokoo emits a single opset-21 model — it cannot be lowered.");
 
     /// <summary>Cumulative product along the axis given as a 0-D tensor input (ONNX CumProd, opset 26+).
-    /// Not emittable today: there is no opset-21 CumProd, and a faithful general decomposition needs a
-    /// Scan (multiply body) which is not yet implemented, so this throws rather than force a higher
-    /// model opset. The CUM_PROD op definition and QEE kernel are retained.</summary>
+    /// Opset 21, the one opset Shorokoo writes, has no <c>CumProd</c> node, and Shorokoo has no
+    /// decomposition of it to opset-21 primitives (a general one needs a Scan multiply body), so this
+    /// entry point throws.</summary>
     public static Variable CumProd(Variable x, Variable axis, bool exclusive = false, bool reverse = false)
         => throw new System.NotImplementedException(
             "CumProd (ONNX opset 26) has no opset-21 equivalent (a general decomposition needs a Scan " +
-            "multiply body, not yet implemented), and Shorokoo emits a single opset-21 model.");
+            "multiply body, which Shorokoo does not provide), and Shorokoo emits a single opset-21 model.");
 }

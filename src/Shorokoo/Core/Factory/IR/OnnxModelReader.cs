@@ -506,8 +506,7 @@ namespace Shorokoo.Core.Factory.IR
 
         // ---- FastCG-native loading path ----
         //
-        // The main graph is materialized directly as FastNodes (vs the legacy CG-then-wrap
-        // path used for FunctionProtos above). Walks the proto's GraphProto.Nodes in declared
+        // The main graph is materialized directly as FastNodes. Walks the proto's GraphProto.Nodes in declared
         // order — sub-graph attributes are recursed into positionally between the parent op's
         // OPEN and CLOSE TempNodes — and emits one FastNode per visited TempNode.
 

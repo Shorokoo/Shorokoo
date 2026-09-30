@@ -307,7 +307,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
             Op(BITWISE_NOT)
                 .Tensor<UnsignedIntLike>("T")
                 .Input("X", "T", "R") // X
-                .Output("Y", "T", "R") // same rank as X (used to be an unconstrained "R2")
+                .Output("Y", "T", "R") // same rank as X
                 .Code("!{1:low_op}"),
 
             Op(BITWISE_OR)
@@ -350,10 +350,6 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Tensor<AnyLike>("T2")
                 // .AttributeBool(AttrSaturate)
                 .AttributeDType(AttrTo, "T2")
-                // round_mode (ONNX opset 24) only affects float8e8m0 targets (unsupported
-                // dtype). Opset 21 does not define it, so import and emission refuse it
-                // (OnnxOpset).
-                .AttributeString(AttrRoundMode)
 
                 // .Constraint(AttrSaturate, 1)
                 .Input("input", "T1", "R")
@@ -369,9 +365,6 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Tensor<AnyLike>("T1")
                 .Tensor<AnyLike>("T2")
                 .AttributeBool(AttrSaturate)
-                // round_mode (ONNX opset 24, float8e8m0 only): refused by import and
-                // emission like Cast's (OnnxOpset).
-                .AttributeString(AttrRoundMode)
                 .Input("input", "T1", "R")
                 // target_type only contributes its dtype; its shape/rank is unrelated to
                 // the input's.

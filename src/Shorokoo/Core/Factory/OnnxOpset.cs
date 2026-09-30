@@ -15,12 +15,14 @@ namespace Shorokoo.Core.Factory
     /// <para>Shorokoo also defines a few operators and optional attributes ONNX introduced after
     /// that opset (<see cref="OperatorsIntroducedLater"/>, <see cref="AttributesIntroducedLater"/>).
     /// None of them is part of opset 21, so a node carrying one is malformed in an opset-21 model:
-    /// import refuses it, and so does the builder when one reaches emission. The builder never
-    /// gets that far with the operators the authoring surface builds — <c>Swish</c> and
-    /// <c>RMSNormalization</c> lower to opset-21 primitives at their <c>OnnxOp</c> entry points,
-    /// <c>TensorScatter</c> is decomposed by the builder's lowering pre-pass, and <c>Attention</c>,
-    /// <c>RotaryEmbedding</c>, <c>BitCast</c> and <c>CumProd</c> throw at theirs — so what the
-    /// emission check catches is a node stamped through the raw <c>NodeBuilder</c> surface.</para>
+    /// import refuses it. The node definitions declare none of the attributes, and
+    /// <c>NodeBuilder</c> refuses a node carrying one. The operators have definitions, and the
+    /// model builder refuses one that reaches emission. The authoring surface never gets it that
+    /// far — <c>Swish</c> and <c>RMSNormalization</c> lower to opset-21 primitives at their
+    /// <c>OnnxOp</c> entry points, <c>TensorScatter</c> is decomposed by the builder's lowering
+    /// pre-pass, and <c>Attention</c>, <c>RotaryEmbedding</c>, <c>BitCast</c> and <c>CumProd</c>
+    /// throw at theirs — so what the emission check catches is a node stamped through the raw
+    /// <c>NodeBuilder</c> surface.</para>
     /// </summary>
     internal static class OnnxOpset
     {
@@ -58,6 +60,7 @@ namespace Shorokoo.Core.Factory
 
         private const string ImportContext = "ONNX import";
         private const string BuildContext = "ONNX model build";
+        private const string NodeBuildContext = "node build";
 
         private static bool IsDefaultDomain(string? domain)
             => string.IsNullOrEmpty(domain) || domain == "ai.onnx";
@@ -92,40 +95,60 @@ namespace Shorokoo.Core.Factory
         }
 
         /// <summary>
-        /// Refuses an imported <paramref name="node"/> with <see cref="ErrorCodes.FW060"/> when it
-        /// is an operator, or carries an attribute, that opset <see cref="Version"/> does not define.
+        /// Refuses an imported default-domain <paramref name="node"/> with
+        /// <see cref="ErrorCodes.FW060"/> when it is an operator, or carries an attribute, that opset
+        /// <see cref="Version"/> does not define. A node in another domain is not an opset-21
+        /// operator, and is left to the reader.
         /// </summary>
         internal static void ThrowIfOutsideVersion(NodeProto node)
         {
-            if (Describe(node.OpType, node.Name, a => node.Attributes.Any(x => x.Name == a)) is { } reason)
+            if (!IsDefaultDomain(node.Domain)) return;
+            var reason = DescribeOperator(node.OpType, node.Name);
+            foreach (var attribute in node.Attributes)
+                reason ??= DescribeAttribute(node.OpType, node.Name, attribute.Name);
+            if (reason is not null)
                 throw new ModelException(ErrorCodes.FW060, ImportContext,
                     $"{reason} The model is malformed: Shorokoo reads ONNX opset {(int)Version} models only.");
         }
 
         /// <summary>
         /// Refuses <paramref name="node"/> with <see cref="ErrorCodes.FW060"/> when it reaches ONNX
-        /// emission as an operator, or carrying an attribute, that opset <see cref="Version"/> does
-        /// not define: Shorokoo writes that opset only, and nothing raises the stamp.
+        /// emission as an operator opset <see cref="Version"/> does not define: Shorokoo writes that
+        /// opset only.
         /// </summary>
         internal static void ThrowIfOutsideVersion(FastNode node)
         {
-            if (Describe(node.OpCode, node.FriendlyName,
-                    a => node.Attributes.IsAttributeDefined(a) && !node.Attributes.IsDefaultValue(a)) is { } reason)
+            if (DescribeOperator(node.OpCode, node.FriendlyName) is { } reason)
                 throw new ModelException(ErrorCodes.FW060, BuildContext,
                     $"{reason} Shorokoo writes ONNX opset {(int)Version} only, so the node has no form it " +
                     "can emit.");
         }
 
-        private static string? Describe(string opCode, string? nodeName, System.Func<string, bool> carries)
+        /// <summary>
+        /// Refuses building a <paramref name="opCode"/> node carrying <paramref name="attributeName"/>
+        /// with <see cref="ErrorCodes.FW060"/> when that is an attribute ONNX added after opset
+        /// <see cref="Version"/>, which the node definitions therefore do not declare.
+        /// </summary>
+        internal static void ThrowIfAttributeOutsideVersion(string opCode, string attributeName)
         {
-            if (OperatorsIntroducedLater.TryGetValue(opCode, out var since))
-                return $"node '{nodeName}' is a '{opCode}', an operator ONNX introduced at opset {(int)since}, " +
-                    $"which opset {(int)Version} does not define.";
-            foreach (var ((op, attribute), attrSince) in AttributesIntroducedLater)
-                if (op == opCode && carries(attribute))
-                    return $"node '{nodeName}' ('{opCode}') carries the '{attribute}' attribute, which ONNX " +
-                        $"added at opset {(int)attrSince} and opset {(int)Version} does not define.";
-            return null;
+            if (DescribeAttribute(opCode, null, attributeName) is { } reason)
+                throw new ModelException(ErrorCodes.FW060, NodeBuildContext,
+                    $"{reason} Shorokoo builds ONNX opset {(int)Version} nodes only.");
         }
+
+        private static string Label(string opCode, string? nodeName)
+            => string.IsNullOrEmpty(nodeName) ? $"'{opCode}'" : $"node '{nodeName}' ('{opCode}')";
+
+        private static string? DescribeOperator(string opCode, string? nodeName)
+            => OperatorsIntroducedLater.TryGetValue(opCode, out var since)
+                ? $"{Label(opCode, nodeName)} is an operator ONNX introduced at opset {(int)since}, " +
+                    $"which opset {(int)Version} does not define."
+                : null;
+
+        private static string? DescribeAttribute(string opCode, string? nodeName, string attribute)
+            => AttributesIntroducedLater.TryGetValue((opCode, attribute), out var since)
+                ? $"{Label(opCode, nodeName)} carries the '{attribute}' attribute, which ONNX added at " +
+                    $"opset {(int)since} and opset {(int)Version} does not define."
+                : null;
     }
 }

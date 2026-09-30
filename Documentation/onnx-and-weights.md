@@ -74,8 +74,8 @@ OnnxModelExporter.SaveWithExternalData(model, "model.onnx");
 graph. The model and each of its functions are stamped at ONNX opset 21, the one opset
 Shorokoo reads and writes; nothing raises the stamp. No post-21 operator is emitted from an
 authored graph: each either throws `NotImplementedException` or is lowered to opset-21
-primitives. A `NodeBuilder`-built node carrying a post-21 operator or attribute is refused
-with `FW060`, naming it. See [limitations.md](limitations.md#onnx-opset-21-only) and
+primitives. A `NodeBuilder`-built post-21 operator is refused with `FW060`, naming it, and
+`NodeBuilder` refuses to build a node carrying a post-21 attribute. See [limitations.md](limitations.md#onnx-opset-21-only) and
 [operator-support.md](operator-support.md) per operator.
 
 Each exported input stores its **representative shape** (the dims it was concretized
@@ -354,7 +354,10 @@ ComputationGraph landedShaped = Persistence.ImportOnnxToCheckpoint("foreign.onnx
 
 Vanilla ONNX drops module structure and hyper defaults, so export → import reproduces
 **outputs**, not structure. For a structural round-trip use `.skpt`
-(`Persistence.From` / `Persistence.Load`).
+(`Persistence.From` / `Persistence.Load`). One operator reloads in a different form: a
+`TensorScatter` node, which opset 21 does not define, is saved — and so reloaded — as its
+opset-21 decomposition, which computes the same values (see
+[ONNX opset 21 only](limitations.md#onnx-opset-21-only)).
 
 `ImportOnnx` fails loudly, naming op and file, on an op outside the vanilla dialect or
 an unknown domain, and naming the file on a truncated or garbage file. Two initializers

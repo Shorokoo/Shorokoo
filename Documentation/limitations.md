@@ -449,14 +449,15 @@ file:
 
 - `Swish` and `RMSNormalization` lower inline to opset-21 primitives.
 - `TensorScatter` is written as a `Concat` plus `GatherElements` (see
-  [operator-support.md](operator-support.md)), in an exported file and a saved `.srk` alike;
-  a reloaded graph computes the same values.
+  [operator-support.md](operator-support.md)), in an exported file and a saved `.srk` or
+  `.skpt` alike; a reloaded graph carries that decomposition in its place and computes the
+  same values.
 - `Attention`, `AttentionWithKVCache`, `RotaryEmbedding`, `BitCast` and `CumProd`
   throw `NotImplementedException` at their `OnnxOp` entry points.
 
-No `Ops`/`OnnxOp` entry point accepts the post-21 attributes either. A node built with the
-low-level `NodeBuilder` can carry a post-21 operator or attribute; writing it is refused with
-**FW060**, naming the node, rather than emitted.
+No node carries a post-21 attribute: the low-level `NodeBuilder` refuses to build one with
+**FW060**, naming the operator and the attribute. A node built with `NodeBuilder` can be a
+post-21 operator; writing it is refused with **FW060**, naming the node, rather than emitted.
 
 The opset 22–26 respecifications of the operators opset 21 defines only widen dtype lists
 (bfloat16, float4e2m1, float8e8m0, int2/uint2, all unsupported in Shorokoo; see below) besides

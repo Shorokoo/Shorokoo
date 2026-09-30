@@ -15,14 +15,13 @@ using Shorokoo.Onnx;
 namespace Shorokoo.Core.Factory
 {
     /// <summary>
-    /// Fast-CG counterpart of the legacy <c>Node.ForOpsetMany</c>. Decides
-    /// the opcode/domain/attributes used when emitting an ONNX <c>NodeProto</c> for a
+    /// Decides the opcode/domain/attributes used when emitting an ONNX <c>NodeProto</c> for a
     /// given <see cref="FastNode"/>. Pure: no <see cref="Variable"/> access,
     /// no tensor-info dictionary, no per-node side state — purely a function of the
     /// FastNode and its graph.
     ///
     /// <para>
-    /// Mirrors the four cases handled by the CG-side method:
+    /// Four cases:
     /// <list type="number">
     ///   <item>Open node → returns <c>null</c> (open nodes are not emitted as ONNX nodes).</item>
     ///   <item>Close node → opcode is the def's full name; the close node's <em>own</em>
@@ -50,7 +49,6 @@ namespace Shorokoo.Core.Factory
         {
             public readonly string OpCode;
             public readonly string Domain;
-            public readonly OpSetVersion Version;
             public readonly OnnxProtoAttributes Attributes;
             /// <summary>Flat list of input keys whose <see cref="FastTensorKey.ToString"/>
             /// becomes the NodeProto's input names. Null entries become empty strings.</summary>
@@ -60,7 +58,7 @@ namespace Shorokoo.Core.Factory
             public readonly string? IdentifierTemplateString;
             public readonly string? StackTrace;
 
-            public OpsetInfo(string opCode, string domain, OpSetVersion version,
+            public OpsetInfo(string opCode, string domain,
                 OnnxProtoAttributes attributes,
                 IReadOnlyList<FastTensorKey?> inputKeys,
                 IReadOnlyList<FastTensorKey?> outputKeys,
@@ -68,7 +66,6 @@ namespace Shorokoo.Core.Factory
             {
                 OpCode = opCode;
                 Domain = domain;
-                Version = version;
                 Attributes = attributes;
                 InputKeys = inputKeys;
                 OutputKeys = outputKeys;
@@ -132,7 +129,6 @@ namespace Shorokoo.Core.Factory
                 return new OpsetInfo(
                     opCode: nodeDef.FullNodeOpName,
                     domain: "",
-                    version: OnnxOpset.Version,
                     attributes: node.Attributes.ToProto(),
                     inputKeys: graphOpenNode.Inputs,
                     outputKeys: node.Outputs,
@@ -189,7 +185,6 @@ namespace Shorokoo.Core.Factory
             return new OpsetInfo(
                 opCode: opCode,
                 domain: domain,
-                version: OnnxOpset.Version,
                 attributes: attributes.ToProto(),
                 inputKeys: node.Inputs,
                 outputKeys: node.Outputs,

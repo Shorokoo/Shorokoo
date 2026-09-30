@@ -29,7 +29,7 @@ namespace Shorokoo.Core.Factory
     ///
     /// <para>
     /// All five pre-passes have Fast-side implementations, so the main pipeline
-    /// no longer round-trips through CG: the input graph is cloned, mutated by
+    /// stays on the Fast graph: the input graph is cloned, mutated by
     /// the Fast pre-passes (<see cref="FastLowerRandomOps"/>,
     /// <see cref="FastAddIdentityForOuterScopeValues"/>,
     /// <see cref="FastPrepForOnnx"/>, <see cref="FastStripCallStacks"/>,
@@ -1258,8 +1258,7 @@ namespace Shorokoo.Core.Factory
                 if (asArithmetic)
                 {
                     if (scaleMeta?.ProtoElemType != (int)TensorProto.DataType.Float
-                        || node.Attributes.Any(a => a.Name == OnnxOpAttributeNames.AttrBlockSize && a.I != 0
-                            || a.Name == OnnxOpAttributeNames.AttrOutputDtype && a.I != (int)TensorProto.DataType.Float))
+                        || node.Attributes.Any(a => a.Name == OnnxOpAttributeNames.AttrBlockSize && a.I != 0))
                         continue;
                     var lowered = new List<NodeProto>(14);
                     if (scaleDims is [1])
@@ -1486,11 +1485,22 @@ namespace Shorokoo.Core.Factory
         /// <para><c>TensorScatter</c> is the one entry: ONNX introduced it at opset 24 and
         /// opset 21 has no node for it, so a graph carrying one is written out — as an exported
         /// file, a session's model or a <c>.srk</c> payload — as the concat and gather its lowering
-        /// decomposes it into. The pass tests the list before it walks
-        /// anything, so a graph with no such node pays nothing beyond one scan.</para>
+        /// decomposes it into. A graph with no such node pays for two scans of its node list —
+        /// the pass's own test for a listed node, and the check that none survived — and
+        /// allocates nothing.</para>
         /// </summary>
         private static readonly ImmutableHashSet<string> DefaultExportLoweredOpCodes =
             ImmutableHashSet.Create(StringComparer.Ordinal, OpCodes.TENSOR_SCATTER);
+
+        /// <summary>
+        /// The part of <see cref="DefaultExportLoweredOpCodes"/> the persistence dialect lowers:
+        /// the operators opset 21 has no node for.
+        /// </summary>
+        private static readonly ImmutableHashSet<string> DefaultPersistenceLoweredOpCodes =
+            PersistenceSubset(DefaultExportLoweredOpCodes);
+
+        private static ImmutableHashSet<string> PersistenceSubset(IEnumerable<string> opCodes)
+            => opCodes.Where(OnnxOpset.OperatorsIntroducedLater.ContainsKey).ToImmutableHashSet(StringComparer.Ordinal);
 
         /// <summary>Thread-scoped substitute installed by <see cref="OverrideExportLoweredOpCodes"/>.</summary>
         [ThreadStatic]
@@ -1539,9 +1549,9 @@ namespace Shorokoo.Core.Factory
         /// </summary>
         private static void LowerForExport(InternalComputationGraph graph, bool keepAuthoredOps)
         {
-            IReadOnlySet<string> opCodes = keepAuthoredOps
-                ? ExportLoweredOpCodes.Where(OnnxOpset.OperatorsIntroducedLater.ContainsKey).ToHashSet()
-                : ExportLoweredOpCodes;
+            IReadOnlySet<string> opCodes = !keepAuthoredOps ? ExportLoweredOpCodes
+                : exportLoweredOpCodesOverride is { } overridden ? PersistenceSubset(overridden)
+                : DefaultPersistenceLoweredOpCodes;
             FastLowerRegisteredOps.Process(graph, opCodes);
 
             foreach (var node in graph.Nodes)

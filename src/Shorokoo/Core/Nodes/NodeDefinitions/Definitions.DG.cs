@@ -72,11 +72,6 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Tensor<FloatLike>("T2")
                 .AttributeLong(AttrAxis)
                 .AttributeLong(AttrBlockSize)
-                // output_dtype (ONNX opset 23): declared as a plain int; the QEE dtype rule
-                // honors it. Opset 21 does not define it, so import refuses it and so does
-                // emission (OnnxOpset). The def-level output group stays bound to x_scale
-                // (they only diverge for float8/4 dtypes, which Shorokoo does not support).
-                .AttributeLong(AttrOutputDtype)
 
                 .ConstraintIsSet(AttrBlockSize, true)
                 .Input("x", "T1", "R") // x
@@ -332,8 +327,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Input("grid", "T2", "R2")
                 .InputTestShapes("X", [[1, 3, 4, 5], [1, 3, 5, 5]])
                 .InputTestShapes("grid", [[1, 4, 5, 2], [1, 5, 5, 2]])
-                // Y is [N, C, *grid spatial dims] — same rank as X (and as grid). Used to be
-                // declared rankMinusOne of the grid's rank, i.e. one too low.
+                // Y is [N, C, *grid spatial dims] — same rank as X (and as grid).
                 .Output("Y", "T1", "R")
                 .Code("NN.GridSample({1:param}{2:param}{b:param}{c:param}{a:param})"),
 

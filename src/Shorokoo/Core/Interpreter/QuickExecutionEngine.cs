@@ -359,8 +359,7 @@ public sealed class QuickExecutionEngine
 
     /// <summary>
     /// InternalComputationGraph placeholder writer for ops that couldn't run: the tensors we produce
-    /// have no known dtype or rank (this info used to come from the graph's TensorInfos side
-    /// dictionary, but QEE no longer reads from it). Downstream ops that tolerate invalid
+    /// have no known dtype or rank. Downstream ops that tolerate invalid
     /// dtype/shape inputs will keep progressing; those that don't will fall back into this same
     /// placeholder path.
     /// </summary>

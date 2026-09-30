@@ -29,6 +29,12 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// results nothing outside the branch can observe, so moving it changes only whether it
     /// runs.</para>
     ///
+    /// <para>One reader outside the branch still leaves a value to it: another <c>IF</c> on the
+    /// same condition that reads it on the same side, and so runs only when the branch does. The
+    /// value is then handed out of its <c>IF</c> as a further output, which that reader reads
+    /// instead, against a placeholder from the other branch that no reader sees (see
+    /// <see cref="CollectExports"/>).</para>
+    ///
     /// <para>Nesting is handled by treating a whole <c>OPEN</c>…<c>CLOSE</c> band as one unit: a
     /// loop used by one branch moves with its body intact, and the pass then recurses into every
     /// scope it has settled, so a branch inside a branch is scoped in turn. Since only siblings
@@ -53,7 +59,15 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             if (!ctx.HasIf) return;
 
             var inputs = graph.Inputs;
-            graph.Nodes = SinkLevel(graph.Nodes, ctx);
+            List<FastNode> scoped;
+            while (true)
+            {
+                var exports = new List<Export>();
+                scoped = SinkLevel(graph.Nodes, ctx, exports);
+                if (exports.Count == 0 || !ApplyExports(graph, exports)) break;
+                ctx = new Context(graph);
+            }
+            graph.Nodes = scoped;
             graph.SetInputs(inputs);
             graph.MoveOutputsToEnd();
 
@@ -68,10 +82,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// <para>A backward pass reads the forward's intermediates, and cannot read one the
         /// forward computes only on a branch it may not take. Autograd therefore flattens the
         /// branches first and emits at module scope; the simplify that follows it scopes what is
-        /// left, now with the gradient nodes among the consumers, so a value the backward reads
-        /// stays out and the rest goes back in (Shorokoo/Shorokoo#312). Scoping before the
-        /// backward exists instead moved those values inside and then read them from outside,
-        /// which is not a graph.</para>
+        /// left, now with the gradient nodes among the consumers (Shorokoo/Shorokoo#312). A value
+        /// the backward reads only from the branch of a gate on the same condition goes back in
+        /// and is handed out of the <c>IF</c> to it; one the backward reads anywhere else stays
+        /// out. Scoping before the backward exists would move those values inside and then read
+        /// them from outside, which is not a graph.</para>
         /// </summary>
         public static void UnscopeAllIfBranches(InternalComputationGraph graph)
         {
@@ -176,7 +191,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// Scopes every <c>IF</c> directly inside <paramref name="level"/> (the whole graph, or one
         /// scope's body), then recurses into each scope the result contains.
         /// </summary>
-        private static List<FastNode> SinkLevel(List<FastNode> level, Context ctx)
+        private static List<FastNode> SinkLevel(List<FastNode> level, Context ctx, List<Export> exports)
         {
             var blocks = SplitIntoBlocks(level);
 
@@ -197,12 +212,19 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     if (!claim.ContainsKey(c)) claim[c] = (b, false);
             }
 
+            for (int b = 0; b < blocks.Count; b++)
+            {
+                if (!blocks[b].IsIf) continue;
+                CollectExports(blocks, b, blockOfNode, claim, isThen: true, ctx, exports);
+                CollectExports(blocks, b, blockOfNode, claim, isThen: false, ctx, exports);
+            }
+
             var moved = new List<FastNode>(level.Count);
             for (int b = 0; b < blocks.Count; b++)
                 if (!claim.ContainsKey(b))
                     Assemble(b, blocks, claim, moved);
 
-            return DescendIntoScopes(moved, ctx);
+            return DescendIntoScopes(moved, ctx, exports);
         }
 
         /// <summary>
@@ -237,14 +259,14 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         }
 
         /// <summary>Re-runs the pass one level down, inside every scope of <paramref name="level"/>.</summary>
-        private static List<FastNode> DescendIntoScopes(List<FastNode> level, Context ctx)
+        private static List<FastNode> DescendIntoScopes(List<FastNode> level, Context ctx, List<Export> exports)
         {
             var result = new List<FastNode>(level.Count);
             foreach (var blk in SplitIntoBlocks(level))
             {
                 if (!blk.IsScope) { result.AddRange(blk.Nodes); continue; }
                 result.Add(blk.Nodes[0]);
-                result.AddRange(SinkLevel(blk.Nodes.GetRange(1, blk.Nodes.Count - 2), ctx));
+                result.AddRange(SinkLevel(blk.Nodes.GetRange(1, blk.Nodes.Count - 2), ctx, exports));
                 result.Add(blk.Nodes[^1]);
             }
             return result;
@@ -372,6 +394,179 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             foreach (var nk in block.Keys)
                 if (ctx.Pinned.Contains(nk)) return false;
             return true;
+        }
+
+        /// <summary>A branch value to hand out of its <c>IF</c> as one more output, and the
+        /// readers to hand it to.</summary>
+        private sealed record Export(FastNode IfOpen, FastNode IfClose, bool IsThen, FastTensorKey Value,
+                                    List<FastNodeKey> Readers);
+
+        /// <summary>
+        /// The values of one branch that only another <c>IF</c> on the same condition, and on the
+        /// same side of it, reads from outside the branch.
+        ///
+        /// <para>Such a reader runs only when this branch does, yet it keeps the value, and
+        /// everything the value is computed from, out of the branch: the cone above admits a value
+        /// only when nothing outside it reads it. So they would run on every execution, and fail
+        /// on what is valid only on the branch's own path. The backward of an <c>IfElse</c> arm is
+        /// the case in point: it reads the arm's intermediates, and sits in the branch of the
+        /// gate that hands its gradient out, on the arm's own condition.</para>
+        ///
+        /// <para>Handing the value out of its branch as a further output of the <c>IF</c> lets the
+        /// branch keep it, since its reader then reads the <c>IF</c>. The other branch hands out a
+        /// placeholder in its place, which no reader ever sees: each one sits in a branch taken
+        /// only when this one is.</para>
+        /// </summary>
+        private static void CollectExports(
+            List<Block> blocks, int ifIdx, Dictionary<FastNodeKey, int> blockOfNode,
+            Dictionary<int, (int IfIdx, bool IsThen)> claim, bool isThen, Context ctx, List<Export> exports)
+        {
+            var ifBlock = blocks[ifIdx];
+            var ifOpen = ifBlock.Nodes[0];
+            var ifClose = ifBlock.Nodes[^1];
+            if (ConditionOf(ifOpen) is not FastTensorKey condition) return;
+
+            var mine = ReachedBlocks(ifClose, BranchAttr(isThen), ifIdx, blockOfNode, ctx);
+            var other = ReachedBlocks(ifClose, BranchAttr(!isThen), ifIdx, blockOfNode, ctx);
+
+            var kept = new HashSet<int>();
+            foreach (var b in mine)
+                if (!other.Contains(b) && IsMovable(blocks[b], ctx)
+                    && (!claim.TryGetValue(b, out var cl) || cl == (ifIdx, isThen)))
+                    kept.Add(b);
+
+            bool SameSide(int b) => blocks[b].IsIf && b > ifIdx && ConditionOf(blocks[b].Nodes[0]) == condition;
+
+            bool ReadOnlyWhenTaken(FastNode producer, FastNodeKey reader, int readerBlock)
+            {
+                if (readerBlock <= ifIdx) return false;
+                if (SameSide(readerBlock) && blocks[readerBlock].Nodes[^1].Key == reader
+                    && ReadOnlyOnSide(blocks[readerBlock].Nodes[^1], producer, isThen))
+                    return true;
+                for (int b = readerBlock; claim.TryGetValue(b, out var cl); b = cl.IfIdx)
+                    if (cl.IsThen == isThen && SameSide(cl.IfIdx))
+                        return true;
+                return false;
+            }
+
+            // Each value either stays with the branch or is read from where the branch is taken.
+            bool changed = true;
+            while (changed)
+            {
+                changed = false;
+                foreach (var b in kept.ToList())
+                {
+                    foreach (var producer in blocks[b].Nodes)
+                    {
+                        if (!ctx.ConsumersOf.TryGetValue(producer.Key, out var consumers)) continue;
+                        foreach (var c in consumers)
+                        {
+                            if (c == ifOpen.Key) goto drop;
+                            if (ifBlock.Keys.Contains(c)) continue;
+                            if (!blockOfNode.TryGetValue(c, out var cb)) goto drop;
+                            if (kept.Contains(cb) || ReadOnlyWhenTaken(producer, c, cb)) continue;
+                            goto drop;
+                        }
+                    }
+                    continue;
+                drop:
+                    kept.Remove(b);
+                    changed = true;
+                }
+            }
+
+            foreach (var b in kept)
+                foreach (var node in blocks[b].Nodes)
+                {
+                    if (!ctx.ConsumersOf.TryGetValue(node.Key, out var consumers)) continue;
+                    foreach (var grp in node.FullOutputs)
+                        foreach (var key in grp.Value)
+                        {
+                            if (key is not FastTensorKey value || value.IsEmpty) continue;
+                            var readers = new List<FastNodeKey>();
+                            foreach (var c in consumers)
+                                if (!ifBlock.Keys.Contains(c) && blockOfNode.TryGetValue(c, out var cb)
+                                    && !kept.Contains(cb) && Reads(ctx.NodeByKey[c], value))
+                                    readers.Add(c);
+                            if (readers.Count > 0)
+                                exports.Add(new Export(ifOpen, ifClose, isThen, value, readers));
+                        }
+                }
+        }
+
+        private static FastTensorKey? ConditionOf(FastNode ifOpen)
+            => ifOpen.Inputs.Count > 0 ? ifOpen.Inputs[0] : null;
+
+        /// <summary>Whether <paramref name="close"/> reads what <paramref name="producer"/> makes
+        /// only as a value of the given branch.</summary>
+        private static bool ReadOnlyOnSide(FastNode close, FastNode producer, bool isThen)
+        {
+            foreach (var grp in close.FullInputs)
+            {
+                if (grp.Key == BranchAttr(isThen)) continue;
+                foreach (var k in grp.Value)
+                    if (k is FastTensorKey tk && tk.FastNodeKey == producer.Key) return false;
+            }
+            return true;
+        }
+
+        private static bool Reads(FastNode node, FastTensorKey key)
+        {
+            foreach (var grp in node.FullInputs)
+                foreach (var k in grp.Value)
+                    if (k == key) return true;
+            return false;
+        }
+
+        /// <summary>
+        /// Hands each export's value out of its <c>IF</c> and rewires its readers to that output,
+        /// against a placeholder of the value's dtype from the other branch: an empty tensor of the
+        /// value's rank (of rank one where the rank is not known; an <c>If</c> may hand out
+        /// values of different shapes from its two branches), or a zero where the value is a
+        /// scalar. A value that is not a tensor of a known dtype stays where it is. Whether any
+        /// export was applied.
+        /// </summary>
+        private static bool ApplyExports(InternalComputationGraph graph, List<Export> exports)
+        {
+            var tensorInfo = FastTensorInfoProcessor.BuildTensorInfoLookup(graph);
+            var nodeByKey = new Dictionary<FastNodeKey, FastNode>();
+            foreach (var n in graph.Nodes) nodeByKey[n.Key] = n;
+
+            bool applied = false;
+            foreach (var export in exports)
+            {
+                if (Placeholder(tensorInfo, export.Value) is not TensorAttribute placeholder) continue;
+
+                var constant = FastInternalOp.Constant(placeholder);
+                graph.Nodes.Insert(graph.Nodes.IndexOf(export.IfOpen), constant);
+                var placeholderKey = new FastTensorKey(constant.Key, 0);
+
+                var close = export.IfClose;
+                var outputs = close.FullOutputs[""];
+                var handedOut = new FastTensorKey(close.Key, outputs.Count);
+                outputs.Add(handedOut);
+                close.FullInputs[BranchAttr(export.IsThen)].Add(export.Value);
+                close.FullInputs[BranchAttr(!export.IsThen)].Add(placeholderKey);
+
+                foreach (var reader in export.Readers)
+                    foreach (var grp in nodeByKey[reader].FullInputs)
+                        for (int i = 0; i < grp.Value.Count; i++)
+                            if (grp.Value[i] == export.Value) grp.Value[i] = handedOut;
+                applied = true;
+            }
+            return applied;
+        }
+
+        private static TensorAttribute? Placeholder(Dictionary<FastTensorKey, FastTensorInfo> tensorInfo, FastTensorKey key)
+        {
+            if (!tensorInfo.TryGetValue(key, out var info) || info.Structure != DataStructure.Tensor
+                || info.DType == DType.Invalid)
+                return null;
+            var dtype = info.DType.ToNonGenericType();
+            var rank = info.Rank ?? 1;
+            if (rank > 0) return TensorAttribute.Create(new Shape(new long[rank]), dtype, []);
+            int bits = TensorData.StorageBits(dtype);
+            return bits == 0 ? null : TensorAttribute.Create(new Shape(), dtype, new byte[(bits + 7) / 8]);
         }
     }
 }

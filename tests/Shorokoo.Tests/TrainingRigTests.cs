@@ -2502,7 +2502,11 @@ public class TrainingRigTrainingLoopCoverageTests
 
     [Fact]
     public void TestAGatherInAnUntakenIfElseArmTrainsWhenTheBackwardReadsItsResult()
-        => Assert.Equal(2.5f, LossAfterOneStep(GainGatheredAndSquaredInAnUntakenIfElseArmModel.ComputationGraph), 1e-4f);
+    {
+        Assert.Equal(2.5f, LossAfterOneStep(GainGatheredAndSquaredInAnUntakenIfElseArmModel.ComputationGraph), 1e-4f);
+        Assert.Equal(2.5f, LossAfterOneStep(GainGatheredAndSquaredInAnUntakenElseArmModel.ComputationGraph), 1e-4f);
+        Assert.Equal(2.5f, LossAfterOneStep(GainGatheredAndSquaredInANestedUntakenIfElseArmModel.ComputationGraph), 1e-4f);
+    }
 
     private static float[] TrainedParams(ComputationGraph modelGraph, bool cond, params float[] xs)
     {
@@ -2526,6 +2530,13 @@ public class TrainingRigTrainingLoopCoverageTests
         Assert.Equal<float>([0.9f, -0.6f], TrainedParams(SqrtInOneIfArmModel.ComputationGraph, false, -1f, -4f));
         Assert.Equal<float>([0.9f, -0.6f], TrainedParams(SqrtInOneIfArmModel.ComputationGraph, false, 1f, 4f));
         Assert.Equal<float>([0.95f, 0.8f], TrainedParams(SqrtInOneIfArmModel.ComputationGraph, true, 1f, 4f));
+    }
+
+    [Fact]
+    public void TestAnIfElseArmWhoseBackwardReadsItsIntermediatesTrainsOnWhatItsForwardComputed()
+    {
+        Assert.Equal<float>([1f, -5.4f], TrainedParams(GatherSquaredInOneIfArmModel.ComputationGraph, true, 1f, 2f));
+        Assert.Equal<float>([0.9f, 0.6f], TrainedParams(GatherSquaredInOneIfArmModel.ComputationGraph, false, 1f, 2f));
     }
 
     private static TrainingRig OptionalBiasRig(OptionalTensorData bias, TensorData x)

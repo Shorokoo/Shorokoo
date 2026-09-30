@@ -1525,3 +1525,43 @@ public partial class GainGatheredAndSquaredInAnUntakenIfElseArmModel
         return (t.Reduce(ReduceKind.Max, keepDims: false).Scalar() > Scalar(100f)).IfElse(picked * picked, y);
     }
 }
+
+/// <summary><see cref="GainGatheredAndSquaredInAnUntakenIfElseArmModel"/> with the gathering arm
+/// on the else side.</summary>
+[Module]
+public partial class GainGatheredAndSquaredInAnUntakenElseArmModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var y = t * Ones.Init([Scalar(2L)]);
+        var picked = (Tensor<float32>)OnnxOp.Gather(y, Vector(5L, 5L), axis: 0);
+        return (t.Reduce(ReduceKind.Max, keepDims: false).Scalar() <= Scalar(100f)).IfElse(y, picked * picked);
+    }
+}
+
+/// <summary>A gain gathered at indices valid only for longer inputs and then squared, in the taken
+/// arm of an <c>IfElse</c> nested in the untaken arm of another.</summary>
+[Module]
+public partial class GainGatheredAndSquaredInANestedUntakenIfElseArmModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var y = t * Ones.Init([Scalar(2L)]);
+        var max = t.Reduce(ReduceKind.Max, keepDims: false).Scalar();
+        var picked = (Tensor<float32>)OnnxOp.Gather(y, Vector(5L, 5L), axis: 0);
+        return (max > Scalar(100f)).IfElse((max > Scalar(1f)).IfElse(picked * picked, y * Scalar(3f)), y);
+    }
+}
+
+/// <summary>A gain gathered at a valid index and squared in one arm of an <c>IfElse</c> on an
+/// input condition, so the arm's backward reads the gathered value.</summary>
+[Module]
+public partial class GatherSquaredInOneIfArmModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t, Scalar<bit> cond)
+    {
+        var y = t * Ones.Init([Scalar(2L)]);
+        var picked = (Tensor<float32>)OnnxOp.Gather(y, Vector(1L, 1L), axis: 0);
+        return cond.IfElse(picked * picked, y);
+    }
+}

@@ -52,12 +52,12 @@ namespace Shorokoo
         /// <summary>The global step counter the step ran at.</summary>
         public long Step => Entry.Step;
 
-        /// <summary>The epoch the step ran at, or <c>null</c> where the run has no data position
-        /// (see <see cref="TrainingCheckpoint.Epoch"/>).</summary>
+        /// <summary>The epoch of the batch the step trained on (see
+        /// <see cref="TrainingCheckpoint.Epoch"/>).</summary>
         public long? Epoch => Entry.Epoch;
 
-        /// <summary>The batch index the step ran at, or <c>null</c> where the run has no data
-        /// position.</summary>
+        /// <summary>The index of the batch the step trained on within its epoch: for the array forms
+        /// of <c>Fit</c> / <c>Train</c>, its index in the arrays.</summary>
         public long? BatchIndex => Entry.BatchIndex;
 
         /// <summary>The step's loss.</summary>

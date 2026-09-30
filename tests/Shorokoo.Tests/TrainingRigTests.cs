@@ -3050,6 +3050,17 @@ public class TrainingRigTrainingLoopCoverageTests
         Assert.Equal(TrainingStopReason.Completed, Stopped(8, cancel: false).StopReason);
         Assert.Equal(TrainingStopReason.Completed, rig.Fit([inputs], [targets], 2, onStep: r => { if (r.Step == 1) r.RequestStop(); }).StopReason);
         Assert.Equal([2, 1], [Stopped(5, cancel: false).EpochLosses.Length, Stopped(3, cancel: false).EpochLosses.Length]);
+        Assert.All((int[])[1, 4, 5, 7], steps => Assert.Equal(expected,
+            FlattenStruct(rig.FitUntilEpoch(Loader(), 2, Stopped(steps, cancel: false).FinalCheckpoint).FinalCheckpoint.TrainableParams)));
+        TensorDataStruct[] xs = [.. ((int[])[2, 4, 6]).Select(n => IndexDataset(rig, n, features: 1).inputs)];
+        TensorDataStruct[] ys = [.. ((int[])[2, 4, 6]).Select(n => IndexDataset(rig, n, features: 1).targets)];
+        var whole = rig.Fit(xs, ys, 2).FinalCheckpoint;
+        Assert.Equal((1L, 2L), (whole.Epoch, whole.BatchIndex));
+        Assert.All((int[])[1, 3, 4, 5], steps => Assert.Equal(FlattenStruct(whole.TrainableParams), FlattenStruct(rig.Fit(xs, ys, 2 - steps / 3,
+            rig.Fit(xs, ys, 2, onStep: r => { if (r.Step == steps - 1) r.RequestStop(); }).FinalCheckpoint).FinalCheckpoint.TrainableParams)));
+        var finished = rig.FitUntilEpoch(Loader(), 2, reference);
+        Assert.Equal((TrainingStopReason.Completed, 0), (finished.StopReason, finished.EpochLosses.Length));
+        Assert.Same(reference, finished.FinalCheckpoint);
     }
 
     [Fact]

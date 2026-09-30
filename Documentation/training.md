@@ -583,14 +583,17 @@ leave nothing whole to return, while the state between two steps always is.
     `TakeCheckpoint` above), to save it or evaluate it while the run goes on.
   - A report is valid only during its callback; acting on a kept one throws.
 - **The result** is the state after the last step taken, whatever ended the run, with its data
-  position. For `Fit(loader)`, passing it back resumes at the next batch exactly as a completed
-  run's would; count `numEpochs` from the resume epoch as usual (see
-  [Feeding data](#feeding-data-the-data-loader)). The array forms carry no data position.
+  position. Passing it back resumes at the next batch exactly as a completed run's would, for the
+  loader and the array forms alike; `numEpochs` counts from the resume epoch (see
+  [Feeding data](#feeding-data-the-data-loader)). To finish a stopped run at the end it was started
+  with, call `rig.FitUntilEpoch(loader, untilEpoch, checkpoint)` instead: it trains until the loader
+  reaches `untilEpoch`, counted from the start of training, so a restarted host makes the same call
+  every time, and one whose checkpoint already got there trains nothing.
   `EpochLosses` covers the epochs the run trained in, a partial one averaged over its steps.
 
 ```csharp
 // A BackgroundService, or SIGTERM on a spot instance: stop cleanly and keep the progress.
-var result = rig.Fit(loader, numEpochs: 10, resumeFrom,
+var result = rig.FitUntilEpoch(loader, untilEpoch: 10, resumeFrom,
     onStep: r =>
     {
         if (r.Step % 1_000 == 999) r.TakeCheckpoint().Save($"ckpt-{r.Step}.safetensors");
@@ -966,9 +969,11 @@ positionally and throws on a count mismatch; for many same-shaped fields,
   new process, rebuild the rig and a loader over the same data/seed and call
   `rig.Fit(loader, numEpochs, initialCheckpoint: loaded)`: `Fit` calls `RestoreAfter`, so training
   resumes at the next batch. A position-unknown checkpoint starts at `(0, 0)` via `RestoreFrom`.
-  `numEpochs` counts from the resume epoch (a mid-epoch checkpoint first finishes that epoch; one saved at an epoch's last batch begins
-  the next). For
-  an external data pipeline, keep its position in the checkpoint's host user-data bag.
+  `numEpochs` counts from the resume epoch (a mid-epoch checkpoint first finishes that epoch; one
+  saved at an epoch's last batch begins the next); `rig.FitUntilEpoch(loader, untilEpoch, loaded)`
+  trains to an epoch counted from the start instead. The array forms of `Fit` / `Train` stamp and
+  resume the same way, batch `i` of the array being batch index `i`. For an external data
+  pipeline, keep its position in the checkpoint's host user-data bag.
 
 ### The training history
 

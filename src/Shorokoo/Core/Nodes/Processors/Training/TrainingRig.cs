@@ -3702,6 +3702,11 @@ namespace Shorokoo
         /// Runs a full training loop over the training data for the specified number of epochs.
         /// Each element in the input/output arrays represents one training step (typically a pre-batched batch).
         ///
+        /// <para>Batch <c>i</c> of an epoch is at batch index <c>i</c>: each step's epoch and batch
+        /// index feed the scheduler and are stamped on the state it produces, as a loader's are. A
+        /// checkpoint with a position resumes one batch past it, and <paramref name="numEpochs"/>
+        /// counts from the epoch it resumes in.</para>
+        ///
         /// <para>The arrays are a dataset, fed once per epoch, so every step <b>reads</b> its batch —
         /// as if it were passed <c>.Shared()</c> — and the batches are all alive and unchanged when
         /// this returns. Each step lets go of the copies it made to read its batch, so the dataset is
@@ -3755,30 +3760,45 @@ namespace Shorokoo
             // resident run: the state stays where the provider produced it, and the checkpoint
             // returned is the last step's state where it is -- on a GPU, the training device's
             // memory -- taken without a copy (Shorokoo/Shorokoo#325).
+            // Resume: a checkpoint's epoch / batch names the batch that was USED, so the run begins
+            // one past it, rolling over to the next epoch after an epoch's last batch, and counts its
+            // epochs from there as Fit(loader) does. One with no position begins at (0, 0).
+            long startEpoch = 0;
+            int startBatch = 0;
+            if (initialCheckpoint.Epoch is long usedEpoch && initialCheckpoint.BatchIndex is long usedBatch)
+            {
+                bool epochDone = usedBatch + 1 >= trainingInputs.Length;
+                startEpoch = epochDone ? usedEpoch + 1 : usedEpoch;
+                startBatch = epochDone ? 0 : (int)(usedBatch + 1);
+            }
+            long lastEpoch = startEpoch + numEpochs - 1;
+
             using var run = BeginResidentRun(initialCheckpoint);
             var epochLosses = new List<float>(numEpochs);
             var stop = TrainingStopReason.Completed;
             long began = System.Diagnostics.Stopwatch.GetTimestamp();
 
-            for (int epoch = 0; epoch < numEpochs && stop == TrainingStopReason.Completed; epoch++)
+            for (long epoch = startEpoch; epoch <= lastEpoch && stop == TrainingStopReason.Completed; epoch++)
             {
                 // Once per epoch as well as per step, so a run with no batches reads it too.
                 if (cancellationToken.IsCancellationRequested) { stop = TrainingStopReason.Cancelled; break; }
                 float epochLoss = 0;
                 int steps = 0;
 
-                for (int i = 0; i < trainingInputs.Length; i++)
+                for (int i = epoch == startEpoch ? startBatch : 0; i < trainingInputs.Length; i++)
                 {
                     // Checked before the step, never during it: the state between two steps is
                     // whole, and a step abandoned part-way would have consumed what it trained from.
                     if (cancellationToken.IsCancellationRequested) { stop = TrainingStopReason.Cancelled; break; }
-                    // Read, not consumed: the same batch is fed again next epoch.
-                    epochLoss += run.Step(trainingInputs[i].Shared(), trainingOutputs[i].Shared());
+                    // Read, not consumed: the same batch is fed again next epoch. Its position feeds
+                    // the scheduler and is stamped on the state the step produces.
+                    epochLoss += run.Step(new DataBatch(trainingInputs[i].Shared(), trainingOutputs[i].Shared(),
+                        new DataLoaderPosition(epoch, i)));
                     steps++;
                     // A stop asked for on the last step ends nothing early: the run is complete.
                     if (Reported(run, onStep, began))
                     {
-                        if (epoch < numEpochs - 1 || i < trainingInputs.Length - 1) stop = TrainingStopReason.StopRequested;
+                        if (epoch < lastEpoch || i < trainingInputs.Length - 1) stop = TrainingStopReason.StopRequested;
                         break;
                     }
                 }
@@ -3897,13 +3917,50 @@ namespace Shorokoo
         {
             if (loader is null) throw new ArgumentNullException(nameof(loader));
             if (numEpochs < 1) throw new ArgumentException("Number of epochs must be at least 1.", nameof(numEpochs));
+            return FitLoader(loader, startEpoch => startEpoch + numEpochs, initialCheckpoint, onStep, cancellationToken);
+        }
 
+        /// <summary>
+        /// <see cref="Fit(IDataLoader, int, TrainingCheckpoint?, Action{TrainingStepReport}?, CancellationToken)"/>
+        /// to a fixed end: trains until the loader reaches epoch <paramref name="untilEpoch"/>, counted
+        /// from the start of training rather than from where <paramref name="initialCheckpoint"/>
+        /// resumes. A run stopped part-way is finished by passing its checkpoint back with the same
+        /// <paramref name="untilEpoch"/> — the one call a host restarted after a preemption makes
+        /// every time. One whose checkpoint already reached that epoch trains nothing and returns it
+        /// as it is, <see cref="TrainingStopReason.Completed"/>.
+        /// </summary>
+        /// <param name="loader">The data loader owning the (input, target) batch stream and its position.</param>
+        /// <param name="untilEpoch">The epoch to train up to: the run ends once every batch of epochs
+        /// <c>0</c> to <c>untilEpoch - 1</c> has been trained.</param>
+        /// <param name="initialCheckpoint">State to resume from, as for <c>Fit</c>.</param>
+        /// <param name="onStep">Called after every step, as for <c>Fit</c>.</param>
+        /// <param name="cancellationToken">Stops the run between two steps, as for <c>Fit</c>.</param>
+        /// <returns>Final checkpoint, the per-epoch mean losses and why the run ended.</returns>
+        public TrainingResult FitUntilEpoch(
+            IDataLoader loader,
+            long untilEpoch,
+            TrainingCheckpoint? initialCheckpoint = null,
+            Action<TrainingStepReport>? onStep = null,
+            CancellationToken cancellationToken = default)
+        {
+            if (loader is null) throw new ArgumentNullException(nameof(loader));
+            if (untilEpoch < 1) throw new ArgumentException("The epoch to train until must be at least 1.", nameof(untilEpoch));
+            return FitLoader(loader, _ => untilEpoch, initialCheckpoint, onStep, cancellationToken);
+        }
+
+        private TrainingResult FitLoader(
+            IDataLoader loader,
+            Func<long, long> targetEpochFrom,
+            TrainingCheckpoint? initialCheckpoint,
+            Action<TrainingStepReport>? onStep,
+            CancellationToken cancellationToken)
+        {
             var checkpoint = initialCheckpoint ?? CreateInitialCheckpoint();
 
             // Resume: point the loader at the next batch to train. A checkpoint's epoch / batch names
             // the batch that was USED, so a resuming run advances one past it via RestoreAfter (the loader
             // does the epoch rollover). A fresh checkpoint — or one whose epoch / batch is unknown (null),
-            // e.g. trained without a loader — starts at (epoch 0, batch 0) via RestoreFrom.
+            // e.g. from plain TrainStep calls — starts at (epoch 0, batch 0) via RestoreFrom.
             if (checkpoint.Epoch is long ckptEpoch && checkpoint.BatchIndex is long ckptBatch)
                 loader.RestoreAfter(new DataLoaderPosition(ckptEpoch, ckptBatch));
             else
@@ -3913,9 +3970,9 @@ namespace Shorokoo
             // compiled once via RuntimeContext).
             // Count epochs from the loader's live resume position (always concrete), not the checkpoint's
             // recorded "batch used" — resuming a full epoch's last batch lands the loader at the next
-            // epoch's start, and numEpochs is added to THAT.
+            // epoch's start, and a relative epoch count is added to THAT.
             long startEpoch = loader.Position.Epoch;
-            long targetEpoch = startEpoch + numEpochs;
+            long targetEpoch = targetEpochFrom(startEpoch);
 
             var epochLosses = new List<float>();
             long runningEpoch = startEpoch;

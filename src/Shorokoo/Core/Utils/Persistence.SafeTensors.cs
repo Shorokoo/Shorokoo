@@ -329,11 +329,6 @@ namespace Shorokoo
                     if (node.OpCode == InternalOpCodes.MODEL_PARAM_DATA && node.IdentifierTemplate is { } id
                         && node.GetTensorAttribute() is { } attribute && onCard.TryGetValue(attribute, out var tensor))
                         supplied[id] = tensor;
-                // A weight whose parameter the binding simplified out of the model is read by
-                // nothing, so it has no one to hand it to, and goes now.
-                var handedOver = new HashSet<TensorData>(supplied.Values, ReferenceEqualityComparer.Instance);
-                foreach (var tensor in onCard.Values)
-                    if (!handedOver.Contains(tensor)) tensor.Delete();
                 return (graph, supplied);
             }
             catch

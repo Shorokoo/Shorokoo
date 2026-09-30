@@ -109,18 +109,17 @@ namespace Shorokoo
         /// single Zstd frame — compressed afresh on each of the archive writer's passes, which a
         /// compressor fed the same bytes at the same level answers identically, so neither the entry
         /// nor its compressed form is ever held whole (Shorokoo/Shorokoo#436) — and it skips the
-        /// alignment a compressed entry cannot use.
+        /// alignment a compressed entry cannot use. The frame header declares the entry's
+        /// decompressed size, which a reader holds the entry's safetensors header to before it
+        /// allocates a tensor that header claims.
         /// </summary>
         internal static (SkptFileFormat.EntryPayload Stored, string Compression, bool Align) SafeTensorsDataEntry(
             List<SafeTensor> tensors, int? zstdLevel)
         {
             void Produce(Stream s) => SafeTensorLoader.SaveSafeTensorsToStream(s, tensors);
             return zstdLevel is int level
-                ? (SkptFileFormat.EntryPayload.Produced(s =>
-                   {
-                       using var compressed = new ZstdSharp.CompressionStream(s, level, leaveOpen: true);
-                       Produce(compressed);
-                   }), SkptFileFormat.CompressionZstd, false)
+                ? (SkptFileFormat.EntryPayload.Produced(s => CompressedFormatUtils.WriteZstdFrame(s, level, Produce)),
+                   SkptFileFormat.CompressionZstd, false)
                 : (SkptFileFormat.EntryPayload.Produced(Produce), SkptFileFormat.CompressionNone, true);
         }
 

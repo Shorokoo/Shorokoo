@@ -425,6 +425,22 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
     }
 
     [Fact]
+    public void TestZeroByteSafeTensorsLoadWhereverTheirOffsetsFall()
+    {
+        static long[][] Shapes(string headerJson) =>
+            [.. SafeTensorLoader.ParseSafeTensorBytes(BuildRawSafeTensors(headerJson, new byte[8]))
+                .OrderBy(t => t.Name, StringComparer.Ordinal).Select(t => t.Data.Shape.Dims.ToArray())];
+
+        long[][] expected = [[0L], [2L]];
+        Assert.Equal(expected, Shapes(
+            "{\"b\":{\"dtype\":\"F32\",\"shape\":[2],\"data_offsets\":[0,8]},\"a\":{\"dtype\":\"F32\",\"shape\":[0],\"data_offsets\":[0,0]}}"));
+        Assert.Equal(expected, Shapes(
+            "{\"b\":{\"dtype\":\"F32\",\"shape\":[2],\"data_offsets\":[0,8]},\"a\":{\"dtype\":\"F32\",\"shape\":[0],\"data_offsets\":[4,4]}}"));
+        Assert.Equal(expected, Shapes(
+            "{\"a\":{\"dtype\":\"F32\",\"shape\":[0],\"data_offsets\":[8,8]},\"b\":{\"dtype\":\"F32\",\"shape\":[2],\"data_offsets\":[0,8]}}"));
+    }
+
+    [Fact]
     public void TestSafeTensorTruncationAndMissingMetadataFailLoudly()
     {
         var tensors = new List<SafeTensor>
@@ -466,6 +482,11 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
         Assert.Equal(ErrorCodes.ST003, exZ.ErrorCode);
         Assert.Contains(zPath, exZ.Message);
         Assert.Contains("truncated", exZ.Message);
+
+        var cutPath = P("cut.zsafetensor");
+        File.WriteAllBytes(cutPath, CompressedFormatUtils.Compress(bytes)[..12]);
+        Assert.Contains(cutPath, Assert.Throws<InvalidDataException>(
+            () => CompressedFormatUtils.LoadCompressedSafeTensors(cutPath)).Message);
 
         static byte[] Build(string headerJson, int payloadBytes)
         {
@@ -1469,6 +1490,29 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
         corrupt["data"]!["weights"]!["sha256"] = SkptFileFormat.Sha256Hex(truncated);
         RewriteWith(zstdEntries, corrupt.ToJsonString(), truncated);
         RefusedLoad(SkptFileFormat.WeightsEntryPath, "Zstd-decompress");
+    }
+
+    [Fact]
+    public void TestZstdSkptEntryDeclaresItsSizeSoAnOversizedTensorIsRefusedUpFront()
+    {
+        var (model, numOut, input) = BuildCompressibleSkptModel();
+        var path = P("zstd-size.skpt");
+        var tamperedPath = P("zstd-size-tampered.skpt");
+        Persistence.From(model).WithModel().WithWeights().WithZstdCompressedData().Save(path);
+        var entries = ReadZipEntries(path);
+        var stored = entries[SkptFileFormat.WeightsEntryPath];
+        Assert.Equal((ulong)CompressedFormatUtils.Decompress(stored).Length,
+            ZstdSharp.Decompressor.GetDecompressedSize(stored));
+        Assert.Equal(ExecuteToBytes(model, numOut, input), ExecuteToBytes(Persistence.Load(path), numOut, input));
+
+        var huge = CompressedFormatUtils.Compress(BuildRawSafeTensors(
+            "{\"w\":{\"dtype\":\"F32\",\"shape\":[34359738368],\"data_offsets\":[0,137438953472]}}", new byte[8]));
+        var config = JsonNode.Parse(entries[SkptFileFormat.ConfigEntryName])!;
+        config["data"]!["weights"]!["sha256"] = SkptFileFormat.Sha256Hex(huge);
+        RewriteSkpt(tamperedPath, [.. entries.Select(e => (e.Key,
+            e.Key == SkptFileFormat.ConfigEntryName ? System.Text.Encoding.UTF8.GetBytes(config.ToJsonString())
+            : e.Key == SkptFileFormat.WeightsEntryPath ? huge : e.Value))]);
+        Assert.Equal(ErrorCodes.ST003, Assert.Throws<ModelException>(() => Persistence.Load(tamperedPath)).ErrorCode);
     }
 
     /// <summary>Every file of a .skpt checkpoint directory keyed by its manifest-style relative

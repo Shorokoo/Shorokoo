@@ -284,8 +284,10 @@ namespace Shorokoo.Onnx
         /// <para><paramref name="available"/> is the payload's length where it is known up front,
         /// and lets a truncated file (interrupted download/copy, disk full, …) be refused before a
         /// byte of data is read, with a <see cref="ModelException"/> naming the declared and actual
-        /// sizes. A stream of unknown length — a decompressing one — is refused the same way where
-        /// it ends early. On any failure the tensors already read are deleted.</para>
+        /// sizes. A decompressing stream passes the size its frame header declares. A stream of
+        /// unknown length — a frame that declares none — is refused the same way where it ends
+        /// early, but only once it does, so a header claiming more than the stream holds is believed
+        /// until then. On any failure the tensors already read are deleted.</para>
         /// </summary>
         internal static List<SafeTensor> ReadSafeTensors(
             Stream source, long? available, Func<string, long, ComputeContext> placement, string origin)
@@ -349,6 +351,16 @@ namespace Shorokoo.Onnx
                 long position = 0;
                 foreach (var entry in entries.OrderBy(e => e.Start))
                 {
+                    // Occupying no bytes, a zero-byte tensor overlaps nothing wherever its offsets
+                    // fall -- inside another tensor's range, or at a start a longer tensor shares --
+                    // and reading it consumes nothing, so the position stays where it is.
+                    if (entry.Start == entry.End)
+                    {
+                        tensors.Add(new SafeTensor(entry.Name,
+                            placement(entry.Name, entry.Elements).ReadTensor(new Shape(entry.Shape), entry.DType, source),
+                            entry.DTypeName, entry.Shape, entry.Metadata));
+                        continue;
+                    }
                     if (entry.Start < position)
                         throw new InvalidOperationException(
                             $"Tensor '{entry.Name}' has data_offsets [{entry.Start}, {entry.End}), which overlap " +

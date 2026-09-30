@@ -653,10 +653,11 @@ namespace Shorokoo
             Stream stored, long storedLength, SkptDataEntry dataEntry, string dataKey,
             Func<long, ComputeContext> destination, string filePath)
         {
-            var magic = new byte[4];
-            int got = stored.ReadAtLeast(magic, magic.Length, throwOnEndOfStream: false);
-            bool zstdFrame = SkptFileFormat.LooksLikeZstdFrame(magic.AsSpan(0, got));
-            using var payload = new PrefixedReadStream(magic, got, stored);
+            // Enough of the entry to hold a Zstd frame header, which is looked at before decoding.
+            var head = new byte[CompressedFormatUtils.ZstdFrameHeaderMaxBytes];
+            int got = stored.ReadAtLeast(head, head.Length, throwOnEndOfStream: false);
+            bool zstdFrame = SkptFileFormat.LooksLikeZstdFrame(head.AsSpan(0, got));
+            using var payload = new PrefixedReadStream(head, got, stored);
             switch (dataEntry.Compression ?? SkptFileFormat.CompressionNone)
             {
                 case SkptFileFormat.CompressionNone:
@@ -676,13 +677,18 @@ namespace Shorokoo
                     // The frame is decoded as the reader asks for bytes, so it fails wherever the reader
                     // happens to be -- a truncated frame mid-tensor, say. A failure of the decoder
                     // itself is the entry failing to decompress, and is refused as that, not as
-                    // whatever the reader was reading when it happened.
+                    // whatever the reader was reading when it happened. The decompressed size the
+                    // frame header declares, where it declares one, bounds what the entry's own
+                    // header may claim, so a tensor the entry cannot hold is refused before it is
+                    // allocated.
                     using (var decoded = new DecodingReadStream(
                         new ZstdSharp.DecompressionStream(payload, leaveOpen: true),
                         e => new InvalidDataException(
                             $"'{filePath}': failed to Zstd-decompress data entry '{dataKey}' " +
                             $"('{dataEntry.Entry}') — the checkpoint is corrupt or was modified. ({e.Message})", e)))
-                        return SafeTensorLoader.ReadSafeTensors(decoded, null, (_, elements) => destination(elements), filePath);
+                        return SafeTensorLoader.ReadSafeTensors(decoded,
+                            CompressedFormatUtils.DeclaredZstdContentSize(head.AsSpan(0, got)),
+                            (_, elements) => destination(elements), filePath);
 
                 default:
                     throw new InvalidDataException(

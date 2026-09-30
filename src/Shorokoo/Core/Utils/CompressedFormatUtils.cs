@@ -75,7 +75,10 @@ namespace Shorokoo.Core.Utils
         /// <summary>
         /// The tensors of a compressed SafeTensors file, decoded as they are read: neither the file
         /// nor its decompressed payload is ever whole in memory, only the tensors themselves
-        /// (Shorokoo/Shorokoo#436).
+        /// (Shorokoo/Shorokoo#436). The size the frame header declares for the payload bounds what
+        /// its header may claim, so a tensor the payload cannot hold is refused before it is
+        /// allocated; a failure of the decoder itself is the file failing to decompress, and is
+        /// refused as that rather than as whatever the reader was reading when it happened.
         /// </summary>
         private static List<SafeTensor> ReadCompressedSafeTensors(string filePath)
         {
@@ -83,8 +86,14 @@ namespace Shorokoo.Core.Utils
                 throw new FileNotFoundException($"Compressed file not found: {filePath}");
             using var file = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read,
                 bufferSize: 1 << 16, FileOptions.SequentialScan);
-            using var decoded = new DecompressionStream(file);
-            return SafeTensorLoader.ReadSafeTensors(decoded, null, (_, _) => ComputeContext.Host, filePath);
+            var head = new byte[ZstdFrameHeaderMaxBytes];
+            int got = file.ReadAtLeast(head, head.Length, throwOnEndOfStream: false);
+            using var decoded = new DecodingReadStream(
+                new DecompressionStream(new PrefixedReadStream(head, got, file)),
+                e => new InvalidDataException(
+                    $"'{filePath}': failed to Zstd-decompress the file — it is corrupt or truncated. ({e.Message})", e));
+            return SafeTensorLoader.ReadSafeTensors(
+                decoded, DeclaredZstdContentSize(head.AsSpan(0, got)), (_, _) => ComputeContext.Host, filePath);
         }
 
         /// <summary>
@@ -658,6 +667,163 @@ namespace Shorokoo.Core.Utils
         {
             using var compressor = new Compressor(compressionLevel);
             return compressor.Wrap(uncompressedBytes).ToArray();
+        }
+
+        /// <summary>The most bytes a Zstd frame header takes: magic, descriptor, window, dictionary
+        /// id and content size.</summary>
+        internal const int ZstdFrameHeaderMaxBytes = 18;
+
+        /// <summary>
+        /// The decompressed size the Zstd frame starting <paramref name="frameStart"/> declares in
+        /// its header, or <c>null</c> where it declares none (a streaming writer that did not know
+        /// it), where the bytes do not start a Zstd frame, or where they end inside its header.
+        /// What bounds a streamed payload's header before a byte of it is believed.
+        /// </summary>
+        internal static unsafe long? DeclaredZstdContentSize(ReadOnlySpan<byte> frameStart)
+        {
+            // A skippable frame answers 0 here, which is not the size of anything that follows it.
+            if (!SkptFileFormat.LooksLikeZstdFrame(frameStart)) return null;
+            ulong size;
+            fixed (byte* p = frameStart)
+                size = ZstdSharp.Unsafe.Methods.ZSTD_getFrameContentSize(p, (nuint)frameStart.Length);
+            // ZSTD_CONTENTSIZE_UNKNOWN and ZSTD_CONTENTSIZE_ERROR are the two largest values.
+            return size >= ulong.MaxValue - 1 || size > long.MaxValue ? null : (long)size;
+        }
+
+        /// <summary>
+        /// Writes what <paramref name="produce"/> writes to <paramref name="destination"/> as one
+        /// Zstd frame at <paramref name="level"/> whose header declares its decompressed size, so a
+        /// reader can hold the payload's own header to it before allocating what that header claims
+        /// (<see cref="DeclaredZstdContentSize"/>). <paramref name="produce"/> runs twice: once into
+        /// a stream that only counts, to learn the size, then into the compressor. The frame is a
+        /// pure function of the bytes produced and the level, so writing it again writes it
+        /// identically.
+        /// </summary>
+        internal static void WriteZstdFrame(Stream destination, int level, Action<Stream> produce)
+        {
+            var counter = new LengthCountingStream();
+            produce(counter);
+            using var frame = new PledgedZstdFrameStream(destination, level, counter.Length);
+            produce(frame);
+            frame.Finish();
+        }
+
+        /// <summary>A write-only stream that keeps nothing and only counts, told a payload's length
+        /// rather than given it wherever the writer can (<see cref="ILengthOnlyStream"/>).</summary>
+        private sealed class LengthCountingStream : Stream, ILengthOnlyStream
+        {
+            private long _length;
+            public bool IsLengthOnly => true;
+            public void Advance(long count) => _length += count;
+            public override void Write(ReadOnlySpan<byte> buffer) => _length += buffer.Length;
+            public override void Write(byte[] buffer, int offset, int count) => _length += count;
+            public override long Length => _length;
+            public override bool CanRead => false;
+            public override bool CanSeek => false;
+            public override bool CanWrite => true;
+            public override long Position { get => _length; set => throw new NotSupportedException(); }
+            public override void Flush() { }
+            public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+            public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+            public override void SetLength(long value) => throw new NotSupportedException();
+        }
+
+        /// <summary>
+        /// A write-only stream compressing into one Zstd frame whose size is pledged up front, which
+        /// is what puts the size in the frame header — the library's own compression stream offers
+        /// no pledge. The frame is closed by <see cref="Finish"/>, not by disposal: a producer that
+        /// failed part-way has written less than was pledged, and closing the frame then would only
+        /// replace its failure with the compressor's.
+        /// </summary>
+        private sealed unsafe class PledgedZstdFrameStream : Stream
+        {
+            private readonly Stream _destination;
+            private readonly byte[] _out = new byte[(int)ZstdSharp.Unsafe.Methods.ZSTD_CStreamOutSize()];
+            private ZstdSharp.Unsafe.ZSTD_CCtx_s* _cctx;
+
+            public PledgedZstdFrameStream(Stream destination, int level, long pledgedSize)
+            {
+                _destination = destination;
+                _cctx = ZstdSharp.Unsafe.Methods.ZSTD_createCCtx();
+                if (_cctx is null) throw new OutOfMemoryException("Zstd could not allocate a compression context.");
+                try
+                {
+                    Check(ZstdSharp.Unsafe.Methods.ZSTD_CCtx_setParameter(
+                        _cctx, ZstdSharp.Unsafe.ZSTD_cParameter.ZSTD_c_compressionLevel, level));
+                    Check(ZstdSharp.Unsafe.Methods.ZSTD_CCtx_setPledgedSrcSize(_cctx, (ulong)pledgedSize));
+                }
+                catch
+                {
+                    Free();
+                    throw;
+                }
+            }
+
+            public override void Write(ReadOnlySpan<byte> buffer)
+            {
+                fixed (byte* src = buffer)
+                {
+                    var input = new ZstdSharp.Unsafe.ZSTD_inBuffer_s { src = src, size = (nuint)buffer.Length, pos = 0 };
+                    while (input.pos < input.size)
+                        Compress(&input, ZstdSharp.Unsafe.ZSTD_EndDirective.ZSTD_e_continue);
+                }
+            }
+
+            public override void Write(byte[] buffer, int offset, int count) => Write(buffer.AsSpan(offset, count));
+            public override void WriteByte(byte value) => Write([value]);
+
+            /// <summary>Closes the frame, writing whatever the compressor still holds.</summary>
+            public void Finish()
+            {
+                var input = new ZstdSharp.Unsafe.ZSTD_inBuffer_s { src = null, size = 0, pos = 0 };
+                while (Compress(&input, ZstdSharp.Unsafe.ZSTD_EndDirective.ZSTD_e_end) != 0) { }
+            }
+
+            private nuint Compress(ZstdSharp.Unsafe.ZSTD_inBuffer_s* input, ZstdSharp.Unsafe.ZSTD_EndDirective directive)
+            {
+                ObjectDisposedException.ThrowIf(_cctx is null, this);
+                nuint remaining;
+                int produced;
+                fixed (byte* dst = _out)
+                {
+                    var output = new ZstdSharp.Unsafe.ZSTD_outBuffer_s { dst = dst, size = (nuint)_out.Length, pos = 0 };
+                    remaining = Check(ZstdSharp.Unsafe.Methods.ZSTD_compressStream2(_cctx, &output, input, directive));
+                    produced = (int)output.pos;
+                }
+                _destination.Write(_out, 0, produced);
+                return remaining;
+            }
+
+            private static nuint Check(nuint result)
+                => ZstdSharp.Unsafe.Methods.ZSTD_isError(result)
+                    ? throw new InvalidOperationException(
+                        $"Zstd compression failed: {ZstdSharp.Unsafe.Methods.ZSTD_getErrorName(result)}")
+                    : result;
+
+            private void Free()
+            {
+                if (_cctx is null) return;
+                ZstdSharp.Unsafe.Methods.ZSTD_freeCCtx(_cctx);
+                _cctx = null;
+            }
+
+            protected override void Dispose(bool disposing)
+            {
+                Free();
+                base.Dispose(disposing);
+            }
+
+            ~PledgedZstdFrameStream() => Free();
+
+            public override bool CanRead => false;
+            public override bool CanSeek => false;
+            public override bool CanWrite => true;
+            public override long Length => throw new NotSupportedException();
+            public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+            public override void Flush() { }
+            public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+            public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+            public override void SetLength(long value) => throw new NotSupportedException();
         }
 
         #endregion

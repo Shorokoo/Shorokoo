@@ -82,27 +82,13 @@ internal class MemoryAwareGraphOptimizer
     /// more compute on chunked attention — and refuses that one. A knob for the aggressive
     /// setting is what issue #197 asks for and this does not provide.</para>
     ///
-    /// <para>Note this is a weight on a RATIO, not on bytes: the predecessor of this
-    /// constant multiplied raw byte counts, which made it meaningful only for graphs whose
-    /// peak happened to be around a million times their compute-time figure — on everything
-    /// else the memory term vanished and the pass silently degenerated into a compute-only
-    /// optimizer. That is the bug the normalization fixes, so do not reintroduce a
-    /// byte-scaled constant here.</para>
+    /// <para>Note this is a weight on a RATIO, not on bytes. A constant multiplying raw byte
+    /// counts would be meaningful only for graphs whose peak happened to be around a million
+    /// times their compute-time figure — on everything else the memory term would vanish and
+    /// the pass would silently degenerate into a compute-only optimizer. The normalization is
+    /// what prevents that, so a byte-scaled constant does not belong here.</para>
     /// </summary>
     public const double DefaultMemoryWeight = 2.0;
-
-    /// <summary>
-    /// How many times <see cref="Rematerializer"/> is re-run within one strategy step.
-    ///
-    /// <para>Each run already applies EVERY candidate it finds, so a second exists only to
-    /// catch candidates the first one created. Past that it is mostly churn, and expensive
-    /// churn: every iteration clones the graph and re-evaluates it end to end. Measured over
-    /// the same spread of training graphs, raising this from 2 to 20 left every peak figure
-    /// unchanged but one, made a transformer encoder's peak WORSE (the extra transforms walk
-    /// the hill-climb into a poorer neighbourhood), and cost 4x the optimization time —
-    /// 9.6s to 39s on one graph, 4.6s to 37.5s on another.</para>
-    /// </summary>
-    public const int DefaultRematerializationIterations = 2;
 
     /// <summary>
     /// Graphs whose peak is below this are handed back untouched.
@@ -131,7 +117,6 @@ internal class MemoryAwareGraphOptimizer
     private readonly ShapeInferenceInterpreter _shapeInference;
     private readonly double _computeFactor;
     private readonly double _memoryFactor;
-    private readonly int _maxRematerializationIterations;
 
     /// <summary>
     /// A pass scoring every graph it considers — the baseline, each checkpoint segment, each
@@ -143,7 +128,6 @@ internal class MemoryAwareGraphOptimizer
     public MemoryAwareGraphOptimizer(
         double computeFactor = DefaultComputeWeight,
         double memoryFactor = DefaultMemoryWeight,
-        int maxRematerializationIterations = DefaultRematerializationIterations,
         GraphEvaluator? evaluator = null,
         ShapeInferenceInterpreter? shapeInference = null)
     {
@@ -151,7 +135,6 @@ internal class MemoryAwareGraphOptimizer
         _shapeInference = shapeInference ?? new ShapeInferenceInterpreter();
         _computeFactor = computeFactor;
         _memoryFactor = memoryFactor;
-        _maxRematerializationIterations = maxRematerializationIterations;
     }
 
     /// <summary>
@@ -236,7 +219,7 @@ internal class MemoryAwareGraphOptimizer
         }
 
         var scheduler = new MemoryAwareScheduler();
-        var rematerializer = new Rematerializer(selection, _maxRematerializationIterations, _evaluator);
+        var rematerializer = new Rematerializer(selection, _evaluator);
 
         // Each pass carries shape info forward alongside the graph it produced. Rematerialization
         // mints new tensor keys, and evaluating against shape info that predates them prices the

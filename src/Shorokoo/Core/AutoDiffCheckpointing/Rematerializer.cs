@@ -24,9 +24,9 @@ namespace Shorokoo.Core.AutoDiffCheckpointing;
 /// backward gap, and both recompute from Q and K, which the gradient needs anyway.</para>
 ///
 /// <para>A target is recomputed <b>once</b>, and every backward consumer of it reads that one
-/// clone (Checkmate and Rockmate recompute a block once per backward stage; the earlier
-/// per-consumer clones here rebuilt the same forward sub-chain <i>k</i> times for <i>k</i>
-/// consumers). Two placements of the clone in the linear order and a split of the chain at an
+/// clone, as Checkmate and Rockmate recompute a block once per backward stage: a clone per
+/// consumer would rebuild the same forward sub-chain <i>k</i> times for <i>k</i> consumers.
+/// Two placements of the clone in the linear order and a split of the chain at an
 /// intermediate tensor — kept as a checkpoint in Rockmate's sense, so only the tail is
 /// recomputed — are each evaluated on the candidate graph, and the pass keeps the measured
 /// best; the estimate only ranks and pre-filters.</para>
@@ -36,9 +36,11 @@ namespace Shorokoo.Core.AutoDiffCheckpointing;
 /// positions they are live across, the way XLA's rematerializer scores candidates by memory
 /// reduced at the points over the limit. A committed chain moves the peak; the region is then
 /// re-read from the new evaluation and the ranking rebuilt, with targets already tried in this
-/// call skipped, so the search converges instead of re-proposing what it just rejected. The
-/// budget of full-graph evaluations per call is explicit (<see cref="MaxEvaluationsPerCall"/>)
-/// and what the instance has spent across its calls is readable (<see cref="EvaluationsUsed"/>),
+/// call skipped, so the search converges instead of re-proposing what it just rejected. A
+/// ranked prefix that improves is pruned by backward elimination before it is committed, so a
+/// batch keeps only the members that pay for themselves. The budget of full-graph evaluations
+/// per call is explicit (<see cref="MaxEvaluationsPerCall"/> unless the constructor is given
+/// another) and what the instance has spent across its calls is readable (<see cref="EvaluationsUsed"/>),
 /// as is whether the budget rather than the candidate list is what stopped it
 /// (<see cref="BudgetBound"/>).</para>
 ///
@@ -54,15 +56,16 @@ internal class Rematerializer
 {
     private readonly GraphEvaluator _evaluator;
     private readonly ComputeMemoryObjective _objective;
+    private readonly int _maxEvaluationsPerCall;
 
     public Rematerializer(
         ComputeMemoryObjective objective,
-        int maxIterations = MemoryAwareGraphOptimizer.DefaultRematerializationIterations,
-        GraphEvaluator? evaluator = null)
+        GraphEvaluator? evaluator = null,
+        int maxEvaluationsPerCall = MaxEvaluationsPerCall)
     {
         _evaluator = evaluator ?? new GraphEvaluator();
         _objective = objective;
-        _ = maxIterations;
+        _maxEvaluationsPerCall = maxEvaluationsPerCall;
     }
 
     /// <summary>
@@ -87,10 +90,13 @@ internal class Rematerializer
     /// <summary>
     /// A committed recomputation: one clone of a <paramref name="ChainLength"/>-node chain
     /// rebuilding <paramref name="Target"/>, read by <paramref name="RewiredConsumers"/>
-    /// consumers, and the evaluated peak either side of the commit.
+    /// consumers, the <see cref="RematCandidate.Identity"/> of the candidate committed, how many
+    /// ranked candidates the batch it belongs to was pruned from (<paramref name="PrunedFrom"/>,
+    /// 1 for a single), and the evaluated peak either side of the commit.
     /// </summary>
     internal sealed record CommitRecord(
         FastTensorKey Target, int ChainLength, int RewiredConsumers, Placement Placement, Variant Variant,
+        (FastTensorKey Target, bool Split, FastNodeKey FirstConsumer, int Consumers) Identity, int PrunedFrom,
         long PeakBefore, long PeakAfter);
 
     /// <summary>Where a chain's clones go in the linear order.</summary>
@@ -140,7 +146,7 @@ internal class Rematerializer
 
         State? Trial(List<RematCandidate> batch, Placement placement)
         {
-            if (evaluations >= MaxEvaluationsPerCall) return null;
+            if (evaluations >= _maxEvaluationsPerCall) return null;
             var (candidateGraph, mapping) = ApplyCandidates(current.Graph, batch, placement);
             if (mapping.Count == 0) return null;
             var candidateShapeInfo = AugmentShapeInfo(current.ShapeInfo, mapping);
@@ -156,11 +162,11 @@ internal class Rematerializer
         bool Better(State? s)
             => s is not null && Score(s) < currentScore && s.Eval.PeakMemoryBytes <= current.Eval.PeakMemoryBytes;
 
-        void Commit(State next, List<RematCandidate> batch, Placement placement)
+        void Commit(State next, List<RematCandidate> batch, Placement placement, int prunedFrom)
         {
             foreach (var c in batch)
                 CommitLog.Add(new CommitRecord(c.Rewires[0].Target, c.Chain.Count,
-                    c.Rewires.Sum(r => r.Consumers.Count), placement, c.Variant,
+                    c.Rewires.Sum(r => r.Consumers.Count), placement, c.Variant, c.Identity, prunedFrom,
                     current.Eval.PeakMemoryBytes, next.Eval.PeakMemoryBytes));
             current = next;
             currentScore = Score(next);
@@ -170,13 +176,14 @@ internal class Rematerializer
         // exposes the next-highest, so single commits can stall on a plateau only a group
         // crosses. Each round therefore first looks for the best ranked PREFIX of the
         // candidates — halving the size each time, so a group that carries most of the drop
-        // at a fraction of the compute is found in log(n) evaluations — and only when no
+        // at a fraction of the compute is found in log(n) evaluations, then pruned to the
+        // members that pay for themselves before it is committed — and only when no
         // prefix improves does it walk the ranked list one candidate at a time, one
         // evaluation each, committing the first that measures better. Every variant of a
         // target (shared, per-consumer, latest-only, split) is its own candidate, so the
         // choice among them is made by the same measurement.
         var batchPhase = true;
-        while (evaluations < MaxEvaluationsPerCall)
+        while (evaluations < _maxEvaluationsPerCall)
         {
             var liveness = Liveness.Build(current.Graph, current.Eval, current.ShapeInfo);
             var candidates = FindCandidates(liveness, current.ShapeInfo, tried);
@@ -213,15 +220,18 @@ internal class Rematerializer
                     // drops each member whose removal scores no worse at no higher peak, lowest
                     // ranked first; a sweep carries on past a drop instead of restarting, so it
                     // costs at most one evaluation per member, and sweeps repeat until one drops
-                    // nothing or the budget runs out. Every member of the original prefix is
-                    // marked tried: a dropped one was just measured to buy nothing here.
+                    // nothing or the budget runs out; the final sweep, the one that drops nothing,
+                    // still costs one evaluation per member. Every member of the original prefix
+                    // is marked tried: a dropped one was just measured to buy nothing here.
                     var members = new List<RematCandidate>(prefix);
                     for (var pruning = true; pruning && members.Count > 1;)
                     {
                         pruning = false;
                         for (int i = members.Count - 1; i >= 0 && members.Count > 1; i--)
                         {
-                            var trial = Trial([.. members.Where((_, j) => j != i)], placement);
+                            var without = new List<RematCandidate>(members);
+                            without.RemoveAt(i);
+                            var trial = Trial(without, placement);
                             if (trial is null) { pruning = false; break; }
                             if (Score(trial) <= Score(best!) && trial.Eval.PeakMemoryBytes <= best!.Eval.PeakMemoryBytes)
                             {
@@ -231,7 +241,7 @@ internal class Rematerializer
                             }
                         }
                     }
-                    Commit(best!, members, placement);
+                    Commit(best!, members, placement, prefix.Count);
                     foreach (var c in prefix) tried.Add(c.Identity);
                     continue;
                 }
@@ -247,11 +257,11 @@ internal class Rematerializer
             var accepted = false;
             foreach (var candidate in candidates)
             {
-                if (evaluations >= MaxEvaluationsPerCall) break;
+                if (evaluations >= _maxEvaluationsPerCall) break;
                 if (!tried.Add(candidate.Identity)) continue;
                 var trial = Trial([candidate], Placement.AfterProducer);
                 if (!Better(trial)) continue;
-                Commit(trial!, [candidate], Placement.AfterProducer);
+                Commit(trial!, [candidate], Placement.AfterProducer, 1);
                 accepted = true;
                 break;
             }
@@ -261,7 +271,7 @@ internal class Rematerializer
         }
 
         EvaluationsUsed += evaluations;
-        BudgetBound |= evaluations >= MaxEvaluationsPerCall;
+        BudgetBound |= evaluations >= _maxEvaluationsPerCall;
         return (current.Graph, current.ShapeInfo);
     }
 
@@ -338,7 +348,7 @@ internal class Rematerializer
     private const int MaxChainNodes = 12;
 
     /// <summary>
-    /// Ceiling on full-graph evaluations spent per <see cref="Apply"/>. Each trial costs one
+    /// Default ceiling on full-graph evaluations spent per <see cref="Apply"/>. Each trial costs one
     /// evaluation, committed or not, so this bounds the pass's cost to something proportional
     /// to graph size rather than to how many candidates happen to look profitable — which on a
     /// transformer is hundreds.

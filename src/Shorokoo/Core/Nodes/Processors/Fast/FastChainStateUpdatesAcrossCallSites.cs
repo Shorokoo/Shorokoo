@@ -41,6 +41,15 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// incoming value straight back, so a call in one arm alone updates the state only when that
     /// arm runs.</para>
     ///
+    /// <para><b>Calls in a loop body.</b> A body is one call site however many trips it runs: every
+    /// trip starts from the value the parameter held entering the loop, the calls within a trip
+    /// compose in order, and the last trip's update is the loop's. The calls within one body are
+    /// chained by <see cref="ChainWithinLoopBodies"/> while the loop is still rolled, where node
+    /// order is the order the calls were made in; unrolling then marks every trip's links but the
+    /// last one's as superseded (<see cref="OnnxOpAttributeNames.ShrkAttrSupersededByLaterIteration"/>),
+    /// and this pass sees the unrolled loop as the last trip's calls alone. The earlier trips'
+    /// reads fall in the range of the loop's first call, so they read what that call reads.</para>
+    ///
     /// <para>A branch expression is an ordinary argument, so its nodes are traced <em>before</em>
     /// the <c>IF_OPEN</c> that selects them and only move inside it at ONNX build time (see
     /// <see cref="FastIfBranchScoper"/>). Which arm a call belongs to is therefore read off what
@@ -67,7 +76,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             var linksByParam = new Dictionary<FastNodeKey, List<FastNode>>();
             foreach (var node in graph.Nodes)
             {
-                if (node.OpCode != InternalOpCodes.STATE_UPDATE_LINK) continue;
+                if (node.OpCode != InternalOpCodes.STATE_UPDATE_LINK || IsSuperseded(node)) continue;
                 if (node.Inputs.Count == 0 || node.Inputs[0] is not FastTensorKey originalKey) continue;
                 if (ResolveThroughIdentities(originalKey, nodeByKey) is not FastTensorKey paramKey) continue;
                 if (!linksByParam.TryGetValue(paramKey.FastNodeKey, out var list))
@@ -96,6 +105,81 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                        rewrites, insertions, branchLinks);
             }
 
+            ApplyRewrites(graph, rewrites, nodeByKey);
+
+            foreach (var (at, node) in insertions.OrderByDescending(x => x.atPos))
+                graph.Nodes.Insert(at, node);
+
+            RootBranchLinks(graph, branchLinks);
+        }
+
+        /// <summary>
+        /// Chains the calls each loop body makes to a stateful model, so that within one trip a
+        /// later call reads the update an earlier one made. Runs while loops are still rolled: a
+        /// body's node order is then the order its calls were made in, which unrolling does not
+        /// keep — a node no trip changes is shared by all of them and stays where it was.
+        ///
+        /// <para>The body's first call keeps reading the parameter as the graph gives it; what it
+        /// reads is settled with the calls around the loop, once the loop is unrolled (see
+        /// <see cref="Process"/>). A body holding an <c>IfElse</c> that makes one of the calls is
+        /// left alone, as <see cref="Process"/> leaves a rolled loop.</para>
+        /// </summary>
+        public static void ChainWithinLoopBodies(InternalComputationGraph graph)
+        {
+            if (graph is null) throw new ArgumentNullException(nameof(graph));
+
+            var nodeByKey = FastProcessorHelper.BuildNodeByKey(graph);
+            var enclosingScope = ComputeEnclosingScope(graph);
+
+            var linksByBody = new Dictionary<(FastNodeKey param, FastNodeKey body), List<FastNode>>();
+            foreach (var node in graph.Nodes)
+            {
+                if (node.OpCode != InternalOpCodes.STATE_UPDATE_LINK) continue;
+                if (enclosingScope[node.Key] is not FastNodeKey body
+                    || nodeByKey[body].OpCode != OpCodes.LOOP_OPEN) continue;
+                if (node.Inputs.Count == 0 || node.Inputs[0] is not FastTensorKey originalKey) continue;
+                if (ResolveThroughIdentities(originalKey, nodeByKey) is not FastTensorKey paramKey) continue;
+                if (!linksByBody.TryGetValue((paramKey.FastNodeKey, body), out var list))
+                    linksByBody[(paramKey.FastNodeKey, body)] = list = [];
+                list.Add(node);
+            }
+            if (!linksByBody.Values.Any(l => l.Count > 1)) return;
+
+            var positionOf = new Dictionary<FastNodeKey, int>(graph.Nodes.Count);
+            for (int i = 0; i < graph.Nodes.Count; i++) positionOf[graph.Nodes[i].Key] = i;
+            var armsOfNode = FastIfArms.Classify(graph);
+            var markerByLink = MarkerByLink(graph, linksByBody.Values.SelectMany(l => l));
+
+            bool Within(FastNodeKey key, FastNodeKey scope)
+            {
+                for (var s = enclosingScope[key]; s is FastNodeKey k; s = enclosingScope[k])
+                    if (k == scope) return true;
+                return false;
+            }
+
+            var rewrites = new List<(int fromPos, int toPos, FastTensorKey param, FastTensorKey replacement)>();
+            foreach (var ((param, body), links) in linksByBody)
+            {
+                if (links.Count < 2) continue;
+                if (links.Any(l => armsOfNode.TryGetValue(l.Key, out var arms)
+                                   && arms.Any(a => Within(a.IfClose, body)))) continue;
+                if (links.Any(l => !markerByLink.TryGetValue(l.Key, out var m) || enclosingScope[m.Key] != body)) continue;
+
+                for (int i = 1; i < links.Count; i++)
+                    rewrites.Add((positionOf[markerByLink[links[i - 1].Key].Key] + 1,
+                                  positionOf[markerByLink[links[i].Key].Key],
+                                  new FastTensorKey(param, 0), links[i - 1].Outputs[0]!.Value));
+            }
+
+            ApplyRewrites(graph, rewrites, nodeByKey);
+        }
+
+        /// <summary>Points every read of a parameter within each node range at its replacement.</summary>
+        private static void ApplyRewrites(
+            InternalComputationGraph graph,
+            List<(int fromPos, int toPos, FastTensorKey param, FastTensorKey replacement)> rewrites,
+            Dictionary<FastNodeKey, FastNode> nodeByKey)
+        {
             foreach (var (from, to, param, replacement) in rewrites)
                 for (int i = from; i <= to && i < graph.Nodes.Count; i++)
                     foreach (var (_, inputs) in graph.Nodes[i].FullInputs)
@@ -109,11 +193,26 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                                 && read.Equals(param))
                                 inputs[j] = replacement;
                         }
+        }
 
-            foreach (var (at, node) in insertions.OrderByDescending(x => x.atPos))
-                graph.Nodes.Insert(at, node);
+        /// <summary>Whether unrolling marked this link as a trip a later trip follows.</summary>
+        internal static bool IsSuperseded(FastNode link)
+            => link.Attributes.GetBoolVal(OnnxOpAttributeNames.ShrkAttrSupersededByLaterIteration) == true;
 
-            RootBranchLinks(graph, branchLinks);
+        /// <summary>The <c>WITH_STATE_DEPS</c> that closes each link's call: the first to name it.</summary>
+        private static Dictionary<FastNodeKey, FastNode> MarkerByLink(
+            InternalComputationGraph graph, IEnumerable<FastNode> links)
+        {
+            var linkKeys = links.Select(l => l.Outputs[0]!.Value).ToHashSet();
+            var markerByLink = new Dictionary<FastNodeKey, FastNode>();
+            foreach (var node in graph.Nodes)
+            {
+                if (node.OpCode != InternalOpCodes.WITH_STATE_DEPS) continue;
+                foreach (var dep in node.Inputs.Skip(1))
+                    if (dep is FastTensorKey k && linkKeys.Contains(k) && !markerByLink.ContainsKey(k.FastNodeKey))
+                        markerByLink[k.FastNodeKey] = node;
+            }
+            return markerByLink;
         }
 
         /// <summary>
@@ -154,15 +253,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             Dictionary<FastNodeKey, List<IfArm>> armsOfNode,
             Dictionary<FastNodeKey, FastNode> nodeByKey)
         {
-            var linkKeys = links.Select(l => l.Outputs[0]!.Value).ToHashSet();
-            var markerByLink = new Dictionary<FastNodeKey, FastNode>();
-            foreach (var node in graph.Nodes)
-            {
-                if (node.OpCode != InternalOpCodes.WITH_STATE_DEPS) continue;
-                foreach (var dep in node.Inputs.Skip(1))
-                    if (dep is FastTensorKey k && linkKeys.Contains(k) && !markerByLink.ContainsKey(k.FastNodeKey))
-                        markerByLink[k.FastNodeKey] = node;
-            }
+            var markerByLink = MarkerByLink(graph, links);
 
             var sites = new List<CallSite>(links.Count);
             foreach (var link in links)

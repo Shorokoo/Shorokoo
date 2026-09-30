@@ -151,17 +151,24 @@ namespace Shorokoo.Core
         /// (Shorokoo/Shorokoo#310). Calling for the update alone is the one thing module-owned
         /// state is for, so the call is an effect and not only a value.
         ///
-        /// <para>Silently a no-op where there is no harvest to reach: outside a module build, and
-        /// inside a <c>LoopAPI.Iterate</c> body, where the value is a per-iteration node with no
-        /// post-loop translation of its own — the deferral <c>Globals.StateUpdate</c> gets there
-        /// has no counterpart for a whole call.</para>
+        /// <para>Inside a <c>LoopAPI.Iterate</c> body the call is recorded on the loop, once — on
+        /// the canonical pass, as <see cref="RegisterStateUpdate"/> records — and the loop hangs it
+        /// on a value it carries out (see <see cref="Looper.AddCallEffect"/>). Silently a no-op
+        /// outside a module build, where there is no harvest to reach.</para>
         /// </summary>
         internal static void RegisterCallEffect(Variable modelVariable, Variable?[] callOutputs)
         {
             if (modelVariable.ModuleFn?.CallIsAnEffect != true) return;
             if (GraphTrace.CallEffects is not List<Variable> effects) return;
-            if (GraphTrace.Loopers.InLoopBody) return;
-            if (callOutputs.NotNulls().FirstOrDefault() is Variable output) effects.Add(output);
+            if (callOutputs.NotNulls().FirstOrDefault() is not Variable output) return;
+
+            var loopers = GraphTrace.Loopers;
+            if (loopers.Active is { } active)
+            {
+                if (loopers.InCanonicalRecordingScope) active.looper.AddCallEffect(output);
+                return;
+            }
+            effects.Add(output);
         }
 
         /// <summary>

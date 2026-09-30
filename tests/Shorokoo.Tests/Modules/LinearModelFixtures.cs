@@ -964,6 +964,180 @@ public partial class StatefulCallDiscardedInALoopModel
     }
 }
 
+/// <summary>One stateful call whose output is discarded, so its model's weight reaches nothing the
+/// step computes and has a zero gradient.</summary>
+[Module]
+public partial class StatefulCallDiscardedAloneModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        _ = StatefulGainSubModel.Model().Call(t);
+        return t * Scalar(2f);
+    }
+}
+
+/// <summary>A loop body whose one stateful call is discarded, so the loop carries it out through
+/// nothing but its state update.</summary>
+[Module]
+public partial class StatefulCallDiscardedAloneInALoopModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var m = StatefulGainSubModel.Model();
+        var x = t;
+        foreach (var ctx in LoopAPI.Iterate(Scalar(3L)))
+        {
+            _ = m.Call(x);
+            x = x * Scalar(2f);
+            ctx.ContinueWhile(Scalar(true));
+        }
+        return x;
+    }
+}
+
+/// <summary>A stateful model called before a loop and in it.</summary>
+[Module]
+public partial class StatefulCalledBeforeAndInALoopModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var m = StatefulGainSubModel.Model();
+        var x = m.Call(t);
+        foreach (var ctx in LoopAPI.Iterate(Scalar(3L)))
+        {
+            x = m.Call(x);
+            ctx.ContinueWhile(Scalar(true));
+        }
+        return x;
+    }
+}
+
+/// <summary>A stateful model called in a loop and after it.</summary>
+[Module]
+public partial class StatefulCalledInALoopAndAfterModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var m = StatefulGainSubModel.Model();
+        var x = t;
+        foreach (var ctx in LoopAPI.Iterate(Scalar(3L)))
+        {
+            x = m.Call(x);
+            ctx.ContinueWhile(Scalar(true));
+        }
+        return m.Call(x);
+    }
+}
+
+/// <summary>A stateful model called twice in the body of a loop nested in another.</summary>
+[Module]
+public partial class StatefulCalledTwiceInANestedLoopModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var m = StatefulGainSubModel.Model();
+        var x = t;
+        foreach (var outer in LoopAPI.Iterate(Scalar(2L)))
+        {
+            foreach (var ctx in LoopAPI.Iterate(Scalar(3L)))
+            {
+                x = m.Call(m.Call(x));
+                ctx.ContinueWhile(Scalar(true));
+            }
+            outer.ContinueWhile(Scalar(true));
+        }
+        return x;
+    }
+}
+
+/// <summary>A stateful model called in an outer loop's body and in the body of a loop nested in it.</summary>
+[Module]
+public partial class StatefulCalledInAnOuterAndAnInnerLoopModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var m = StatefulGainSubModel.Model();
+        var x = t;
+        foreach (var outer in LoopAPI.Iterate(Scalar(2L)))
+        {
+            x = m.Call(x);
+            foreach (var ctx in LoopAPI.Iterate(Scalar(3L)))
+            {
+                x = m.Call(x);
+                ctx.ContinueWhile(Scalar(true));
+            }
+            outer.ContinueWhile(Scalar(true));
+        }
+        return x;
+    }
+}
+
+/// <summary>A gain whose state accumulates its input, so each call's update depends on what it is
+/// called on.</summary>
+[Module]
+public partial class InputAccumulatingSubModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> input)
+    {
+        var seen = InitRunningMean.Init(input.ShapeTensor());
+        Globals.StateUpdate(seen, seen + input);
+        return input * Ones.Init([Scalar(2L)]) + seen;
+    }
+}
+
+/// <summary><see cref="InputAccumulatingSubModel"/> called once in a loop body, on a value each trip
+/// changes.</summary>
+[Module]
+public partial class InputAccumulatingCalledOnceInALoopModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var m = InputAccumulatingSubModel.Model();
+        var x = t;
+        foreach (var ctx in LoopAPI.Iterate(Scalar(3L)))
+        {
+            x = m.Call(x);
+            ctx.ContinueWhile(Scalar(true));
+        }
+        return x;
+    }
+}
+
+/// <summary><see cref="InputAccumulatingSubModel"/> called twice in a loop body.</summary>
+[Module]
+public partial class InputAccumulatingCalledTwiceInALoopModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var m = InputAccumulatingSubModel.Model();
+        var x = t;
+        foreach (var ctx in LoopAPI.Iterate(Scalar(3L)))
+        {
+            x = m.Call(m.Call(x));
+            ctx.ContinueWhile(Scalar(true));
+        }
+        return x;
+    }
+}
+
+/// <summary><see cref="InputAccumulatingSubModel"/> called in a loop whose continue condition reads
+/// the value the call returns, so the loop stops after its first trip.</summary>
+[Module]
+public partial class InputAccumulatingInALoopThatStopsEarlyModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var m = InputAccumulatingSubModel.Model();
+        var x = t;
+        foreach (var ctx in LoopAPI.Iterate(Scalar(3L)))
+        {
+            x = m.Call(x) * Scalar(2f);
+            ctx.ContinueWhile(x.Reduce(ReduceKind.Max, keepDims: false).Scalar() < Scalar(1.5f));
+        }
+        return x;
+    }
+}
+
 /// <summary>A trainable parameter inside a loop whose trip count is not a compile-time constant, so
 /// the loop is not unrolled before the training graph is built.</summary>
 [Module]

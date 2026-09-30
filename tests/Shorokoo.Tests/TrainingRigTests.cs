@@ -2460,12 +2460,27 @@ public class TrainingRigTrainingLoopCoverageTests
     public void TestAStatefulCallWhoseOutputIsDiscardedStillUpdatesItsState()
         => Assert.Equal([2f], StateFieldsAfterOneStep(StatefulCallDiscardedModel.ComputationGraph));
 
-    // A second call site in a loop body registers no update of its own:
-    // https://github.com/Shorokoo/Shorokoo/issues/465
-    [Fact(Skip = "Shorokoo/Shorokoo#465: a stateful model called twice in one loop body applies one update")]
+    [Fact]
     public void TestAStatefulModelCalledTwiceInALoopBodyAppliesBothUpdatesEvenWhenOneIsDiscarded()
         => Assert.Equal([2f, 2f], [.. StateFieldsAfterOneStep(StatefulCalledTwiceInALoopModel.ComputationGraph),
                                    .. StateFieldsAfterOneStep(StatefulCallDiscardedInALoopModel.ComputationGraph)]);
+
+    [Fact]
+    public void TestALoopBodyIsOneCallSiteThatComposesWithTheCallsAroundIt()
+        => Assert.Equal([1f, 1f, 2f, 2f, 2f, 2f],
+            [.. StateFieldsAfterOneStep(StatefulCallDiscardedAloneModel.ComputationGraph),
+             .. StateFieldsAfterOneStep(StatefulCallDiscardedAloneInALoopModel.ComputationGraph),
+             .. StateFieldsAfterOneStep(StatefulCalledBeforeAndInALoopModel.ComputationGraph),
+             .. StateFieldsAfterOneStep(StatefulCalledInALoopAndAfterModel.ComputationGraph),
+             .. StateFieldsAfterOneStep(StatefulCalledTwiceInANestedLoopModel.ComputationGraph),
+             .. StateFieldsAfterOneStep(StatefulCalledInAnOuterAndAnInnerLoopModel.ComputationGraph)]);
+
+    [Fact]
+    public void TestEveryTripOfALoopStartsFromTheStepsStateAndTheLastTripThatRanIsTheUpdate()
+        => Assert.Equal([1f, 8f, 1f],
+            [.. StateFieldsAfterOneStep(InputAccumulatingCalledOnceInALoopModel.ComputationGraph),
+             .. StateFieldsAfterOneStep(InputAccumulatingCalledTwiceInALoopModel.ComputationGraph),
+             .. StateFieldsAfterOneStep(InputAccumulatingInALoopThatStopsEarlyModel.ComputationGraph)]);
 
     /// <summary>The ops an inference model computes inside its <c>If</c>, rather than before it.</summary>
     private static string[] IfBodyOps(ComputationGraph modelGraph)

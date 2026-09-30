@@ -332,6 +332,14 @@ public static class OnnxOpAttributeNames
     /// </summary>
     public const string ShrkAttrCheckpoint = "shrk_checkpoint";
 
+    /// <summary>
+    /// On a <c>STATE_UPDATE_LINK</c>, set when the link belongs to an unrolled loop iteration that
+    /// a later iteration of the same loop follows. A loop body is one call site however many trips
+    /// it runs, and its update is the last trip's: such a link is still read within its own
+    /// iteration, but it is neither a call site of its own nor the value the step ends with.
+    /// </summary>
+    public const string ShrkAttrSupersededByLaterIteration = "shrk_superseded_by_later_iteration";
+
 
 
     public const string AttrBody = "body";

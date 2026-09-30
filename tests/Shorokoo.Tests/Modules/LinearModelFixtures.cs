@@ -1285,6 +1285,26 @@ public partial class StatefulCalledTwiceInALoopOfAnInputTripCountModel
     }
 }
 
+/// <summary>A stateful model called before a loop and twice in it, whose trip count is computed from
+/// constants too large for the graph's constant folding, so the loop unrolls only when the training
+/// step is built.</summary>
+[Module]
+public partial class StatefulCalledAroundALoopUnrolledOnlyForTrainingModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var m = StatefulGainSubModel.Model();
+        var x = m.Call(t);
+        var trips = Globals.TensorFill(Vector(300L), 1L).Reduce(ReduceKind.Sum, keepDims: false).Scalar() / Scalar(100L);
+        foreach (var ctx in LoopAPI.Iterate(trips))
+        {
+            x = m.Call(m.Call(x));
+            ctx.ContinueWhile(Scalar(true));
+        }
+        return x;
+    }
+}
+
 /// <summary>A trainable parameter inside a loop whose trip count is not a compile-time constant, so
 /// the loop is not unrolled before the training graph is built.</summary>
 [Module]

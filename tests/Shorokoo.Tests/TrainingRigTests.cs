@@ -2678,6 +2678,10 @@ public class TrainingRigTrainingLoopCoverageTests
              .. StateFieldsAfterOneStep(StatefulCalledInALoopNestedInOneWithARuntimeConditionModel.ComputationGraph)]);
 
     [Fact]
+    public void TestAStatefulLoopUnrolledOnlyForTrainingComposesItsCallsWithTheCallBeforeIt()
+        => Assert.Equal([3f], StateFieldsAfterOneStep(StatefulCalledAroundALoopUnrolledOnlyForTrainingModel.ComputationGraph));
+
+    [Fact]
     public void TestAStatefulCallInALoopThatCarriesNothingOutIsRefused()
         => Assert.Contains("carries nothing out", Assert.Throws<InvalidOperationException>(
             () => StatefulCallInALoopCarryingNothingModel.ComputationGraph).Message);

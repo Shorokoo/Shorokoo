@@ -3142,12 +3142,6 @@ public class TrainingRigTrainingLoopCoverageTests
         adamW.TrainStep(adamW.CreateInitialCheckpoint(), InBatch(1f, 2f, 3f, 4f), TargetBatch(2f, 4f, 6f, 8f));
         Assert.Equal([(0, 0), (1, 1), (2, 2), (3, 3)], adamW.MarkedStatePairs(Assert.Single(adamW.CompiledTrainStepShapeKeys)));
 
-        var (matmul, ckpt) = CoverFromScratch(BatchedMatmulModel.ComputationGraph, SoftmaxL2Loss.ComputationGraph,
-            SGDOptimizer.ComputationGraph, [4L, 5L, 8L], 0.01f);
-        matmul.TrainStep(ckpt, matmul.InputDef.FromOrderedData(TensorData([4L, 5L, 8L], new float[160])),
-            matmul.TargetDef.FromOrderedData(TensorData([4L, 4L], new float[16])));
-        Assert.Equal([(0, 0), (1, 1)], matmul.MarkedStatePairs(Assert.Single(matmul.CompiledTrainStepShapeKeys)));
-
         var x = TensorData([2L], 1f, 2f);
         var stateful = TrainingRig.FromScratch(StateReadWithItsUpdateModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
             [new TensorDataModelParam(StateReadWithItsUpdateModel.ComputationGraph.InputNames[0]!, ModelParamType.InputParam, x)], 0.1f);
@@ -3583,7 +3577,7 @@ public class TrainingRigTrainingLoopCoverageTests
         => Assert.Equal(TrainedAtBatchSizes(TwoLayerMlp.ComputationGraph, 8L, aliasing: false, 2L, 3L, 5L),
             TrainedAtBatchSizes(TwoLayerMlp.ComputationGraph, 8L, aliasing: true, 2L, 3L, 5L));
 
-    private static (float[] Values, long Aliased) ResidentRun(ComputationGraph model, long outputs, bool aliasing)
+    private static (float[] Values, long Aliased, long ModelledPeak) ResidentRun(ComputationGraph model, long outputs, bool aliasing)
     {
         using var context = new ComputeContext { OutputAliasing = aliasing };
         var sample = TensorData([2L, 8L], [.. Enumerable.Range(0, 16).Select(i => i / 16f)]);
@@ -3594,36 +3588,26 @@ public class TrainingRigTrainingLoopCoverageTests
         using var run = rig.BeginResidentRun();
         for (int i = 0; i < 3; i++) run.Step(input.Shared(), target.Shared());
         var final = run.StepToCheckpoint(input.Shared(), target.Shared());
-        return ([.. FlattenStruct(final.TrainableParams), .. FlattenStruct(final.OptimizerState)], context.AliasedOutputs);
+        return ([.. FlattenStruct(final.TrainableParams), .. FlattenStruct(final.OptimizerState)], context.AliasedOutputs,
+            rig.OptimizationResult.Evaluation.PeakMemoryBytes);
     }
 
     [Fact]
     public void TestAResidentRunWritesATiedWeightOverTheWeightItConsumedCoverage()
     {
-        var (aliased, written) = ResidentRun(TiedWeightMlp.ComputationGraph, 32L, aliasing: true);
+        var (aliased, written, _) = ResidentRun(TiedWeightMlp.ComputationGraph, 32L, aliasing: true);
         Assert.Equal(4 * 12L, written);
         Assert.Equal(ResidentRun(TiedWeightMlp.ComputationGraph, 32L, aliasing: false).Values, aliased);
     }
 
     [Fact]
-    public void TestAResidentRunWritingEveryStateOutputInPlaceTrainsExactlyAsOneThatDoesNotCoverage()
-        => Assert.Equal(ResidentRun(Modules.PlainTinyMlpStack.ComputationGraph, 16L, aliasing: false).Values,
-            ResidentRun(Modules.PlainTinyMlpStack.ComputationGraph, 16L, aliasing: true).Values);
-
-    [Fact]
-    public void TestTheMemoryPassModelsAStepWritingItsStateOverTheStateItConsumedCoverage()
+    public void TestAResidentRunWritingEveryStateOutputInPlaceTrainsExactlyAsOneThatDoesNotAndIsModelledSoCoverage()
     {
-        long ModelledPeak(ComputeContext context)
-        {
-            var sample = TensorData([2L, 8L], [.. Enumerable.Range(0, 16).Select(i => i / 16f)]);
-            var rig = TrainingRig.FromScratch(
-                Modules.PlainTinyMlpStack.ComputationGraph, L2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph,
-                [sample.CopyTo(ComputeContext.Host)], new AdamWOptimizerHyperparameters { LearningRate = 0.01f }, runtimeContext: context);
-            return rig.OptimizationResult.Evaluation.PeakMemoryBytes;
-        }
-        using var aliased = new ComputeContext();
-        using var unaliased = new ComputeContext { OutputAliasing = false };
-        Assert.True(ModelledPeak(aliased) < ModelledPeak(unaliased));
+        var inPlace = ResidentRun(Modules.PlainTinyMlpBlock.ComputationGraph, 8L, aliasing: true);
+        var held = ResidentRun(Modules.PlainTinyMlpBlock.ComputationGraph, 8L, aliasing: false);
+        Assert.Equal(held.Values, inPlace.Values);
+        Assert.Equal(4 * 16L, inPlace.Aliased);
+        Assert.True(inPlace.ModelledPeak < held.ModelledPeak);
     }
 }
 

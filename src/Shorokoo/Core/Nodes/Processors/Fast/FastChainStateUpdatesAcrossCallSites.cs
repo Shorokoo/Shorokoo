@@ -64,7 +64,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// the <c>IF_OPEN</c> that selects them and only move inside it at ONNX build time (see
     /// <see cref="FastIfBranchScoper"/>). Which arm a call belongs to is therefore read off what
     /// the <c>IF_CLOSE</c>'s branch inputs reach, not off where the call sits: a value both arms
-    /// read belongs to neither and is the parameter's ordinary, unconditional history.</para>
+    /// read, or one read outside the branch too, belongs to neither and is the parameter's
+    /// ordinary, unconditional history (see <see cref="FastIfArms"/>).</para>
     /// </summary>
     internal static class FastChainStateUpdatesAcrossCallSites
     {

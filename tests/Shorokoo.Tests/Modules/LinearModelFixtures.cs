@@ -1267,6 +1267,52 @@ public partial class StatefulCallInADiscardedIfElseArmModel
     }
 }
 
+/// <summary>A stateful call in an arm of an <c>IfElse</c> whose result is discarded, inside a loop
+/// body, on a condition that does not take that arm.</summary>
+[Module]
+public partial class StatefulCallInADiscardedIfElseArmInALoopModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var m = StatefulGainSubModel.Model();
+        var x = t;
+        foreach (var ctx in LoopAPI.Iterate(Scalar(3L)))
+        {
+            _ = (t.Reduce(ReduceKind.Max, keepDims: false).Scalar() > Scalar(100f)).IfElse(m.Call(t), t * Scalar(3f));
+            x = x * Scalar(2f);
+            ctx.ContinueWhile(Scalar(true));
+        }
+        return x;
+    }
+}
+
+/// <summary>A stateful call made before an <c>IfElse</c>, read by one arm and by what follows the
+/// branch, so it runs whichever arm is taken.</summary>
+[Module]
+public partial class StatefulCalledBeforeAnIfElseAndReadInOneArmModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var m = StatefulGainSubModel.Model();
+        var y = m.Call(t);
+        return (t.Reduce(ReduceKind.Max, keepDims: false).Scalar() > Scalar(100f)).IfElse(y, t * Scalar(3f)) + y;
+    }
+}
+
+/// <summary>A stateful call made before a discarded <c>IfElse</c> and read by one arm, whose result
+/// the module returns, so it runs whichever arm is taken.</summary>
+[Module]
+public partial class StatefulCalledBeforeADiscardedIfElseAndReadInOneArmModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var m = StatefulGainSubModel.Model();
+        var y = m.Call(t);
+        _ = (t.Reduce(ReduceKind.Max, keepDims: false).Scalar() > Scalar(100f)).IfElse(y, t * Scalar(3f));
+        return y;
+    }
+}
+
 /// <summary>A stateful model called twice in a loop whose trip count is a runtime input, so the loop
 /// unrolls only once that input is baked in.</summary>
 [Module]
@@ -1448,6 +1494,18 @@ public partial class SqrtInOneIfArmModel
     {
         var w = Ones.Init([Scalar(2L)]);
         return cond.IfElse((t * w).Sqrt(), t * w);
+    }
+}
+
+/// <summary>A gain computed before an <c>IfElse</c>, read by one arm and by what follows the branch,
+/// so its gradient flows whichever arm is taken.</summary>
+[Module]
+public partial class GainReadInOneIfArmAndAfterTheBranchModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t, Scalar<bit> cond)
+    {
+        var y = t * Ones.Init([Scalar(2L)]);
+        return cond.IfElse(y, t * Scalar(3f)) + y;
     }
 }
 

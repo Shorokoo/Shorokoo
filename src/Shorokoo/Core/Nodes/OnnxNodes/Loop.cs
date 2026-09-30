@@ -106,6 +106,11 @@ namespace Shorokoo
         /// has nothing to hang it on and is refused when it closes.</summary>
         internal void AddCallEffect(Variable callOutput) => (callEffects ??= []).Add(callOutput);
 
+        /// <summary>The stateful calls recorded in this loop's body so far, for an <c>IfElse</c> built
+        /// in the body to keep itself when its arms make one (see
+        /// <see cref="InternalGlobals.KeepIfElseOfArmCallEffects"/>).</summary>
+        internal List<Variable>? CallEffects => callEffects;
+
         // private HashSet<Variable> zombieScanVariableOutputs = new HashSet<Variable>();
 
         private HashSet<Variable> allExternalInputs = new HashSet<Variable>();

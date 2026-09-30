@@ -963,6 +963,24 @@ public class CoreUtilsCoverageTests
         Assert.Equal(0L, figures.MaxInUseBytes);
     }
 
+    [Fact]
+    public void TestTheOrtTensorAddressBindingStillResolvesAndAgreesWithTheSpan()
+    {
+        var api = typeof(OrtAllocator).Assembly.GetType(OrtArenaStats.ApiHolderTypeName)!
+            .GetField(OrtArenaStats.ApiFieldName, BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public)!
+            .GetValue(null)!;
+        foreach (var entry in OrtTensorAddress.ApiEntryPointNames)
+            Assert.Equal(typeof(IntPtr), api.GetType().GetField(entry)!.FieldType);
+        var handle = typeof(OrtValue).GetProperty(
+            OrtTensorAddress.HandlePropertyName, BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+        Assert.Equal(typeof(IntPtr), handle!.PropertyType);
+        Assert.True(OrtTensorAddress.IsBound);
+
+        using var value = OrtValue.CreateTensorValueFromMemory([1f, 2f, 3f], [3L]);
+        value.GetTensorMutableDataAsSpan<float>()[2] = 7f;
+        Assert.Equal(BitConverter.SingleToInt32Bits(7f), Marshal.ReadInt32(OrtTensorAddress.Read(value)!.Value, 8));
+    }
+
     /// <summary>
     /// A session's own arena, read back through the public surface: zeroed before it has run, and
     /// carrying what the run took afterwards. A backend answering the interface's default reports

@@ -365,6 +365,55 @@ public class GpuExecutionTests
         Assert.All(state, t => Assert.True(t.CopiesAreEmpty));
     }
 
+    [CudaFact]
+    public void CudaProvider_AFittedCheckpointSavesFromTheCardInBoundedPiecesAndLoadsBackAsItsHostCopy()
+    {
+        TrainingRig Rig(ComputationGraph model) => TrainingRig.FromScratch(
+            model, L2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph,
+            [TensorData([1L], [1f])], new AdamWOptimizerHyperparameters { LearningRate = 0.1f });
+        TrainingCheckpoint Fitted(TrainingRig rig, long width) => rig.Fit(
+            [rig.InputDef.FromOrderedData(TensorData([1L], [2f]))], [rig.TargetDef.FromOrderedData(TensorData([width], new float[width]))],
+            numEpochs: 2).FinalCheckpoint;
+        var wideRig = Rig(WideMultiplyModel.ComputationGraph);
+        var wide = Fitted(wideRig, 1L << 20);
+        var narrow = Fitted(Rig(ScalarMultiplyModel.ComputationGraph), 1L);
+        var home = wide.ToHost();
+        float[] State(TrainingCheckpoint c) =>
+            [.. TrainingRigHelpers.FlattenStruct(c.TrainableParams), .. TrainingRigHelpers.FlattenStruct(c.OptimizerState)];
+        Assert.All(wide.TrainableParams.Fields.Values.OfType<TensorData>(), t => Assert.False(t.IsHostResident));
+
+        var path = TrainingRigHelpers.TempPath("device_ckpt");
+        try
+        {
+            void Flat(TrainingCheckpoint c) => c.Save(path + ".safetensors");
+            void Zip(TrainingCheckpoint c) => Persistence.SaveTrainingCheckpointToSkpt(c, path + ".skpt");
+            void Dir(TrainingCheckpoint c) => Persistence.ForTrainingCheckpoint(c).SaveAsDirectory(path);
+            long stateBytes = 4L * State(home).Length;
+            foreach (var save in (Action<TrainingCheckpoint>[])[Flat, Zip, Dir])
+            {
+                Assert.True(SaveAllocation(() => save(wide)) - SaveAllocation(() => save(narrow)) < stateBytes / 2);
+                save(wide);
+            }
+
+            Assert.Equal(State(home), State(wideRig.LoadCheckpoint(path + ".safetensors")));
+            Assert.Equal(State(home), State(wideRig.LoadCheckpointFromSkpt(path + ".skpt")));
+            Assert.Equal(State(home), State(wideRig.LoadCheckpointFromSkpt(path)));
+        }
+        finally
+        {
+            foreach (var file in (string[])[path + ".safetensors", path + ".skpt"]) File.Delete(file);
+            if (Directory.Exists(path)) Directory.Delete(path, recursive: true);
+        }
+    }
+
+    private static long SaveAllocation(Action save)
+    {
+        save();
+        var before = GC.GetAllocatedBytesForCurrentThread();
+        save();
+        return GC.GetAllocatedBytesForCurrentThread() - before;
+    }
+
     /// <summary>
     /// Whether ONNX Runtime lets a run's feed go once the last node reading it has run, measured
     /// on a session of its own: it does not. A 64 MiB feed in the session's own arena, read by the

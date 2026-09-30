@@ -2492,6 +2492,14 @@ public class TrainingRigTrainingLoopCoverageTests
     public void TestAGatherInAnUntakenIfElseArmTrains()
         => Assert.Equal(2.5f, LossAfterOneStep(GainGatheredInAnUntakenIfElseArmModel.ComputationGraph), 1e-4f);
 
+    [Fact]
+    public void TestAGatherInAnIfElseArmTrainsWhicheverSideAndNestingItSitsIn()
+    {
+        Assert.Equal(2.5f, LossAfterOneStep(GainGatheredInAnUntakenElseArmModel.ComputationGraph), 1e-4f);
+        Assert.Equal(2.5f, LossAfterOneStep(GainGatheredInANestedUntakenIfElseArmModel.ComputationGraph), 1e-4f);
+        Assert.Equal(4f, LossAfterOneStep(GainGatheredInATakenIfElseArmModel.ComputationGraph), 1e-4f);
+    }
+
     private static float[] TrainedParams(ComputationGraph modelGraph, bool cond, params float[] xs)
     {
         object[] values = [.. xs.Select(v => (object)v)];

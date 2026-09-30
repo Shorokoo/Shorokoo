@@ -129,7 +129,7 @@ public class QeePoolConvAuditTests
     private const double L = double.MinValue;
     private static readonly double[] FloatWindows = [N, N, 1, N, N, N, L, N, N, N, L, L];
     private static readonly double[] FloatWindowMaxima = [N, 1, L, L, N, 1, L, L, N, N, 1, N, 1, N, N, N, N, N, L, N, L, N, N, N, L, L, L, L];
-    private static readonly long[] FloatWindowPositionsThroughWrittenPadding = [0, 2, 6, 10, 0, 4, 6, 9, 0, -1, 2, 1, 2, 3, 2, 3, 4, 5, 6, 5, 6, 7, 8, 9, 10, 11, 10, 11];
+    private static readonly long[] FloatWindowPositions = [0, 2, 6, 10, 0, 4, 6, 9, 0, 1, 2, 1, 2, 3, 4, 3, 4, 5, 6, 7, 6, 7, 8, 9, 10, 11, 10, 11];
     private static readonly double[] IntegerWindows = [L, L, 1, L, L, L, L, L, L, L, L, L];
     private static readonly double[] IntegerWindowMaxima = [L, 1, L, L, L, 1, L, L, L, L, 1, L, 1, L, L, L, L, L, L, L, L, L, L, L, L, L, L, L];
     private static readonly long[] IntegerWindowPositions = [0, 2, 6, 7, 0, 4, 6, 8, 0, 1, 2, 1, 2, 3, 4, 3, 4, 5, 6, 7, 6, 7, 8, 9, 10, 9, 10, 11];
@@ -160,11 +160,16 @@ public class QeePoolConvAuditTests
     }
 
     [Fact]
-    public void TestFloatMaxPoolWindowsAtOrBelowTheLowestFiniteValueTakeTheirFirstMaximumOrAWrittenPaddingPosition()
+    public void TestFloatMaxPoolWindowsAtOrBelowTheLowestFiniteValueTakeTheirFirstMaximum()
     {
-        Assert.True(LowestWindows(DType.Float16, AsFloat16, FloatWindows, FloatWindowMaxima, FloatWindowPositionsThroughWrittenPadding));
-        Assert.True(LowestWindows(DType.Float32, AsFloat32, FloatWindows, FloatWindowMaxima, FloatWindowPositionsThroughWrittenPadding));
-        Assert.True(LowestWindows(DType.Float64, AsFloat64, FloatWindows, FloatWindowMaxima, FloatWindowPositionsThroughWrittenPadding));
+        Assert.True(LowestWindows(DType.Float16, AsFloat16, FloatWindows, FloatWindowMaxima, FloatWindowPositions));
+        Assert.True(LowestWindows(DType.Float32, AsFloat32, FloatWindows, FloatWindowMaxima, FloatWindowPositions));
+        Assert.True(LowestWindows(DType.Float64, AsFloat64, FloatWindows, FloatWindowMaxima, FloatWindowPositions));
+    }
+
+    [Fact]
+    public void TestAFloatMaxPoolOverNegativeInfinityTakesEachWindowsFirstMaximum()
+    {
         Assert.True(AutoTest.AdvancedTestGraph<NegativeInfinityWindowMaxPoolIndicesValues>([],
             [F32([1L, 1L, 5L], float.NegativeInfinity, float.NegativeInfinity, 5f, float.NegativeInfinity, float.NegativeInfinity)],
             expected: [0, 0, 2, 2, 3, 4]));

@@ -390,11 +390,11 @@ shape and type.
      only the type's lowest value a wrong index. When the `Indices` output is
      read, the pool is computed over the input cast to float32 and its values cast
      back ([#420](https://github.com/Shorokoo/Shorokoo/issues/420)).
-   - A float `MaxPool` whose `Indices` output is read, with pads as large as the
-     kernel: the padding written into the input is −inf, so a window whose input
-     elements are all −inf takes a padded position before them as its first maximum,
-     and its index names the padding, such as −1. The values are right. Accepted
-     ([#437](https://github.com/Shorokoo/Shorokoo/issues/437)).
+   - A `MaxPool` whose `Indices` output is read, with pads as large as the kernel:
+     the padding written into the input is the element type's lowest value, so in a
+     window whose input elements are all that value every position ties and the pool
+     takes the window's start, which may be written padding. Such an index is carried
+     to the window's first input element, the spec's.
    - On the [PyTorch backend](pytorch-backend.md#limitations), which pads the
      input with −inf itself, a window whose maximum is −inf takes a padded
      position before the input element holding it as its first maximum: its

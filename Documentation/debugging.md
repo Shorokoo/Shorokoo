@@ -193,11 +193,6 @@ that meets one gets ONNX Runtime's result:
 - A model that returns a `Range` as an output beside a `Gather` the `Range` drives fails: ONNX
   Runtime's graph optimization removes the `Range`, and reading the outputs throws
   `UnsupportedDTypeException` (`OU002`) ([#432](https://github.com/Shorokoo/Shorokoo/issues/432)).
-- A float `MaxPool` whose `Indices` output is read, with pads as large as the kernel, is pooled
-  over −inf padding written into the input (the `AveragePool`, `LpPool`, `MaxPool` row), so a
-  window whose input elements are all −inf takes a padded position before them as its first
-  maximum: its index names the padding, such as −1. The values are right
-  ([#437](https://github.com/Shorokoo/Shorokoo/issues/437)).
 - On ONNX Runtime's CPU provider, an int32 or int64 `ReduceSum`, `ReduceMean`, `ReduceProd`,
   `ReduceL1` or `ReduceSumSquare` accumulates in double precision and clamps the result to the type's range, where Shorokoo's
   folding wraps as two's complement: int32 `ReduceSum([2147483647, 2147483647])` gives 2147483647,

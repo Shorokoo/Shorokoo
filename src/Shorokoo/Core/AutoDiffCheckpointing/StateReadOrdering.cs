@@ -9,8 +9,8 @@ namespace Shorokoo.Core.AutoDiffCheckpointing;
 
 /// <summary>
 /// Orders the writer of each updated state output after every reader of the state it replaces, so
-/// that the output can be written into that state's memory (<see cref="OutputAlias"/>) whatever
-/// the backend folds before it runs the step.
+/// that what the backend folds before it runs the step does not keep the output from being
+/// written into that state's memory (<see cref="OutputAlias"/>).
 ///
 /// <para><b>Why the order matters.</b> A state pair is written in place only when every node
 /// reading the input has run before the output's writer (<see cref="OutputAliasProof"/>). A
@@ -44,9 +44,13 @@ namespace Shorokoo.Core.AutoDiffCheckpointing;
 /// neither is an operand a backend reads to infer a shape — a <c>Resize</c> scale, a
 /// <c>Range</c> bound — since no such operator is elementwise; so the ordering changes no shape
 /// a backend infers. A backend folds none of it: a <c>Slice</c> of a value computed at
-/// run time is not a constant, and a <c>Concat</c> with a non-constant input is kept — ONNX
-/// Runtime keeps the dependency through its training-step optimizations, and writes every pair of
-/// a step so ordered in place.</para>
+/// run time is not a constant, and a <c>Concat</c> with a non-constant input is kept. So the
+/// ordering lets a pair survive a backend's folding of the readers of values computed from the
+/// state alone; it does not make the pair written in place. That is decided by the backend's own
+/// proof over the graph it runs (<see cref="OutputAliasProof.Prove(Shorokoo.Core.Factory.IR.GraphProto, IEnumerable{OutputAlias})"/>,
+/// which ONNX Runtime asks of the graph it writes out after its optimizations), and a rewrite
+/// that proof sees and this ordering does not — a fusion placing its node where no node of this
+/// graph stood — can still refuse a pair.</para>
 ///
 /// <para><b>What is left alone.</b> A pair one of whose readers depends on the writer cannot be
 /// ordered — the reader needs the update — and a pair whose update has no scalar operand outside

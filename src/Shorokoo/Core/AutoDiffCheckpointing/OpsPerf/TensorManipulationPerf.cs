@@ -147,7 +147,7 @@ internal class TensorManipulationPerf : IOpPerf
 
     /// <summary>Whether a slice keeps nothing, or one contiguous run of whole slabs along the
     /// outermost axis: every other axis of <paramref name="output"/> as long as the input's, and
-    /// every step one — absent, or known to be one.</summary>
+    /// every step one — absent, or a constant <c>int64</c> or <c>int32</c> one.</summary>
     private static bool KeepsWholeOuterSlabs(OpPerfInput input, TensorShapeInfo output)
     {
         if (output.ElementCount == 0) return true;
@@ -156,8 +156,9 @@ internal class TensorManipulationPerf : IOpPerf
         if (inDims.Length == 0 || inDims.Length != outDims.Length || !inDims.Skip(1).SequenceEqual(outDims.Skip(1)))
             return false;
         if (input.InputShapes.Length <= 4 || input.InputShapes[4] is not { } steps) return true;
-        return steps.Data is { HasValues: true, DType: var type } values && type == DType.Int64
-            && values.Elements<long>().ToArray().All(step => step == 1);
+        if (steps.Data is not { HasValues: true } values) return false;
+        if (values.DType == DType.Int64) return values.Elements<long>().ToArray().All(step => step == 1);
+        return values.DType == DType.Int32 && values.Elements<int>().ToArray().All(step => step == 1);
     }
 
     private static long[]? Perm(OpPerfInput input)

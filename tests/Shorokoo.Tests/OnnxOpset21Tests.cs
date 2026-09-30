@@ -193,6 +193,21 @@ public class OnnxOpset21Tests
         return true;
     }
 
+    private static bool BuildRefused(System.Func<Variable> build) => Refusal(() => build()) is not null;
+
+    [Fact]
+    public void TestNodeBuilderRefusesAttributesOpset21DoesNotDefine()
+    {
+        var x = Globals.InputTensor<float32>(defaultName: "x", rank: 1);
+        var q = Globals.InputTensor<uint8>(defaultName: "q", rank: 1);
+        Assert.True(BuildRefused(() => NodeBuilder.BuildNodeSingleOut(OpCodes.DEQUANTIZE_LINEAR, [q, Globals.Scalar(0.5f), null],
+            [(AttrAxis, null), (AttrBlockSize, null), (AttrOutputDtype, 10L)])));
+        Assert.True(BuildRefused(() => NodeBuilder.BuildNodeSingleOut(OpCodes.QUANTIZE_LINEAR, [x, Globals.Scalar(0.5f), null],
+            [(AttrPrecision, 1L)])));
+        Assert.True(BuildRefused(() => NodeBuilder.BuildNodeSingleOut(OpCodes.CAST, [x], [(AttrTo, DType.Float16), (AttrRoundMode, "up")])));
+        Assert.True(BuildRefused(() => NodeBuilder.BuildNodeSingleOut(OpCodes.CAST_LIKE, [x, q], [(AttrRoundMode, "up")])));
+    }
+
     [Fact]
     public void TestEmissionRefusesANodeOpset21DoesNotDefine()
     {

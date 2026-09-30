@@ -172,6 +172,14 @@ A missing side file, a `location` escaping the model's directory, an out-of-rang
 `offset`/`length`, a `length` contradicting shape/dtype, or a missing
 `externalDataDirectory` throws `ModelException`, naming the tensor and file.
 
+Imported from a file path, a model's weights are held once in host memory, each read straight
+into its own tensor: the file is scanned rather than parsed whole, and a tensor of at least
+1 KiB whose bytes lie flat in the file (`raw_data`, or `float_data` / `double_data` of a
+float / double tensor) is read from where it lies, as external data in the model's own file is.
+A weight stored as varints (`int32_data`, `int64_data`, `uint64_data`) or strings is decoded
+as it is parsed. From bytes or a stream, the protobuf is parsed whole. A sparse initializer
+is refused, naming the file: the importer does not read one, so store it dense.
+
 ## Save/load Shorokoo graph format (`.srk` / `.zsrk`)
 
 ```csharp
@@ -354,7 +362,9 @@ ComputationGraph landedShaped = Persistence.ImportOnnxToCheckpoint("foreign.onnx
   translation; a Shorokoo-produced `.onnx` keeps its identifiers. Every entry point has
   an `inputShapes` overload: `ImportOnnx(path, inputShapes)`,
   `ImportOnnx(path, namingScheme, inputShapes)`, and the same two for
-  `ImportOnnxToCheckpoint`.
+  `ImportOnnxToCheckpoint`. To compile it on a device with its weights read straight into
+  device memory, use `ComputeContext.ImportCompiledOnnx` (see
+  [Loading a saved model onto the device](inference.md#loading-a-saved-model-onto-the-device)).
 - `ImportOnnxToCheckpoint` saves the result as a `.skpt` (see
   [.skpt](skpt-checkpoints.md)); a failed import leaves any existing checkpoint untouched.
 

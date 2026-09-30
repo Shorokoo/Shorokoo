@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using Shorokoo.Core.Factory.IR;
+using Shorokoo.Runtime;
 
 namespace Shorokoo.Onnx
 {
@@ -14,11 +15,15 @@ namespace Shorokoo.Onnx
     /// <see cref="TensorProto.DataLocation.External"/>.
     ///
     /// <para>
-    /// <see cref="LoadIntoModel"/> materializes every external tensor in a freshly
-    /// deserialized <see cref="ModelProto"/> into its inline <see cref="TensorProto.RawData"/>
-    /// form, so the rest of the import pipeline never sees an external tensor. All dtypes
-    /// the inline path supports are supported externally — the side file carries exactly
-    /// the little-endian raw bytes that <c>raw_data</c> would have carried.
+    /// <see cref="LoadIntoModel"/> reads every external tensor in a freshly deserialized
+    /// <see cref="ModelProto"/> into the value the reader takes for it
+    /// (<see cref="TensorProto.Loaded"/>), so the rest of the import pipeline never sees an
+    /// external tensor. Each is read from its file range straight into its own tensor
+    /// (<see cref="ComputeContext.ReadTensor"/>), never whole anywhere else. All dtypes the inline
+    /// path supports are supported externally — the side file carries exactly the little-endian
+    /// raw bytes that <c>raw_data</c> would have carried; a tensor whose elements have no flat
+    /// buffer (strings, sub-byte and complex elements) is put in <see cref="TensorProto.RawData"/>
+    /// instead, and refused by the reader in the words it refuses inline bytes in.
     /// </para>
     ///
     /// <para>
@@ -37,14 +42,25 @@ namespace Shorokoo.Onnx
         internal const string LengthKey = "length";
 
         /// <summary>
-        /// Materializes every <c>data_location=EXTERNAL</c> tensor in <paramref name="model"/>
-        /// into inline <see cref="TensorProto.RawData"/>, resolving <c>location</c> keys
-        /// against <paramref name="baseDirectory"/> (the model file's directory).
-        /// <paramref name="baseDirectory"/> may be null when the model came from a
-        /// stream/bytes — then any external tensor fails loudly.
+        /// Reads every <c>data_location=EXTERNAL</c> tensor in <paramref name="model"/>,
+        /// resolving <c>location</c> keys against <paramref name="baseDirectory"/> (the model
+        /// file's directory). <paramref name="baseDirectory"/> may be null when the model came
+        /// from a stream/bytes — then any external tensor fails loudly.
+        ///
+        /// <para>Each is read onto the host, except, when <paramref name="onto"/> is given, an
+        /// initializer of the main graph of more than
+        /// <see cref="Core.AutoDiffCheckpointing.ShapeInferenceInterpreter.MaxSmallTensorElements"/>
+        /// elements: that one is read into <paramref name="onto"/>'s memory, its proto given a
+        /// placeholder without values, and the pair returned. On failure every tensor read onto
+        /// <paramref name="onto"/> is deleted.</para>
         /// </summary>
-        internal static void LoadIntoModel(ModelProto model, string? baseDirectory)
+        internal static Dictionary<TensorAttribute, TensorData> LoadIntoModel(
+            ModelProto model, string? baseDirectory, ComputeContext? onto = null)
         {
+            var onDevice = new Dictionary<TensorAttribute, TensorData>(ReferenceEqualityComparer.Instance);
+            var toDevice = onto is null || model.Graph is null
+                ? new HashSet<TensorProto>()
+                : new HashSet<TensorProto>(model.Graph.Initializers, ReferenceEqualityComparer.Instance);
             // One open stream per distinct side file: several tensors commonly slice
             // into the same file at different offsets.
             Dictionary<string, FileStream>? openFiles = null;
@@ -55,8 +71,14 @@ namespace Shorokoo.Onnx
                     if (tensor.data_location != TensorProto.DataLocation.External)
                         continue;
                     openFiles ??= new Dictionary<string, FileStream>(StringComparer.Ordinal);
-                    MaterializeExternalTensor(tensor, baseDirectory, openFiles);
+                    MaterializeExternalTensor(tensor, baseDirectory, openFiles,
+                        toDevice.Contains(tensor) ? onto : null, onDevice);
                 }
+            }
+            catch
+            {
+                foreach (var tensor in onDevice.Values) tensor.Delete();
+                throw;
             }
             finally
             {
@@ -64,6 +86,7 @@ namespace Shorokoo.Onnx
                     foreach (var fs in openFiles.Values)
                         fs.Dispose();
             }
+            return onDevice;
         }
 
         /// <summary>
@@ -117,7 +140,8 @@ namespace Shorokoo.Onnx
         }
 
         private static void MaterializeExternalTensor(
-            TensorProto tensor, string? baseDirectory, Dictionary<string, FileStream> openFiles)
+            TensorProto tensor, string? baseDirectory, Dictionary<string, FileStream> openFiles,
+            ComputeContext? onto, Dictionary<TensorAttribute, TensorData> onDevice)
         {
             var tensorName = string.IsNullOrEmpty(tensor.Name) ? "<unnamed>" : tensor.Name;
             var tensorInfo = $"tensor '{tensorName}'";
@@ -214,14 +238,37 @@ namespace Shorokoo.Onnx
                     $"the external data range [offset {offset}, length {readLength}] is out of range " +
                     $"for file '{resolved}' ({fileLength} bytes).");
 
-            var bytes = new byte[readLength];
             fs.Seek(offset, SeekOrigin.Begin);
-            fs.ReadExactly(bytes);
-
-            tensor.RawData = bytes;
+            var dtype = (DType)tensor.data_type;
+            if (expected < 0 || !HasFlatBuffer(dtype))
+            {
+                var bytes = new byte[readLength];
+                fs.ReadExactly(bytes);
+                tensor.RawData = bytes;
+            }
+            else
+            {
+                Shape shape = tensor.Dims is { Length: > 0 } dims ? dims : (long[])[];
+                if (onto is not null && shape.Count > Core.AutoDiffCheckpointing.ShapeInferenceInterpreter.MaxSmallTensorElements)
+                {
+                    var placeholder = TensorAttribute.WithoutValues(shape, dtype);
+                    onDevice[placeholder] = onto.ReadTensor(shape, dtype, fs);
+                    tensor.Loaded = placeholder;
+                }
+                else
+                {
+                    tensor.Loaded = ComputeContext.Host.ReadTensor(shape, dtype, fs).MoveToAttribute();
+                }
+            }
             tensor.ExternalDatas.Clear();
             tensor.Resetdata_location();
         }
+
+        /// <summary>Whether a tensor of <paramref name="dtype"/> is a flat buffer of whole-byte
+        /// elements, which is what <see cref="ComputeContext.ReadTensor"/> reads.</summary>
+        private static bool HasFlatBuffer(DType dtype)
+            => !dtype.IsSameElementTypeAs(DType.Utf8) && dtype != DType.Complex64 && dtype != DType.Complex128
+                && dtype.EncodingBitCount >= 8;
 
         /// <summary>
         /// The byte count implied by the tensor's dtype and dims, or -1 when the dtype
@@ -246,5 +293,16 @@ namespace Shorokoo.Onnx
                     count *= d;
             return count * bits / 8;
         }
+    }
+}
+
+namespace Shorokoo.Core.Factory.IR
+{
+    public partial class TensorProto
+    {
+        /// <summary>The value <see cref="Onnx.OnnxExternalData.LoadIntoModel"/> read for this
+        /// tensor's external data, which the reader takes in place of the proto's own payload. Not
+        /// part of the message.</summary>
+        internal TensorAttribute? Loaded { get; set; }
     }
 }

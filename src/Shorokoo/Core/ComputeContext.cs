@@ -1806,6 +1806,44 @@ namespace Shorokoo.Runtime
                 () => Persistence.ImportSafeTensorsOnto(concreteArchitecture, weightsPath, namingScheme, this),
                 () => Persistence.ImportSafeTensors(concreteArchitecture, weightsPath, namingScheme));
 
+        /// <summary>
+        /// <see cref="LoadCompiled(string)"/> for the <c>.onnx</c> model at
+        /// <paramref name="filePath"/>, imported exactly as
+        /// <see cref="Persistence.ImportOnnx(string, ModuleParamSetNamingScheme?)"/> imports it and
+        /// refused alike: each initializer of more than a thousand-odd elements whose bytes the file
+        /// holds flat — inline <c>raw_data</c> and ONNX external data alike — goes from the file
+        /// straight into this context's memory. A payload ONNX codes as varints
+        /// (<c>int64_data</c>, say) is read on the host and held in the model as
+        /// <see cref="Persistence.ImportOnnx(string, ModuleParamSetNamingScheme?)"/> holds it. Named
+        /// apart from <see cref="LoadCompiled(string)"/>, which reads a <c>.skpt</c>: a file's
+        /// format is never told from its extension.
+        /// </summary>
+        /// <exception cref="InvalidOperationException">This context is under a device-memory
+        /// budget that cannot take the weights (<see cref="DeviceMemorySettings.LimitBytes"/>).</exception>
+        public CompiledGraph ImportCompiledOnnx(string filePath, ModuleParamSetNamingScheme? namingScheme = null)
+            => LoadCompiled(
+                () => Persistence.ImportOnnxOnto(filePath, namingScheme, null, this),
+                () => Persistence.ImportOnnx(filePath, namingScheme));
+
+        /// <summary><see cref="ImportCompiledOnnx(string, ModuleParamSetNamingScheme?)"/> with each
+        /// input <paramref name="inputShapes"/> names given that representative shape, as
+        /// <see cref="Persistence.ImportOnnx(string, IReadOnlyDictionary{string, long[]})"/> gives
+        /// it.</summary>
+        public CompiledGraph ImportCompiledOnnx(string filePath, IReadOnlyDictionary<string, long[]> inputShapes)
+            => ImportCompiledOnnx(filePath, null, inputShapes);
+
+        /// <summary><see cref="ImportCompiledOnnx(string, IReadOnlyDictionary{string, long[]})"/>
+        /// with each foreign initializer name translated through
+        /// <paramref name="namingScheme"/>.</summary>
+        public CompiledGraph ImportCompiledOnnx(
+            string filePath, ModuleParamSetNamingScheme? namingScheme, IReadOnlyDictionary<string, long[]> inputShapes)
+        {
+            ArgumentNullException.ThrowIfNull(inputShapes);
+            return LoadCompiled(
+                () => Persistence.ImportOnnxOnto(filePath, namingScheme, inputShapes, this),
+                () => Persistence.ImportOnnx(filePath, namingScheme, inputShapes));
+        }
+
         private CompiledGraph LoadCompiled(
             Func<(InternalComputationGraph Graph, Dictionary<string, TensorData> Supplied)> loadOnto,
             Func<ComputationGraph> loadOnHost)

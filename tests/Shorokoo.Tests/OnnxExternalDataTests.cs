@@ -58,6 +58,7 @@ public class OnnxExternalDataTests
     private const int FloatElem = 1;    // TensorProto.DataType.FLOAT
     private const int Int64Elem = 7;    // INT64
     private const int Float16Elem = 10; // FLOAT16
+    private const int DoubleElem = 11;  // DOUBLE
 
     private static NodeProto Node(string opType, string name, string[] inputs, string[] outputs)
     {
@@ -251,6 +252,69 @@ public class OnnxExternalDataTests
             float[] expected = [2f, 4f, 6f, 8f];
             Assert.Equal(expected,
                 RunAddModel(OnnxModelImporter.FromOnnxModel(bytes, externalDataDirectory: dir)));
+        });
+    }
+
+    [Fact]
+    public void TestAnOnnxFileIsScannedWithItsFlatPayloadsReadWhereTheyLieAndImportsAsParsedWhole()
+    {
+        WithTempDir(dir =>
+        {
+            const int N = 512;
+            float[] Values(float scale) => [.. Enumerable.Range(0, N).Select(i => scale * MathF.Sin(i))];
+            NodeProto With(NodeProto node, AttributeProto attribute) { node.Attributes.Add(attribute); return node; }
+            AttributeProto To(int elemType) => new() { Name = "to", Type = AttributeProto.AttributeType.Int, I = elemType };
+            AttributeProto Value(float scale) => new() { Name = "value", Type = AttributeProto.AttributeType.Tensor, T = Init("", FloatElem, [N], FloatBytes(Values(scale))) };
+            GraphProto Branch(string name, float scale)
+            {
+                var branch = new GraphProto { Name = name };
+                branch.Nodes.Add(With(Node("Constant", name + "_c", [], [name + "_out"]), Value(scale)));
+                branch.Outputs.Add(TensorInfo(name + "_out", FloatElem, N));
+                return branch;
+            }
+
+            var g = new GraphProto { Name = "payloads" };
+            g.Inputs.Add(TensorInfo("x", FloatElem, N));
+            g.Initializers.Add(Init("raw", FloatElem, [N], FloatBytes(Values(1f))));
+            g.Initializers.Add(new TensorProto { Name = "packed", data_type = FloatElem, Dims = [N], FloatDatas = Values(2f) });
+            g.Initializers.Add(new TensorProto { Name = "wide", data_type = DoubleElem, Dims = [N], DoubleDatas = [.. Values(3f).Select(v => (double)v)] });
+            g.Initializers.Add(new TensorProto { Name = "varint", data_type = Int64Elem, Dims = [N], Int64Datas = [.. Enumerable.Range(0, N).Select(i => (long)i)] });
+            g.Initializers.Add(Init("surplus", FloatElem, [N], FloatBytes([.. Values(4f), 9f])));
+            g.Initializers.Add(Init("small", FloatElem, [4], FloatBytes(1f, 2f, 3f, 4f)));
+            g.Initializers.Add(Init("cond", 9, [], [1]));
+            g.Nodes.Add(With(Node("Constant", "c", [], ["c"]), Value(5f)));
+            g.Nodes.Add(With(Node("Cast", "castw", ["wide"], ["widef"]), To(FloatElem)));
+            g.Nodes.Add(With(Node("Cast", "casti", ["varint"], ["varintf"]), To(FloatElem)));
+            var ifNode = Node("If", "if", ["cond"], ["branch"]);
+            ifNode.Attributes.Add(new AttributeProto { Name = "then_branch", Type = AttributeProto.AttributeType.Graph, G = Branch("then", 6f) });
+            ifNode.Attributes.Add(new AttributeProto { Name = "else_branch", Type = AttributeProto.AttributeType.Graph, G = Branch("else", 7f) });
+            g.Nodes.Add(ifNode);
+            string[] terms = ["raw", "packed", "widef", "varintf", "surplus", "c", "branch"];
+            for (int i = 0; i < terms.Length; i++)
+                g.Nodes.Add(Node("Add", "add" + i, [i == 0 ? "x" : "s" + i, terms[i]], [i == terms.Length - 1 ? "y" : "s" + (i + 1)]));
+            g.Outputs.Add(TensorInfo("y", FloatElem, N));
+            var path = WriteModel(dir, "payloads.onnx", WrapModel(g));
+
+            var scanned = OnnxStreamingScan.ReadModel(path);
+            var external = TensorProto.DataLocation.External;
+            Assert.Equal([external, external, external, default, default, default, default], scanned.Graph.Initializers.Select(t => t.data_location));
+            Assert.Equal(external, scanned.Graph.Nodes[0].Attributes[0].T.data_location);
+            Assert.All(scanned.Graph.Nodes[3].Attributes, a => Assert.Equal(external, a.G.Nodes[0].Attributes[0].T.data_location));
+
+            var x = TensorData([(long)N], Values(0.5f));
+            byte[] Run(ComputationGraph model) => ComputeContext.Default.Execute(model, x.Shared())[0].ToTensorData().AccessRawMemory().ToArray();
+            var parsedWhole = Run(OnnxModelImporter.FromOnnxModel(File.ReadAllBytes(path)));
+            Assert.Equal(parsedWhole, Run(Persistence.ImportOnnx(path)));
+            Assert.Equal(parsedWhole, Run(OnnxModelImporter.FromOnnxModel(path)));
+
+            var truncated = Path.Combine(dir, "truncated.onnx");
+            File.WriteAllBytes(truncated, File.ReadAllBytes(path)[..^(N * 4)]);
+            Assert.Contains(truncated, Assert.Throws<InvalidDataException>(() => Persistence.ImportOnnx(truncated)).Message);
+
+            g.SparseInitializers.Add(new SparseTensorProto { Values = Init("sparse", FloatElem, [1], FloatBytes(1f)), Indices = Init("", Int64Elem, [1], LongBytes(0)), Dims = [N] });
+            var sparse = WriteModel(dir, "sparse.onnx", WrapModel(g));
+            Assert.Contains("sparse initializer", Assert.Throws<InvalidDataException>(() => Persistence.ImportOnnx(sparse)).Message);
+            Assert.Contains("sparse initializer", Assert.Throws<InvalidDataException>(() => OnnxModelImporter.FromOnnxModel(File.ReadAllBytes(sparse))).Message);
         });
     }
 

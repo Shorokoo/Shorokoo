@@ -318,6 +318,7 @@ are, and they are never whole in host memory:
 using var cuda     = new ComputeContext(cudaBackend);
 using var compiled = cuda.LoadCompiled("model.skpt");                       // a .skpt checkpoint
 using var imported = cuda.LoadCompiled(architecture, "model.safetensors");  // or architecture + weights
+using var foreign  = cuda.ImportCompiledOnnx("model.onnx");                 // or an .onnx model
 var y = compiled.Execute(x);
 ```
 
@@ -329,8 +330,11 @@ var y = compiled.Execute(x);
   in the last bits from the same model compiled from its graph.
 - On a backend that cannot use weights where they are (PyTorch, JAX), `LoadCompiled` is
   `Compile(Persistence.Load(...))`.
-- An `.onnx` file carries its weights inside the protobuf, which is read whole; convert it to a
-  `.skpt` once to load it this way.
+- `ImportCompiledOnnx` imports the `.onnx` as `Persistence.ImportOnnx` does and refuses it
+  alike, with the same `namingScheme` and `inputShapes` overloads. Its weights are read from where
+  they lie in the file, inline in the protobuf or in an external-data side file alike, so the
+  protobuf is never held whole. A weight ONNX stores as varints (`int32_data`, `int64_data`,
+  `uint64_data`) has no bytes to read in place; it is decoded on the host and stays in the graph.
 
 ### Stopping a run
 

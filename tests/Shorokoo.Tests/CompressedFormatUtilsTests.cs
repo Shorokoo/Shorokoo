@@ -1326,15 +1326,19 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
         var architecture = FCLayer.ComputationGraph.ToConcreteArchitecture([numOut, input]);
         var model = architecture.ToConcreteModel();
         var (zip, dir, zstd, weights) = (P("compiled.skpt"), P("compiled_dir"), P("compiled_zstd.skpt"), P("compiled.safetensors"));
+        var (onnx, onnxPair) = (P("compiled.onnx"), P("compiled_pair.onnx"));
         Persistence.From(model).WithModel().WithWeights().Save(zip);
         Persistence.From(model).WithModel().WithWeights().SaveAsDirectory(dir);
         Persistence.From(model).WithModel().WithWeights().WithZstdCompressedData().Save(zstd);
         Persistence.ExportSafeTensors(model, weights);
+        Persistence.ExportOnnx(model, onnx);
+        Persistence.ExportOnnx(model, onnxPair, new OnnxExternalDataOptions { SizeThreshold = 0 });
         var expected = ExecuteToBytes(model, numOut, input);
 
         using var context = new ComputeContext();
         foreach (var load in (Func<CompiledGraph>[])[() => context.LoadCompiled(zip), () => context.LoadCompiled(dir),
-            () => context.LoadCompiled(zstd), () => context.LoadCompiled(architecture, weights)])
+            () => context.LoadCompiled(zstd), () => context.LoadCompiled(architecture, weights),
+            () => context.ImportCompiledOnnx(onnx), () => context.ImportCompiledOnnx(onnxPair)])
         {
             var compiled = load();
             var weight = Assert.Single(compiled.SuppliedTensors);
@@ -1343,6 +1347,30 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
             compiled.Dispose();
             Assert.True(weight.IsDisposed);
         }
+        var held = context.Tensors.ToList();
+        Assert.Throws<ArgumentException>(() => context.ImportCompiledOnnx(onnx, new Dictionary<string, long[]> { ["absent"] = [1L] }));
+        Assert.Equal(held, context.Tensors);
+    }
+
+    [Fact]
+    public void TestImportingAnOnnxHoldsEachWeightOnce()
+    {
+        long Import(long width, OnnxExternalDataOptions? externalData)
+        {
+            var numOut = TensorData(DType.Int64, [], width);
+            var model = FCLayer.ComputationGraph.ToConcreteArchitecture([numOut, TensorDataWithSmallVals(DType.Float32, [2L, width])]).ToConcreteModel();
+            var path = P($"held_{width}_{externalData is null}.onnx");
+            Persistence.ExportOnnx(model, path, externalData);
+            Persistence.ImportOnnx(path);
+            GC.Collect();
+            var before = GC.GetAllocatedBytesForCurrentThread();
+            Persistence.ImportOnnx(path);
+            return GC.GetAllocatedBytesForCurrentThread() - before;
+        }
+
+        const long Wide = 1024;
+        foreach (var externalData in (OnnxExternalDataOptions?[])[null, new OnnxExternalDataOptions { SizeThreshold = 0 }])
+            Assert.True(Import(Wide, externalData) - Import(64, externalData) < 4 * Wide * Wide * 3 / 2);
     }
 
     [Fact]

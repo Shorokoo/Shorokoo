@@ -468,31 +468,42 @@ public class GpuExecutionTests
         var numOut = TensorData(DType.Int64, [], Width);
         var input = TensorData([1L, Width], [.. Enumerable.Range(0, (int)Width).Select(i => MathF.Sin(i))]);
         var path = TrainingRigHelpers.TempPath("compiled") + ".skpt";
+        var (onnx, onnxPair) = (Path.ChangeExtension(path, ".onnx"), Path.ChangeExtension(path, ".pair.onnx"));
         try
         {
-            Persistence.From(FCLayer.ComputationGraph.ToConcreteArchitecture([numOut, input]).ToConcreteModel())
-                .WithModel().WithWeights().Save(path);
+            {
+                var model = FCLayer.ComputationGraph.ToConcreteArchitecture([numOut, input]).ToConcreteModel();
+                Persistence.From(model).WithModel().WithWeights().Save(path);
+                Persistence.ExportOnnx(model, onnx);
+                Persistence.ExportOnnx(model, onnxPair, new OnnxExternalDataOptions { SizeThreshold = 0 });
+            }
             using var context = new ComputeContext();
             float[] Run(CompiledGraph compiled) => [.. compiled.Execute(numOut.Shared(), input.Shared())[0].ToTensorData().ToHost().As<float32>().AccessMemory<float>()];
             float[] expected;
             using (var viaGraph = context.Compile(Persistence.Load(path))) expected = Run(viaGraph);
 
-            GC.Collect();
-            long managed = GC.GetAllocatedBytesForCurrentThread();
-            long Private() => System.Diagnostics.Process.GetCurrentProcess().PrivateMemorySize64;
-            long Card() => DeviceMemory.Read()!.Value.UsedBytes;
-            var (host, card) = (Private(), Card());
-            using var loaded = context.LoadCompiled(path);
-            var (hostGrowth, cardGrowth) = (Private() - host, Card() - card);
-            Assert.True(GC.GetAllocatedBytesForCurrentThread() - managed < 64L << 20);
-            Assert.True(cardGrowth < 3 * 4 * Width * Width / 2);
-            Assert.True(hostGrowth - cardGrowth < 4 * Width * Width / 2);
-            Assert.Equal([false, false], loaded.SuppliedTensors.Select(t => t.IsHostResident));
-            Assert.True(expected.Zip(Run(loaded)).All(p => MathF.Abs(p.First - p.Second) <= 1e-5f * MathF.Max(1f, MathF.Abs(p.First))));
+            foreach (var load in (Func<CompiledGraph>[])[() => context.ImportCompiledOnnx(onnx), () => context.ImportCompiledOnnx(onnxPair), () => context.LoadCompiled(path)])
+            {
+                GC.Collect();
+                long managed = GC.GetAllocatedBytesForCurrentThread();
+                long Private() => System.Diagnostics.Process.GetCurrentProcess().PrivateMemorySize64;
+                long Card() => DeviceMemory.Read()!.Value.UsedBytes;
+                var (host, card) = (Private(), Card());
+                using var loaded = load();
+                var (hostGrowth, cardGrowth) = (Private() - host, Card() - card);
+                Assert.True(GC.GetAllocatedBytesForCurrentThread() - managed < 64L << 20);
+                Assert.True(cardGrowth < 3 * 4 * Width * Width / 2);
+                Assert.True(hostGrowth - cardGrowth < 4 * Width * Width / 2);
+                Assert.Equal([false, false], loaded.SuppliedTensors.Select(t => t.IsHostResident));
+                Assert.True(expected.Zip(Run(loaded)).All(p => MathF.Abs(p.First - p.Second) <= 1e-5f * MathF.Max(1f, MathF.Abs(p.First))));
+            }
         }
         finally
         {
             File.Delete(path);
+            File.Delete(onnx);
+            File.Delete(onnxPair);
+            File.Delete(onnxPair + ".data");
         }
     }
 

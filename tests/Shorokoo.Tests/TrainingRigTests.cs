@@ -2504,11 +2504,15 @@ public class TrainingRigTrainingLoopCoverageTests
         => Assert.Contains("carries nothing out", Assert.Throws<InvalidOperationException>(
             () => StatefulCallInALoopCarryingNothingModel.ComputationGraph).Message);
 
-    // Shorokoo/Shorokoo#479: a discarded call is kept by naming its output from outside the branch,
-    // which makes the arm's call, and its update, unconditional.
-    [Fact(Skip = "Shorokoo/Shorokoo#479")]
+    [Fact]
     public void TestAStatefulCallInADiscardedIfElseArmUpdatesOnlyWhenThatArmRuns()
-        => Assert.Equal([0f], StateFieldsAfterOneStep(StatefulCallInADiscardedIfElseArmModel.ComputationGraph));
+        => Assert.Equal([0f, 0f], [.. StateFieldsAfterOneStep(StatefulCallInADiscardedIfElseArmModel.ComputationGraph),
+            .. StateFieldsAfterOneStep(StatefulCallInADiscardedIfElseArmInALoopModel.ComputationGraph)]);
+
+    [Fact]
+    public void TestAStatefulCallMadeBeforeAnIfElseAndReadInOneArmUpdatesWhicheverArmRuns()
+        => Assert.Equal([1f, 1f], [.. StateFieldsAfterOneStep(StatefulCalledBeforeAnIfElseAndReadInOneArmModel.ComputationGraph),
+            .. StateFieldsAfterOneStep(StatefulCalledBeforeADiscardedIfElseAndReadInOneArmModel.ComputationGraph)]);
 
     /// <summary>The ops an inference model computes inside its <c>If</c>, rather than before it.</summary>
     private static string[] IfBodyOps(ComputationGraph modelGraph)
@@ -2554,6 +2558,10 @@ public class TrainingRigTrainingLoopCoverageTests
         Assert.Equal<float>([0.9f, -0.6f], TrainedParams(SqrtInOneIfArmModel.ComputationGraph, false, 1f, 4f));
         Assert.Equal<float>([0.95f, 0.8f], TrainedParams(SqrtInOneIfArmModel.ComputationGraph, true, 1f, 4f));
     }
+
+    [Fact]
+    public void TestAValueReadInOneIfElseArmAndAfterTheBranchKeepsItsGradientWhicheverArmRuns()
+        => Assert.Equal<float>([0.6f, -0.6f], TrainedParams(GainReadInOneIfArmAndAfterTheBranchModel.ComputationGraph, false, 1f, 2f));
 
     private static TrainingRig OptionalBiasRig(OptionalTensorData bias, TensorData x)
         => TrainingRig.FromScratch(NullableTrainableBiasLayer.ComputationGraph,

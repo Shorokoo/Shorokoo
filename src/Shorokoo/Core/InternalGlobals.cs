@@ -172,6 +172,45 @@ namespace Shorokoo.Core
         }
 
         /// <summary>
+        /// Keeps an <c>IfElse</c> whose arms make a stateful call, even where its result is
+        /// discarded. Which arm a call belongs to is read off what the <c>IF_CLOSE</c>'s branch
+        /// inputs reach, so a branch nothing keeps is swept away and leaves the call it held
+        /// belonging to no arm: the call effect alone keeps it, and its update applies whether or
+        /// not the arm runs. Naming the <c>IfElse</c>'s output as one more effect keeps the branch,
+        /// so the update is taken from whichever arm ran. Recorded in whichever scope
+        /// <see cref="RegisterCallEffect"/> records, when <paramref name="armValues"/> reach a
+        /// call effect recorded there.
+        /// </summary>
+        internal static void KeepIfElseOfArmCallEffects(Variable[] armValues, Variable ifOutput)
+        {
+            if (GraphTrace.CallEffects is not List<Variable> effects) return;
+            var loopers = GraphTrace.Loopers;
+            if (loopers.Active is { } active)
+            {
+                if (!loopers.InCanonicalRecordingScope || active.looper.CallEffects is not { } loopEffects) return;
+                effects = loopEffects;
+            }
+            if (effects.Count == 0) return;
+
+            var recorded = effects.Select(e => e.OwningNode).ToHashSet();
+            long oldest = recorded.Min(n => n.OrderingHintNumber);
+            var seen = new HashSet<Node>();
+            var stack = new Stack<Variable>(armValues);
+            while (stack.Count > 0)
+            {
+                var node = stack.Pop().OwningNode;
+                if (node.OrderingHintNumber < oldest || !seen.Add(node)) continue;
+                if (recorded.Contains(node))
+                {
+                    effects.Add(ifOutput);
+                    return;
+                }
+                foreach (var input in node.AllInputs)
+                    if (input is not null) stack.Push(input);
+            }
+        }
+
+        /// <summary>
         /// Registers a state update relationship between an original state tensor and its updated value.
         /// Called by Globals.StateUpdate to track state updates during module execution. The pair is
         /// recorded on the current module build (see <see cref="GraphTrace"/>), where the graph builder

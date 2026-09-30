@@ -102,7 +102,8 @@ namespace Shorokoo
         /// enclosing scope in turn.</summary>
         private List<Variable>? callEffects;
 
-        /// <summary>Records one stateful call made in this loop's body.</summary>
+        /// <summary>Records one stateful call made in this loop's body. A loop carrying nothing out
+        /// has nothing to hang it on and is refused when it closes.</summary>
         internal void AddCallEffect(Variable callOutput) => (callEffects ??= []).Add(callOutput);
 
         // private HashSet<Variable> zombieScanVariableOutputs = new HashSet<Variable>();
@@ -1113,18 +1114,20 @@ namespace Shorokoo
 
             // A stateful call whose result the body discards is kept by what the loop carries
             // out: the first carried value (else the first scanned one) takes the calls as
-            // dependencies, and its close output becomes a call effect of the enclosing scope. A
-            // loop that carries nothing out has nothing to keep its body alive with.
+            // dependencies, and its close output becomes a call effect of the enclosing scope.
             int effectCarrier = -1;
             if (this.callEffects is { Count: > 0 } effects)
             {
                 var carrierLoopVariable = Array.FindIndex(closeNodeLoopVariables, x => !x.IsLagCarry);
                 effectCarrier = carrierLoopVariable >= 0 ? carrierLoopVariable
                     : closeNodeScanInputs.Length > 0 ? closeNodeLoopInputs.Length
-                    : -1;
-                if (effectCarrier >= 0 && effectCarrier < closeNodeLoopInputs.Length)
+                    : throw new InvalidOperationException(
+                        "A LoopAPI.Iterate body calls a model that updates module-owned state, but the " +
+                        "loop carries nothing out, so nothing after it can keep the call and its update " +
+                        "would be lost. Carry a value out of the loop — a loop variable or a scanned value.");
+                if (effectCarrier < closeNodeLoopInputs.Length)
                     closeNodeLoopInputs[effectCarrier] = InternalOp.WithStateDeps(closeNodeLoopInputs[effectCarrier], [.. effects]);
-                else if (effectCarrier >= 0)
+                else
                     closeNodeScanInputs[0] = InternalOp.WithStateDeps(closeNodeScanInputs[0], [.. effects]);
             }
 
@@ -1144,6 +1147,7 @@ namespace Shorokoo
             Debug.Assert(this.OpenLoopNode.AssertNotNull().Outputs.Length == numLoopOutputs + 2);
             Debug.Assert(loopCloseNode.Inputs.Length == numBreakConditions + numLoopOutputs + numScanOutputs);
             Debug.Assert(loopCloseNode.Outputs.Length == numLoopOutputs + numScanOutputs);
+            int closeIndex = 0;
             foreach (((var closeNodeInputVariable, var closeNodeOutputVariable), var loopVariable) in
                             loopCloseNode.Inputs.Skip(1).Zip(loopCloseNode.Outputs.AssertNotNulls()).Zip(closeNodeLoopVariables.Concat(closeNodeScanLoopVariables)))
             {
@@ -1153,8 +1157,8 @@ namespace Shorokoo
                     this.closeNodeOutputs[closeNodeOutputVariable] = loopVariable;
                 }
 
-                Debug.Assert(Object.ReferenceEquals(loopVariable.CloseNodeInput, closeNodeInputVariable)
-                             || closeNodeInputVariable?.OwningNode.NodeDef.FullNodeOpName == InternalOpCodes.WITH_STATE_DEPS);
+                Debug.Assert(Object.ReferenceEquals(loopVariable.CloseNodeInput,
+                    closeIndex++ == effectCarrier ? closeNodeInputVariable?.OwningNode.Inputs[0] : closeNodeInputVariable));
             }
 
             this.CloseLoopNode = loopCloseNode;

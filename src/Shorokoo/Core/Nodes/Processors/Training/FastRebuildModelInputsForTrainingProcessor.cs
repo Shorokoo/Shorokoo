@@ -141,10 +141,7 @@ namespace Shorokoo.Core.Nodes.Processors.Training
                             "FastRebuildModelInputsForTrainingProcessor: a state update reads a value that is "
                             + "not one this state field has held, so the field it updates cannot be "
                             + "identified and its update would be dropped.");
-                    // An unrolled trip a later trip supersedes is read within its own trip, but its
-                    // update is not the one the field carries out.
-                    if (!FastChainStateUpdatesAcrossCallSites.IsSuperseded(node))
-                        currentByField[field] = resolvedUpdatedState;
+                    currentByField[field] = resolvedUpdatedState;
                     heldByField[field].Add(resolvedUpdatedState);
 
                     var outputKey = GetSingleOutputKey(node);

@@ -98,7 +98,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// <see cref="FastChainStateUpdatesAcrossCallSites"/> so that each call's link reads the
         /// previous one. Only the last link in a chain holds the value the step ends with, and the
         /// executor takes exactly one value per parameter, so a link that another link reads is not
-        /// an output. Nor is an unrolled loop trip's link that a later trip supersedes.</para>
+        /// an output.</para>
         /// </summary>
         internal static List<FastNode> FinalLinkPerStateParam(InternalComputationGraph graph)
         {
@@ -125,7 +125,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     ? previousRoot
                     : resolved;
                 rootOfLink[node.Key] = root;
-                if (!FastChainStateUpdatesAcrossCallSites.IsSuperseded(node)) lastLinkOfRoot[root] = node;
+                lastLinkOfRoot[root] = node;
             }
 
             var finalLinks = new List<FastNode>();

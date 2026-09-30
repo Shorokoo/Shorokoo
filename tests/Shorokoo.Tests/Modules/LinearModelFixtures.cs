@@ -1138,6 +1138,153 @@ public partial class InputAccumulatingInALoopThatStopsEarlyModel
     }
 }
 
+/// <summary>A stateful model called twice in a loop body and once after the loop.</summary>
+[Module]
+public partial class StatefulCalledTwiceInALoopAndAfterModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var m = StatefulGainSubModel.Model();
+        var x = t;
+        foreach (var ctx in LoopAPI.Iterate(Scalar(3L)))
+        {
+            x = m.Call(m.Call(x));
+            ctx.ContinueWhile(Scalar(true));
+        }
+        return m.Call(x);
+    }
+}
+
+/// <summary><see cref="InputAccumulatingSubModel"/> called in an outer loop's body and in the body
+/// of a loop nested in it, so each outer trip's inner call reads that trip's outer call.</summary>
+[Module]
+public partial class InputAccumulatingCalledInAnOuterAndAnInnerLoopModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var m = InputAccumulatingSubModel.Model();
+        var x = t;
+        foreach (var outer in LoopAPI.Iterate(Scalar(2L)))
+        {
+            x = m.Call(x);
+            foreach (var ctx in LoopAPI.Iterate(Scalar(1L)))
+            {
+                x = m.Call(x);
+                ctx.ContinueWhile(Scalar(true));
+            }
+            outer.ContinueWhile(Scalar(true));
+        }
+        return x;
+    }
+}
+
+/// <summary><see cref="InputAccumulatingSubModel"/> called in a loop body before an <c>IfElse</c>
+/// whose taken arm calls it again.</summary>
+[Module]
+public partial class InputAccumulatingCalledBeforeAnIfElseInALoopModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var m = InputAccumulatingSubModel.Model();
+        var x = t;
+        foreach (var ctx in LoopAPI.Iterate(Scalar(2L)))
+        {
+            x = m.Call(x);
+            x = (x.Reduce(ReduceKind.Max, keepDims: false).Scalar() < Scalar(100f)).IfElse(m.Call(x), x * Scalar(3f));
+            ctx.ContinueWhile(Scalar(true));
+        }
+        return x;
+    }
+}
+
+/// <summary>A stateful model called in an <c>IfElse</c> arm in a loop that stops after its first
+/// trip, whose arm the later trips' frozen values would not take.</summary>
+[Module]
+public partial class StatefulCalledInAnIfElseInALoopThatStopsEarlyModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var m = StatefulGainSubModel.Model();
+        var x = t;
+        foreach (var ctx in LoopAPI.Iterate(Scalar(3L)))
+        {
+            var takeCall = x.Reduce(ReduceKind.Max, keepDims: false).Scalar() < Scalar(2.5f);
+            x = takeCall.IfElse(m.Call(x) * Scalar(2f), x * Scalar(3f));
+            ctx.ContinueWhile(x.Reduce(ReduceKind.Max, keepDims: false).Scalar() < Scalar(1.5f));
+        }
+        return x;
+    }
+}
+
+/// <summary>A stateful model called in a loop nested in one whose continue condition is read at
+/// run time.</summary>
+[Module]
+public partial class StatefulCalledInALoopNestedInOneWithARuntimeConditionModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var m = StatefulGainSubModel.Model();
+        var x = t;
+        foreach (var outer in LoopAPI.Iterate(Scalar(2L)))
+        {
+            foreach (var ctx in LoopAPI.Iterate(Scalar(2L)))
+            {
+                x = m.Call(x);
+                ctx.ContinueWhile(Scalar(true));
+            }
+            outer.ContinueWhile(x.Reduce(ReduceKind.Max, keepDims: false).Scalar() < Scalar(100f));
+        }
+        return x;
+    }
+}
+
+/// <summary>A loop that carries nothing out, whose body makes a stateful call.</summary>
+[Module]
+public partial class StatefulCallInALoopCarryingNothingModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var m = StatefulGainSubModel.Model();
+        foreach (var ctx in LoopAPI.Iterate(Scalar(3L)))
+        {
+            _ = m.Call(t);
+            ctx.ContinueWhile(Scalar(true));
+        }
+        return t * Scalar(2f);
+    }
+}
+
+/// <summary>A stateful call in an arm of an <c>IfElse</c> whose result is discarded, on a condition
+/// that does not take that arm.</summary>
+[Module]
+public partial class StatefulCallInADiscardedIfElseArmModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var m = StatefulGainSubModel.Model();
+        _ = (t.Reduce(ReduceKind.Max, keepDims: false).Scalar() > Scalar(100f)).IfElse(m.Call(t), t * Scalar(3f));
+        return t * Scalar(8f);
+    }
+}
+
+/// <summary>A stateful model called twice in a loop whose trip count is a runtime input, so the loop
+/// unrolls only once that input is baked in.</summary>
+[Module]
+public partial class StatefulCalledTwiceInALoopOfAnInputTripCountModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t, Scalar<int64> trips)
+    {
+        var m = StatefulGainSubModel.Model();
+        var x = t;
+        foreach (var ctx in LoopAPI.Iterate(trips))
+        {
+            x = m.Call(m.Call(x));
+            ctx.ContinueWhile(Scalar(true));
+        }
+        return x;
+    }
+}
+
 /// <summary>A trainable parameter inside a loop whose trip count is not a compile-time constant, so
 /// the loop is not unrolled before the training graph is built.</summary>
 [Module]

@@ -2664,6 +2664,30 @@ public class TrainingRigTrainingLoopCoverageTests
              .. StateFieldsAfterOneStep(InputAccumulatingCalledTwiceInALoopModel.ComputationGraph),
              .. StateFieldsAfterOneStep(InputAccumulatingInALoopThatStopsEarlyModel.ComputationGraph)]);
 
+    [Fact]
+    public void TestEachTripOfALoopComposesItsCallsAcrossNestingAndBranchesAndTheCallAfterReadsTheLastTrip()
+        => Assert.Equal([3f, 4f, 4f],
+            [.. StateFieldsAfterOneStep(StatefulCalledTwiceInALoopAndAfterModel.ComputationGraph),
+             .. StateFieldsAfterOneStep(InputAccumulatingCalledInAnOuterAndAnInnerLoopModel.ComputationGraph),
+             .. StateFieldsAfterOneStep(InputAccumulatingCalledBeforeAnIfElseInALoopModel.ComputationGraph)]);
+
+    [Fact]
+    public void TestALoopThatStopsEarlyKeepsItsLastRunTripsUpdateThroughBranchesAndNestedLoops()
+        => Assert.Equal([1f, 1f],
+            [.. StateFieldsAfterOneStep(StatefulCalledInAnIfElseInALoopThatStopsEarlyModel.ComputationGraph),
+             .. StateFieldsAfterOneStep(StatefulCalledInALoopNestedInOneWithARuntimeConditionModel.ComputationGraph)]);
+
+    [Fact]
+    public void TestAStatefulCallInALoopThatCarriesNothingOutIsRefused()
+        => Assert.Contains("carries nothing out", Assert.Throws<InvalidOperationException>(
+            () => StatefulCallInALoopCarryingNothingModel.ComputationGraph).Message);
+
+    // Shorokoo/Shorokoo#479: a discarded call is kept by naming its output from outside the branch,
+    // which makes the arm's call, and its update, unconditional.
+    [Fact(Skip = "Shorokoo/Shorokoo#479")]
+    public void TestAStatefulCallInADiscardedIfElseArmUpdatesOnlyWhenThatArmRuns()
+        => Assert.Equal([0f], StateFieldsAfterOneStep(StatefulCallInADiscardedIfElseArmModel.ComputationGraph));
+
     /// <summary>The ops an inference model computes inside its <c>If</c>, rather than before it.</summary>
     private static string[] IfBodyOps(ComputationGraph modelGraph)
     {

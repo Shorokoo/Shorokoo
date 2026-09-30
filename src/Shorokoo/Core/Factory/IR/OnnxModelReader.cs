@@ -939,9 +939,10 @@ namespace Shorokoo.Core.Factory.IR
         /// that a user is likely to hit carry the workaround with them; everything else
         /// points at the support matrix.
         /// </summary>
-        private static string UnsupportedOperatorMessage(string opType, string? nodeName)
+        private static string UnsupportedOperatorMessage(string opType, string? nodeName, string? domain = null)
         {
-            var opening = $"ONNX import: the '{opType}' operator (node '{nodeName}') is not "
+            var qualified = OnnxOpset.IsDefaultDomain(domain) ? opType : $"{domain}::{opType}";
+            var opening = $"ONNX import: the '{qualified}' operator (node '{nodeName}') is not "
                 + "supported by Shorokoo.";
             return opType switch
             {
@@ -987,6 +988,13 @@ namespace Shorokoo.Core.Factory.IR
                          opCode;
 
                 var nodeProto = tempNode.Node;
+
+                // A node outside the default domain is a call of one of the model's own functions
+                // (Shorokoo writes those in the "Functions" domain) or an operator Shorokoo does not
+                // have: a same-named standard definition is a different operator.
+                if (!OnnxOpset.IsDefaultDomain(nodeProto.Domain) && !functionsMap.ContainsKey(opCode))
+                    throw new NotSupportedException(
+                        UnsupportedOperatorMessage(nodeProto.OpType, nodeProto.Name, nodeProto.Domain));
 
                 if (!functionsMap.ContainsKey(opCode) && !definitions.ContainsKey(opCode)
                     && !Definitions.ModuleOps.Contains(opCode))

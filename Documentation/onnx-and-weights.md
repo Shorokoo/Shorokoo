@@ -128,6 +128,12 @@ attribute, ONNX introduced after opset 21. Import converts nothing: convert such
 opset 21 first, for example with `onnx.version_converter.convert_version(model, 21)` — see
 [limitations.md](limitations.md#onnx-opset-21-only).
 
+An operator Shorokoo does not support fails the import with `NotSupportedException`, naming
+the operator and its node. That includes every node outside the standard domain (`""` /
+`ai.onnx`) that does not call one of the model's own functions — a `com.microsoft::Attention`,
+say, or a `com.microsoft::Relu`: an operator in another domain is not the standard operator
+of the same name.
+
 Shorokoo-written models carry a `shrk_graph_kind` metadata prop that sets the imported
 `Kind`; foreign models are classified by op-scanning. A tag impossible for the content
 fails the import.

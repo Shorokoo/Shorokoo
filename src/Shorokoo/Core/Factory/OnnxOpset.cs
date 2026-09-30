@@ -62,7 +62,7 @@ namespace Shorokoo.Core.Factory
         private const string BuildContext = "ONNX model build";
         private const string NodeBuildContext = "node build";
 
-        private static bool IsDefaultDomain(string? domain)
+        internal static bool IsDefaultDomain(string? domain)
             => string.IsNullOrEmpty(domain) || domain == "ai.onnx";
 
         /// <summary>

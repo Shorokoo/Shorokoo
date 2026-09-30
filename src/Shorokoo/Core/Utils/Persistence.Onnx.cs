@@ -426,8 +426,7 @@ namespace Shorokoo
                 var domain = node.Domain;
                 bool ok = domain switch
                 {
-                    "" or "ai.onnx" or "ai.onnx.ml"
-                        => Definitions.VanillaOpNames.Contains(node.OpType),
+                    "" or "ai.onnx" => Definitions.VanillaOpNames.Contains(node.OpType),
                     "Functions" => declaredFunctions.Contains(node.OpType),
                     _ => false,
                 };

@@ -424,13 +424,17 @@ public class CodegenFreeModuleTests
     [Fact]
     public void TestAStatefulLoopUnrolledByBakingItsTripCountComposesItsCalls()
     {
+        Assert.Equal(2f, StateAfterBakingTheTripCount(StatefulCalledTwiceInALoopOfAnInputTripCountModel.ComputationGraph));
+        Assert.Equal(8f, StateAfterBakingTheTripCount(InputAccumulatingInALoopOfAnInputTripCountThatStopsEarlyModel.ComputationGraph));
+    }
+
+    private static float StateAfterBakingTheTripCount(ComputationGraph cg)
+    {
         var input = TensorData([2L], 1f, 2f);
-        var concrete = StatefulCalledTwiceInALoopOfAnInputTripCountModel.ComputationGraph
-            .ToConcreteArchitecture([input, TensorData([], 3L)]);
+        var concrete = cg.ToConcreteArchitecture([input, TensorData([], 3L)]);
         var specialized = concrete.Specialize(new ModelParamList(
             [new KeyValuePair<string, TensorData>(concrete.InputNames[1]!, TensorData([], 3L))], ModelParamType.InputParam)).ToConcreteModel();
-        var (_, updated) = ComputeContext.Default.ExecuteWithState(specialized, input.Shared());
-        Assert.Equal(2f, StateValue(updated));
+        return StateValue(ComputeContext.Default.ExecuteWithState(specialized, input.Shared()).updatedGraph);
     }
 
     [Fact]
@@ -447,6 +451,24 @@ public class CodegenFreeModuleTests
         var input = TensorData([2L], 1f, 2f);
         var concrete = cg.ToConcreteArchitecture([input]).ToConcreteModel();
         return StateValue(ComputeContext.Default.ExecuteWithState(concrete, input.Shared()).updatedGraph);
+    }
+
+    [Fact]
+    public void TestAStatefulCallInALoopNestedWithARolledLoopRunsWithItsState()
+    {
+        Assert.Equal(1f, StateAfterOneExecution(StatefulCalledInALiteralLoopInsideARolledLoopModel.ComputationGraph));
+        Assert.Equal(1f, StateAfterOneExecution(StatefulCalledInARolledLoopInsideALiteralLoopModel.ComputationGraph));
+    }
+
+    [Fact]
+    public void TestARolledStatefulLoopInAnUntakenIfElseArmRunsAndMakesNoUpdate()
+    {
+        var input = TensorData([2L], 1f, 2f);
+        var concrete = InputAccumulatingInARolledLoopInAnUntakenIfElseArmModel.ComputationGraph
+            .ToConcreteArchitecture([input]).ToConcreteModel();
+        Assert.Equal<float>([3f, 6f], Floats(ComputeContext.Default.Execute(concrete, (IData[])[input])[0]
+            .ToTensorData().AccessRawMemory().ToArray()));
+        Assert.Equal(0f, StateAfterOneExecution(InputAccumulatingInARolledLoopInAnUntakenIfElseArmModel.ComputationGraph));
     }
 
     [Fact]

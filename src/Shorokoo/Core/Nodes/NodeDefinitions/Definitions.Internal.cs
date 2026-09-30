@@ -262,6 +262,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Input("updatedState", "T", rank: "R")
                 .Input("tripsRan", "B")
                 .AttributeLongs(ShrkAttrLoopTrips)
+                .AttributeBool(ShrkAttrStateOrdered)
                 .Output("linkedUpdatedState", "T", rank: "R"),
 
             // WITH_STATE_DEPS: Creates graph dependencies from updated state tensors to module output.

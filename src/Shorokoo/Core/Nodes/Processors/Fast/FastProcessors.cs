@@ -5230,6 +5230,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
             var remap = new Dictionary<FastTensorKey, FastTensorKey>();
             var nodesToRemove = new HashSet<FastNodeKey>();
+            var losingArms = new HashSet<(FastNodeKey IfClose, bool IsThen)>();
 
             foreach (var closeNode in graph.Nodes)
             {
@@ -5267,9 +5268,23 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
                 nodesToRemove.Add(openKey);
                 nodesToRemove.Add(closeNode.Key);
+                losingArms.Add((closeNode.Key, !boolVal));
             }
 
             if (nodesToRemove.Count == 0) return false;
+
+            // What only the arm the condition does not take computes goes with it — a stateful call
+            // made there included, which a WITH_STATE_DEPS names only to keep it, so it is not
+            // named any more.
+            var armsOf = FastIfArms.Classify(graph);
+            bool OnlyInALosingArm(FastTensorKey? key)
+                => key is FastTensorKey k && producerByOutput.TryGetValue(k, out var p)
+                   && armsOf.TryGetValue(p.Key, out var arms)
+                   && arms.Any(a => losingArms.Contains((a.IfClose, a.IsThen)));
+            foreach (var node in graph.Nodes)
+                if (node.OpCode == InternalOpCodes.WITH_STATE_DEPS
+                    && node.FullInputs.TryGetValue("", out var deps) && deps.Skip(1).Any(OnlyInALosingArm))
+                    node.FullInputs[""] = [deps[0], .. deps.Skip(1).Where(d => !OnlyInALosingArm(d))];
 
             // Resolve transitive remap chains (an IF_CLOSE output may itself be the
             // input to another IF_CLOSE we just folded).
@@ -5982,8 +5997,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// <see cref="OnnxOpAttributeNames.ShrkAttrLoopTrips"/>, with the flag saying whether the trip
         /// ran as one more input where that is decided at run time.
         /// </summary>
-        private static void TagLoopTrip(FastNode cloned, FastNode original, long loopId, long trip, FastTensorKey? ran)
+        private static void TagLoopTrip(FastNode cloned, FastNode original, long loopId, long trip, long tripCount, FastTensorKey? ran)
         {
+            // Ordered while the loop was rolled: it carries its state out as a loop variable.
+            if (FastChainStateUpdatesAcrossCallSites.IsOrdered(original)) return;
             var inputs = cloned.FullInputs[""];
             long flagIndex = -1;
             if (ran is FastTensorKey r)
@@ -5991,7 +6008,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 flagIndex = inputs.Count;
                 inputs.Add(r);
             }
-            long[] trips = [.. original.Attributes.GetLongsVal(OnnxOpAttributeNames.ShrkAttrLoopTrips) ?? [], loopId, trip, flagIndex];
+            long[] trips = [.. original.Attributes.GetLongsVal(OnnxOpAttributeNames.ShrkAttrLoopTrips) ?? [], loopId, trip, tripCount, flagIndex];
             cloned.Attributes = OnnxCSharpAttributes.FromCSharpVals(
                 new Dictionary<string, object?> { [OnnxOpAttributeNames.ShrkAttrLoopTrips] = trips },
                 Definitions.NodeDefinitions[InternalOpCodes.STATE_UPDATE_LINK].AttributeDefs);
@@ -6414,7 +6431,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     // time whether that trip ran, so the calls around and within the loop can be
                     // ordered once it is unrolled.
                     if (b.OpCode == InternalOpCodes.STATE_UPDATE_LINK)
-                        TagLoopTrip(cloned, b, loopId, iter, hasCondChain ? allPrevCondKey : null);
+                        TagLoopTrip(cloned, b, loopId, iter, iterCount, hasCondChain ? allPrevCondKey : null);
 
                     newNodes.Add(cloned);
                     clonedThisIter.Add((b, cloned));

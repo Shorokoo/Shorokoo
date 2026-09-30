@@ -60,6 +60,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                         if (ok is not null && !ok.Value.IsEmpty) producerOf[ok.Value] = node;
 
             var readersOf = ReadersOf(graph, producerOf);
+            var closeOf = new Dictionary<FastNodeKey, FastNodeKey>();
+            foreach (var node in graph.Nodes)
+                if (node.OpCode == OpCodes.IF_CLOSE && node.GraphOpenNodeKey is FastNodeKey openNode)
+                    closeOf[openNode] = node.Key;
 
             foreach (var close in graph.Nodes)
             {
@@ -76,7 +80,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                         ? ReachedFrom(roots, producerOf) : [];
                 }
 
-                var readOutside = ReadOutsideTheBranch(close.Key, reached, readersOf, nodeByKey, producerOf);
+                var readOutside = ReadOutsideTheBranch(close.Key, reached, readersOf, closeOf, nodeByKey, producerOf);
 
                 foreach (var isThen in (bool[])[true, false])
                     foreach (var nodeKey in reached[isThen])
@@ -110,9 +114,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         }
 
         /// <summary>The nodes reading each node's outputs, graph outputs included, leaving out the
-        /// state dependencies a <c>WITH_STATE_DEPS</c> names only to keep them. An <c>IF_OPEN</c>
-        /// produces nothing an arm reaches, so the condition it reads is read by its
-        /// <c>IF_CLOSE</c>.</summary>
+        /// state dependencies a <c>WITH_STATE_DEPS</c> names only to keep them.</summary>
         private static Dictionary<FastNodeKey, List<FastNodeKey?>> ReadersOf(
             InternalComputationGraph graph, Dictionary<FastTensorKey, FastNode> producerOf)
         {
@@ -124,35 +126,34 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 list.Add(reader);
             }
 
-            var closeOf = new Dictionary<FastNodeKey, FastNodeKey>();
             foreach (var node in graph.Nodes)
-                if (node.OpCode == OpCodes.IF_CLOSE && node.GraphOpenNodeKey is FastNodeKey open)
-                    closeOf[open] = node.Key;
-
-            foreach (var node in graph.Nodes)
-            {
-                var reader = closeOf.TryGetValue(node.Key, out var close) ? close : node.Key;
                 foreach (var (_, ins) in node.FullInputs)
                     for (int i = 0; i < ins.Count; i++)
                         if (i == 0 || node.OpCode != InternalOpCodes.WITH_STATE_DEPS)
-                            Read(ins[i], reader);
-            }
+                            Read(ins[i], node.Key);
             foreach (var output in graph.Outputs)
                 Read(output, null);
             return readersOf;
         }
 
         /// <summary>The nodes of an <c>IfElse</c>'s arms that run whichever arm is taken because
-        /// something other than the branch reads them, together with all they are computed from.</summary>
+        /// something other than the branch reads them, together with all they are computed from.
+        /// The branch's own condition is read before either arm runs, so its <c>IF_OPEN</c> reads
+        /// from outside; a nested <c>IfElse</c>'s <c>IF_OPEN</c> reads from wherever its
+        /// <c>IF_CLOSE</c> sits.</summary>
         private static HashSet<FastNodeKey> ReadOutsideTheBranch(
             FastNodeKey close,
             Dictionary<bool, HashSet<FastNodeKey>> reached,
             Dictionary<FastNodeKey, List<FastNodeKey?>> readersOf,
+            Dictionary<FastNodeKey, FastNodeKey> closeOf,
             Dictionary<FastNodeKey, FastNode> nodeByKey,
             Dictionary<FastTensorKey, FastNode> producerOf)
         {
+            bool Reached(FastNodeKey k) => reached[true].Contains(k) || reached[false].Contains(k);
             bool InBranch(FastNodeKey? key)
-                => key is FastNodeKey k && (k.Equals(close) || reached[true].Contains(k) || reached[false].Contains(k));
+                => key is FastNodeKey k
+                   && (k.Equals(close) || Reached(k)
+                       || closeOf.TryGetValue(k, out var nestedClose) && !nestedClose.Equals(close) && Reached(nestedClose));
 
             var readOutside = new HashSet<FastNodeKey>();
             var worklist = new Stack<FastNodeKey>();

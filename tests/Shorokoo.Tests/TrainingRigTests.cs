@@ -2682,6 +2682,54 @@ public class TrainingRigTrainingLoopCoverageTests
         => Assert.Equal([3f], StateFieldsAfterOneStep(StatefulCalledAroundALoopUnrolledOnlyForTrainingModel.ComputationGraph));
 
     [Fact]
+    public void TestAStatefulCallInAnIfElseArmAConstantConditionDoesNotTakeMakesNoUpdate()
+    {
+        Assert.Empty(StatefulCallInAnIfElseArmOnAFalseConstantModel.ComputationGraph
+            .ToConcreteArchitecture([TensorData([2L], 1f, 2f)]).ToInternal().GetStateParamDataNodes());
+        Assert.Equal([0f], StateFieldsAfterOneStep(StatefulCallInAnIfElseArmTakenOnTheFirstTripOnlyModel.ComputationGraph));
+    }
+
+    [Fact]
+    public void TestAnUnrolledLoopInAnIfElseArmStartsEachTripFromTheStepsState()
+    {
+        Assert.Equal([1f, 1f],
+            [.. StateFieldsAfterOneStep(StatefulLoopInATakenIfElseArmModel.ComputationGraph),
+             .. StateFieldsAfterOneStep(StatefulLoopInADiscardedTakenIfElseArmModel.ComputationGraph)]);
+        Assert.Equal(2.5f, LossAfterOneStep(StatefulLoopInATakenIfElseArmModel.ComputationGraph), 1e-4f);
+    }
+
+    [Fact]
+    public void TestAStatefulCallAnIfElsesConditionReadsUpdatesWhicheverArmRuns()
+        => Assert.Equal([1f], StateFieldsAfterOneStep(StatefulCallReadByAnIfElsesConditionAndArmModel.ComputationGraph));
+
+    [Fact]
+    public void TestADiscardedIfElseChangesNoOtherBranchsUpdate()
+        => Assert.Equal([0f, 0f],
+            [.. StateFieldsAfterOneStep(StatefulCallReadByAnUntakenArmAndADiscardedIfElseModel.ComputationGraph),
+             .. StateFieldsAfterOneStep(StatefulCallInAnUntakenArmOfADiscardedIfElseReadByAnotherModel.ComputationGraph)]);
+
+    [Fact]
+    public void TestAnIfElseReadByOneArmOfAnotherStaysInsideItAfterAStatefulCall()
+    {
+        var f = IfElseNestedInAnArmAfterAStatefulCallModel.ComputationGraph
+            .ToConcreteArchitecture([TensorData([2L], 1f, 2f)]).ToConcreteModel().ToInternal();
+        int depth = 0, topLevelIfs = 0;
+        foreach (var n in f.Nodes)
+        {
+            if (n.OpCode == OpCodes.IF_CLOSE || n.OpCode == OpCodes.LOOP_CLOSE) depth--;
+            if (n.OpCode == OpCodes.IF_OPEN && depth == 0) topLevelIfs++;
+            if (n.OpCode == OpCodes.IF_OPEN || n.OpCode == OpCodes.LOOP_OPEN) depth++;
+        }
+        Assert.Equal(1, topLevelIfs);
+    }
+
+    // Shorokoo/Shorokoo#492: the backward of the untaken arm's Gather, a ScatterND, runs
+    // unconditionally with indices only the taken arm would have made valid.
+    [Fact(Skip = "Shorokoo/Shorokoo#492")]
+    public void TestAGatherInAnUntakenIfElseArmTrains()
+        => Assert.Equal(2.5f, LossAfterOneStep(GainGatheredInAnUntakenIfElseArmModel.ComputationGraph), 1e-4f);
+
+    [Fact]
     public void TestAStatefulCallInALoopThatCarriesNothingOutIsRefused()
         => Assert.Contains("carries nothing out", Assert.Throws<InvalidOperationException>(
             () => StatefulCallInALoopCarryingNothingModel.ComputationGraph).Message);

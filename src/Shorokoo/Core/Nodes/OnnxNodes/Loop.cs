@@ -106,10 +106,13 @@ namespace Shorokoo
         /// has nothing to hang it on and is refused when it closes.</summary>
         internal void AddCallEffect(Variable callOutput) => (callEffects ??= []).Add(callOutput);
 
-        /// <summary>The stateful calls recorded in this loop's body so far, for an <c>IfElse</c> built
-        /// in the body to keep itself when its arms make one (see
-        /// <see cref="InternalGlobals.KeepIfElseOfArmCallEffects"/>).</summary>
-        internal List<Variable>? CallEffects => callEffects;
+        /// <summary>The <c>IfElse</c>s built in the body, recorded on the canonical pass; those it has
+        /// to keep for the stateful calls their arms make become effects of the body when it closes
+        /// (see <see cref="InternalGlobals.IfElsesKeptForTheirArms"/>).</summary>
+        private List<(Variable[] Arms, Variable Output)>? ifElses;
+
+        /// <summary>Records one <c>IfElse</c> built in this loop's body.</summary>
+        internal void AddIfElse(Variable[] arms, Variable output) => (ifElses ??= []).Add((arms, output));
 
         // private HashSet<Variable> zombieScanVariableOutputs = new HashSet<Variable>();
 
@@ -1121,6 +1124,9 @@ namespace Shorokoo
             // out: the first carried value (else the first scanned one) takes the calls as
             // dependencies, and its close output becomes a call effect of the enclosing scope.
             int effectCarrier = -1;
+            if (this.callEffects is { Count: > 0 } && this.ifElses is { Count: > 0 } bodyIfElses)
+                this.callEffects.AddRange(InternalGlobals.IfElsesKeptForTheirArms(this.callEffects, bodyIfElses,
+                    [(Variable?)this.continueWhileTensor, .. closeNodeLoopInputs, .. closeNodeScanInputs]));
             if (this.callEffects is { Count: > 0 } effects)
             {
                 var carrierLoopVariable = Array.FindIndex(closeNodeLoopVariables, x => !x.IsLagCarry);

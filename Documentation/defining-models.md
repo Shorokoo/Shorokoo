@@ -34,9 +34,9 @@ Related: [core-types.md](core-types.md) · [inference.md](inference.md) ·
     within a trip compose in order, and the update is the one the last trip that ran
     made. The loop composes with calls before and after it like any other call. A loop
     making such a call has to carry a value out; one that carries nothing out is refused.
-    This holds too for a loop whose trip count is known only at run time, nested or not,
-    except that a call in an `IfElse` in such a loop's body, or in such a loop inside one
-    whose trip count is constant, is refused when the model runs with its state.
+    This holds too for a loop whose trip count is known only at run time, nested in a loop
+    of either kind or holding one, except that a call in an `IfElse` in such a loop's body
+    is refused when the model runs with its state.
   - In an `IfElse`, only the arm that runs updates; calls within an arm compose with
     each other and with calls before the branch. A call the branch does not choose
     between must come before the ones it does.

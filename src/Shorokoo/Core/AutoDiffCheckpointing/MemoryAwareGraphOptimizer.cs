@@ -196,24 +196,25 @@ internal class MemoryAwareGraphOptimizer
 
         // A step that writes its state in place keeps a pair only where every reader of the state
         // runs before its update, whatever the backend folds. Ordering the updates after those
-        // readers (StateReadOrdering) is a candidate of its own, kept where it scores better than
-        // the graph as it came, and then what every strategy below starts from. It is weighed
-        // before the size threshold, so a small step keeps its pairs too: the trial is one
-        // evaluation, and each pair is a buffer the size of the state it writes over.
+        // readers (StateReadOrdering) is a candidate of its own, in two forms -- as placed, and with
+        // each update's search run before any other reaches its readers -- the better kept where it
+        // scores better than the graph as it came, and then what every strategy below starts from.
+        // It is weighed before the size threshold, so a small step keeps its pairs too: the trial
+        // is two evaluations, and each pair is a buffer the size of the state it writes over.
         var start = new Candidate(graph, shapeInfo);
         var startEval = baselineEval;
         if (_evaluator.State is { WrittenInPlace: true } state)
         {
-            var (ordered, orderedShapeInfo) = StateReadOrdering.Apply(graph, shapeInfo, state.Pairs);
-            if (!ReferenceEquals(ordered, graph))
+            foreach (var writersWithTheirReaders in (bool[])[false, true])
             {
+                var (ordered, orderedShapeInfo) = StateReadOrdering.Apply(graph, shapeInfo, state.Pairs, writersWithTheirReaders);
+                if (ReferenceEquals(ordered, graph)) break;
                 var orderedEval = _evaluator.Evaluate(ordered, orderedShapeInfo);
-                if (selection.Score(orderedEval) < selection.Score(baselineEval))
-                {
-                    strategies.Add((OrderedStateReads, orderedEval, ordered, orderedShapeInfo));
+                if (selection.Score(orderedEval) < selection.Score(startEval))
                     (start, startEval) = (new Candidate(ordered, orderedShapeInfo), orderedEval);
-                }
             }
+            if (!ReferenceEquals(start.Graph, graph))
+                strategies.Add((OrderedStateReads, startEval, start.Graph, start.ShapeInfo));
         }
 
         // The evaluator walks a Loop/If body once, but ORT runs a Loop body per iteration and

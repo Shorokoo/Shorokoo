@@ -91,7 +91,7 @@ internal static class OrtExecutionOrder
         return pairs == 0 ? 1.0 : (double)ascending / pairs;
     }
 
-    private static bool IsPreResident(FastNode node)
+    internal static bool IsPreResident(FastNode node)
         => node.IsModelInput() || node.IsModelParamData()
         || node.OpCode is OpCodes.CONSTANT or OpCodes.LOOP_FAKE_INPUT or OpCodes.LOOP_INDEX_VARIABLE or OpCodes.LOOP_SCAN_VARIABLE;
 

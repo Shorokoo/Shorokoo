@@ -466,12 +466,12 @@ public class AutoDiffCheckpointingCoverageTests
         [OnnxOp.Sub(p, OnnxOp.Cast(OnnxOp.Mul(OnnxOp.Cast(g, null, DType.Float64), OnnxOp.Cast(lr, null, DType.Float64)), null, DType.Float32)), OnnxOp.MatMul(g, Twice(p))];
 
     private static (InternalComputationGraph Graph, ShapeInferenceResult ShapeInfo) StepGraph(
-        Func<Variable, Variable, Variable, Variable[]> outputs, bool ordered, long side = 512, long rows = 512)
+        Func<Variable, Variable, Variable, Variable[]> outputs, bool ordered, long side = 512, long rows = 512, bool withReaders = false)
     {
         var (p, g, lr) = (InputTensor<float32>("p", rank: 2), InputTensor<float32>("g", rank: 2), InputScalar<float32>("lr"));
         var graph = new InternalComputationGraph([p, g, lr], [.. outputs(p, g, lr)]);
         var shapeInfo = Infer(graph, [side, side], [Math.Min(rows, side), side], []);
-        return ordered ? StateReadOrdering.Apply(graph, shapeInfo, [(0, 0)]) : (graph, shapeInfo);
+        return ordered ? StateReadOrdering.Apply(graph, shapeInfo, [(0, 0)], withReaders) : (graph, shapeInfo);
     }
 
     private static readonly StepState TwoStatesInPlace = new([(0, 0), (1, 1)], WrittenInPlace: true);
@@ -483,6 +483,29 @@ public class AutoDiffCheckpointingCoverageTests
         var graph = new InternalComputationGraph([p, q, g, lr], [OnnxOp.Sub(p, step), OnnxOp.Sub(q, step), OnnxOp.MatMul(g, Twice(p)), OnnxOp.MatMul(g, Twice(q))]);
         var shapeInfo = Infer(graph, [side, side], [side, side], [side, side], []);
         return ordered ? StateReadOrdering.Apply(graph, shapeInfo, TwoStatesInPlace.Pairs) : (graph, shapeInfo);
+    }
+
+    private static Variable[] ReadEarly(Variable p, Variable g, Variable lr)
+        => [Update(p, g, lr), Then(OnnxOp.Mul(g, OnnxOp.ReduceSum(OnnxOp.MatMul(g, Twice(p)))), g)];
+
+    private static Variable Then(Variable t, Variable g) => OnnxOp.ReduceSum(OnnxOp.Add(OnnxOp.MatMul(t, g), t));
+
+    private static GraphEvaluationResult Evaluated(StepState state, Func<Variable, Variable, Variable, Variable[]> outputs, bool ordered, bool withReaders = false)
+    {
+        var (graph, shapeInfo) = StepGraph(outputs, ordered, withReaders: withReaders);
+        return new GraphEvaluator(state: state).Evaluate(graph, shapeInfo);
+    }
+
+    [Fact]
+    public void TestAnUpdateRunWithItsReadersHoldsNoReadersOutputUntilTheUpdateCoverage()
+    {
+        var withReaders = Evaluated(StateInPlace, ReadEarly, ordered: true, withReaders: true);
+        Assert.True(withReaders.PeakMemoryBytes < Evaluated(StateInPlace, ReadEarly, ordered: true).PeakMemoryBytes);
+        Assert.Equal([(0, 0)], withReaders.StateWrittenInPlace);
+        var (graph, shapeInfo) = StepGraph(ReadEarly, ordered: false);
+        Assert.True(new MemoryAwareGraphOptimizer(evaluator: new GraphEvaluator(state: StateInPlace), shapeInference: new ShapeInferenceInterpreter(CpuContext))
+            .OptimizeWithShapeInfo(graph, shapeInfo).Evaluation.PeakMemoryBytes <= withReaders.PeakMemoryBytes);
+        Assert.Equal((0L, 1L, true), Ordered(ReadEarly, withReaders: true, 0.5f));
     }
 
     private static IReadOnlyList<(int Output, int Input)> Modelled(Func<Variable, Variable, Variable, Variable[]> outputs, bool ordered)
@@ -517,9 +540,12 @@ public class AutoDiffCheckpointingCoverageTests
     }
 
     private static (long Plain, long Ordered, bool Same) Ordered(Func<Variable, Variable, Variable, Variable[]> outputs, params float[] lrs)
+        => Ordered(outputs, withReaders: false, lrs);
+
+    private static (long Plain, long Ordered, bool Same) Ordered(Func<Variable, Variable, Variable, Variable[]> outputs, bool withReaders, params float[] lrs)
     {
         var plain = Execute(StepGraph(outputs, ordered: false, side: 16).Graph, [(0, 0)], lrs);
-        var ordered = Execute(StepGraph(outputs, ordered: true, side: 16).Graph, [(0, 0)], lrs);
+        var ordered = Execute(StepGraph(outputs, ordered: true, side: 16, withReaders: withReaders).Graph, [(0, 0)], lrs);
         return (plain.Aliased, ordered.Aliased, plain.Values.SequenceEqual(ordered.Values));
     }
 

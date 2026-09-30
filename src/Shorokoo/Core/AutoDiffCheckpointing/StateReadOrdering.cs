@@ -61,11 +61,23 @@ namespace Shorokoo.Core.AutoDiffCheckpointing;
 /// to say. A graph holding a scope is handed back as it came, as the rest of the memory-aware
 /// pass hands it back.</para>
 ///
+/// <para><b>Where it runs.</b> Each empty slice is placed just after its reader, and the concatenation
+/// just before the anchor's consumer. ONNX Runtime does not run that order, though
+/// (<see cref="OrtExecutionOrder"/>): it reaches a node from the first leaf whose search needs it,
+/// and the slice is needed only by the writer's search. A reader some other leaf reached first
+/// keeps its output until the writer's search takes the slice of it, which can be long after
+/// that output's last read. With <c>writersWithTheirReaders</c> the leaves are also moved so that
+/// each writer's search runs before any other reaches its readers: each slice then runs just
+/// after its reader, and only the empty value it makes waits for the writer. That in turn runs
+/// the writer's update and the gradient it reads earlier, which can cost more than the output it
+/// spares; so both are candidates.</para>
+///
 /// <para>The ordering is a candidate, not a given: <see cref="MemoryAwareGraphOptimizer"/> scores
-/// it against the graph as it came and keeps the better. It pays for itself when the step writes
-/// its state in place, since each pair it keeps is a state-sized buffer the run does not allocate;
-/// it costs a few kernels and can hold a reader's output a little longer. Where the step writes
-/// nothing in place the ordering buys nothing and is not tried.</para>
+/// it, in both forms, against the graph as it came and keeps the best. It pays for itself when the
+/// step writes its state in place, since each pair it keeps is a state-sized buffer the run does
+/// not allocate; it costs a few kernels, and a reader's output held longer or an update run
+/// earlier. Where the step writes nothing in place the ordering buys nothing and is not
+/// tried.</para>
 /// </summary>
 internal static class StateReadOrdering
 {
@@ -73,10 +85,13 @@ internal static class StateReadOrdering
     /// <paramref name="graph"/> with the writer of each pair of <paramref name="pairs"/> it can
     /// order placed after every reader of that pair's input, and shape information covering every
     /// node the ordering added — or the very same graph and shape information where there is
-    /// nothing to order.
+    /// nothing to order. With <paramref name="writersWithTheirReaders"/>, the leaves are placed so
+    /// that ONNX Runtime runs each writer's search before any other reaches its readers (see
+    /// <see cref="RunEachWriterWithItsReaders"/>).
     /// </summary>
     public static (InternalComputationGraph Graph, ShapeInferenceResult ShapeInfo) Apply(
-        InternalComputationGraph graph, ShapeInferenceResult shapeInfo, IReadOnlyList<(int Output, int Input)> pairs)
+        InternalComputationGraph graph, ShapeInferenceResult shapeInfo, IReadOnlyList<(int Output, int Input)> pairs,
+        bool writersWithTheirReaders = false)
     {
         if (pairs.Count == 0 || graph.Nodes.Any(n => n.IsOpenNode())) return (graph, shapeInfo);
         var unordered = OutputAliasProof.Unordered(graph, pairs).Where(p => p.Readers.Count > 0).ToList();
@@ -89,7 +104,8 @@ internal static class StateReadOrdering
         var shapes = shapeInfo.TensorInfos.ToBuilder();
         var constants = new Constants(shapes);
         var insertBefore = new Dictionary<FastNode, List<FastNode>>();
-        var ordered = false;
+        var insertAfter = new Dictionary<FastNode, List<FastNode>>();
+        var ordered = new List<(FastNode Writer, List<FastNode> Readers)>();
 
         foreach (var pair in unordered)
         {
@@ -103,19 +119,22 @@ internal static class StateReadOrdering
                 continue;
             var slices = new List<FastTensorKey?>(readers.Count + 1);
             var added = new List<FastNode>();
-            foreach (var (output, outputInfo) in outputs.Select(o => o!.Value))
+            foreach (var (reader, (output, outputInfo)) in readers.Zip(outputs.Select(o => o!.Value)))
             {
+                var taken = new List<FastNode>();
                 var dims = outputInfo.Shape.Dims;
                 var sliced = dims.Length > 0 ? output
-                    : Add(added, shapes, OpCodes.RESHAPE, [], [output, constants.Vector(-1L)], new TensorShapeInfo(new Shape(1L), outputInfo.DType, null));
+                    : Add(taken, shapes, OpCodes.RESHAPE, [], [output, constants.Vector(-1L)], new TensorShapeInfo(new Shape(1L), outputInfo.DType, null));
                 long[] emptyDims = dims.Length > 0 ? [0L, .. dims.Skip(1)] : [0L];
-                var empty = Add(added, shapes, OpCodes.SLICE, [], [sliced, constants.Vector(0L), constants.Vector(0L), constants.Vector(0L)],
+                var empty = Add(taken, shapes, OpCodes.SLICE, [], [sliced, constants.Vector(0L), constants.Vector(0L), constants.Vector(0L)],
                     new TensorShapeInfo(new Shape(emptyDims), outputInfo.DType, null));
                 if (emptyDims.Length > 1)
-                    empty = Add(added, shapes, OpCodes.RESHAPE, [], [empty, constants.Vector(-1L)], new TensorShapeInfo(new Shape(0L), outputInfo.DType, null));
+                    empty = Add(taken, shapes, OpCodes.RESHAPE, [], [empty, constants.Vector(-1L)], new TensorShapeInfo(new Shape(0L), outputInfo.DType, null));
                 slices.Add(outputInfo.DType == anchorInfo.DType ? empty
-                    : Add(added, shapes, OpCodes.CAST, new() { [OnnxOpAttributeNames.AttrTo] = anchorInfo.DType }, [empty],
+                    : Add(taken, shapes, OpCodes.CAST, new() { [OnnxOpAttributeNames.AttrTo] = anchorInfo.DType }, [empty],
                         new TensorShapeInfo(new Shape(0L), anchorInfo.DType, null)));
+                (insertAfter.TryGetValue(reader, out var after) ? after : insertAfter[reader] = []).AddRange(taken);
+                dag.Added(taken);
             }
 
             var flatInfo = new TensorShapeInfo(new Shape(1L), anchorInfo.DType, null);
@@ -126,23 +145,88 @@ internal static class StateReadOrdering
             consumer.FullInputs[slot][index] = reshaped;
             (insertBefore.TryGetValue(consumer, out var before) ? before : insertBefore[consumer] = []).AddRange(added);
             dag.Added(added);
-            ordered = true;
+            ordered.Add((writer, readers));
         }
-        if (!ordered) return (graph, shapeInfo);
+        if (ordered.Count == 0) return (graph, shapeInfo);
 
-        // The new nodes go just before the consumer they feed, and the body is then sorted again,
-        // keeping every node's place where its producers allow it: a reader the ordering hangs the
-        // consumer on may come after it in the order it came in.
-        var body = new List<FastNode>(nodes.Count + insertBefore.Values.Sum(l => l.Count));
+        // Each empty slice goes just after its reader and each concatenation just before the
+        // consumer it feeds, and the body is then sorted again, keeping every node's place where
+        // its producers allow it: a reader the ordering hangs the consumer on may come after it in
+        // the order it came in.
+        var body = new List<FastNode>(nodes.Count + insertBefore.Values.Concat(insertAfter.Values).Sum(l => l.Count));
         foreach (var node in nodes.Take(copy.BodyEnd))
         {
             if (insertBefore.TryGetValue(node, out var before)) body.AddRange(before);
             body.Add(node);
+            if (insertAfter.TryGetValue(node, out var after)) body.AddRange(after);
         }
         body.InsertRange(copy.InputCount, constants.Nodes);
-        copy.Nodes = [.. StableTopologicalOrder(body, copy.InputCount), .. nodes.Skip(copy.BodyEnd)];
+        var order = StableTopologicalOrder(body, copy.InputCount);
+        if (writersWithTheirReaders) RunEachWriterWithItsReaders(order, ordered);
+        copy.Nodes = [.. order, .. nodes.Skip(copy.BodyEnd)];
         copy.MoveOutputsToEnd();
         return (copy, new ShapeInferenceResult(shapes.ToImmutable()));
+    }
+
+    /// <summary>
+    /// Moves leaves of <paramref name="order"/> — nodes nothing in it reads — later, so that ONNX
+    /// Runtime's traversal (<see cref="OrtExecutionOrder"/>) reaches each writer of
+    /// <paramref name="ordered"/> no later than the first of its readers. That traversal runs a node
+    /// in the search from the first leaf, highest position first, that reaches it, and a writer
+    /// reaches its readers only through the empty slices it now waits for. Were a reader reached
+    /// first from another leaf, its output would be held from there until the writer's search
+    /// took the slice of it; reached from the writer's own search, the slice runs just after the
+    /// reader, and the reader's output lives as long as it did. A leaf only ever moves later —
+    /// which it can, nothing reading it — and each move puts the writer's leaf just after the leaf
+    /// that reached a reader first, so its search runs just before that one.
+    /// </summary>
+    private static void RunEachWriterWithItsReaders(List<FastNode> order, List<(FastNode Writer, List<FastNode> Readers)> ordered)
+    {
+        for (int moves = 0; moves < 4 * ordered.Count; moves++)
+        {
+            var reachedBy = FirstLeafReaching(order);
+            var move = ordered
+                .Select(pair => (Writer: reachedBy[pair.Writer], First: pair.Readers.Select(r => reachedBy[r]).MinBy(l => l.Rank)))
+                .FirstOrDefault(pair => pair.First.Rank < pair.Writer.Rank);
+            if (move.Writer.Leaf is null) return;
+            order.Remove(move.Writer.Leaf);
+            order.Insert(order.IndexOf(move.First.Leaf) + 1, move.Writer.Leaf);
+        }
+    }
+
+    /// <summary>
+    /// For each node of <paramref name="order"/> ONNX Runtime runs, the leaf whose search reaches
+    /// it first, and that leaf's rank among the searches: the leaves, highest position first,
+    /// each marking every node it reaches that no earlier one did.
+    /// </summary>
+    private static Dictionary<FastNode, (FastNode Leaf, int Rank)> FirstLeafReaching(List<FastNode> order)
+    {
+        var producer = new Dictionary<FastTensorKey, FastNode>();
+        foreach (var node in order)
+            foreach (var output in node.Outputs)
+                if (output is { } key) producer[key] = node;
+        var read = new HashSet<FastNode>();
+        foreach (var node in order)
+            foreach (var input in node.Inputs)
+                if (input is { } key && producer.TryGetValue(key, out var p)) read.Add(p);
+
+        var reachedBy = new Dictionary<FastNode, (FastNode Leaf, int Rank)>();
+        var rank = 0;
+        var pending = new Stack<FastNode>();
+        for (int i = order.Count - 1; i >= 0; i--)
+        {
+            var leaf = order[i];
+            if (read.Contains(leaf) || OrtExecutionOrder.IsPreResident(leaf)) continue;
+            pending.Push(leaf);
+            while (pending.TryPop(out var node))
+            {
+                if (!reachedBy.TryAdd(node, (leaf, rank))) continue;
+                foreach (var input in node.Inputs)
+                    if (input is { } key && producer.TryGetValue(key, out var p) && !reachedBy.ContainsKey(p)) pending.Push(p);
+            }
+            rank++;
+        }
+        return reachedBy;
     }
 
     /// <summary>

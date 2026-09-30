@@ -223,8 +223,8 @@ public static class OutputAliasProof
                      && Definitions.VanillaOpNames.Contains(node.OpCode))
             {
                 var projected = new NodeProto { OpType = node.OpCode };
-                foreach (var input in node.Inputs) projected.Inputs.Add(Name(input));
-                foreach (var output in node.Outputs) projected.Outputs.Add(Name(output));
+                foreach (var input in Flattened(node.FullInputs)) projected.Inputs.Add(Name(input));
+                foreach (var output in Flattened(node.FullOutputs)) projected.Outputs.Add(Name(output));
                 proto.Nodes.Add(projected);
                 spans.Add((i, i));
                 continue;
@@ -236,11 +236,11 @@ public static class OutputAliasProof
             var region = new NodeProto { OpType = node.OpCode };
             var reader = new NodeProto { OpType = node.OpCode };
             for (int r = i; r <= last; r++)
-                foreach (var output in nodes[r].Outputs)
+                foreach (var output in Flattened(nodes[r].FullOutputs))
                     if (output is not null) region.Outputs.Add(Name(output));
             var written = new HashSet<string>(region.Outputs, StringComparer.Ordinal);
             for (int r = i; r <= last; r++)
-                foreach (var input in nodes[r].Inputs)
+                foreach (var input in Flattened(nodes[r].FullInputs))
                     if (input is not null && !written.Contains(Name(input))) reader.Inputs.Add(Name(input));
             var body = new GraphProto();
             body.Nodes.Add(reader);
@@ -251,6 +251,12 @@ public static class OutputAliasProof
         }
         return (proto, spans);
     }
+
+    /// <summary>A node's values in <see cref="FastNode.Inputs"/> order — its slots by ordinal
+    /// name — without sorting the one slot most nodes have.</summary>
+    private static IEnumerable<FastTensorKey?> Flattened(Dictionary<string, List<FastTensorKey?>> slots)
+        => slots.Count == 1 ? slots.Values.First()
+            : slots.OrderBy(slot => slot.Key, StringComparer.Ordinal).SelectMany(slot => slot.Value);
 
     /// <summary>
     /// Whether a runtime may hand back <paramref name="node"/>'s input at position
@@ -313,6 +319,9 @@ public static class OutputAliasProof
 
         // What Constants() found, once it has been asked.
         private HashSet<string>? _constants;
+
+        // What OrderingProducers() found, once it has been asked.
+        private int[][]? _orderingProducers;
 
         internal GraphIndex(GraphProto graph)
         {
@@ -480,26 +489,43 @@ public static class OutputAliasProof
         private List<int> NotAncestorsOf(int writer, HashSet<int> readers)
         {
             if (readers.Count == 0) return [];
+            var producers = OrderingProducers();
             var stamp = ++_stamp;
             var missing = readers.Count;
             var pending = new Stack<int>();
             _visited[writer] = stamp;
             pending.Push(writer);
             while (missing > 0 && pending.TryPop(out var n))
-            {
-                var node = _nodes[n];
-                if (ReadsOnlyAShape(node)) continue;
-                var captured = _captured.TryGetValue(n, out var names) ? names : [];
-                foreach (var input in node.Inputs.Concat(captured))
+                foreach (var producer in producers[n])
                 {
-                    if (input.Length == 0 || !_producer.TryGetValue(input, out var producer)) continue;
                     if (_visited[producer] == stamp) continue;
                     _visited[producer] = stamp;
                     if (readers.Contains(producer)) missing--;
                     pending.Push(producer);
                 }
-            }
             return [.. readers.Where(r => _visited[r] != stamp).Order()];
+        }
+
+        /// <summary>
+        /// Per node, the nodes writing what it reads along the edges that order execution whatever
+        /// a runtime folds: its explicit inputs, and the outer values its subgraphs read other than
+        /// through a shape — none for a node that reads only a shape. Built once, when first asked.
+        /// </summary>
+        private int[][] OrderingProducers()
+        {
+            if (_orderingProducers is not null) return _orderingProducers;
+            var producers = new int[_nodes.Count][];
+            for (int n = 0; n < _nodes.Count; n++)
+            {
+                var node = _nodes[n];
+                if (ReadsOnlyAShape(node)) { producers[n] = []; continue; }
+                var captured = _captured.TryGetValue(n, out var names) ? names : [];
+                var found = new List<int>();
+                foreach (var input in node.Inputs.Concat(captured))
+                    if (input.Length > 0 && _producer.TryGetValue(input, out var producer)) found.Add(producer);
+                producers[n] = [.. found];
+            }
+            return _orderingProducers = producers;
         }
 
         /// <summary>

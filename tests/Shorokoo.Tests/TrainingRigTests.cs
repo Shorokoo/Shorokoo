@@ -2460,6 +2460,13 @@ public class TrainingRigTrainingLoopCoverageTests
     public void TestAStatefulCallWhoseOutputIsDiscardedStillUpdatesItsState()
         => Assert.Equal([2f], StateFieldsAfterOneStep(StatefulCallDiscardedModel.ComputationGraph));
 
+    // A second call site in a loop body registers no update of its own:
+    // https://github.com/Shorokoo/Shorokoo/issues/465
+    [Fact(Skip = "Shorokoo/Shorokoo#465: a stateful model called twice in one loop body applies one update")]
+    public void TestAStatefulModelCalledTwiceInALoopBodyAppliesBothUpdatesEvenWhenOneIsDiscarded()
+        => Assert.Equal([2f, 2f], [.. StateFieldsAfterOneStep(StatefulCalledTwiceInALoopModel.ComputationGraph),
+                                   .. StateFieldsAfterOneStep(StatefulCallDiscardedInALoopModel.ComputationGraph)]);
+
     /// <summary>The ops an inference model computes inside its <c>If</c>, rather than before it.</summary>
     private static string[] IfBodyOps(ComputationGraph modelGraph)
     {

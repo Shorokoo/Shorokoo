@@ -927,6 +927,43 @@ public partial class StatefulCalledOnceInALoopModel
     }
 }
 
+/// <summary>A stateful model called twice in one loop body, both results used — the baseline for
+/// <see cref="StatefulCallDiscardedInALoopModel"/>.</summary>
+[Module]
+public partial class StatefulCalledTwiceInALoopModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var m = StatefulGainSubModel.Model();
+        var x = t;
+        foreach (var ctx in LoopAPI.Iterate(Scalar(3L)))
+        {
+            x = m.Call(m.Call(x));
+            ctx.ContinueWhile(Scalar(true));
+        }
+        return x;
+    }
+}
+
+/// <summary>A stateful model called twice in one loop body with the second call's output discarded,
+/// so that call reaches the graph through nothing but its state update.</summary>
+[Module]
+public partial class StatefulCallDiscardedInALoopModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var m = StatefulGainSubModel.Model();
+        var x = t;
+        foreach (var ctx in LoopAPI.Iterate(Scalar(3L)))
+        {
+            x = m.Call(x);
+            _ = m.Call(x);
+            ctx.ContinueWhile(Scalar(true));
+        }
+        return x;
+    }
+}
+
 /// <summary>A trainable parameter inside a loop whose trip count is not a compile-time constant, so
 /// the loop is not unrolled before the training graph is built.</summary>
 [Module]

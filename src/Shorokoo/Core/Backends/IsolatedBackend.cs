@@ -416,6 +416,21 @@ public static class IsolatedBackend
                 modelBytes, graphOptimization, logSeverity, deviceMemory, diagnostics, outputAliases,
                 intraOpThreads);
 
+        public IShorokooSession CreateSession(
+            ReadOnlyMemory<byte> modelBytes,
+            ShorokooGraphOptimization graphOptimization,
+            ShorokooLogSeverity logSeverity,
+            DeviceMemorySettings deviceMemory,
+            DiagnosticSettings diagnostics,
+            IReadOnlyList<OutputAlias> outputAliases,
+            int intraOpThreads,
+            IReadOnlyList<SuppliedInitializer> suppliedInitializers)
+            => _inner.CreateSession(
+                modelBytes, graphOptimization, logSeverity, deviceMemory, diagnostics, outputAliases,
+                intraOpThreads, suppliedInitializers);
+
+        public bool SuppliesInitializers => _inner.SuppliesInitializers;
+
         public bool AcceptsTrainingFormat(string format) => _inner.AcceptsTrainingFormat(format);
 
         public string? KernelWorkaroundSet => _inner.KernelWorkaroundSet;
@@ -437,6 +452,12 @@ public static class IsolatedBackend
         public MemorySpace MemorySpace => _inner.MemorySpace;
 
         public byte[] CopyTensorToHost(IShorokooTensorValue value) => _inner.CopyTensorToHost(value);
+
+        public bool TryCopyTensorRangeToHost(IShorokooTensorValue value, long byteOffset, Span<byte> destination)
+            => _inner.TryCopyTensorRangeToHost(value, byteOffset, destination);
+
+        public bool TryCopyHostToTensorRange(IShorokooTensorValue value, long byteOffset, ReadOnlySpan<byte> source)
+            => _inner.TryCopyHostToTensorRange(value, byteOffset, source);
 
         public IShorokooTensorValue CreateTensorInBackendMemory(
             ShorokooTensorElementType elementType, byte[] data, long[] shape)

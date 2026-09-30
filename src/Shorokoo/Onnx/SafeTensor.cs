@@ -21,20 +21,24 @@ namespace Shorokoo.Onnx
         /// Tensor data. A record parsed out of a file holds a tensor and hands it over; one built
         /// from a graph's own parameter holds that graph's <see cref="TensorAttribute"/>, which is
         /// immutable and shared, so reading it as a tensor takes a copy — which is why the writer
-        /// reads <see cref="RawBytes"/> instead and a checkpoint save still costs no second copy
-        /// of the model.
+        /// goes through <see cref="WriteTo"/> instead and a checkpoint save still costs no second
+        /// copy of the model.
         /// </summary>
         public TensorData Data => _data ?? _attribute!.CopyToTensorData();
 
-        /// <summary>The elements as they will be written, out of whichever form this record holds
-        /// and copying neither.</summary>
-        internal ReadOnlySpan<byte> RawBytes
+        /// <summary>The bytes <see cref="WriteTo"/> writes, measured without reading them —
+        /// which for a tensor on a device is what lets a save lay out its header before a byte of
+        /// the payload has left the card.</summary>
+        internal long ByteLength => _attribute is not null ? _attribute.Bytes.Length : _data!.ContentByteLength;
+
+        /// <summary>Writes the elements to <paramref name="destination"/> out of whichever form this
+        /// record holds, copying neither: a graph literal's own bytes, a host tensor's own storage,
+        /// or a device tensor streamed off the device through one bounded buffer
+        /// (<see cref="TensorData.WriteContentTo"/>).</summary>
+        internal void WriteTo(Stream destination)
         {
-            get
-            {
-                if (_attribute is not null) return _attribute.Bytes;
-                return _data!.AccessRawMemory();
-            }
+            if (_attribute is not null) destination.Write(_attribute.Bytes);
+            else _data!.WriteContentTo(destination);
         }
 
         /// <summary>

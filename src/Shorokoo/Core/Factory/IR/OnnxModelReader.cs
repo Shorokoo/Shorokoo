@@ -389,6 +389,10 @@ namespace Shorokoo.Core.Factory.IR
 
         private static TensorAttribute CreateTensorData(TensorProto tensorProto)
         {
+            // External data already read, straight into its own tensor.
+            if (tensorProto.Loaded is { } loaded)
+                return loaded;
+
             byte[] rawDataBytes;
 
             var type = (DType)tensorProto.data_type;
@@ -429,6 +433,8 @@ namespace Shorokoo.Core.Factory.IR
                 rawDataBytes = ConvertInt32PackedData(type, tensorProto.Int32Datas);
             else if (tensorProto.FloatDatas != null && tensorProto.FloatDatas.Length > 0)
                 rawDataBytes = OnnxUtils.ConvertToByteArray(tensorProto.FloatDatas);
+            else if (tensorProto.DoubleDatas != null && tensorProto.DoubleDatas.Length > 0)
+                rawDataBytes = OnnxUtils.ConvertToByteArray(tensorProto.DoubleDatas);
             else if (tensorProto.Int64Datas != null && tensorProto.Int64Datas.Length > 0)
                 rawDataBytes = OnnxUtils.ConvertToByteArray(tensorProto.Int64Datas);
             else if (tensorProto.Uint64Datas != null && tensorProto.Uint64Datas.Length > 0)

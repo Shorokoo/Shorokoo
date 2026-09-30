@@ -160,6 +160,34 @@ public interface IShorokooBackend
         int intraOpThreads)
         => CreateSession(modelBytes, graphOptimization, logSeverity, deviceMemory, diagnostics, outputAliases);
 
+    // The same session, with some of the model's initializers supplied as values already in this
+    // backend's memory -- weights loaded straight onto the card, which the model's bytes then need
+    // not carry (Shorokoo/Shorokoo#436). The model declares each one as SuppliedInitializers
+    // describes, and the session reads the value where it is for as long as it lives, which the
+    // caller guarantees.
+    //
+    // The default refuses any it is given: a backend that cannot use a value in place says so, and
+    // the caller then puts the values' bytes into the model instead (SuppliesInitializers).
+    IShorokooSession CreateSession(
+        ReadOnlyMemory<byte> modelBytes,
+        ShorokooGraphOptimization graphOptimization,
+        ShorokooLogSeverity logSeverity,
+        DeviceMemorySettings deviceMemory,
+        DiagnosticSettings diagnostics,
+        IReadOnlyList<OutputAlias> outputAliases,
+        int intraOpThreads,
+        IReadOnlyList<SuppliedInitializer> suppliedInitializers)
+    {
+        ArgumentNullException.ThrowIfNull(suppliedInitializers);
+        if (suppliedInitializers.Count > 0)
+            throw new NotSupportedException(
+                $"{Description} cannot take a model's initializers as values it already holds.");
+        return CreateSession(modelBytes, graphOptimization, logSeverity, deviceMemory, diagnostics, outputAliases, intraOpThreads);
+    }
+
+    // Whether CreateSession takes supplied initializers. A decorator forwards it.
+    bool SuppliesInitializers => false;
+
     // Whether this backend's sessions run a training step handed over in `format` (one of
     // TrainingFormats). Every backend runs TrainingFormats.Onnx -- a step whose gradient Shorokoo
     // has already written out as ordinary operators -- so that is the default and the only answer
@@ -221,6 +249,52 @@ public interface IShorokooBackend
         // ToArray has copied out of the buffer it points at (Shorokoo/Shorokoo#178).
         GC.KeepAlive(value);
         return bytes;
+    }
+
+    // Copies `destination.Length` bytes of this value's contents, starting `byteOffset` bytes in,
+    // into `destination` -- a piece of what CopyTensorToHost returns whole, into a buffer the caller
+    // owns and reuses. It is how a tensor is written out of the provider's own memory without its
+    // whole contents ever sitting in host memory at once: a save moves it through one bounded
+    // buffer, piece by piece.
+    //
+    // Returns false, having copied nothing, where this backend cannot copy part of a value; the
+    // caller then falls back to CopyTensorToHost. The default serves a value the host can read
+    // itself, and a backend whose provider keeps values in its own memory overrides it where it can
+    // reach an arbitrary range of the allocation.
+    bool TryCopyTensorRangeToHost(IShorokooTensorValue value, long byteOffset, Span<byte> destination)
+    {
+        ArgumentNullException.ThrowIfNull(value);
+        if (!value.IsHostAccessible) return false;
+        var source = value.GetTensorDataAsSpan<byte>();
+        if (byteOffset < 0 || byteOffset > source.Length - destination.Length)
+            throw new ArgumentOutOfRangeException(nameof(byteOffset),
+                $"{destination.Length} bytes from offset {byteOffset} run past the value's {source.Length}.");
+        source.Slice((int)byteOffset, destination.Length).CopyTo(destination);
+        // The span is the value's last read (Shorokoo/Shorokoo#178).
+        GC.KeepAlive(value);
+        return true;
+    }
+
+    // Copies `source` into this value's contents, starting `byteOffset` bytes in -- the mirror of
+    // TryCopyTensorRangeToHost, and how a tensor is loaded into the provider's own memory without
+    // its whole contents ever sitting in host memory at once: a load moves it from the file through
+    // one bounded buffer, piece by piece, into a tensor allocated where it is to live.
+    //
+    // Returns false, having copied nothing, where this backend cannot write part of a value; the
+    // caller then falls back to CreateTensorInBackendMemory over the whole contents. The default
+    // serves a value the host can write itself.
+    bool TryCopyHostToTensorRange(IShorokooTensorValue value, long byteOffset, ReadOnlySpan<byte> source)
+    {
+        ArgumentNullException.ThrowIfNull(value);
+        if (!value.IsHostAccessible) return false;
+        var destination = value.GetTensorMutableDataAsSpan<byte>();
+        if (byteOffset < 0 || byteOffset > destination.Length - source.Length)
+            throw new ArgumentOutOfRangeException(nameof(byteOffset),
+                $"{source.Length} bytes from offset {byteOffset} run past the value's {destination.Length}.");
+        source.CopyTo(destination.Slice((int)byteOffset, source.Length));
+        // The span is the value's last read (Shorokoo/Shorokoo#178).
+        GC.KeepAlive(value);
+        return true;
     }
 
     // A tensor of this backend holding `data`, allocated where this backend's tensors live -- the

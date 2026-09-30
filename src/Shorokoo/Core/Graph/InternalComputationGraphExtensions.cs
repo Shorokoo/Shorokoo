@@ -464,8 +464,35 @@ namespace Shorokoo.Graph
                 .ToImmutableDictionary(g => g.Key, g => g.First().ParamValue);
 
             var fastGraph = graph.Clone();
-            var concrete = FastApplyModelParamValues.Process(fastGraph, paramValuesById);
+            return SettledConcreteModel(FastApplyModelParamValues.Process(fastGraph, paramValuesById));
+        }
 
+        /// <summary>
+        /// <see cref="ToConcreteModel(InternalComputationGraph, ModelParamList, ModuleParamSetNamingScheme)"/>
+        /// against parameter <b>descriptions</b> rather than values: each named slot carries its
+        /// parameter's shape and dtype, and its elements only where a shape pass would read them.
+        /// For a caller that needs the concrete model's structure and not its weights — a save,
+        /// which writes the weights out of the checkpoint's own tensors and strips them from the
+        /// model it writes — so no parameter's values are copied, from a device or anywhere else.
+        /// </summary>
+        internal static InternalComputationGraph ToConcreteModelDescribed(
+            this InternalComputationGraph graph,
+            IEnumerable<KeyValuePair<string, TensorAttribute>> paramSlots,
+            ModuleParamSetNamingScheme namingScheme)
+        {
+            var modelIds = graph.GetConcreteModelParamInfos().ModelIds;
+            var slotsById = paramSlots
+                .Select(x => (ModelId: namingScheme.ToModelId(x.Key, modelIds), Slot: x.Value))
+                .Where(x => x.ModelId is not null)
+                .GroupBy(x => x.ModelId.AssertNotNull())
+                .ToDictionary(g => g.Key, g => g.First().Slot);
+            return SettledConcreteModel(FastApplyModelParamValues.Process(graph.Clone(), slotsById));
+        }
+
+        /// <summary>The steps after binding shared by both forms of <c>ToConcreteModel</c>: the
+        /// default RNG identity where none was bound, and output shapes settled afresh.</summary>
+        private static InternalComputationGraph SettledConcreteModel(InternalComputationGraph concrete)
+        {
             // A concrete model with RNG feed sites always carries an identity: when none was
             // bound, bind the default deterministic config now — the RngSeed parameter fills
             // with the default identity and the feeds draw keyed Threefry. "No config" means

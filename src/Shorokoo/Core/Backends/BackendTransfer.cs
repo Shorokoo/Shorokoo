@@ -50,8 +50,8 @@ public static class BackendTransfer
                 + "own backend's device memory, so it cannot be handed to " +
                 $"{target.Description}. Only a host-resident value can cross between backends "
                 + "that do not share a native runtime, so bring it back to the host on the backend "
-                + "that owns it first -- ResidentTrainingRun.StepToCheckpoint is what does that "
-                + "for a resident training run.");
+                + "that owns it first -- TensorData.ToHost() does that, and TrainingCheckpoint.ToHost() "
+                + "for a whole training state.");
 
         if (value.ElementType == ShorokooTensorElementType.String)
             return target.CreateStringTensor(value.GetStringTensorData(), value.Shape);

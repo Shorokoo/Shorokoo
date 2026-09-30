@@ -264,6 +264,65 @@ public class GpuExecutionTests
         Assert.Contains("BFCArena", Assert.ThrowsAny<OnnxRuntimeException>(() => Run(onHost)).Message);
     }
 
+    [CudaFact]
+    public void CudaProvider_ATensorOnTheCardLargerThanOneArraySavesItsBytesThroughBoundedPieces()
+    {
+        const int N = 640 << 20;
+        using var ctx = new ComputeContext();
+        var limit = InputScalar<int32>("l");
+        var compiled = ctx.Compile(new InternalComputationGraph([limit], [OnnxOp.Range(Scalar(0), limit, Scalar(1))]));
+        var held = compiled.Execute([TensorData(DType.Int32, [], N)], [true])[0].ToTensorData();
+        Assert.False(held.IsHostResident);
+        long[] sampled = [0, (1L << 29) - 1, 1L << 29, (1L << 29) + 1, (9L << 26) + 12345, N - 1];
+        var probe = new SamplingStream(sampled);
+
+        long allocated = GC.GetAllocatedBytesForCurrentThread();
+        held.WriteContentTo(probe);
+        Assert.True(GC.GetAllocatedBytesForCurrentThread() - allocated < 64L << 20);
+        Assert.Equal(4L * N, probe.Length);
+        Assert.Equal(sampled.Select(i => (int)i), probe.Values);
+    }
+
+    [CudaFact]
+    public void CudaProvider_ACopyTheCudaRuntimeFailsIsAnErrorRatherThanADeclinedRange()
+    {
+        using var info = new OrtMemoryInfo("Cuda", OrtAllocatorType.DeviceAllocator, 0, OrtMemType.Default);
+        using var bogus = new OrtTensorValue(OrtValue.CreateTensorValueWithData(info, Microsoft.ML.OnnxRuntime.Tensors.TensorElementType.Float, [4L], (IntPtr)16, 16));
+        Assert.Throws<InvalidOperationException>(() => DefaultBackend.Instance.TryCopyTensorRangeToHost(bogus, 0, new byte[16]));
+        using var ctx = new ComputeContext();
+        Assert.Equal(5f, AddTwoScalars(ctx, 2f, 3f));
+    }
+
+    /// <summary>Keeps the <c>int32</c> element at each sampled index of what is written to it, and
+    /// nothing else.</summary>
+    private sealed class SamplingStream(long[] sampled) : Stream
+    {
+        private readonly byte[] _pending = new byte[4];
+        private long _position;
+        public List<int> Values { get; } = [];
+        public override void Write(ReadOnlySpan<byte> buffer)
+        {
+            foreach (var index in sampled)
+                for (long b = 4 * index; b < 4 * index + 4; b++)
+                    if (b >= _position && b < _position + buffer.Length)
+                    {
+                        _pending[b - 4 * index] = buffer[(int)(b - _position)];
+                        if (b == 4 * index + 3) Values.Add(BitConverter.ToInt32(_pending));
+                    }
+            _position += buffer.Length;
+        }
+        public override void Write(byte[] buffer, int offset, int count) => Write(buffer.AsSpan(offset, count));
+        public override bool CanRead => false;
+        public override bool CanSeek => false;
+        public override bool CanWrite => true;
+        public override long Length => _position;
+        public override long Position { get => _position; set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+    }
+
     /// <summary>
     /// A tensor fed to a run on the card as it is goes to that run: one in the card's memory is
     /// handed over where it is, and one in host memory goes to the session from the host, or as the
@@ -333,13 +392,12 @@ public class GpuExecutionTests
     }
 
     /// <summary>
-    /// A checkpoint a resident run hands out is host memory the run goes on from: the next step
-    /// reads it through a card copy of its whole state, and then trains from state of its own. The
-    /// copies go with that step rather than staying with the caller's checkpoint, which would keep
-    /// a second copy of the state on the card for as long as the checkpoint lives.
+    /// A checkpoint a resident run hands out stays on the card, where the run goes on from it: the
+    /// next step reads it in place, so no copy of it is made, on the card or anywhere else, and
+    /// the caller's checkpoint holds the state once.
     /// </summary>
     [CudaFact]
-    public void CudaProvider_AResidentRunLetsGoOfTheCardCopiesOfACheckpointItHandedOutOnceItHasMovedOn()
+    public void CudaProvider_ACheckpointAResidentRunHandsOutStaysOnTheCardAndIsReadThereWithoutACopy()
     {
         var (input, target) = (TrainingRigHelpers.InBatch(1f, 2f, 3f, 4f),
                                TrainingRigHelpers.TargetBatch(2f, 4f, 6f, 8f));
@@ -352,7 +410,109 @@ public class GpuExecutionTests
         TensorData[] state = [.. ((TensorDataStruct[])[published.TrainableParams, published.ModelState, published.OptimizerState])
             .SelectMany(fields => fields.Fields.Values.OfType<TensorData>())];
         Assert.NotEmpty(state);
+        Assert.All(state, t => Assert.False(t.IsHostResident));
         Assert.All(state, t => Assert.True(t.CopiesAreEmpty));
+    }
+
+    [CudaFact]
+    public void CudaProvider_AFittedCheckpointSavesFromTheCardAndLoadsOntoItInBoundedPieces()
+    {
+        TrainingRig Rig(ComputationGraph model) => TrainingRig.FromScratch(
+            model, L2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph,
+            [TensorData([1L], [1f])], new AdamWOptimizerHyperparameters { LearningRate = 0.1f });
+        TrainingCheckpoint Fitted(TrainingRig rig, long width) => rig.Fit(
+            [rig.InputDef.FromOrderedData(TensorData([1L], [2f]))], [rig.TargetDef.FromOrderedData(TensorData([width], new float[width]))],
+            numEpochs: 2).FinalCheckpoint;
+        var (wideRig, narrowRig) = (Rig(WideMultiplyModel.ComputationGraph), Rig(ScalarMultiplyModel.ComputationGraph));
+        var (wide, narrow) = (Fitted(wideRig, 1L << 20), Fitted(narrowRig, 1L));
+        var home = wide.ToHost();
+        float[] State(TrainingCheckpoint c) =>
+            [.. TrainingRigHelpers.FlattenStruct(c.TrainableParams), .. TrainingRigHelpers.FlattenStruct(c.OptimizerState)];
+        bool OnCard(TrainingCheckpoint c) => c.TrainableParams.Fields.Values.Concat(c.OptimizerState.Fields.Values)
+            .OfType<TensorData>().All(t => !t.IsHostResident);
+        long stateBytes = 4L * State(home).Length;
+        Assert.True(OnCard(wide));
+
+        (Action<TrainingCheckpoint, string> Save, Func<TrainingRig, string, TrainingCheckpoint> Load, string Suffix)[] forms =
+        [
+            ((c, p) => c.Save(p), (r, p) => r.LoadCheckpoint(p), ".safetensors"),
+            ((c, p) => Persistence.SaveTrainingCheckpointToSkpt(c, p), (r, p) => r.LoadCheckpointFromSkpt(p), ".skpt"),
+            ((c, p) => Persistence.ForTrainingCheckpoint(c).SaveAsDirectory(p), (r, p) => r.LoadCheckpointFromSkpt(p), "_dir"),
+        ];
+        var path = TrainingRigHelpers.TempPath("device_ckpt");
+        try
+        {
+            foreach (var (save, load, suffix) in forms)
+            {
+                var (widePath, narrowPath) = (path + "_wide" + suffix, path + "_narrow" + suffix);
+                Assert.True(Allocation(() => save(wide, widePath)) - Allocation(() => save(narrow, narrowPath)) < stateBytes / 2);
+                Assert.True(Allocation(() => load(wideRig, widePath)) - Allocation(() => load(narrowRig, narrowPath)) < stateBytes / 2);
+                var loaded = load(wideRig, widePath);
+                Assert.True(OnCard(loaded));
+                Assert.Equal(State(home), State(loaded.ToHost()));
+            }
+        }
+        finally
+        {
+            foreach (var (_, _, suffix) in forms)
+                foreach (var p in (string[])[path + "_wide" + suffix, path + "_narrow" + suffix])
+                    if (Directory.Exists(p)) Directory.Delete(p, recursive: true);
+                    else File.Delete(p);
+        }
+    }
+
+    [CudaFact]
+    public void CudaProvider_AModelLoadedCompiledReadsItsWeightsOntoTheCardAndRunsAsTheLoadedGraphDoes()
+    {
+        const long Width = 8192;
+        var numOut = TensorData(DType.Int64, [], Width);
+        var input = TensorData([1L, Width], [.. Enumerable.Range(0, (int)Width).Select(i => MathF.Sin(i))]);
+        var path = TrainingRigHelpers.TempPath("compiled") + ".skpt";
+        var (onnx, onnxPair) = (Path.ChangeExtension(path, ".onnx"), Path.ChangeExtension(path, ".pair.onnx"));
+        try
+        {
+            {
+                var model = FCLayer.ComputationGraph.ToConcreteArchitecture([numOut, input]).ToConcreteModel();
+                Persistence.From(model).WithModel().WithWeights().Save(path);
+                Persistence.ExportOnnx(model, onnx);
+                Persistence.ExportOnnx(model, onnxPair, new OnnxExternalDataOptions { SizeThreshold = 0 });
+            }
+            using var context = new ComputeContext();
+            float[] Run(CompiledGraph compiled) => [.. compiled.Execute(numOut.Shared(), input.Shared())[0].ToTensorData().ToHost().As<float32>().AccessMemory<float>()];
+            float[] expected;
+            using (var viaGraph = context.Compile(Persistence.Load(path))) expected = Run(viaGraph);
+
+            foreach (var load in (Func<CompiledGraph>[])[() => context.ImportCompiledOnnx(onnx), () => context.ImportCompiledOnnx(onnxPair), () => context.LoadCompiled(path)])
+            {
+                GC.Collect();
+                long managed = GC.GetAllocatedBytesForCurrentThread();
+                long Private() => System.Diagnostics.Process.GetCurrentProcess().PrivateMemorySize64;
+                long Card() => DeviceMemory.Read()!.Value.UsedBytes;
+                var (host, card) = (Private(), Card());
+                using var loaded = load();
+                var (hostGrowth, cardGrowth) = (Private() - host, Card() - card);
+                Assert.True(GC.GetAllocatedBytesForCurrentThread() - managed < 64L << 20);
+                Assert.True(cardGrowth < 3 * 4 * Width * Width / 2);
+                Assert.True(hostGrowth - cardGrowth < 4 * Width * Width / 2);
+                Assert.Equal([false, false], loaded.SuppliedTensors.Select(t => t.IsHostResident));
+                Assert.True(expected.Zip(Run(loaded)).All(p => MathF.Abs(p.First - p.Second) <= 1e-5f * MathF.Max(1f, MathF.Abs(p.First))));
+            }
+        }
+        finally
+        {
+            File.Delete(path);
+            File.Delete(onnx);
+            File.Delete(onnxPair);
+            File.Delete(onnxPair + ".data");
+        }
+    }
+
+    private static long Allocation(Action act)
+    {
+        act();
+        var before = GC.GetAllocatedBytesForCurrentThread();
+        act();
+        return GC.GetAllocatedBytesForCurrentThread() - before;
     }
 
     /// <summary>
@@ -423,7 +583,7 @@ public class GpuExecutionTests
     /// one that writes it anywhere else — the same bits, not merely close — with and without a
     /// budget on the context, which counts that state outside the arena. Every step writes all 56
     /// of the stack's state outputs over their inputs, the first one over the copies of the initial
-    /// checkpoint it took; the checkpoint step brings its state home and writes none.
+    /// checkpoint it took, and the checkpoint step too, since its state stays on the card.
     /// </summary>
     [CudaFact]
     public void CudaProvider_AResidentRunWritingItsStateOverTheStateItConsumedTrainsExactlyAsWithout()
@@ -442,7 +602,7 @@ public class GpuExecutionTests
                 using var run = rig.BeginResidentRun();
                 for (int i = 0; i < 4; i++) run.Step(input.Shared(), target.Shared());
                 var final = run.StepToCheckpoint(input.Shared(), target.Shared());
-                return ([.. Weights(final), .. TrainingRigHelpers.FlattenStruct(final.OptimizerState)], context.AliasedOutputs);
+                return ([.. Weights(final), .. TrainingRigHelpers.FlattenStruct(final.ToHost().OptimizerState)], context.AliasedOutputs);
             }
         }
 
@@ -456,8 +616,8 @@ public class GpuExecutionTests
         Assert.Equal(plain, aliased);
         Assert.Equal(plain, budgeted);
         Assert.Equal(0L, none);
-        Assert.Equal(4 * 56L, written);
-        Assert.Equal(4 * 56L, budgetWritten);
+        Assert.Equal(5 * 56L, written);
+        Assert.Equal(5 * 56L, budgetWritten);
     }
 
     /// <summary>
@@ -799,7 +959,7 @@ public class GpuExecutionTests
     }
 
     private static float[] Weights(TrainingCheckpoint checkpoint) =>
-        TrainingRigHelpers.FlattenStruct(checkpoint.TrainableParams);
+        TrainingRigHelpers.FlattenStruct(checkpoint.ToHost().TrainableParams);
 
     private static float AddTwoScalars(ComputeContext ctx, float left, float right)
     {

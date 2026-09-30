@@ -179,6 +179,33 @@ namespace Shorokoo.Core.Factory
             return tensor;
         }
 
+        /// <summary>
+        /// Declares <paramref name="initializer"/> as one the session is handed as a value rather
+        /// than read from the model (<see cref="Shorokoo.Core.Backends.SuppliedInitializer"/>): its
+        /// payload is dropped for external data at the placeholder location, and the graph lists it
+        /// among its inputs too, which makes it overridable and so keeps a runtime from folding a
+        /// node that reads it into a constant at build — a fold would read the placeholder.
+        /// </summary>
+        public static void DeclareSupplied(GraphProto graph, TensorProto initializer)
+        {
+            initializer.ResetRawData();
+            initializer.MetadataProps.RemoveAll(p => p.Key == OnnxOpAttributeNames.ShrkMetaValuesElided);
+            initializer.data_location = TensorProto.DataLocation.External;
+            initializer.ExternalDatas.Clear();
+            initializer.ExternalDatas.Add(new StringStringEntryProto
+            {
+                Key = "location",
+                Value = Shorokoo.Core.Backends.SuppliedInitializer.PlaceholderLocation,
+            });
+            graph.Inputs.Add(OnnxIRFactory.CreateTensorInfo(
+                dims: OnnxIRFactory.CreateDims(MakeConcreteDims(initializer.Dims), initializer.Name),
+                name: initializer.Name,
+                type: DType.FromProtoTypeNum(initializer.data_type),
+                structure: DataStructure.Tensor,
+                targetFunctionName: null,
+                inputTypeName: null));
+        }
+
         // ------------------------- node proto -------------------------
 
         /// <summary>

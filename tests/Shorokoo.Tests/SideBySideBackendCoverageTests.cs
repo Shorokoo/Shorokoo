@@ -378,6 +378,11 @@ public class SideBySideBackendCoverageTests
 
         public byte[] CopyTensorToHost(IShorokooTensorValue value) => inner.CopyTensorToHost(value);
 
+        public bool TryCopyTensorRangeToHost(IShorokooTensorValue value, long byteOffset, Span<byte> destination)
+            => inner.TryCopyTensorRangeToHost(value, byteOffset, destination);
+        public bool TryCopyHostToTensorRange(IShorokooTensorValue value, long byteOffset, ReadOnlySpan<byte> source)
+            => inner.TryCopyHostToTensorRange(value, byteOffset, source);
+
         public IShorokooTensorValue CreateTensorInBackendMemory(
             ShorokooTensorElementType elementType, byte[] data, long[] shape)
             => inner.CreateTensorInBackendMemory(elementType, data, shape);
@@ -470,7 +475,7 @@ public class SideBySideBackendCoverageTests
         // inference.md promises users, and the message has to name the way home.
         var refused = Assert.Throws<InvalidOperationException>(
             () => BackendTransfer.CopyTo(target, new UnreadableValue()));
-        Assert.Contains("StepToCheckpoint", refused.Message);
+        Assert.Contains("ToHost()", refused.Message);
 
         // And a value that is neither a tensor nor a sequence has no contents to rebuild at all.
         Assert.Throws<InvalidOperationException>(

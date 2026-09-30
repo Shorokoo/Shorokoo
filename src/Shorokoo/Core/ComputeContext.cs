@@ -66,6 +66,23 @@ namespace Shorokoo.Runtime
         // on is built with, a rebuilt one included.
         private readonly IReadOnlyList<OutputAlias> _outputAliases;
 
+        // The weights this graph's session reads where they are rather than from its model -- a
+        // model loaded straight onto the device (ComputeContext.LoadCompiled) -- which every session
+        // it is built on is handed, a rebuilt one included. The graph owns them: they live exactly
+        // as long as it does, and are deleted once its session is released. The session reads
+        // their memory where it is, so the graph holds a reader lock on each for its whole life:
+        // they stay attached to its context and counted in its budget, and while the graph lives
+        // a delete is refused, declined or held back, a run cannot consume one, and the context
+        // cannot detach one.
+        private readonly IReadOnlyList<(SuppliedInitializer Initializer, TensorData Tensor)> _supplied;
+
+        // Who holds the reader lock on each of those weights, as a refusal names it.
+        private static readonly RunIdentity WeightReader =
+            new(() => "the session of a compiled graph, which reads it as a weight until the graph is disposed");
+
+        /// <summary>The tensors this graph's session is handed as initializers, each once.</summary>
+        internal IEnumerable<TensorData> SuppliedTensors => _supplied.Select(s => s.Tensor).Distinct();
+
         internal CompiledGraph(
             IShorokooSession session,
             IShorokooBackend backend,
@@ -77,9 +94,26 @@ namespace Shorokoo.Runtime
             ComputeContext owner,
             string? description = null,
             byte[]? model = null,
-            IReadOnlyList<OutputAlias>? outputAliases = null)
+            IReadOnlyList<OutputAlias>? outputAliases = null,
+            IReadOnlyList<(SuppliedInitializer Initializer, TensorData Tensor)>? supplied = null)
         {
+            _supplied = supplied ?? [];
             _owner = owner;
+            var locked = new List<TensorData>();
+            try
+            {
+                foreach (var tensor in SuppliedTensors)
+                {
+                    ((ILifetimeOwner)tensor).Life.AcquireReadLock(WeightReader);
+                    locked.Add(tensor);
+                    owner.HoldForGraph(tensor, held: true);
+                }
+            }
+            catch
+            {
+                foreach (var tensor in locked) ReleaseWeight(tensor);
+                throw;
+            }
             _onnxInputNameByOriginal = onnxInputNameByOriginal;
             _built = new BuiltSession(session, deviceMemory, BindableOf(session));
             _outputNames = [.. session.OutputNames];
@@ -205,7 +239,19 @@ namespace Shorokoo.Runtime
                 built = _built;
             }
             built.Session.Dispose();
+            // After the session: it reads them for as long as it lives. Every lock goes before
+            // any weight is deleted, so a delete that throws leaves none of them held.
+            foreach (var tensor in SuppliedTensors) ReleaseWeight(tensor);
+            foreach (var tensor in SuppliedTensors) tensor.Delete();
             GC.SuppressFinalize(this);
+        }
+
+        /// <summary>Drops this graph's reader lock on one of its weights. The memory goes now if a
+        /// delete of it was already waiting for the lock.</summary>
+        private void ReleaseWeight(TensorData tensor)
+        {
+            _owner.HoldForGraph(tensor, held: false);
+            ((ILifetimeOwner)tensor).Life.ReleaseReadLock(WeightReader);
         }
 
         /// <summary>The graph-optimization profile the session was built with (test hook).</summary>
@@ -527,7 +573,8 @@ namespace Shorokoo.Runtime
                 "This compiled graph kept no model to build its session again from, so its arena "
                 + "limit cannot come down to what its context's device-memory budget now allows.");
             var deviceMemory = _built.DeviceMemory with { LimitBytes = arenaLimit };
-            var session = _owner.BuildSession(_backend, model, Optimization, deviceMemory, _outputAliases);
+            var session = _owner.BuildSession(
+                _backend, model, Optimization, deviceMemory, _outputAliases, supplied: [.. _supplied.Select(s => s.Initializer)]);
             var fresh = new BuiltSession(session, deviceMemory, BindableOf(session));
             BuiltSession old;
             lock (_sessionGate)
@@ -1041,6 +1088,11 @@ namespace Shorokoo.Runtime
         // as long as its lock.
         private readonly Dictionary<object, int> _locksHeld = new(ReferenceEqualityComparer.Instance);
 
+        // The weights of this context's graphs loaded with LoadCompiled, which their sessions read
+        // for as long as each graph lives: Detach refuses on these too. Weak, as the tensor list
+        // is -- the graph holds its weights, and one the program dropped takes them with it.
+        private readonly ConditionalWeakTable<TensorData, object> _heldByGraphs = new();
+
         // How many reader locks this context holds in all. Disposing a context while it is
         // processing is invalid, and this is what makes that a refusal rather than an assumption.
         private int _leases;
@@ -1109,7 +1161,23 @@ namespace Shorokoo.Runtime
                     throw new InvalidOperationException(
                         $"A run of this compute context is reading tensor {tensor}, so the context "
                         + "cannot detach it until that run returns.");
+                if (_heldByGraphs.TryGetValue(tensor, out _))
+                    throw new InvalidOperationException(
+                        $"A compiled graph of this compute context reads tensor {tensor} as a weight, "
+                        + "so the context cannot detach it until that graph is disposed.");
                 _attached.Remove(tensor);
+            }
+        }
+
+        /// <summary>Records that a compiled graph of this context reads <paramref name="tensor"/>
+        /// as a weight for as long as it lives, or, with <paramref name="held"/> false, that the
+        /// graph is done with it.</summary>
+        internal void HoldForGraph(TensorData tensor, bool held)
+        {
+            lock (_gate)
+            {
+                if (held) _heldByGraphs.AddOrUpdate(tensor, OwnedMarker);
+                else _heldByGraphs.Remove(tensor);
             }
         }
 
@@ -1162,6 +1230,46 @@ namespace Shorokoo.Runtime
         /// (<see cref="DeviceMemorySettings.LimitBytes"/>).</exception>
         public TensorData AllocateUninitialized(Shape shape, DType dtype)
         {
+            var bytes = FlatByteCount(shape, dtype);
+            if (_isHost)
+                return TensorData.NewHostTensor(shape, dtype, new byte[bytes]);
+
+            var backend = ResolvedBackend;
+            return Placed(bytes, () => $"AllocateUninitialized of {shape}:{dtype}", () => TensorData.Create(
+                shape, dtype, backend.CreateUninitializedTensorInBackendMemory(
+                    (ShorokooTensorElementType)(int)dtype, (long[])shape), backend));
+        }
+
+        /// <summary>
+        /// A tensor of <paramref name="shape"/> and <paramref name="dtype"/> in this context's
+        /// memory holding the next bytes of <paramref name="source"/> — as many as the tensor
+        /// covers — read into it where it lives: on a card, through one bounded host buffer a piece
+        /// at a time (<see cref="StagedUpload"/>), so its contents are never whole in host memory.
+        /// What a load puts a tensor on the device with (Shorokoo/Shorokoo#436). Attached, budgeted
+        /// and refused as <see cref="AllocateUninitialized(Shape, DType)"/> is; throws
+        /// <see cref="EndOfStreamException"/> where the stream ends first.
+        /// </summary>
+        internal TensorData ReadTensor(Shape shape, DType dtype, Stream source)
+        {
+            ArgumentNullException.ThrowIfNull(source);
+            var bytes = FlatByteCount(shape, dtype);
+            if (_isHost)
+            {
+                var contents = new byte[bytes];
+                source.ReadExactly(contents);
+                return TensorData.NewHostTensor(shape, dtype, contents);
+            }
+
+            var backend = ResolvedBackend;
+            return Placed(bytes, () => $"a load of {shape}:{dtype}", () => TensorData.Create(
+                shape, dtype, StagedUpload.Read(
+                    backend, (ShorokooTensorElementType)(int)dtype, (long[])shape, bytes, source), backend));
+        }
+
+        /// <summary>The bytes a flat buffer of this shape and dtype takes, refusing — alike on
+        /// every context, before any budget is asked — a dtype or shape that has none.</summary>
+        private long FlatByteCount(Shape shape, DType dtype)
+        {
             ArgumentNullException.ThrowIfNull(dtype);
             ObjectDisposedException.ThrowIf(_disposed, this);
             // Refused here rather than left to the backend, so the same dtype is refused in the
@@ -1184,14 +1292,7 @@ namespace Shorokoo.Runtime
                     $"A tensor of {shape}:{dtype} cannot be allocated as a flat buffer: its "
                     + "elements have no whole-byte stride, or its shape has no known element count.");
 
-            var bytes = checked(shape.Count * (bits / 8));
-            if (_isHost)
-                return TensorData.NewHostTensor(shape, dtype, new byte[bytes]);
-
-            var backend = ResolvedBackend;
-            return Placed(bytes, () => $"AllocateUninitialized of {shape}:{dtype}", () => TensorData.Create(
-                shape, dtype, backend.CreateUninitializedTensorInBackendMemory(
-                    (ShorokooTensorElementType)(int)dtype, (long[])shape), backend));
+            return checked(shape.Count * (bits / 8));
         }
 
         /// <summary>
@@ -1660,6 +1761,126 @@ namespace Shorokoo.Runtime
             return (regularOutputs, new ComputationGraph(updatedGraph, graph.Kind));
         }
 
+        /// <summary>
+        /// Loads the inference model of the <c>.skpt</c> checkpoint at <paramref name="filePath"/>
+        /// and compiles it on this context, its weights going from the file straight into this
+        /// context's memory — on a card, through one bounded host buffer — where the session reads
+        /// them: they are never whole in host memory, and never in the model the session is built
+        /// from (Shorokoo/Shorokoo#436). <see cref="Compile(ComputationGraph)"/> of
+        /// <see cref="Persistence.Load(string)"/> runs the same model, holding its weights in the
+        /// graph on the host and copying them into the session's memory as it is built.
+        ///
+        /// <para>The weights belong to the compiled graph, which frees them when it is disposed,
+        /// so there is no graph of the model with its weights to edit or save; load it with
+        /// <see cref="Persistence.Load(string)"/> for that. A weight of at most a thousand-odd
+        /// elements (<c>ShapeInferenceInterpreter.MaxSmallTensorElements</c>) is held in the
+        /// description as <see cref="Persistence.Load(string)"/> holds it, which is where the
+        /// compiler reads such values. The session reads the others as it runs rather than folding
+        /// what is computed from them alone into constants as it is built, and the runtime fuses
+        /// fewer of the nodes that read them, so results can round differently in the last bits
+        /// from the same model compiled from its graph. On a backend that
+        /// cannot take a session's weights where they are, this is
+        /// <see cref="Compile(ComputationGraph)"/> of <see cref="Persistence.Load(string)"/>.</para>
+        /// </summary>
+        /// <exception cref="InvalidOperationException">This context is under a device-memory
+        /// budget that cannot take the weights (<see cref="DeviceMemorySettings.LimitBytes"/>).</exception>
+        public CompiledGraph LoadCompiled(string filePath)
+            => LoadCompiled(filePath, SkptFileFormat.DefaultMappingSetName);
+
+        /// <summary><see cref="LoadCompiled(string)"/> with the weights of the named mapping
+        /// <paramref name="set"/>, as <see cref="Persistence.Load(string, string)"/> binds
+        /// them.</summary>
+        public CompiledGraph LoadCompiled(string filePath, string set)
+            => LoadCompiled(() => Persistence.LoadOnto(filePath, set, this), () => Persistence.Load(filePath, set));
+
+        /// <summary>
+        /// <see cref="LoadCompiled(string)"/> for a model whose weights are the SafeTensors file at
+        /// <paramref name="weightsPath"/>, bound onto <paramref name="concreteArchitecture"/> — a
+        /// <c>.srk</c> architecture, say — exactly as
+        /// <see cref="Persistence.ImportSafeTensors(ComputationGraph, string, ModuleParamSetNamingScheme?)"/>
+        /// binds them, and refused alike.
+        /// </summary>
+        public CompiledGraph LoadCompiled(
+            ComputationGraph concreteArchitecture, string weightsPath, ModuleParamSetNamingScheme? namingScheme = null)
+            => LoadCompiled(
+                () => Persistence.ImportSafeTensorsOnto(concreteArchitecture, weightsPath, namingScheme, this),
+                () => Persistence.ImportSafeTensors(concreteArchitecture, weightsPath, namingScheme));
+
+        /// <summary>
+        /// <see cref="LoadCompiled(string)"/> for the <c>.onnx</c> model at
+        /// <paramref name="filePath"/>, imported exactly as
+        /// <see cref="Persistence.ImportOnnx(string, ModuleParamSetNamingScheme?)"/> imports it and
+        /// refused alike: each initializer of more than a thousand-odd elements whose bytes the file
+        /// holds flat — inline <c>raw_data</c> and ONNX external data alike — goes from the file
+        /// straight into this context's memory. A payload ONNX codes as varints
+        /// (<c>int64_data</c>, say) is read on the host and held in the model as
+        /// <see cref="Persistence.ImportOnnx(string, ModuleParamSetNamingScheme?)"/> holds it. Named
+        /// apart from <see cref="LoadCompiled(string)"/>, which reads a <c>.skpt</c>: a file's
+        /// format is never told from its extension.
+        /// </summary>
+        /// <exception cref="InvalidOperationException">This context is under a device-memory
+        /// budget that cannot take the weights (<see cref="DeviceMemorySettings.LimitBytes"/>).</exception>
+        public CompiledGraph ImportCompiledOnnx(string filePath, ModuleParamSetNamingScheme? namingScheme = null)
+            => LoadCompiled(
+                () => Persistence.ImportOnnxOnto(filePath, namingScheme, null, this),
+                () => Persistence.ImportOnnx(filePath, namingScheme));
+
+        /// <summary><see cref="ImportCompiledOnnx(string, ModuleParamSetNamingScheme?)"/> with each
+        /// input <paramref name="inputShapes"/> names given that representative shape, as
+        /// <see cref="Persistence.ImportOnnx(string, IReadOnlyDictionary{string, long[]})"/> gives
+        /// it.</summary>
+        public CompiledGraph ImportCompiledOnnx(string filePath, IReadOnlyDictionary<string, long[]> inputShapes)
+            => ImportCompiledOnnx(filePath, null, inputShapes);
+
+        /// <summary><see cref="ImportCompiledOnnx(string, IReadOnlyDictionary{string, long[]})"/>
+        /// with each foreign initializer name translated through
+        /// <paramref name="namingScheme"/>.</summary>
+        public CompiledGraph ImportCompiledOnnx(
+            string filePath, ModuleParamSetNamingScheme? namingScheme, IReadOnlyDictionary<string, long[]> inputShapes)
+        {
+            ArgumentNullException.ThrowIfNull(inputShapes);
+            return LoadCompiled(
+                () => Persistence.ImportOnnxOnto(filePath, namingScheme, inputShapes, this),
+                () => Persistence.ImportOnnx(filePath, namingScheme, inputShapes));
+        }
+
+        private CompiledGraph LoadCompiled(
+            Func<(InternalComputationGraph Graph, Dictionary<string, TensorData> Supplied)> loadOnto,
+            Func<ComputationGraph> loadOnHost)
+        {
+            RefuseHostContext("compile");
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            if (!ResolvedBackend.SuppliesInitializers) return Compile(loadOnHost());
+
+            var (graph, supplied) = loadOnto();
+            CompiledGraph compiled;
+            try
+            {
+                compiled = Compile(graph, supplied);
+            }
+            catch
+            {
+                foreach (var tensor in supplied.Values.Distinct()) tensor.Delete();
+                throw;
+            }
+            // A weight the compiler found nothing reading went into no session, and has no owner.
+            foreach (var tensor in supplied.Values.Distinct().Except(compiled.SuppliedTensors)) tensor.Delete();
+            return compiled;
+        }
+
+        /// <summary><paramref name="graph"/> compiled with the initializers of the parameters
+        /// <paramref name="supplied"/> holds a tensor for handed to its session as those
+        /// tensors, which the compiled graph then owns.</summary>
+        internal CompiledGraph Compile(InternalComputationGraph graph, IReadOnlyDictionary<string, TensorData> supplied)
+        {
+            graph.RequireRunnableOps("ComputeContext.LoadCompiled");
+            return CompileFromModel(
+                () => FastOnnxModelBuilder.BuildInternalOnnxModel(graph, prepForOnnx: true,
+                    workarounds: KernelWorkaroundRegistry.For(ResolvedBackend.KernelWorkaroundSet)),
+                ResolveOriginalInputNames(graph), trainingStep: false, reusedAcrossShapes: false,
+                description: null, suppliedByIdentifier: supplied);
+        }
+
         internal CompiledGraph Compile(InternalComputationGraph graph) => Compile(graph, inputDims: null, trainingStep: false);
 
         /// <summary>
@@ -1757,10 +1978,12 @@ namespace Shorokoo.Runtime
             IReadOnlyList<(int Output, int Input)>? aliasCandidates = null,
             ShorokooGraphOptimization? profile = null,
             int intraOpThreads = 0,
-            Func<ModelProto>? buildWithoutWorkarounds = null)
+            Func<ModelProto>? buildWithoutWorkarounds = null,
+            IReadOnlyDictionary<string, TensorData>? suppliedByIdentifier = null)
         {
             RefuseHostContext("compile");
             var model = buildModel();
+            var supplied = Supplied(model, suppliedByIdentifier);
             var outputAliases = MarkedAliases(model.Graph, aliasCandidates);
             if (buildWithoutWorkarounds is not null && outputAliases.Count < (aliasCandidates?.Count ?? 0)
                 && MarkedAliases(buildWithoutWorkarounds().Graph, aliasCandidates) is { } asWritten
@@ -1794,7 +2017,8 @@ namespace Shorokoo.Runtime
                     deviceMemory = deviceMemory with { LimitBytes = arena };
                     kept = modelData;
                 }
-                session = BuildSession(backend, modelData, optimization, deviceMemory, outputAliases, intraOpThreads);
+                session = BuildSession(backend, modelData, optimization, deviceMemory, outputAliases, intraOpThreads,
+                    [.. supplied.Select(s => s.Initializer)]);
             }
             finally
             {
@@ -1805,7 +2029,7 @@ namespace Shorokoo.Runtime
 
             var graph = new CompiledGraph(
                 session, backend, onnxInputNameByOriginal, originalInputNames, optimization,
-                deviceMemory, RunSettings, this, description, kept, outputAliases);
+                deviceMemory, RunSettings, this, description, kept, outputAliases, supplied);
             // Enrolled under the same gate a disposal takes, so a compile racing a disposal either
             // lands before it and is released with everything else, or finds the context gone.
             lock (_gate)
@@ -1818,6 +2042,28 @@ namespace Shorokoo.Runtime
                 _compiled.AddOrUpdate(graph, OwnedMarker);
             }
             return graph;
+        }
+
+        /// <summary>
+        /// Declares in <paramref name="model"/> each initializer whose parameter
+        /// <paramref name="byIdentifier"/> holds a tensor for — a weight loaded straight into this
+        /// context's memory — as one its session is handed as that tensor
+        /// (<see cref="SuppliedInitializer"/>), and pairs each with the tensor it is handed.
+        /// </summary>
+        private List<(SuppliedInitializer Initializer, TensorData Tensor)> Supplied(
+            ModelProto model, IReadOnlyDictionary<string, TensorData>? byIdentifier)
+        {
+            List<(SuppliedInitializer, TensorData)> supplied = [];
+            if (byIdentifier is null || byIdentifier.Count == 0) return supplied;
+            foreach (var initializer in model.Graph.Initializers)
+            {
+                var identifier = initializer.MetadataProps
+                    .FirstOrDefault(p => p.Key == OnnxOpAttributeNames.ShrkMetaNodeIdentifierTemplate)?.Value;
+                if (identifier is null || !byIdentifier.TryGetValue(identifier, out var tensor)) continue;
+                FastOnnxProtoFactory.DeclareSupplied(model.Graph, initializer);
+                supplied.Add((new SuppliedInitializer(initializer.Name, ((IOnnxData)tensor).Value), tensor));
+            }
+            return supplied;
         }
 
         private static string[] ResolveOriginalInputNames(InternalComputationGraph graph)
@@ -2162,10 +2408,14 @@ namespace Shorokoo.Runtime
         internal IShorokooSession BuildSession(
             IShorokooBackend backend, byte[] modelData, ShorokooGraphOptimization optimization,
             DeviceMemorySettings deviceMemory, IReadOnlyList<OutputAlias>? outputAliases = null,
-            int intraOpThreads = 0)
-            => backend.CreateSession(
-                modelData, optimization, ShorokooLogSeverity.Fatal, deviceMemory, Diagnostics,
-                outputAliases ?? [], intraOpThreads);
+            int intraOpThreads = 0, IReadOnlyList<SuppliedInitializer>? supplied = null)
+            => supplied is { Count: > 0 }
+                ? backend.CreateSession(
+                    modelData, optimization, ShorokooLogSeverity.Fatal, deviceMemory, Diagnostics,
+                    outputAliases ?? [], intraOpThreads, supplied)
+                : backend.CreateSession(
+                    modelData, optimization, ShorokooLogSeverity.Fatal, deviceMemory, Diagnostics,
+                    outputAliases ?? [], intraOpThreads);
 
         /// <summary>
         /// Whether the model takes no runtime input, so every node's value is already

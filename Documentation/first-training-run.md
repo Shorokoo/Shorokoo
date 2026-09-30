@@ -100,8 +100,9 @@ are in [What a training step consumes](training.md#what-a-training-step-consumes
 
 ## 4. Checkpoint
 
-`StepToCheckpoint` takes one more step and brings the state back to the host as a
-`TrainingCheckpoint`. Save it as a `.skpt`, which carries everything needed to resume.
+`StepToCheckpoint` takes one more step and hands out the state as a `TrainingCheckpoint`,
+left where the step put it (on a GPU, the card's memory; the save writes it from there). Save it
+as a `.skpt`, which carries everything needed to resume.
 
 ```csharp
 var (lx, ly) = MakeBatch(99);

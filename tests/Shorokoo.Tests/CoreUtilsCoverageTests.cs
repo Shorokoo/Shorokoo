@@ -416,6 +416,21 @@ public class CoreUtilsCoverageTests
     }
 
     [Fact]
+    public void TestAPieceOfAHostTensorPastTwoGibibytesIsWrittenAndReadAtItsOffset()
+    {
+        var backend = DefaultBackend.Instance;
+        using var value = backend.CreateUninitializedTensorInBackendMemory(ShorokooTensorElementType.UInt8, [(1L << 31) + 8]);
+        byte[] piece = [1, 2, 3, 4];
+        foreach (var offset in (long[])[5L, 1L << 31])
+        {
+            var read = new byte[piece.Length];
+            Assert.True(backend.TryCopyHostToTensorRange(value, offset, piece));
+            Assert.True(backend.TryCopyTensorRangeToHost(value, offset, read));
+            Assert.Equal(piece, read);
+        }
+    }
+
+    [Fact]
     public void TestABackendThatDoesNotOverrideTheUninitializedAllocationStillGetsAZeroFilledOne()
     {
         IShorokooBackend defaulting = new ByteWiseOnlyBackend();
@@ -961,6 +976,24 @@ public class CoreUtilsCoverageTests
         var figures = Assert.IsType<ArenaStatistics>(OrtArenaStats.Read(allocator));
         Assert.Equal(-1L, figures.LimitBytes);
         Assert.Equal(0L, figures.MaxInUseBytes);
+    }
+
+    [Fact]
+    public void TestTheOrtTensorAddressBindingStillResolvesAndAgreesWithTheSpan()
+    {
+        var api = typeof(OrtAllocator).Assembly.GetType(OrtArenaStats.ApiHolderTypeName)!
+            .GetField(OrtArenaStats.ApiFieldName, BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public)!
+            .GetValue(null)!;
+        foreach (var entry in OrtTensorAddress.ApiEntryPointNames)
+            Assert.Equal(typeof(IntPtr), api.GetType().GetField(entry)!.FieldType);
+        var handle = typeof(OrtValue).GetProperty(
+            OrtTensorAddress.HandlePropertyName, BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+        Assert.Equal(typeof(IntPtr), handle!.PropertyType);
+        Assert.True(OrtTensorAddress.IsBound);
+
+        using var value = OrtValue.CreateTensorValueFromMemory([1f, 2f, 3f], [3L]);
+        value.GetTensorMutableDataAsSpan<float>()[2] = 7f;
+        Assert.Equal(BitConverter.SingleToInt32Bits(7f), Marshal.ReadInt32(OrtTensorAddress.Read(value)!.Value, 8));
     }
 
     /// <summary>

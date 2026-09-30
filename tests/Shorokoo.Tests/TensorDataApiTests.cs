@@ -529,7 +529,7 @@ public class TensorDataApiCoverageTests
         Assert.False(resident.IsHostResident);
 
         var ex = Assert.Throws<InvalidOperationException>(() => resident.AccessMemory<float>().ToArray());
-        Assert.Contains("StepToCheckpoint", ex.Message);
+        Assert.Contains("ToHost()", ex.Message);
         Assert.Throws<InvalidOperationException>(() => resident.AccessRawMemory().ToArray());
         Assert.Throws<InvalidOperationException>(() => resident.CopyRawMemory());
         Assert.Throws<InvalidOperationException>(() => resident.ValueAt<float>(0));

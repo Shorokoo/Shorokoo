@@ -393,6 +393,10 @@ internal sealed class SessionCountingBackend(IShorokooBackend inner) : IShorokoo
     public IShorokooTensorValue CreateSequence(IReadOnlyList<IShorokooTensorValue> values)
         => inner.CreateSequence(values);
     public byte[] CopyTensorToHost(IShorokooTensorValue value) => inner.CopyTensorToHost(value);
+    public bool TryCopyTensorRangeToHost(IShorokooTensorValue value, long byteOffset, Span<byte> destination)
+        => inner.TryCopyTensorRangeToHost(value, byteOffset, destination);
+    public bool TryCopyHostToTensorRange(IShorokooTensorValue value, long byteOffset, ReadOnlySpan<byte> source)
+        => inner.TryCopyHostToTensorRange(value, byteOffset, source);
     public IShorokooTensorValue CreateTensorInBackendMemory(
         ShorokooTensorElementType elementType, byte[] data, long[] shape)
         => inner.CreateTensorInBackendMemory(elementType, data, shape);

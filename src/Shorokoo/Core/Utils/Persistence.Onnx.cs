@@ -10,6 +10,7 @@ using Shorokoo.Core.Nodes.Processors.Fast;
 using Shorokoo.Core.Utils;
 using Shorokoo.Graph;
 using Shorokoo.Onnx;
+using Shorokoo.Runtime;
 using IR = Shorokoo.Core.Factory.IR;
 
 namespace Shorokoo
@@ -113,9 +114,16 @@ namespace Shorokoo
         /// which is always a valid identifier. Two initializers resolving to one identifier
         /// fail loudly, naming both.</para>
         ///
+        /// <para>The file is scanned rather than parsed whole: each weight whose bytes lie flat in
+        /// it — inline or as external data — is read straight into its own tensor, so host memory
+        /// holds each weight once. A weight ONNX codes as varints is decoded as it is parsed.
+        /// <see cref="ComputeContext.ImportCompiledOnnx(string, ModuleParamSetNamingScheme?)"/>
+        /// compiles the model with its weights read straight into a device's memory instead.</para>
+        ///
         /// <para>Fails loudly, naming the offending op and the file, on a construct the reader
-        /// cannot ingest (an op outside the vanilla ONNX dialect Shorokoo reads, or a node in
-        /// an unknown domain); a truncated or garbage file fails loudly naming the file.</para>
+        /// cannot ingest (an op outside the vanilla ONNX dialect Shorokoo reads, a node in
+        /// an unknown domain, or a sparse initializer); a truncated or garbage file fails loudly
+        /// naming the file.</para>
         ///
         /// <para>The model must be an ONNX opset-21 model: one whose default-domain
         /// (<c>ai.onnx</c>) opset import is missing or names another opset is refused with
@@ -172,26 +180,89 @@ namespace Shorokoo
             ModuleParamSetNamingScheme? namingScheme,
             IReadOnlyDictionary<string, long[]>? inputShapes)
         {
+            var (graph, taggedKind, _) = ReadOnnx(filePath, namingScheme, inputShapes, onto: null);
+            // Every input of a concrete import records a representative shape by now — the one
+            // ExportOnnx wrote, the caller's, or the one the file declares — except an input of
+            // unknown rank the caller gave none for, which is refused here, naming it.
+            return OnnxModelImporter.Freeze(graph, taggedKind, $"'{filePath}'");
+        }
+
+        /// <summary>
+        /// <see cref="ImportOnnx(string, ModuleParamSetNamingScheme, IReadOnlyDictionary{string, long[]})"/>
+        /// for a model compiled on <paramref name="onto"/> by
+        /// <see cref="ComputeContext.ImportCompiledOnnx(string, ModuleParamSetNamingScheme?)"/>, as
+        /// <see cref="LoadOnto"/> is for a <c>.skpt</c>: an initializer of more than
+        /// <c>ShapeInferenceInterpreter.MaxSmallTensorElements</c> elements whose bytes the file holds
+        /// flat is read straight into <paramref name="onto"/>'s memory and handed back by its
+        /// parameter's identifier, its placeholder in the graph left without values; any other is
+        /// bound as the import binds it. Refused as the import refuses, and as
+        /// <see cref="ComputeContext.Compile(ComputationGraph)"/> refuses what it imports. On failure
+        /// every weight read is deleted.
+        /// </summary>
+        internal static (InternalComputationGraph Graph, Dictionary<string, TensorData> Supplied) ImportOnnxOnto(
+            string filePath,
+            ModuleParamSetNamingScheme? namingScheme,
+            IReadOnlyDictionary<string, long[]>? inputShapes,
+            ComputeContext onto)
+        {
+            var (graph, taggedKind, onDevice) = ReadOnnx(filePath, namingScheme, inputShapes, onto);
+            try
+            {
+                OnnxModelImporter.Freeze(graph, taggedKind, $"'{filePath}'")
+                    .RequireSessionRunnable("ComputeContext.ImportCompiledOnnx");
+                var supplied = new Dictionary<string, TensorData>(StringComparer.Ordinal);
+                foreach (var node in graph.Nodes)
+                    if (node.OpCode == InternalOpCodes.MODEL_PARAM_DATA && node.IdentifierTemplate is { } id
+                        && node.GetTensorAttribute() is { } attribute && onDevice.TryGetValue(attribute, out var tensor))
+                        supplied[id] = tensor;
+                // A weight no parameter is handed would have no owner.
+                foreach (var tensor in onDevice.Values.Except<TensorData>(supplied.Values, ReferenceEqualityComparer.Instance)) tensor.Delete();
+                return (graph, supplied);
+            }
+            catch
+            {
+                foreach (var tensor in onDevice.Values) tensor.Delete();
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// The import of the <c>.onnx</c> at <paramref name="filePath"/> up to its freeze, its
+        /// initializers named. The file is scanned rather than parsed whole
+        /// (<see cref="OnnxStreamingScan"/>), so each weight whose bytes it holds flat is read once,
+        /// straight into its own tensor — onto the host, or, with <paramref name="onto"/>, a large
+        /// initializer into <paramref name="onto"/>'s memory, returned beside the placeholder that
+        /// stands for it (see <see cref="OnnxExternalData.LoadIntoModel"/>). On failure those are
+        /// deleted.
+        /// </summary>
+        private static (InternalComputationGraph Graph, GraphKind? TaggedKind, Dictionary<TensorAttribute, TensorData> OnDevice) ReadOnnx(
+            string filePath,
+            ModuleParamSetNamingScheme? namingScheme,
+            IReadOnlyDictionary<string, long[]>? inputShapes,
+            ComputeContext? onto)
+        {
             if (string.IsNullOrWhiteSpace(filePath))
                 throw new ArgumentException("ONNX path cannot be null or empty.", nameof(filePath));
             if (!File.Exists(filePath))
                 throw new FileNotFoundException($"'{filePath}': ONNX file not found.", filePath);
 
-            byte[] bytes;
+            FileStream file;
             try
             {
-                bytes = File.ReadAllBytes(filePath);
+                file = OnnxStreamingScan.Open(filePath);
             }
             catch (Exception e) when (e is IOException or UnauthorizedAccessException)
             {
                 throw new InvalidDataException($"'{filePath}': could not be read ({e.Message}).", e);
             }
+            // The one handle serves the scan and the read of the weights it references, so those
+            // are the weights of the file scanned.
+            using var modelFile = file;
 
             IR.ModelProto model;
             try
             {
-                using var ms = new MemoryStream(bytes, writable: false);
-                model = ProtoBuf.Serializer.Deserialize<IR.ModelProto>(ms);
+                model = OnnxStreamingScan.ReadModel(file);
             }
             catch (Exception e) when (e is ProtoBuf.ProtoException
                 or EndOfStreamException
@@ -205,6 +276,10 @@ namespace Shorokoo
                     $"'{filePath}': not a readable ONNX model — failed to parse the protobuf " +
                     $"({e.GetType().Name}: {e.Message}). The file is corrupt or not an ONNX model.", e);
             }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+            {
+                throw new InvalidDataException($"'{filePath}': could not be read ({e.Message}).", e);
+            }
 
             if (model.Graph is null)
                 throw new InvalidDataException(
@@ -216,35 +291,42 @@ namespace Shorokoo
             // op is a bare lookup error).
             ValidateVanillaDialect(model, filePath);
 
-            InternalComputationGraph graph;
-            GraphKind? taggedKind;
+            var onDevice = new Dictionary<TensorAttribute, TensorData>(ReferenceEqualityComparer.Instance);
             try
             {
-                var fullDir = Path.GetDirectoryName(Path.GetFullPath(filePath));
-                (graph, taggedKind) = OnnxModelImporter.FromModelProtoWithKindTag(model, fullDir, inputShapes);
+                InternalComputationGraph graph;
+                GraphKind? taggedKind;
+                try
+                {
+                    var fullDir = Path.GetDirectoryName(Path.GetFullPath(filePath));
+                    OnnxOpset.ThrowIfNotAtVersion(model);
+                    onDevice = OnnxExternalData.LoadIntoModel(model, fullDir, onto, file);
+                    (graph, taggedKind) = OnnxModelImporter.FromLoadedModelProtoWithKindTag(model, inputShapes);
+                }
+                catch (Exception e) when (e is ProtoBuf.ProtoException
+                    or EndOfStreamException
+                    or IndexOutOfRangeException
+                    or ArgumentOutOfRangeException
+                    or OverflowException
+                    or FormatException
+                    or KeyNotFoundException)
+                {
+                    throw new InvalidDataException(
+                        $"'{filePath}': the ONNX model could not be imported " +
+                        $"({e.GetType().Name}: {e.Message}). The file is corrupt or uses a construct " +
+                        "Shorokoo's importer cannot ingest.", e);
+                }
+
+                // Assign identifiers on the mutable internal graph, then freeze — a
+                // ComputationGraph is immutable, so the naming must happen before it is wrapped.
+                AdoptInitializerIdentifiers(graph, namingScheme, filePath);
+                return (graph, taggedKind, onDevice);
             }
-            catch (Exception e) when (e is ProtoBuf.ProtoException
-                or EndOfStreamException
-                or IndexOutOfRangeException
-                or ArgumentOutOfRangeException
-                or OverflowException
-                or FormatException
-                or KeyNotFoundException)
+            catch
             {
-                throw new InvalidDataException(
-                    $"'{filePath}': the ONNX model could not be imported " +
-                    $"({e.GetType().Name}: {e.Message}). The file is corrupt or uses a construct " +
-                    "Shorokoo's importer cannot ingest.", e);
+                foreach (var tensor in onDevice.Values) tensor.Delete();
+                throw;
             }
-
-
-            // Assign identifiers on the mutable internal graph, then freeze — a
-            // ComputationGraph is immutable, so the naming must happen before it is wrapped.
-            AdoptInitializerIdentifiers(graph, namingScheme, filePath);
-            // Every input of a concrete import records a representative shape by now — the one
-            // ExportOnnx wrote, the caller's, or the one the file declares — except an input of
-            // unknown rank the caller gave none for, which is refused here, naming it.
-            return OnnxModelImporter.Freeze(graph, taggedKind, $"'{filePath}'");
         }
 
         /// <summary>

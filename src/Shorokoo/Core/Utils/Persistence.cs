@@ -113,9 +113,37 @@ namespace Shorokoo
 
             var (modelKey, modelEntry) = SingleModel(manifest, filePath);
             var graph = LoadModelDefinition(container, modelKey, modelEntry, filePath);
-            BindWeights(container, manifest, modelKey, set, graph, filePath);
+            BindWeights(container, manifest, modelKey, set, graph, filePath, onto: null, supplied: null);
 
             return new ComputationGraph(graph, GraphKind.ConcreteModel);
+        }
+
+        /// <summary>
+        /// <see cref="Load(string, string)"/> for a model compiled on <paramref name="onto"/> by
+        /// <see cref="ComputeContext.LoadCompiled(string, string)"/>: a weight of more than
+        /// <see cref="Shorokoo.Core.AutoDiffCheckpointing.ShapeInferenceInterpreter.MaxSmallTensorElements"/> elements is read straight
+        /// from the file into <paramref name="onto"/>'s memory and handed back by its parameter's
+        /// identifier, its placeholder in the graph left without values; a smaller one is bound as
+        /// <see cref="Load(string, string)"/> binds it, so what the graph's own passes read of the
+        /// weights is there to read. On failure every weight read is deleted.
+        /// </summary>
+        internal static (InternalComputationGraph Graph, Dictionary<string, TensorData> Supplied) LoadOnto(
+            string filePath, string set, ComputeContext onto)
+        {
+            if (string.IsNullOrWhiteSpace(filePath))
+                throw new ArgumentException("Checkpoint path cannot be null or empty.", nameof(filePath));
+            if (string.IsNullOrWhiteSpace(set))
+                throw new ArgumentException("Mapping set name cannot be null or empty.", nameof(set));
+
+            using var container = SkptContainer.Open(filePath);
+            var manifest = SkptFileFormat.ParseManifest(container.ReadManifestBytes(), filePath);
+            ValidateManifestIdentity(manifest, filePath);
+
+            var (modelKey, modelEntry) = SingleModel(manifest, filePath);
+            var graph = LoadModelDefinition(container, modelKey, modelEntry, filePath);
+            var supplied = new Dictionary<string, TensorData>(StringComparer.Ordinal);
+            BindWeights(container, manifest, modelKey, set, graph, filePath, onto, supplied);
+            return (graph, supplied);
         }
 
         /// <summary>
@@ -159,7 +187,7 @@ namespace Shorokoo
             var lossGraph = ReadLossConstituent(container, manifest, filePath);
             var (modelKey, modelEntry) = SingleModel(manifest, filePath);
             var model = LoadModelDefinition(container, modelKey, modelEntry, filePath);
-            BindWeights(container, manifest, modelKey, SkptFileFormat.DefaultMappingSetName, model, filePath);
+            BindWeights(container, manifest, modelKey, SkptFileFormat.DefaultMappingSetName, model, filePath, onto: null, supplied: null);
 
             return new ComputationGraph(
                 Core.Training.TrainingGraphBuilder.ComposeEvaluationGraph(model, lossGraph.ToInternal()),
@@ -419,7 +447,8 @@ namespace Shorokoo
         /// </summary>
         private static void BindWeights(
             SkptContainer container, SkptManifest manifest, string modelKey, string setName,
-            InternalComputationGraph graph, string filePath)
+            InternalComputationGraph graph, string filePath, ComputeContext? onto,
+            Dictionary<string, TensorData>? supplied)
         {
             if (manifest.TensorMappings is null
                 || !manifest.TensorMappings.TryGetValue(modelKey, out var mappingSets)
@@ -437,7 +466,26 @@ namespace Shorokoo
             }
             var tensorRefs = mappingSet.Tensors ?? new Dictionary<string, SkptTensorRef>();
 
-            var tensorsByDataKey = new SkptDataEntries(_ => ComputeContext.Host);
+            var tensorsByDataKey = new SkptDataEntries((_, elements) =>
+                onto is not null && elements > Shorokoo.Core.AutoDiffCheckpointing.ShapeInferenceInterpreter.MaxSmallTensorElements ? onto : ComputeContext.Host);
+            try
+            {
+                BindLoadedWeights(container, manifest, modelKey, setName, graph, filePath, tensorRefs, tensorsByDataKey, onto, supplied);
+            }
+            catch
+            {
+                foreach (var entry in tensorsByDataKey.Values)
+                    foreach (var tensor in entry.Values)
+                        if (onto is not null && onto.Attaches(tensor)) tensor.Delete();
+                throw;
+            }
+        }
+
+        private static void BindLoadedWeights(
+            SkptContainer container, SkptManifest manifest, string modelKey, string setName,
+            InternalComputationGraph graph, string filePath, Dictionary<string, SkptTensorRef> tensorRefs,
+            SkptDataEntries tensorsByDataKey, ComputeContext? onto, Dictionary<string, TensorData>? supplied)
+        {
             // One attribute per stored tensor, because one stored tensor can serve several
             // parameters: the saver is content-addressed, so two parameters whose values are
             // byte-identical are written once and both mapping entries name it. The bind below
@@ -488,6 +536,14 @@ namespace Shorokoo
                 // same stored tensor is safe for the reason an attribute exists: it is immutable,
                 // so there is nothing for two parameters to disagree about. Shape and dtype stay
                 // readable on the spent tensor, so the check above still holds for the second.
+                // A weight read into a device's memory stays there, handed to the session that reads
+                // it; the placeholder keeps its dtype and shape and holds no values.
+                if (supplied is not null && onto is not null && onto.Attaches(loaded))
+                {
+                    supplied[paramId] = loaded;
+                    continue;
+                }
+
                 var storedTensorKey = $"{tensorRef.Data}\0{tensorRef.Tensor}";
                 if (!attributeByStoredTensor.TryGetValue(storedTensorKey, out var bound))
                     attributeByStoredTensor[storedTensorKey] = bound = loaded.MoveToAttribute();
@@ -547,7 +603,7 @@ namespace Shorokoo
             // what was read of it is deleted.
             using var stored = container.OpenRequiredEntry(dataEntry.Entry, $"data entry '{dataKey}'", out long storedLength);
             using var hashed = new Sha256ReadStream(stored);
-            var place = tensorsByDataKey.Placement(dataKey);
+            ComputeContext place(long elements) => tensorsByDataKey.Placement(dataKey, elements);
             List<SafeTensor> read;
             try
             {
@@ -586,7 +642,7 @@ namespace Shorokoo
         /// <summary>
         /// Reads a data entry's tensors through its manifest-declared compression layer (none for
         /// "none", one Zstd layer for "zstd", decoded as it streams), into
-        /// <paramref name="destination"/>. The declared compression is cross-checked against the
+        /// the memory <paramref name="destination"/> names for a tensor of each element count. The declared compression is cross-checked against the
         /// stored bytes' framing, so a manifest/stored mismatch in either direction fails loudly
         /// naming the entry instead of feeding garbage to the safetensors parser. The Zstd-frame
         /// sniff cannot misfire on a genuine uncompressed payload: every supported data format is
@@ -595,7 +651,7 @@ namespace Shorokoo
         /// </summary>
         private static List<SafeTensor> ReadDataEntryPayload(
             Stream stored, long storedLength, SkptDataEntry dataEntry, string dataKey,
-            ComputeContext destination, string filePath)
+            Func<long, ComputeContext> destination, string filePath)
         {
             var magic = new byte[4];
             int got = stored.ReadAtLeast(magic, magic.Length, throwOnEndOfStream: false);
@@ -609,7 +665,7 @@ namespace Shorokoo
                             $"'{filePath}': data entry '{dataKey}' ('{dataEntry.Entry}') declares compression " +
                             $"'{SkptFileFormat.CompressionNone}' but its stored bytes are a Zstd frame — " +
                             "the manifest and the stored entry disagree; the checkpoint is corrupt or was modified.");
-                    return SafeTensorLoader.ReadSafeTensors(payload, storedLength, _ => destination, filePath);
+                    return SafeTensorLoader.ReadSafeTensors(payload, storedLength, (_, elements) => destination(elements), filePath);
 
                 case SkptFileFormat.CompressionZstd:
                     if (!zstdFrame)
@@ -626,7 +682,7 @@ namespace Shorokoo
                         e => new InvalidDataException(
                             $"'{filePath}': failed to Zstd-decompress data entry '{dataKey}' " +
                             $"('{dataEntry.Entry}') — the checkpoint is corrupt or was modified. ({e.Message})", e)))
-                        return SafeTensorLoader.ReadSafeTensors(decoded, null, _ => destination, filePath);
+                        return SafeTensorLoader.ReadSafeTensors(decoded, null, (_, elements) => destination(elements), filePath);
 
                 default:
                     throw new InvalidDataException(
@@ -658,11 +714,11 @@ namespace Shorokoo
     /// The data entries one .skpt load has read, by data key — each read once however many
     /// references reach it — and where each one's tensors are to live.
     /// </summary>
-    internal sealed class SkptDataEntries(Func<string, ComputeContext> placement)
+    internal sealed class SkptDataEntries(Func<string, long, ComputeContext> placement)
         : Dictionary<string, OrderedDictionary<string, TensorData>>(StringComparer.Ordinal)
     {
         /// <summary>The context whose memory a data entry's tensors are read into, by data key.</summary>
-        internal Func<string, ComputeContext> Placement { get; } = placement;
+        internal Func<string, long, ComputeContext> Placement { get; } = placement;
     }
 
     /// <summary>A read-only forward stream over another that takes the SHA-256 of every byte read

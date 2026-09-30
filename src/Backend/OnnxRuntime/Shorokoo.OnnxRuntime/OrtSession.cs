@@ -35,6 +35,11 @@ internal sealed class OrtSession : IShorokooSession
     // The folder ORT writes this session's profile into, or null when it was not built to record
     // one -- which is the default. Deleted with the session.
     private readonly string? _profileDirectory;
+
+    /// <summary>The views of supplied initializers this session was built over (see
+    /// <c>OrtBackend.Supply</c>), which ONNX Runtime requires to outlive it: released after it.</summary>
+    internal IReadOnlyList<OrtValue> SuppliedViews { get; init; } = [];
+
     private readonly object _profileGate = new();
     private NodePlacement? _nodePlacement;
     private bool _profilingEnded;
@@ -722,6 +727,7 @@ internal sealed class OrtSession : IShorokooSession
             _ownedPinnedMemoryInfo?.Dispose();
         }
         _session.Dispose();
+        foreach (var view in SuppliedViews) view.Dispose();
         // After the session, which is what closes the profile file it has been writing.
         DeleteProfileDirectory();
         GC.SuppressFinalize(this);

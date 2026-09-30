@@ -306,6 +306,32 @@ var r2 = compiled.Execute(inputData2);             // reuses the session
 `ExecuteWithState` returns `(NamedModelParam[] regularOutputs, ComputationGraph updatedGraph)`
 — feed the updated graph to the next call. `Eval` returns `TensorData` (or `TensorData[]`).
 
+### Loading a saved model onto the device
+
+`ctx.Compile(Persistence.Load(path))` holds the weights in the graph, in host memory, and the
+session copies them onto the card as it is built — several host copies of the weights at that
+moment. `LoadCompiled` goes from the file to a compiled model instead, reading each weight straight
+into the context's memory through one bounded host buffer; the session reads the weights where they
+are, and they are never whole in host memory:
+
+```csharp
+using var cuda     = new ComputeContext(cudaBackend);
+using var compiled = cuda.LoadCompiled("model.skpt");                       // a .skpt checkpoint
+using var imported = cuda.LoadCompiled(architecture, "model.safetensors");  // or architecture + weights
+var y = compiled.Execute(x);
+```
+
+- The weights belong to the compiled graph and are freed when it is disposed. There is no graph
+  with the weights to edit or save; load one with `Persistence.Load` for that.
+- Weights of at most about a thousand elements stay in the graph on the host, where the compiler
+  reads such values.
+- The runtime does not fold or fuse over the weights it is handed, so results can round differently
+  in the last bits from the same model compiled from its graph.
+- On a backend that cannot use weights where they are (PyTorch, JAX), `LoadCompiled` is
+  `Compile(Persistence.Load(...))`.
+- An `.onnx` file carries its weights inside the protobuf, which is read whole; convert it to a
+  `.skpt` once to load it this way.
+
 ### Stopping a run
 
 Put a `CancellationToken` on a run's `RunSettings`; a cancelled call throws

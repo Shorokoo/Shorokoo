@@ -341,7 +341,7 @@ public class SideBySideBackendHardwareTests
         Assert.NotNull(cuda.Description.CudaDeviceId);
         Assert.Equal(("Cuda", cuda.Description.CudaDeviceId!.Value), AllocatorOf(device));
 
-        Assert.True(FillOnDevice(device, written));
+        Assert.True(cuda.TryCopyHostToTensorRange(device, 0, written));
         var home = cuda.CopyTensorToHost(device);
         Assert.Equal(byteCount, home.Length);
         Assert.Equal(written, home);
@@ -432,21 +432,6 @@ public class SideBySideBackendHardwareTests
             .GetMethod("GetTensorMemoryInfo")!.Invoke(inner, null)!;
         return ((string)info.GetType().GetProperty("Name")!.GetValue(info)!,
                 (int)info.GetType().GetProperty("Id")!.GetValue(info)!);
-    }
-
-    /// <summary>Writes <paramref name="bytes"/> across the bus into the value's own allocation,
-    /// through the address and the copy the backend itself uses.</summary>
-    private static bool FillOnDevice(IShorokooTensorValue value, byte[] bytes)
-    {
-        var backend = value.GetType().Assembly;
-        var address = backend.GetType("Shorokoo.OnnxRuntime.OrtBackend")!
-            .GetMethod("DevicePointer", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [value])!;
-        var copied = (bool)backend.GetType("Shorokoo.OnnxRuntime.CudaInterop")!
-            .GetMethod("CopyHostToDevice", BindingFlags.Static | BindingFlags.Public)!
-            .Invoke(null, [bytes, address, bytes.Length])!;
-        GC.KeepAlive(value);
-        return copied;
     }
 
     private static float[] Floats(TensorData data)

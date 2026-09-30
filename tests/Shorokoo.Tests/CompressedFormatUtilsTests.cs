@@ -1298,6 +1298,33 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
     }
 
     [Fact]
+    public void TestALoadedCompiledModelRunsAsTheLoadedGraphDoesWithItsLargeWeightsHandedToItsSession()
+    {
+        var numOut = TensorData(DType.Int64, [], 64L);
+        var input = TensorDataWithSmallVals(DType.Float32, [2L, 64L]);
+        var architecture = FCLayer.ComputationGraph.ToConcreteArchitecture([numOut, input]);
+        var model = architecture.ToConcreteModel();
+        var (zip, dir, zstd, weights) = (P("compiled.skpt"), P("compiled_dir"), P("compiled_zstd.skpt"), P("compiled.safetensors"));
+        Persistence.From(model).WithModel().WithWeights().Save(zip);
+        Persistence.From(model).WithModel().WithWeights().SaveAsDirectory(dir);
+        Persistence.From(model).WithModel().WithWeights().WithZstdCompressedData().Save(zstd);
+        Persistence.ExportSafeTensors(model, weights);
+        var expected = ExecuteToBytes(model, numOut, input);
+
+        using var context = new ComputeContext();
+        foreach (var load in (Func<CompiledGraph>[])[() => context.LoadCompiled(zip), () => context.LoadCompiled(dir),
+            () => context.LoadCompiled(zstd), () => context.LoadCompiled(architecture, weights)])
+        {
+            var compiled = load();
+            var weight = Assert.Single(compiled.SuppliedTensors);
+            Assert.Equal([64L, 64L], weight.Shape.Dims);
+            Assert.Equal(expected, compiled.Execute(numOut.Shared(), input.Shared())[0].ToTensorData().AccessRawMemory().ToArray());
+            compiled.Dispose();
+            Assert.True(weight.IsDisposed);
+        }
+    }
+
+    [Fact]
     public void TestSkptLoadValidationZstdDataAndCompressionFaults()
     {
         var (model, numOut, input) = BuildSkptModel();

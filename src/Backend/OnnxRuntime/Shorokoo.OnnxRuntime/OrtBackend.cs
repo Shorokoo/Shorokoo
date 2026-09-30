@@ -170,7 +170,7 @@ public abstract class OrtBackend : IShorokooBackend
         ShorokooLogSeverity logSeverity,
         DeviceMemorySettings deviceMemory,
         DiagnosticSettings diagnostics)
-        => Build(modelBytes, graphOptimization, logSeverity, deviceMemory, diagnostics, outputAliases: null, intraOpThreads: 0);
+        => Build(modelBytes, graphOptimization, logSeverity, deviceMemory, diagnostics, outputAliases: null, intraOpThreads: 0, []);
 
     /// <summary>
     /// <see cref="CreateSession(ReadOnlyMemory{byte}, ShorokooGraphOptimization, ShorokooLogSeverity, DeviceMemorySettings, DiagnosticSettings)"/>,
@@ -238,8 +238,35 @@ public abstract class OrtBackend : IShorokooBackend
         ArgumentOutOfRangeException.ThrowIfNegative(intraOpThreads);
         return Build(
             modelBytes, graphOptimization, logSeverity, deviceMemory, diagnostics,
-            outputAliases.Count == 0 ? null : outputAliases, intraOpThreads);
+            outputAliases.Count == 0 ? null : outputAliases, intraOpThreads, []);
     }
+
+    /// <summary>
+    /// <see cref="CreateSession(ReadOnlyMemory{byte}, ShorokooGraphOptimization, ShorokooLogSeverity, DeviceMemorySettings, DiagnosticSettings, IReadOnlyList{OutputAlias}, int)"/>,
+    /// with the initializers <paramref name="suppliedInitializers"/> names taken as the values they
+    /// are, where they are — on a card, weights loaded straight into its memory, which ONNX Runtime
+    /// then reads in place rather than copying from the model (Shorokoo/Shorokoo#436).
+    /// </summary>
+    public IShorokooSession CreateSession(
+        ReadOnlyMemory<byte> modelBytes,
+        ShorokooGraphOptimization graphOptimization,
+        ShorokooLogSeverity logSeverity,
+        DeviceMemorySettings deviceMemory,
+        DiagnosticSettings diagnostics,
+        IReadOnlyList<OutputAlias> outputAliases,
+        int intraOpThreads,
+        IReadOnlyList<SuppliedInitializer> suppliedInitializers)
+    {
+        ArgumentNullException.ThrowIfNull(outputAliases);
+        ArgumentNullException.ThrowIfNull(suppliedInitializers);
+        ArgumentOutOfRangeException.ThrowIfNegative(intraOpThreads);
+        return Build(
+            modelBytes, graphOptimization, logSeverity, deviceMemory, diagnostics,
+            outputAliases.Count == 0 ? null : outputAliases, intraOpThreads, suppliedInitializers);
+    }
+
+    /// <summary>This backend's sessions take supplied initializers.</summary>
+    public bool SuppliesInitializers => true;
 
     // The most bytes of initializers a session built while writing its graph out keeps as it was
     // built, holding them twice, rather than being built again without writing (see CreateSession).
@@ -252,14 +279,16 @@ public abstract class OrtBackend : IShorokooBackend
         DeviceMemorySettings deviceMemory,
         DiagnosticSettings diagnostics,
         IReadOnlyList<OutputAlias>? outputAliases,
-        int intraOpThreads)
+        int intraOpThreads,
+        IReadOnlyList<SuppliedInitializer> suppliedInitializers)
     {
         ArgumentNullException.ThrowIfNull(deviceMemory);
         ArgumentNullException.ThrowIfNull(diagnostics);
         // One copy for however many sessions are built from it: ORT takes the model as an array.
         var model = modelBytes.ToArray();
         BuiltSession New(string? optimizedDirectory) => NewSession(
-            model, graphOptimization, logSeverity, deviceMemory, diagnostics, optimizedDirectory, intraOpThreads);
+            model, graphOptimization, logSeverity, deviceMemory, diagnostics, optimizedDirectory, intraOpThreads,
+            suppliedInitializers);
         if (outputAliases is null) return Wrap(New(optimizedDirectory: null), []);
 
         var optimizedDirectory = TempDirectory("shorokoo-optimized-");
@@ -324,7 +353,7 @@ public abstract class OrtBackend : IShorokooBackend
 
     /// <summary>An ONNX Runtime session, and the folder it writes its profile into, if it keeps
     /// one: what <see cref="OrtSession"/> is made of.</summary>
-    private readonly record struct BuiltSession(InferenceSession Session, string? ProfileDirectory);
+    private readonly record struct BuiltSession(InferenceSession Session, string? ProfileDirectory, IReadOnlyList<OrtValue> SuppliedViews);
 
     /// <summary>
     /// An ONNX Runtime session over <paramref name="model"/>, writing the graph it will run into
@@ -337,7 +366,8 @@ public abstract class OrtBackend : IShorokooBackend
         DeviceMemorySettings deviceMemory,
         DiagnosticSettings diagnostics,
         string? optimizedDirectory,
-        int intraOpThreads)
+        int intraOpThreads,
+        IReadOnlyList<SuppliedInitializer> suppliedInitializers)
     {
         // The `using` is load-bearing, not tidiness. SessionOptions is a SafeHandle, so it
         // carries a critical finalizer that calls OrtReleaseSessionOptions, and ORT takes its
@@ -356,18 +386,32 @@ public abstract class OrtBackend : IShorokooBackend
         // it with no name for the catch to delete it by. The folder the graph is written into is
         // the caller's, made and deleted there.
         var profileDirectory = diagnostics.TraceNodePlacement ? TempDirectory("shorokoo-node-placement-") : null;
+        var placeholderDirectory = suppliedInitializers.Count > 0 ? TempDirectory("shorokoo-supplied-") : null;
+        List<OrtValue> views = [];
         try
         {
             if (profileDirectory is not null) EnableProfiling(options, profileDirectory);
             if (optimizedDirectory is not null) WriteOptimizedModel(options, optimizedDirectory);
+            if (placeholderDirectory is not null) Supply(options, placeholderDirectory, suppliedInitializers, views);
             _configureExecutionProvider(options, deviceMemory);
-            return new BuiltSession(new InferenceSession(model, options), profileDirectory);
+            var session = new InferenceSession(model, options);
+            // The values themselves are the caller's to keep alive for the session's life; this
+            // keeps them reachable across the constructor, which takes them as bare handles.
+            GC.KeepAlive(suppliedInitializers);
+            return new BuiltSession(session, profileDirectory, views);
         }
         catch
         {
             // No session to own the folder, so nothing would ever delete it.
             DeleteDirectory(profileDirectory);
+            foreach (var view in views) view.Dispose();
             throw;
+        }
+        finally
+        {
+            // ONNX Runtime checks the placeholder exists as it builds the session and never reads
+            // it, the values arriving from the options instead.
+            DeleteDirectory(placeholderDirectory);
         }
     }
 
@@ -375,12 +419,12 @@ public abstract class OrtBackend : IShorokooBackend
     /// <paramref name="outputAliases"/> it can.</summary>
     private OrtSession Wrap(BuiltSession built, IReadOnlyList<OrtSession.ProvedAlias> outputAliases)
     {
-        var (session, profileDirectory) = built;
+        var (session, profileDirectory, views) = built;
         try
         {
             // The session keeps this backend so it can rebuild a feed that came from another
             // backend's native runtime -- see OrtSession.Unwrap.
-            return new OrtSession(session, _cudaDeviceId, this, profileDirectory, outputAliases);
+            return new OrtSession(session, _cudaDeviceId, this, profileDirectory, outputAliases) { SuppliedViews = views };
         }
         catch
         {
@@ -393,6 +437,7 @@ public abstract class OrtBackend : IShorokooBackend
     private static void Discard(BuiltSession built)
     {
         built.Session.Dispose();
+        foreach (var view in built.SuppliedViews) view.Dispose();
         DeleteDirectory(built.ProfileDirectory);
     }
 
@@ -542,6 +587,42 @@ public abstract class OrtBackend : IShorokooBackend
                 $"Deterministic compute needs ONNX Runtime's {name}, which {assembly.GetName()} does not expose.");
         return new(Entry("SetDeterministicCompute"), Entry("GetErrorMessage"), Entry("ReleaseStatus"));
     });
+
+    /// <summary>
+    /// Hands <paramref name="suppliedInitializers"/> to the session as the values of the
+    /// initializers they name, and points the model's placeholder location into
+    /// <paramref name="directory"/>, which this makes with the one empty file ONNX Runtime checks
+    /// for. Measured on ONNX Runtime 1.30 with a 1 GiB weight in CUDA memory: the session read it
+    /// where it was, growing the card's use by 12 MiB and the process's by 29 MiB where building
+    /// the weight from the model grew both by the weight again.
+    ///
+    /// <para>ONNX Runtime takes an initializer only over memory it does not own, and this
+    /// backend's values are its allocations; so each goes over as a view of the same buffer,
+    /// which <paramref name="views"/> collects for the session to release after itself.</para>
+    /// </summary>
+    private static void Supply(
+        SessionOptions options, string directory, IReadOnlyList<SuppliedInitializer> suppliedInitializers,
+        List<OrtValue> views)
+    {
+        Directory.CreateDirectory(directory);
+        File.WriteAllBytes(Path.Combine(directory, SuppliedInitializer.PlaceholderLocation), []);
+        options.AddSessionConfigEntry("session.model_external_initializers_file_folder_path", directory);
+        foreach (var supplied in suppliedInitializers)
+        {
+            if (supplied.Value is not OrtTensorValue ort)
+                throw new InvalidOperationException(
+                    $"Initializer '{supplied.Name}' was supplied as a {supplied.Value.GetType().Name}, which "
+                    + "did not come from this backend.");
+            using var memory = ort.Inner.GetTensorMemoryInfo();
+            var view = OrtValue.CreateTensorValueWithData(
+                memory, (TensorElementType)(int)ort.ElementType, ort.Shape, DevicePointer(ort),
+                ort.Inner.GetTensorSizeInBytes());
+            views.Add(view);
+            options.AddInitializer(supplied.Name, view);
+            // The memory info is borrowed from the value, and read through it until here.
+            GC.KeepAlive(ort);
+        }
+    }
 
     private static void DeleteDirectory(string? directory)
     {

@@ -136,7 +136,11 @@ var next    = rig.TrainStep(resumed, inputBatch, targetBatch);   // trainstep co
 A checkpoint whose state is in device memory (one a resident run or `Fit` handed out on a GPU)
 is saved from there, each tensor written through one bounded host staging buffer, so the state is
 never whole in host memory — see [What a save costs](training.md#what-a-save-costs). Loading
-goes through host memory.
+for a rig that trains on a device is the same in reverse: `LoadCheckpoint` and
+`LoadCheckpointFromSkpt` read the state from the file straight into the rig's device memory, a
+bounded piece at a time. An inference model loads onto a device with
+`context.LoadCompiled(path)` — see
+[Loading a saved model onto the device](inference.md#loading-a-saved-model-onto-the-device).
 
 Or resume from the file **alone**: the static `TrainingRig.Load` rebuilds the rig from
 the constituents the file carries and returns it with the loaded checkpoint:

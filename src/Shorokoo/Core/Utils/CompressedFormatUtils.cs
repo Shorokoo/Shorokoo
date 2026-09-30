@@ -15,6 +15,7 @@ using Shorokoo.Core.Factory.IR;
 using Shorokoo.Onnx;
 using Shorokoo.Graph;
 using Shorokoo.Core.Nodes.Processors.Helpers;
+using Shorokoo.Runtime;
 using ZstdSharp;
 
 namespace Shorokoo.Core.Utils
@@ -56,8 +57,7 @@ namespace Shorokoo.Core.Utils
         /// <returns>ModelParamList containing all tensors from the file</returns>
         public static ModelParamList LoadCompressedModelParamSet(string filePath, ModelParamType paramType = ModelParamType.TrainableParam)
         {
-            var decompressedBytes = DecompressFile(filePath);
-            var tensors = SafeTensorLoader.ParseSafeTensorBytes(decompressedBytes, filePath);
+            var tensors = ReadCompressedSafeTensors(filePath);
             var paramDict = tensors.ToDictionary(t => t.Name, t => t.Data);
             return new ModelParamList(paramDict, paramType);
         }
@@ -69,8 +69,22 @@ namespace Shorokoo.Core.Utils
         /// <returns>List of SafeTensor objects containing tensor data and metadata</returns>
         public static List<SafeTensor> LoadCompressedSafeTensors(string filePath)
         {
-            var decompressedBytes = DecompressFile(filePath);
-            return SafeTensorLoader.ParseSafeTensorBytes(decompressedBytes, filePath);
+            return ReadCompressedSafeTensors(filePath);
+        }
+
+        /// <summary>
+        /// The tensors of a compressed SafeTensors file, decoded as they are read: neither the file
+        /// nor its decompressed payload is ever whole in memory, only the tensors themselves
+        /// (Shorokoo/Shorokoo#436).
+        /// </summary>
+        private static List<SafeTensor> ReadCompressedSafeTensors(string filePath)
+        {
+            if (!File.Exists(filePath))
+                throw new FileNotFoundException($"Compressed file not found: {filePath}");
+            using var file = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read,
+                bufferSize: 1 << 16, FileOptions.SequentialScan);
+            using var decoded = new DecompressionStream(file);
+            return SafeTensorLoader.ReadSafeTensors(decoded, null, (_, _) => ComputeContext.Host, filePath);
         }
 
         /// <summary>

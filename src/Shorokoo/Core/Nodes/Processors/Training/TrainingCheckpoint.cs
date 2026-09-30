@@ -740,7 +740,7 @@ namespace Shorokoo
             // The state sections are read straight into the memory the rig trains in -- on a card,
             // through one bounded buffer, never whole in host memory (Shorokoo/Shorokoo#436). The
             // marker, the counters and the history are read on the host, where they are read back.
-            var tensors = SafeTensorLoader.LoadSafeTensors(filePath, name =>
+            var tensors = SafeTensorLoader.LoadSafeTensors(filePath, (name, _) =>
                 name.StartsWith(TrainableSection + "/", StringComparison.Ordinal)
                 || name.StartsWith(ModelStateSection + "/", StringComparison.Ordinal)
                 || name.StartsWith(OptimizerStateSection + "/", StringComparison.Ordinal)

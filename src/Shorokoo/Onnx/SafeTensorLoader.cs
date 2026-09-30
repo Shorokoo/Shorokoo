@@ -74,7 +74,7 @@ namespace Shorokoo.Onnx
         /// <param name="filePath">Path to the SafeTensor file</param>
         /// <returns>List of SafeTensor objects containing tensor data and metadata, in file order</returns>
         public static List<SafeTensor> LoadSafeTensors(string filePath)
-            => LoadSafeTensors(filePath, _ => ComputeContext.Host);
+            => LoadSafeTensors(filePath, (_, _) => ComputeContext.Host);
 
         /// <summary>
         /// <see cref="LoadSafeTensors(string)"/>, putting each tensor where
@@ -82,7 +82,7 @@ namespace Shorokoo.Onnx
         /// bytes going straight into the memory it lives in — so host memory holds one bounded
         /// buffer for a tensor loaded onto a device, never the file (Shorokoo/Shorokoo#436).
         /// </summary>
-        internal static List<SafeTensor> LoadSafeTensors(string filePath, Func<string, ComputeContext> placement)
+        internal static List<SafeTensor> LoadSafeTensors(string filePath, Func<string, long, ComputeContext> placement)
         {
             if (!File.Exists(filePath))
                 throw new FileNotFoundException($"SafeTensor file not found: {filePath}");
@@ -269,7 +269,7 @@ namespace Shorokoo.Onnx
         private static List<SafeTensor> ParseSafeTensorFile(byte[] fileBytes, string origin)
         {
             using var source = new MemoryStream(fileBytes, writable: false);
-            return ReadSafeTensors(source, fileBytes.Length, _ => ComputeContext.Host, origin);
+            return ReadSafeTensors(source, fileBytes.Length, (_, _) => ComputeContext.Host, origin);
         }
 
         /// <summary>
@@ -288,7 +288,7 @@ namespace Shorokoo.Onnx
         /// it ends early. On any failure the tensors already read are deleted.</para>
         /// </summary>
         internal static List<SafeTensor> ReadSafeTensors(
-            Stream source, long? available, Func<string, ComputeContext> placement, string origin)
+            Stream source, long? available, Func<string, long, ComputeContext> placement, string origin)
         {
             var lengthField = new byte[8];
             int got = source.ReadAtLeast(lengthField, 8, throwOnEndOfStream: false);
@@ -357,7 +357,7 @@ namespace Shorokoo.Onnx
                     TensorData data;
                     try
                     {
-                        data = placement(entry.Name).ReadTensor(new Shape(entry.Shape), entry.DType, source);
+                        data = placement(entry.Name, entry.Elements).ReadTensor(new Shape(entry.Shape), entry.DType, source);
                     }
                     catch (EndOfStreamException e)
                     {
@@ -376,7 +376,7 @@ namespace Shorokoo.Onnx
         }
 
         private sealed record HeaderEntry(
-            string Name, string DTypeName, DType DType, long[] Shape, long Start, long End,
+            string Name, string DTypeName, DType DType, long[] Shape, long Elements, long Start, long End,
             Dictionary<string, object> Metadata);
 
         /// <summary>One tensor's header entry, checked against what the payload can hold.</summary>
@@ -422,7 +422,7 @@ namespace Shorokoo.Onnx
             var additionalMetadata = metaDict
                 .Where(kvp => kvp.Key != "shape" && kvp.Key != "data_offsets" && kvp.Key != "dtype")
                 .ToDictionary(kvp => kvp.Key, kvp => kvp.Value);
-            return new HeaderEntry(tensorName, dtypeName, dtype, shape, startOffset, endOffset, additionalMetadata);
+            return new HeaderEntry(tensorName, dtypeName, dtype, shape, elements, startOffset, endOffset, additionalMetadata);
         }
 
         /// <summary>Reads past <paramref name="count"/> bytes no tensor claims.</summary>

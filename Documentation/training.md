@@ -917,13 +917,14 @@ initial values — parameters, model state and optimizer state — for `CreateIn
 rig from `TrainingRig.Load` keeps none, where every parameter declares a concrete shape (the
 case for a model built by Shorokoo): it computes them the first time something asks, since the
 checkpoint it loads replaces them. A resident run holds the state on its device; each checkpoint it
-hands out is a host copy of the whole state, held for as long as you hold the checkpoint.
+hands out is that state where it is, which the run then only reads, so its next step writes beside
+it: a second copy of the state on the device for as long as you hold the checkpoint.
 
 ## Feeding data: the data loader
 
-The array overloads of `Fit`/`Train` take pre-batched `TensorDataStruct[]` and leave the epoch /
-batch counters to you. A **data loader** owns the batch stream: it batches your data, tracks its
-position, and lets `Fit` advance step / epoch / batch, so a saved checkpoint records where the run
+The array overloads of `Fit`/`Train` take pre-batched `TensorDataStruct[]`, each element one
+batch: element `i` is batch index `i` of every epoch. A **data loader** owns the batch stream: it
+batches your data, tracks its position, and lets `Fit` advance step / epoch / batch, so a saved checkpoint records where the run
 was and a resumed run continues from the next batch.
 
 ```csharp
@@ -1163,9 +1164,13 @@ form) write each tensor through one bounded host staging buffer (8 MiB), piece b
 state is never whole in host memory. On ONNX Runtime CUDA the CUDA runtime copies the pieces; a
 backend that cannot copy part of a tensor (the PyTorch and JAX backends) stages one whole tensor at
 a time instead. The `.skpt` save reads each device tensor twice, once to hash it for the manifest
-and once to write it, and binds the model it writes from the weights' shapes and dtypes, copying
-only the smallest weights to the host. There is no direct device-to-disk path; loading goes through
-host memory.
+only the smallest weights to the host. There is no direct device-to-disk path.
+
+Loading is the same in reverse. A checkpoint loaded for a rig that trains on a device
+(`rig.LoadCheckpoint`, `rig.LoadCheckpointFromSkpt`) reads its state from the file straight into
+the rig's device memory, through the same bounded buffer, and comes back device-resident, as a
+trained one does; the counters and the history are read on the host. A compressed `.skpt` entry is
+decoded as it streams.
 
 ### Bind trained weights into an inference model
 

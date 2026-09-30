@@ -198,7 +198,7 @@ namespace Shorokoo
             // State is read straight into the memory the rig trains in -- on a card, through one bounded
             // buffer, never whole in host memory (Shorokoo/Shorokoo#436). The history is read on the
             // host, where it is read back.
-            var tensorsByDataKey = new SkptDataEntries(dataKey =>
+            var tensorsByDataKey = new SkptDataEntries((dataKey, _) =>
                 dataKey == SkptFileFormat.HistoryDataKey ? ComputeContext.Host : destination);
 
             bool Want(CheckpointComponents c) => components is null || (components.Value & c) != 0;

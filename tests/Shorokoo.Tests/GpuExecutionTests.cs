@@ -461,6 +461,41 @@ public class GpuExecutionTests
         }
     }
 
+    [CudaFact]
+    public void CudaProvider_AModelLoadedCompiledReadsItsWeightsOntoTheCardAndRunsAsTheLoadedGraphDoes()
+    {
+        const long Width = 8192;
+        var numOut = TensorData(DType.Int64, [], Width);
+        var input = TensorData([1L, Width], [.. Enumerable.Range(0, (int)Width).Select(i => MathF.Sin(i))]);
+        var path = TrainingRigHelpers.TempPath("compiled") + ".skpt";
+        try
+        {
+            Persistence.From(FCLayer.ComputationGraph.ToConcreteArchitecture([numOut, input]).ToConcreteModel())
+                .WithModel().WithWeights().Save(path);
+            using var context = new ComputeContext();
+            float[] Run(CompiledGraph compiled) => [.. compiled.Execute(numOut.Shared(), input.Shared())[0].ToTensorData().ToHost().As<float32>().AccessMemory<float>()];
+            float[] expected;
+            using (var viaGraph = context.Compile(Persistence.Load(path))) expected = Run(viaGraph);
+
+            GC.Collect();
+            long managed = GC.GetAllocatedBytesForCurrentThread();
+            long Private() => System.Diagnostics.Process.GetCurrentProcess().PrivateMemorySize64;
+            long Card() => DeviceMemory.Read()!.Value.UsedBytes;
+            var (host, card) = (Private(), Card());
+            using var loaded = context.LoadCompiled(path);
+            var (hostGrowth, cardGrowth) = (Private() - host, Card() - card);
+            Assert.True(GC.GetAllocatedBytesForCurrentThread() - managed < 64L << 20);
+            Assert.True(cardGrowth < 3 * 4 * Width * Width / 2);
+            Assert.True(hostGrowth - cardGrowth < 4 * Width * Width / 2);
+            Assert.Equal([false, false], loaded.SuppliedTensors.Select(t => t.IsHostResident));
+            Assert.True(expected.Zip(Run(loaded)).All(p => MathF.Abs(p.First - p.Second) <= 1e-5f * MathF.Max(1f, MathF.Abs(p.First))));
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
     private static long Allocation(Action act)
     {
         act();

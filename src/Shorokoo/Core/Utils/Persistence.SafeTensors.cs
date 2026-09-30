@@ -1,4 +1,6 @@
 using System;
+using Shorokoo.Runtime;
+using Shorokoo.Core.Nodes.NodeDefinitions;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -144,6 +146,28 @@ namespace Shorokoo
             string filePath,
             ModuleParamSetNamingScheme? namingScheme = null)
         {
+            var (tensors, scheme) = LoadValidatedImport(
+                concreteArchitecture, filePath, namingScheme, (_, _) => ComputeContext.Host);
+            // Bind through the standard path — the same ModelParamList / ToConcreteModel binding
+            // the checkpoint machinery uses; the validation guarantees nothing is silently dropped.
+            var weights = new ModelParamList(
+                tensors.Select(t => new KeyValuePair<string, TensorData>(t.Name, t.Data)),
+                ModelParamType.TrainableParam);
+            return concreteArchitecture.ToConcreteModel(weights, scheme);
+        }
+
+        /// <summary>
+        /// The tensors of the SafeTensors file at <paramref name="filePath"/>, each read into the
+        /// memory <paramref name="placement"/> names for it, checked to bind every parameter of
+        /// <paramref name="concreteArchitecture"/> exactly once under the naming scheme — which
+        /// comes back with them. On failure every tensor read is deleted.
+        /// </summary>
+        private static (List<SafeTensor> Tensors, ModuleParamSetNamingScheme Scheme) LoadValidatedImport(
+            ComputationGraph concreteArchitecture,
+            string filePath,
+            ModuleParamSetNamingScheme? namingScheme,
+            Func<string, long, ComputeContext> placement)
+        {
             if (concreteArchitecture is null) throw new ArgumentNullException(nameof(concreteArchitecture));
             if (string.IsNullOrWhiteSpace(filePath))
                 throw new ArgumentException("SafeTensors path cannot be null or empty.", nameof(filePath));
@@ -157,7 +181,22 @@ namespace Shorokoo
 
             // The loader's fail-loud checks (declared header length and every tensor's
             // data_offsets validated against the actual byte count) run here, naming filePath.
-            var tensors = SafeTensorLoader.LoadSafeTensors(filePath);
+            var tensors = SafeTensorLoader.LoadSafeTensors(filePath, placement);
+            try
+            {
+                return (tensors, ValidateImport(concreteArchitecture, tensors, filePath, namingScheme));
+            }
+            catch
+            {
+                foreach (var t in tensors) t.Data.Delete();
+                throw;
+            }
+        }
+
+        private static ModuleParamSetNamingScheme ValidateImport(
+            ComputationGraph concreteArchitecture, List<SafeTensor> tensors, string filePath,
+            ModuleParamSetNamingScheme? namingScheme)
+        {
 
             var paramInfos = concreteArchitecture.GetConcreteModelParamInfos();
             namingScheme ??= ModuleParamSetNamingScheme.CreateShorokooNamingScheme(paramInfos);
@@ -252,13 +291,51 @@ namespace Shorokoo
                         "Does the file belong to this model?");
             }
 
-            // Bind through the standard path — the same ModelParamList / ToConcreteModel
-            // binding the checkpoint machinery uses; validation above guarantees nothing is
-            // silently dropped by it.
-            var weights = new ModelParamList(
-                tensors.Select(t => new KeyValuePair<string, TensorData>(t.Name, t.Data)),
-                ModelParamType.TrainableParam);
-            return concreteArchitecture.ToConcreteModel(weights, namingScheme);
+            return namingScheme;
+        }
+
+        /// <summary>
+        /// <see cref="ImportSafeTensors(ComputationGraph, string, ModuleParamSetNamingScheme?)"/>
+        /// for a model compiled on <paramref name="onto"/> by
+        /// <see cref="ComputeContext.LoadCompiled(ComputationGraph, string, ModuleParamSetNamingScheme?)"/>,
+        /// as <see cref="LoadOnto"/> is for a <c>.skpt</c>: a weight of more than
+        /// <c>ShapeInferenceInterpreter.MaxSmallTensorElements</c> elements is read straight into
+        /// <paramref name="onto"/>'s memory and handed back by its parameter's identifier, bound in
+        /// the graph as a description without values; a smaller one is bound as the import binds
+        /// it. On failure every weight read is deleted.
+        /// </summary>
+        internal static (InternalComputationGraph Graph, Dictionary<string, TensorData> Supplied) ImportSafeTensorsOnto(
+            ComputationGraph concreteArchitecture, string filePath, ModuleParamSetNamingScheme? namingScheme,
+            ComputeContext onto)
+        {
+            var (tensors, scheme) = LoadValidatedImport(concreteArchitecture, filePath, namingScheme,
+                (_, elements) => elements > Core.AutoDiffCheckpointing.ShapeInferenceInterpreter.MaxSmallTensorElements
+                    ? onto : ComputeContext.Host);
+            try
+            {
+                // Each weight on the card is bound as a placeholder of its own, found again below
+                // by reference, which is what says whose initializer it is.
+                var onCard = new Dictionary<TensorAttribute, TensorData>(ReferenceEqualityComparer.Instance);
+                var slots = tensors.Select(t =>
+                {
+                    if (!onto.Attaches(t.Data)) return new KeyValuePair<string, TensorAttribute>(t.Name, t.Data.MoveToAttribute());
+                    var placeholder = TensorAttribute.WithoutValues(t.Data.Shape, t.Data.DType);
+                    onCard[placeholder] = t.Data;
+                    return new KeyValuePair<string, TensorAttribute>(t.Name, placeholder);
+                }).ToList();
+                var graph = concreteArchitecture.ToInternal().ToConcreteModelDescribed(slots, scheme);
+                var supplied = new Dictionary<string, TensorData>(StringComparer.Ordinal);
+                foreach (var node in graph.Nodes)
+                    if (node.OpCode == InternalOpCodes.MODEL_PARAM_DATA && node.IdentifierTemplate is { } id
+                        && node.GetTensorAttribute() is { } attribute && onCard.TryGetValue(attribute, out var tensor))
+                        supplied[id] = tensor;
+                return (graph, supplied);
+            }
+            catch
+            {
+                foreach (var t in tensors) if (onto.Attaches(t.Data)) t.Data.Delete();
+                throw;
+            }
         }
 
         /// <summary>

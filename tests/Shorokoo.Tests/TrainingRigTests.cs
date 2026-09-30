@@ -201,6 +201,40 @@ public partial class ThreeInputMixedModel
     }
 }
 
+/// <summary>A linear layer, then one weight read twice: as the transposed projection in and as the
+/// projection back out.</summary>
+[Module]
+public partial class TiedWeightMlp
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+    {
+        var h = Linear.Model(Scalar(32L), Scalar(true)).Call(x);
+        var tied = KaimingUniform.Init([Scalar(32L), Scalar(32L)]);
+        return h.MatMul(tied.Transpose(1L, 0L)).Relu().MatMul(tied);
+    }
+}
+
+/// <summary>Module state whose update is read beside the state it replaces, by one node.</summary>
+[Module]
+public partial class StateReadWithItsUpdateModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> input)
+    {
+        var seen = InitRunningMean.Init(input.ShapeTensor());
+        var updated = seen + Scalar(1f);
+        Globals.StateUpdate(seen, updated);
+        return input * Ones.Init([Scalar(2L)]) + updated * seen;
+    }
+}
+
+/// <summary>A hidden linear layer of sixteen units and a ReLU, then a linear layer of eight.</summary>
+[Module]
+public partial class TwoLayerMlp
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+        => Linear.Model(Scalar(8L), Scalar(true)).Call(Linear.Model(Scalar(16L), Scalar(true)).Call(x).Relu());
+}
+
 /// <summary>Two same-shaped parameters drawn from their own streams, the first scaling the input
 /// and the second offsetting it.</summary>
 [Module]
@@ -3108,11 +3142,12 @@ public class TrainingRigTrainingLoopCoverageTests
         adamW.TrainStep(adamW.CreateInitialCheckpoint(), InBatch(1f, 2f, 3f, 4f), TargetBatch(2f, 4f, 6f, 8f));
         Assert.Equal([(0, 0), (1, 1), (2, 2), (3, 3)], adamW.MarkedStatePairs(Assert.Single(adamW.CompiledTrainStepShapeKeys)));
 
-        var (matmul, ckpt) = CoverFromScratch(BatchedMatmulModel.ComputationGraph, SoftmaxL2Loss.ComputationGraph,
-            SGDOptimizer.ComputationGraph, [4L, 5L, 8L], 0.01f);
-        matmul.TrainStep(ckpt, matmul.InputDef.FromOrderedData(TensorData([4L, 5L, 8L], new float[160])),
-            matmul.TargetDef.FromOrderedData(TensorData([4L, 4L], new float[16])));
-        Assert.Equal([(0, 0)], matmul.MarkedStatePairs(Assert.Single(matmul.CompiledTrainStepShapeKeys)));
+        var x = TensorData([2L], 1f, 2f);
+        var stateful = TrainingRig.FromScratch(StateReadWithItsUpdateModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            [new TensorDataModelParam(StateReadWithItsUpdateModel.ComputationGraph.InputNames[0]!, ModelParamType.InputParam, x)], 0.1f);
+        stateful.TrainStep(stateful.CreateInitialCheckpoint(), NNLibraryTrainingFixtures.MakeBatch("input", "ModelInput", x),
+            NNLibraryTrainingFixtures.MakeBatch("targets", "Target", TensorData([2L], 0f, 0f)));
+        Assert.Equal([(0, 0)], stateful.MarkedStatePairs(Assert.Single(stateful.CompiledTrainStepShapeKeys)));
     }
 
     [Fact]
@@ -3508,9 +3543,7 @@ public class TrainingRigTrainingLoopCoverageTests
         Assert.NotEmpty(FlattenStruct(stepped.TrainableParams));
     }
 
-    // A resident step writes only 50 of its 56 state outputs over the state it consumed:
-    // https://github.com/Shorokoo/Shorokoo/issues/453
-    [Fact(Skip = "Shorokoo/Shorokoo#453: a resident step writes 50 of its 56 state outputs over the state it consumed")]
+    [Fact]
     public void TestAResidentRunWritesEveryStateOutputOverTheStateItConsumedCoverage()
     {
         using var context = new ComputeContext();
@@ -3523,6 +3556,58 @@ public class TrainingRigTrainingLoopCoverageTests
         using var run = rig.BeginResidentRun();
         for (int i = 0; i < 4; i++) run.Step(input.Shared(), target.Shared());
         Assert.Equal(4 * 56L, context.AliasedOutputs);
+    }
+
+    private static TensorData Ramp(long rows, long columns)
+        => TensorData([rows, columns], [.. Enumerable.Range(0, (int)(rows * columns)).Select(i => i / 16f)]);
+
+    private static float[] TrainedAtBatchSizes(ComputationGraph model, long outputs, bool aliasing, params long[] batches)
+    {
+        using var context = new ComputeContext { OutputAliasing = aliasing };
+        var rig = TrainingRig.FromScratch(model, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            [Ramp(batches[0], 8L).CopyTo(ComputeContext.Host)], new SGDOptimizerHyperparameters { LearningRate = 0.01f }, runtimeContext: context);
+        var ckpt = rig.CreateInitialCheckpoint();
+        foreach (var batch in batches)
+            ckpt = rig.TrainStep(ckpt, rig.InputDef.FromOrderedData(Ramp(batch, 8L)), rig.TargetDef.FromOrderedData(Ramp(batch, outputs)));
+        return [.. FlattenStruct(ckpt.TrainableParams)];
+    }
+
+    [Fact]
+    public void TestAStepWritingItsStateInPlaceTrainsAtEveryBatchSizeCoverage()
+        => Assert.Equal(TrainedAtBatchSizes(TwoLayerMlp.ComputationGraph, 8L, aliasing: false, 2L, 3L, 5L),
+            TrainedAtBatchSizes(TwoLayerMlp.ComputationGraph, 8L, aliasing: true, 2L, 3L, 5L));
+
+    private static (float[] Values, long Aliased, long ModelledPeak) ResidentRun(ComputationGraph model, long outputs, bool aliasing)
+    {
+        using var context = new ComputeContext { OutputAliasing = aliasing };
+        var sample = TensorData([2L, 8L], [.. Enumerable.Range(0, 16).Select(i => i / 16f)]);
+        var rig = TrainingRig.FromScratch(model, L2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph,
+            [sample.CopyTo(ComputeContext.Host)], new AdamWOptimizerHyperparameters { LearningRate = 0.01f }, runtimeContext: context);
+        var input = rig.InputDef.FromOrderedData(sample);
+        var target = rig.TargetDef.FromOrderedData(TensorData([2L, outputs], [.. Enumerable.Range(0, (int)(2 * outputs)).Select(i => i / 32f)]));
+        using var run = rig.BeginResidentRun();
+        for (int i = 0; i < 3; i++) run.Step(input.Shared(), target.Shared());
+        var final = run.StepToCheckpoint(input.Shared(), target.Shared());
+        return ([.. FlattenStruct(final.TrainableParams), .. FlattenStruct(final.OptimizerState)], context.AliasedOutputs,
+            rig.OptimizationResult.Evaluation.PeakMemoryBytes);
+    }
+
+    [Fact]
+    public void TestAResidentRunWritesATiedWeightOverTheWeightItConsumedCoverage()
+    {
+        var (aliased, written, _) = ResidentRun(TiedWeightMlp.ComputationGraph, 32L, aliasing: true);
+        Assert.Equal(4 * 12L, written);
+        Assert.Equal(ResidentRun(TiedWeightMlp.ComputationGraph, 32L, aliasing: false).Values, aliased);
+    }
+
+    [Fact]
+    public void TestAResidentRunWritingEveryStateOutputInPlaceTrainsExactlyAsOneThatDoesNotAndIsModelledSoCoverage()
+    {
+        var inPlace = ResidentRun(Modules.PlainTinyMlpBlock.ComputationGraph, 8L, aliasing: true);
+        var held = ResidentRun(Modules.PlainTinyMlpBlock.ComputationGraph, 8L, aliasing: false);
+        Assert.Equal(held.Values, inPlace.Values);
+        Assert.Equal(4 * 16L, inPlace.Aliased);
+        Assert.True(inPlace.ModelledPeak < held.ModelledPeak);
     }
 }
 

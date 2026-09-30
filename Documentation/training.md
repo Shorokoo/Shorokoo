@@ -549,9 +549,13 @@ It applies:
   run's `Step` on a GPU. `TrainStep` and `StepToCheckpoint` on a GPU return state to the host, so
   they overwrite nothing on the card.
 - **Where the graph proves it.** Optimizer state read only by its own update qualifies (e.g. AdamW's
-  moments and step counter). A weight the backward pass reads directly to propagate a gradient is
-  written anew; for a stack of `Linear` layers under AdamW every weight, bias and moment is written
-  over.
+  moments and step counter). A weight the backward pass also reads — to propagate a gradient to the
+  layer below, or at each place a tied weight is used — qualifies once its update is ordered after
+  those reads. The rig's memory-aware pass orders it when Shorokoo computes the gradient itself
+  (`TrainingBackend.Shorokoo`, the default; see [training-backends.md](training-backends.md)) and
+  the pass's objective prefers the ordered step. A weight is written anew when something
+  reads it after its update, or when the pass declines to order the update. For a stack of `Linear`
+  layers under AdamW every weight, bias and moment is written over.
 
 Results are bit-identical with or without it, and there is nothing to configure. On a card a
 resident run thus holds its state once rather than twice; under a device-memory budget the state

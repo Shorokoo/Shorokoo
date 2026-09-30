@@ -382,6 +382,266 @@ public class AutoDiffCheckpointingCoverageTests
         }
     }
 
+    private static readonly StepState StateInPlace = new([(0, 0)], WrittenInPlace: true);
+    private static readonly StepState StateHeld = new([(0, 0)], WrittenInPlace: false);
+
+    private static (InternalComputationGraph Graph, ShapeInferenceResult ShapeInfo) StateGraph(
+        Func<Tensor<float32>, Tensor<float32>, Variable[]> outputs, long[]? stateShape = null)
+    {
+        var p = InputTensor<float32>("p", rank: 2);
+        var g = InputTensor<float32>("g", rank: 2);
+        var graph = new InternalComputationGraph([p, g], [.. outputs(p, g)]);
+        return (graph, Infer(graph, stateShape ?? [512, 512], [512, 512]));
+    }
+
+    private static GraphEvaluationResult EvalState(
+        StepState? state, Func<Tensor<float32>, Tensor<float32>, Variable[]> outputs, long[]? stateShape = null)
+    {
+        var (graph, shapeInfo) = StateGraph(outputs, stateShape);
+        return new GraphEvaluator(state: state).Evaluate(graph, shapeInfo);
+    }
+
+    private static Variable Looped(Tensor<float32> p, Tensor<float32> g)
+    {
+        Variable carried = g;
+        foreach (var _ in LoopAPI.Iterate(Scalar(2L)))
+            carried = OnnxOp.Add(carried, p);
+        return carried;
+    }
+
+    [Fact]
+    public void TestAStateOutputWrittenInPlaceIsChargedInItsInputsBufferCoverage()
+    {
+        Assert.Equal(2 * Mb, EvalState(StateInPlace, (p, g) => [OnnxOp.Sub(p, g)]).PeakMemoryBytes);
+        Assert.Equal(3 * Mb, EvalState(StateHeld, (p, g) => [OnnxOp.Sub(p, g)]).PeakMemoryBytes);
+        Assert.Equal(3 * Mb, EvalState(null, (p, g) => [OnnxOp.Sub(p, g)]).PeakMemoryBytes);
+        Assert.Equal(Mb + 4, EvalState(StateInPlace, (p, g) => [OnnxOp.Sub(p, OnnxOp.ReduceSum(p))]).PeakMemoryBytes);
+        Assert.Equal(2 * Mb + 4, EvalState(StateHeld, (p, g) => [OnnxOp.Sub(p, OnnxOp.ReduceSum(p))]).PeakMemoryBytes);
+        Assert.Equal(2 * Mb + 4, EvalState(StateHeld, (p, g) => [OnnxOp.ReduceSum(g)]).PeakMemoryBytes);
+        Assert.Equal(Mb + 4, EvalState(null, (p, g) => [OnnxOp.ReduceSum(g)]).PeakMemoryBytes);
+        Assert.Equal([(0, 0)], EvalState(StateInPlace, (p, g) => [OnnxOp.Sub(p, g)]).StateWrittenInPlace);
+        Assert.Empty(EvalState(StateHeld, (p, g) => [OnnxOp.Sub(p, g)]).StateWrittenInPlace);
+    }
+
+    [Fact]
+    public void TestAStateOutputItsGraphCannotProveIsChargedBesideItsInputCoverage()
+    {
+        Assert.Equal(4 * Mb, EvalState(StateInPlace, (p, g) => [OnnxOp.Sub(p, g), OnnxOp.Neg(p)]).PeakMemoryBytes);
+        Assert.Equal(EvalState(StateHeld, (p, g) => [OnnxOp.Sub(p, g), OnnxOp.Neg(p)]).PeakMemoryBytes,
+            EvalState(StateInPlace, (p, g) => [OnnxOp.Sub(p, g), OnnxOp.Neg(p)]).PeakMemoryBytes);
+        Assert.Empty(EvalState(StateInPlace, (p, g) => [OnnxOp.Sub(p, g), OnnxOp.Neg(p)]).StateWrittenInPlace);
+        Assert.Empty(EvalState(StateInPlace, (p, g) => [OnnxOp.Sub(g, p)]).StateWrittenInPlace);
+        Assert.Empty(EvalState(StateInPlace, (p, g) => [OnnxOp.Relu(p)]).StateWrittenInPlace);
+        Assert.Empty(EvalState(StateInPlace, (p, g) => [OnnxOp.Sub(p, g), OnnxOp.Reshape(p, Vector(512L * 512L), allowZero: false)]).StateWrittenInPlace);
+        Assert.Empty(EvalState(StateInPlace, (p, g) => [OnnxOp.Sub(p, Looped(p, g))]).StateWrittenInPlace);
+        Assert.Empty(EvalState(StateInPlace, (p, g) => [OnnxOp.Sub(p, g)], stateShape: [1, 512]).StateWrittenInPlace);
+        Assert.Empty(EvalState(new StepState([(1, 0), (0, 2)], WrittenInPlace: true), (p, g) => [OnnxOp.Sub(p, g)]).StateWrittenInPlace);
+    }
+
+    private static Variable Twice(Variable p) => OnnxOp.Transpose(OnnxOp.Transpose(p));
+
+    private static Variable Update(Variable p, Variable g, Variable lr) => OnnxOp.Sub(p, OnnxOp.Mul(g, lr));
+
+    private static Variable[] Linear(Variable p, Variable g, Variable lr) => [Update(p, g, lr), OnnxOp.MatMul(g, Twice(p))];
+
+    private static Variable[] Tied(Variable p, Variable g, Variable lr) => [Update(p, g, lr), OnnxOp.MatMul(g, Twice(p)), OnnxOp.MatMul(OnnxOp.Transpose(p), g)];
+
+    private static Variable[] Direct(Variable p, Variable g, Variable lr) => [Update(p, g, lr), OnnxOp.MatMul(g, p)];
+
+    private static Variable[] EmptyReader(Variable p, Variable g, Variable lr) => [Update(p, g, lr), OnnxOp.Slice(Twice(p), Vector(0L), Vector(0L))];
+
+    private static Variable[] ReadAfterUpdate(Variable p, Variable g, Variable lr) => ReadAfter(Update(p, g, lr), p);
+
+    private static Variable[] ReadAfter(Variable updated, Variable p) => [updated, OnnxOp.MatMul(updated, Twice(p))];
+
+    private static Variable[] Unanchored(Variable p, Variable g, Variable lr) => [OnnxOp.Sub(p, g), OnnxOp.MatMul(g, Twice(p))];
+
+    private static Variable[] BoolReader(Variable p, Variable g, Variable lr) => [Update(p, g, lr), OnnxOp.Greater(Twice(p), g)];
+
+    private static Variable[] DoubleReader(Variable p, Variable g, Variable lr) => [Update(p, g, lr), OnnxOp.Cast(Twice(p), null, DType.Float64)];
+
+    private static Variable[] ScalarReader(Variable p, Variable g, Variable lr) => [Update(p, g, lr), OnnxOp.ReduceSum(Twice(p), keepdims: false)];
+
+    private static Variable[] DoubleAnchor(Variable p, Variable g, Variable lr) =>
+        [OnnxOp.Sub(p, OnnxOp.Cast(OnnxOp.Mul(OnnxOp.Cast(g, null, DType.Float64), OnnxOp.Cast(lr, null, DType.Float64)), null, DType.Float32)), OnnxOp.MatMul(g, Twice(p))];
+
+    private static (InternalComputationGraph Graph, ShapeInferenceResult ShapeInfo) StepGraph(
+        Func<Variable, Variable, Variable, Variable[]> outputs, bool ordered, long side = 512, long rows = 512, bool withReaders = false)
+    {
+        var (p, g, lr) = (InputTensor<float32>("p", rank: 2), InputTensor<float32>("g", rank: 2), InputScalar<float32>("lr"));
+        var graph = new InternalComputationGraph([p, g, lr], [.. outputs(p, g, lr)]);
+        var shapeInfo = Infer(graph, [side, side], [Math.Min(rows, side), side], []);
+        return ordered ? StateReadOrdering.Apply(graph, shapeInfo, [(0, 0)], withReaders) : (graph, shapeInfo);
+    }
+
+    private static readonly StepState TwoStatesInPlace = new([(0, 0), (1, 1)], WrittenInPlace: true);
+
+    private static (InternalComputationGraph Graph, ShapeInferenceResult ShapeInfo) TwoStatesSharingAnUpdate(bool ordered, long side = 512)
+    {
+        var (p, q, g, lr) = (InputTensor<float32>("p", rank: 2), InputTensor<float32>("q", rank: 2), InputTensor<float32>("g", rank: 2), InputScalar<float32>("lr"));
+        var step = OnnxOp.Mul(g, lr);
+        var graph = new InternalComputationGraph([p, q, g, lr], [OnnxOp.Sub(p, step), OnnxOp.Sub(q, step), OnnxOp.MatMul(g, Twice(p)), OnnxOp.MatMul(g, Twice(q))]);
+        var shapeInfo = Infer(graph, [side, side], [side, side], [side, side], []);
+        return ordered ? StateReadOrdering.Apply(graph, shapeInfo, TwoStatesInPlace.Pairs) : (graph, shapeInfo);
+    }
+
+    private static Variable[] ReadEarly(Variable p, Variable g, Variable lr)
+        => [Update(p, g, lr), Then(OnnxOp.Mul(g, OnnxOp.ReduceSum(OnnxOp.MatMul(g, Twice(p)))), g)];
+
+    private static Variable Then(Variable t, Variable g) => OnnxOp.ReduceSum(OnnxOp.Add(OnnxOp.MatMul(t, g), t));
+
+    private static GraphEvaluationResult Evaluated(StepState state, Func<Variable, Variable, Variable, Variable[]> outputs, bool ordered, bool withReaders = false)
+    {
+        var (graph, shapeInfo) = StepGraph(outputs, ordered, withReaders: withReaders);
+        return new GraphEvaluator(state: state).Evaluate(graph, shapeInfo);
+    }
+
+    [Fact]
+    public void TestAnUpdateRunWithItsReadersHoldsNoReadersOutputUntilTheUpdateCoverage()
+    {
+        var withReaders = Evaluated(StateInPlace, ReadEarly, ordered: true, withReaders: true);
+        Assert.True(withReaders.PeakMemoryBytes < Evaluated(StateInPlace, ReadEarly, ordered: true).PeakMemoryBytes);
+        Assert.Equal([(0, 0)], withReaders.StateWrittenInPlace);
+        var (graph, shapeInfo) = StepGraph(ReadEarly, ordered: false);
+        Assert.True(new MemoryAwareGraphOptimizer(evaluator: new GraphEvaluator(state: StateInPlace), shapeInference: new ShapeInferenceInterpreter(CpuContext))
+            .OptimizeWithShapeInfo(graph, shapeInfo).Evaluation.PeakMemoryBytes <= withReaders.PeakMemoryBytes);
+        Assert.Equal((0L, 1L, true), Ordered(ReadEarly, withReaders: true, 0.5f));
+    }
+
+    private static IReadOnlyList<(int Output, int Input)> Modelled(Func<Variable, Variable, Variable, Variable[]> outputs, bool ordered)
+    {
+        var (graph, shapeInfo) = StepGraph(outputs, ordered);
+        return new GraphEvaluator(state: StateInPlace).Evaluate(graph, shapeInfo).StateWrittenInPlace;
+    }
+
+    private static GraphEvaluationResult Optimized(Func<Variable, Variable, Variable, Variable[]> outputs, StepState state)
+    {
+        var (graph, shapeInfo) = StepGraph(outputs, ordered: false, rows: 1);
+        return new MemoryAwareGraphOptimizer(evaluator: new GraphEvaluator(state: state), shapeInference: new ShapeInferenceInterpreter(CpuContext))
+            .OptimizeWithShapeInfo(graph, shapeInfo).Evaluation;
+    }
+
+    private static (float[] Values, long Aliased) Execute(InternalComputationGraph graph, IReadOnlyList<(int, int)> pairs, float[] lrs)
+    {
+        using var context = new ComputeContext();
+        var squares = graph.Inputs.Count - 1;
+        var compiled = context.Compile(graph, [.. Enumerable.Repeat<long[]>([16L, 16L], squares), []], trainingStep: true, aliasCandidates: pairs);
+        float[] Square(int seed) => [.. Enumerable.Range(0, 256).Select(i => (i * seed % 17) - 8f)];
+        var values = new List<float>();
+        foreach (var lr in lrs)
+        {
+            TensorData[] inputs = [.. Enumerable.Range(0, squares).Select(i => TensorData([16L, 16L], Square(2 * i + 3))), TensorData([], lr)];
+            foreach (var result in compiled.Execute(inputs))
+                values.AddRange(result.ToTensorData() is var data && data.DType == DType.Float32 ? data.As<float32>().CopyMemory<float>()
+                    : data.DType == DType.Float64 ? [.. data.As<float64>().CopyMemory<double>().Select(v => (float)v)]
+                    : [.. data.As<bit>().CopyMemory<bool>().Select(v => v ? 1f : 0f)]);
+        }
+        return ([.. values], context.AliasedOutputs);
+    }
+
+    private static (long Plain, long Ordered, bool Same) Ordered(Func<Variable, Variable, Variable, Variable[]> outputs, params float[] lrs)
+        => Ordered(outputs, withReaders: false, lrs);
+
+    private static (long Plain, long Ordered, bool Same) Ordered(Func<Variable, Variable, Variable, Variable[]> outputs, bool withReaders, params float[] lrs)
+    {
+        var plain = Execute(StepGraph(outputs, ordered: false, side: 16).Graph, [(0, 0)], lrs);
+        var ordered = Execute(StepGraph(outputs, ordered: true, side: 16, withReaders: withReaders).Graph, [(0, 0)], lrs);
+        return (plain.Aliased, ordered.Aliased, plain.Values.SequenceEqual(ordered.Values));
+    }
+
+    private static bool OrderingLeaves(Func<Variable, Variable, Variable, Variable[]> outputs)
+    {
+        var (graph, shapeInfo) = StepGraph(outputs, ordered: false);
+        return ReferenceEquals(graph, StateReadOrdering.Apply(graph, shapeInfo, [(0, 0)]).Graph);
+    }
+
+    private static CompiledGraph CompiledOrdered(Func<Variable, Variable, Variable, Variable[]> outputs)
+    {
+        using var context = new ComputeContext();
+        var (graph, _) = StepGraph(outputs, ordered: true, side: 16);
+        return context.Compile(graph, [[16L, 16L], [16L, 16L], []], trainingStep: true, aliasCandidates: [(0, 0)]);
+    }
+
+    [Fact]
+    public void TestAnUpdateIsNeverOrderedThroughAnOperandThatDeterminesAShapeCoverage()
+    {
+        Assert.True(OrderingLeaves((p, g, lr) => [OnnxOp.Sub(p, OnnxOp.Mul(g, OnnxOp.Range(Scalar(0f), Scalar(512f), Scalar(1f)))), OnnxOp.MatMul(g, Twice(p))]));
+        Assert.True(OrderingLeaves((p, g, lr) => [OnnxOp.Sub(p, OnnxOp.Resize(g, null, Vector(1f, 1f), null, null, null, null, null, null, null, null, null, null)), OnnxOp.MatMul(g, Twice(p))]));
+    }
+
+    [Fact]
+    public void TestAnUpdateWhoseStateIsReadIntoASequenceCompilesCoverage()
+        => Assert.NotNull(CompiledOrdered((p, g, lr) => [Update(p, g, lr), OnnxOp.SplitToSequence(Twice(p))]));
+
+    [Fact]
+    public void TestTheModelCountsAReaderOfWhatTheStateAloneComputesAsAReaderOfTheStateCoverage()
+    {
+        Assert.Empty(Modelled(Linear, ordered: false));
+        Assert.Empty(Modelled(Tied, ordered: false));
+        Assert.Empty(Modelled(EmptyReader, ordered: false));
+        Assert.Equal([(0, 0)], Modelled((p, g, lr) => [OnnxOp.Sub(p, OnnxOp.MatMul(g, Twice(p)))], ordered: false));
+        Assert.Equal([(0, 0)], Modelled((p, g, lr) => [OnnxOp.Sub(p, g), OnnxOp.MatMul(g, OnnxOp.Transpose(g))], ordered: false));
+        Assert.Empty(Modelled((p, g, lr) => [OnnxOp.Sub(p, g), OnnxOp.Reshape(Twice(p), OnnxOp.Shape(g), allowZero: false)], ordered: false));
+    }
+
+    [Fact]
+    public void TestOrderingAnUpdateAfterEveryReaderOfItsStateLetsTheModelWriteItInPlaceCoverage()
+    {
+        Assert.Equal([(0, 0)], Modelled(Linear, ordered: true));
+        Assert.Equal([(0, 0)], Modelled(Tied, ordered: true));
+        Assert.Equal([(0, 0)], Modelled(Direct, ordered: true));
+        Assert.Equal([(0, 0)], Modelled(EmptyReader, ordered: true));
+        Assert.Equal([(0, 0)], Modelled(BoolReader, ordered: true));
+        Assert.Equal([(0, 0)], Modelled(DoubleReader, ordered: true));
+        Assert.Equal([(0, 0)], Modelled(ScalarReader, ordered: true));
+        Assert.Equal([(0, 0)], Modelled(DoubleAnchor, ordered: true));
+        var (graph, shapeInfo) = TwoStatesSharingAnUpdate(ordered: true);
+        Assert.Equal([(0, 0), (1, 1)], new GraphEvaluator(state: TwoStatesInPlace).Evaluate(graph, shapeInfo).StateWrittenInPlace);
+    }
+
+    [Fact]
+    public void TestAnUpdateThatCannotBeOrderedIsLeftAsItCameCoverage()
+    {
+        Assert.Empty(Modelled(ReadAfterUpdate, ordered: true));
+        Assert.Empty(Modelled(Unanchored, ordered: true));
+        Assert.True(OrderingLeaves(ReadAfterUpdate));
+        Assert.True(OrderingLeaves(Unanchored));
+    }
+
+    [Fact]
+    public void TestTheMemoryPassScoresEveryCandidateWithTheStateItWritesInPlaceCoverage()
+    {
+        var (graph, shapeInfo) = StateGraph((p, g) => [OnnxOp.Sub(p, g)]);
+        var optimized = new MemoryAwareGraphOptimizer(evaluator: new GraphEvaluator(state: StateInPlace), shapeInference: new ShapeInferenceInterpreter(CpuContext))
+            .OptimizeWithShapeInfo(graph, shapeInfo);
+        Assert.Equal([(0, 0)], optimized.Evaluation.StateWrittenInPlace);
+        Assert.Equal(2 * Mb, optimized.Evaluation.PeakMemoryBytes);
+        Assert.Equal([(0, 0)], Optimized(Direct, StateInPlace).StateWrittenInPlace);
+        Assert.True(Optimized(Direct, StateInPlace).PeakMemoryBytes < Optimized(Direct, StateHeld).PeakMemoryBytes);
+    }
+
+    [Fact]
+    public void TestAnUpdateOrderedAfterEveryReaderOfItsStateIsWrittenInPlaceByTheRuntimeAndComputesTheSameCoverage()
+    {
+        Assert.Equal((0L, 1L, true), Ordered(Linear, 0.5f));
+        Assert.Equal((0L, 3L, true), Ordered(Tied, 0.5f, float.NaN, float.NegativeInfinity));
+        Assert.Equal((0L, 1L, true), Ordered(Direct, 0.5f));
+        Assert.Equal((0L, 2L, true), Ordered(EmptyReader, 0.5f, float.PositiveInfinity));
+        Assert.Equal((0L, 0L, true), Ordered(ReadAfterUpdate, 0.5f));
+    }
+
+    [Fact]
+    public void TestAnUpdateOrderedAfterReadersOfEveryKindIsWrittenInPlaceByTheRuntimeAndComputesTheSameCoverage()
+    {
+        Assert.Equal((0L, 1L, true), Ordered(BoolReader, 0.5f));
+        Assert.Equal((0L, 1L, true), Ordered(DoubleReader, 0.5f));
+        Assert.Equal((0L, 1L, true), Ordered(ScalarReader, 0.5f));
+        Assert.Equal((0L, 1L, true), Ordered(DoubleAnchor, 0.5f));
+        var plain = Execute(TwoStatesSharingAnUpdate(ordered: false, side: 16).Graph, TwoStatesInPlace.Pairs, [0.5f]);
+        var ordered = Execute(TwoStatesSharingAnUpdate(ordered: true, side: 16).Graph, TwoStatesInPlace.Pairs, [0.5f]);
+        Assert.Equal((0L, 2L, true), (plain.Aliased, ordered.Aliased, plain.Values.SequenceEqual(ordered.Values)));
+    }
+
     private static bool Recomputable(Variable input, Variable output)
     {
         var g = new InternalComputationGraph([input], [output]);
@@ -569,7 +829,7 @@ public class AutoDiffCheckpointingCoverageTests
         var (checkpointed, _, _) = MlpStackRig(Modules.CheckpointedTinyMlpStack.ComputationGraph, [2L, 8L]);
 
         Assert.True(plain.PreOptimizationEval.PeakMemoryBytes < MemoryAwareGraphOptimizer.MinimumPeakBytesToOptimize);
-        Assert.Equal("Baseline", plain.OptimizationResult.StrategyName);
+        Assert.Contains(plain.OptimizationResult.StrategyName, ["Baseline", MemoryAwareGraphOptimizer.OrderedStateReads]);
         Assert.True(NodeCount(checkpointed) > NodeCount(plain));
         Assert.True(checkpointed.OptimizationResult.Evaluation.PeakMemoryBytes <= plain.OptimizationResult.Evaluation.PeakMemoryBytes);
     }

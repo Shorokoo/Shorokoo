@@ -121,6 +121,18 @@ internal class TensorManipulationPerf : IOpPerf
                 };
             }
 
+            case SLICE when KeepsWholeOuterSlabs(input, outputShape):
+            {
+                // One contiguous run of whole slabs along the outermost axis: the copy reads the
+                // bytes it writes and no others, however large the tensor it is cut from, and a
+                // slice of nothing costs its launch alone. Any other slice keeps the default price.
+                return new OpPerfResult
+                {
+                    ComputeTime = OpCostModel.Survival(input, OpCostModel.Copy(2.0 * outputShape.MemoryBytes)),
+                    ExtraMemoryBytes = 0,
+                };
+            }
+
             default:
             {
                 // Concat, Split, Slice, Pad, Tile, Gather*, Range, ConstantOfShape, …: a strided copy
@@ -131,6 +143,22 @@ internal class TensorManipulationPerf : IOpPerf
                 };
             }
         }
+    }
+
+    /// <summary>Whether a slice keeps nothing, or one contiguous run of whole slabs along the
+    /// outermost axis: every other axis of <paramref name="output"/> as long as the input's, and
+    /// every step one — absent, or a constant <c>int64</c> or <c>int32</c> one.</summary>
+    private static bool KeepsWholeOuterSlabs(OpPerfInput input, TensorShapeInfo output)
+    {
+        if (output.ElementCount == 0) return true;
+        if (input.InputShapes[0] is not { } data) return false;
+        var (inDims, outDims) = (data.Shape.Dims, output.Shape.Dims);
+        if (inDims.Length == 0 || inDims.Length != outDims.Length || !inDims.Skip(1).SequenceEqual(outDims.Skip(1)))
+            return false;
+        if (input.InputShapes.Length <= 4 || input.InputShapes[4] is not { } steps) return true;
+        if (steps.Data is not { HasValues: true } values) return false;
+        if (values.DType == DType.Int64) return values.Elements<long>().ToArray().All(step => step == 1);
+        return values.DType == DType.Int32 && values.Elements<int>().ToArray().All(step => step == 1);
     }
 
     private static long[]? Perm(OpPerfInput input)

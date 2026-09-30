@@ -27,6 +27,13 @@ public class GraphEvaluationResult
     public double OrderFidelity { get; init; } = 1.0;
 
     /// <summary>
+    /// The state pairs the evaluation charged in one buffer, by position — output <c>Output</c>
+    /// written into the memory of input <c>Input</c> (see <see cref="StepState"/>). Empty where the
+    /// evaluator carries no state, writes none in place, or the graph proves none.
+    /// </summary>
+    internal IReadOnlyList<(int Output, int Input)> StateWrittenInPlace { get; init; } = [];
+
+    /// <summary>
     /// Per-node evaluation details, in the order the evaluation walked the graph
     /// (<see cref="EvaluationOrder"/>); <see cref="NodeEvaluationInfo.NodeIndex"/> maps each
     /// entry back to its node.

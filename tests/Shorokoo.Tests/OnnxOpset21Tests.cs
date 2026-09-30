@@ -70,6 +70,20 @@ public class OnnxOpset21Tests
         return model;
     }
 
+    private static ModelProto Contrib(string opType)
+    {
+        var model = NodeModel(opType, [], ("", 21), ("com.microsoft", 1));
+        model.Graph.Nodes[0].Domain = "com.microsoft";
+        return model;
+    }
+
+    [Fact]
+    public void TestImportRefusesOperatorsOutsideTheDefaultDomainAsUnsupported()
+    {
+        Assert.Throws<System.NotSupportedException>(() => Import(Contrib("Attention")));
+        Assert.Throws<System.NotSupportedException>(() => Import(Contrib("Relu")));
+    }
+
     private static ModelProto WithFunctionAt(long? version, string opType = "Relu")
     {
         var model = ReluModel(("", 21), ("Functions", 1));

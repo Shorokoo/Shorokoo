@@ -290,7 +290,7 @@ internal class Rematerializer
 
     private sealed record State(InternalComputationGraph Graph, ShapeInferenceResult ShapeInfo, GraphEvaluationResult Eval);
 
-    private static ShapeInferenceResult AugmentShapeInfo(
+    internal static ShapeInferenceResult AugmentShapeInfo(
         ShapeInferenceResult baseInfo,
         Dictionary<FastTensorKey, FastTensorKey> newToOriginalMapping)
     {
@@ -340,7 +340,7 @@ internal class Rematerializer
     internal static long LivenessPeakFor(InternalComputationGraph graph, GraphEvaluationResult eval, ShapeInferenceResult shapeInfo)
         => Liveness.Build(graph, eval, shapeInfo).Peak;
 
-    private sealed class Liveness
+    internal sealed class Liveness
     {
         public required IList<FastNode> Nodes { get; init; }
         public required Dictionary<FastTensorKey, int> ProducerPos { get; init; }
@@ -460,7 +460,7 @@ internal class Rematerializer
     /// One recomputation: a producer chain to clone once, and for each target tensor it
     /// rebuilds, the consumers to rewire onto the clone.
     /// </summary>
-    private sealed class RematCandidate
+    internal sealed class RematCandidate
     {
         /// <summary>Producers to clone, in topological order — deepest dependency first.</summary>
         public required List<FastNode> Chain { get; init; }
@@ -503,7 +503,7 @@ internal class Rematerializer
         return result;
     }
 
-    private List<RematCandidate> FindCandidates(
+    internal List<RematCandidate> FindCandidates(
         Liveness live, ShapeInferenceResult shapeInfo,
         HashSet<(FastTensorKey, bool, FastNodeKey, int)> tried)
     {
@@ -741,7 +741,7 @@ internal class Rematerializer
     /// a map from every minted key to the tensor it replicates, so the caller can extend shape
     /// information to cover them.
     /// </summary>
-    private static (InternalComputationGraph Graph, Dictionary<FastTensorKey, FastTensorKey> Mapping) ApplyCandidates(
+    internal static (InternalComputationGraph Graph, Dictionary<FastTensorKey, FastTensorKey> Mapping) ApplyCandidates(
         InternalComputationGraph graph, List<RematCandidate> candidates, Placement placement)
     {
         var copy = graph.Clone();

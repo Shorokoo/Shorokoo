@@ -875,6 +875,42 @@ public class AutoDiffCheckpointingCoverageTests
                     Assert.NotNull(afterInfo.GetTensorInfo(output.Value));
     }
 
+    private static bool FirstCommittedBatchIsMinimal(InternalComputationGraph graph, ShapeInferenceResult shapeInfo, GraphEvaluator evaluator)
+    {
+        var baseline = evaluator.Evaluate(graph, shapeInfo);
+        var objective = new ComputeMemoryObjective(1.0, 2.0, baseline);
+        var remat = new Rematerializer(objective, evaluator: evaluator);
+        remat.Apply(graph, shapeInfo);
+        var log = remat.CommitLog.TakeWhile(c => c.PeakBefore == baseline.PeakMemoryBytes).ToList();
+        var candidates = remat.FindCandidates(Rematerializer.Liveness.Build(graph, baseline, shapeInfo), shapeInfo, []);
+        List<Rematerializer.RematCandidate> batch = [.. log.Select(c => candidates.First(k => k.Rewires[0].Target.Equals(c.Target)
+            && k.Variant == c.Variant && k.Chain.Count == c.ChainLength && k.Rewires.Sum(r => r.Consumers.Count) == c.RewiredConsumers))];
+
+        (double Score, long Peak) Measure(IEnumerable<Rematerializer.RematCandidate> members)
+        {
+            var (g, mapping) = Rematerializer.ApplyCandidates(graph, [.. members], log[0].Placement);
+            var eval = evaluator.Evaluate(g, Rematerializer.AugmentShapeInfo(shapeInfo, mapping));
+            return (objective.Score(eval), eval.PeakMemoryBytes);
+        }
+
+        var committed = Measure(batch);
+        return batch.All(dropped => Measure(batch.Where(c => c != dropped)) is var r && !(r.Score < committed.Score && r.Peak <= committed.Peak));
+    }
+
+    // The rematerializer commits a ranked prefix of candidates whole, members that add compute without lowering the peak included:
+    // https://github.com/Shorokoo/Shorokoo/issues/478
+    [Fact(Skip = "Shorokoo/Shorokoo#478: the rematerializer commits a candidate prefix whole, including members that add compute without lowering the peak")]
+    public void TestNoMemberOfACommittedRecomputeBatchCanBeDroppedForABetterScoreCoverage()
+    {
+        var rig = TrainingRig.FromScratch(SdpaMeanPoolModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            [new TensorDataModelParam("input", ModelParamType.InputParam, Pattern([2L, 4L, 256L, 64L], 1f))], 0.01f);
+        var graph = rig.PreOptimizationGraph.ToInternal();
+        var shapeInfo = new ShapeInferenceInterpreter(CpuContext).Infer(graph,
+            rig.OptimizationInputShapes.Select(s => Synthesize(s.Shape, s.DType)).ToArray());
+
+        Assert.True(FirstCommittedBatchIsMinimal(graph, shapeInfo, new GraphEvaluator(state: new StepState([(0, 0), (1, 1), (2, 2)], WrittenInPlace: true))));
+    }
+
     [Fact]
     public void TestShapeReadersDoNotHoldTheirInputCoverage()
     {

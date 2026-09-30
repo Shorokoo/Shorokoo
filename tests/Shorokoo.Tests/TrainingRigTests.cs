@@ -2820,6 +2820,10 @@ public class TrainingRigTrainingLoopCoverageTests
                    .Select(v => MathF.Round(v, 4))];
     }
 
+    [Fact]
+    public void TestAGatherInAnUntakenIfElseArmTrainsWhenTheBackwardReadsItsResult()
+        => Assert.Equal(2.5f, LossAfterOneStep(GainGatheredAndSquaredInAnUntakenIfElseArmModel.ComputationGraph), 1e-4f);
+
     private static float[] TrainedParams(ComputationGraph modelGraph, bool cond, params float[] xs)
     {
         object[] values = [.. xs.Select(v => (object)v)];

@@ -461,6 +461,13 @@ public class CodegenFreeModuleTests
     }
 
     [Fact]
+    public void TestALiteralLoopWhoseLastTripSkipsTheCallHandsBackInsideARolledLoop()
+    {
+        Assert.Equal(1f, StateAfterOneExecution(StatefulCalledAroundALiteralLoopWhoseLastTripSkipsTheCallInARolledLoopModel.ComputationGraph));
+        Assert.Equal(2f, StateAfterOneExecution(StatefulCalledAroundAndAfterALiteralLoopWhoseLastTripSkipsTheCallInARolledLoopModel.ComputationGraph));
+    }
+
+    [Fact]
     public void TestARolledStatefulLoopInAnUntakenIfElseArmRunsAndMakesNoUpdate()
     {
         var input = TensorData([2L], 1f, 2f);

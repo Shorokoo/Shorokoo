@@ -176,12 +176,12 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
         /// <summary>The unrolled loop trips a link belongs to, outermost-unrolled last, each with the
         /// flag saying whether it ran when that is decided at run time.</summary>
-        private static List<(long Loop, long Trip, long Count, FastTensorKey? Ran)> TripsOf(FastNode link)
+        private static List<(long Loop, long Trip, long Count, long RolledDepth, FastTensorKey? Ran)> TripsOf(FastNode link)
         {
-            var trips = new List<(long, long, long, FastTensorKey?)>();
+            var trips = new List<(long, long, long, long, FastTensorKey?)>();
             if (link.Attributes.GetLongsVal(OnnxOpAttributeNames.ShrkAttrLoopTrips) is not long[] vals) return trips;
-            for (int i = 0; i + 3 < vals.Length; i += 4)
-                trips.Add((vals[i], vals[i + 1], vals[i + 2], vals[i + 3] >= 0 ? link.Inputs[(int)vals[i + 3]] : null));
+            for (int i = 0; i + 4 < vals.Length; i += 5)
+                trips.Add((vals[i], vals[i + 1], vals[i + 2], vals[i + 3], vals[i + 4] >= 0 ? link.Inputs[(int)vals[i + 4]] : null));
             return trips;
         }
 
@@ -338,30 +338,40 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 var after = site.Link.Outputs[0]!.Value;
                 previousMarker = positionOf[site.Marker.Key];
 
-                // Leave the rolled loops the next call is not in, innermost first.
+                // Leave the loops the next call is not in, innermost first: the unrolled loops
+                // inside each rolled one before that one closes, then those around it. A loop's
+                // update is its last trip's, so an unrolled loop whose last trip made no call — an
+                // IfElse on the iteration folded it away — hands back the value entering it.
                 int stay = i + 1 == sites.Count ? 0 : SharedPrefix(site.Loops, sites[i + 1].Loops);
+                var nextLoops = i + 1 == sites.Count ? [] : TripsOf(sites[i + 1].Link).Select(t => t.Loop).ToHashSet();
+                var leaving = loops.Where(kv => !nextLoops.Contains(kv.Key)).OrderByDescending(kv => kv.Value.Order).ToList();
                 int leftAt = positionOf[site.Marker.Key];
+                void LeaveUnrolledLoopsDeeperThan(int depth, bool atModuleScope)
+                {
+                    foreach (var (id, left) in leaving.Where(kv => kv.Value.RolledDepth > depth && loops.ContainsKey(kv.Key)))
+                    {
+                        loops.Remove(id);
+                        if (left.Trip == left.Count - 1) continue;
+                        if (left.MayNotRun)
+                            throw new InvalidOperationException(
+                                "FastChainStateUpdatesAcrossCallSites: a loop whose continue condition is "
+                                + "read at run time makes a stateful call on some trips but not on its last, "
+                                + "so its update depends on which trip ran last, which this pass does not "
+                                + "follow. Make the call on every trip, or give the loop a condition known "
+                                + "when the graph is built.");
+                        after = HandBack(after, left.Entry, leftAt + 1, insertions);
+                        if (atModuleScope) scopeLinks.Add(after);
+                    }
+                }
                 for (int l = site.Loops.Count - 1; l >= stay; l--)
                 {
+                    LeaveUnrolledLoopsDeeperThan(l, atModuleScope: false);
                     after = CloseLoop(graph, site.Loops[l], loopEntries[l], after, positionOf, insertions);
                     leftAt = Math.Max(leftAt, positionOf[ClosingOf(graph, site.Loops[l]).Key]);
                     loopEntries.RemoveAt(l);
                     if (l == 0 && site.Arm is null) scopeLinks.Add(after);
                 }
-
-                // Leave the unrolled loops the next call is not in. A loop's update is its last
-                // trip's, so one whose last trip made no call — an IfElse on the iteration folded
-                // it away — hands back the value entering it.
-                var nextLoops = i + 1 == sites.Count ? [] : TripsOf(sites[i + 1].Link).Select(t => t.Loop).ToHashSet();
-                foreach (var (id, left) in loops.Where(kv => !nextLoops.Contains(kv.Key)).OrderByDescending(kv => kv.Value.Order).ToList())
-                {
-                    loops.Remove(id);
-                    if (left.Trip < left.Count - 1 && !left.MayNotRun)
-                    {
-                        after = HandBack(after, left.Entry, leftAt + 1, insertions);
-                        if (site.Arm is null) scopeLinks.Add(after);
-                    }
-                }
+                LeaveUnrolledLoopsDeeperThan(-1, atModuleScope: stay == 0 && site.Arm is null);
                 if (site.Arm is IfArm siteArm) armValue[siteArm] = after;
                 else current = after;
                 if (stay > 0) continue;
@@ -381,9 +391,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         }
 
         /// <summary>An unrolled loop the calls are in: the value entering it, the trip its latest call
-        /// is in, when it was entered relative to the others, its trip count, and whether a trip of it
-        /// may not run.</summary>
-        private readonly record struct UnrolledLoop(FastTensorKey Entry, long Trip, int Order, long Count, bool MayNotRun);
+        /// is in, when it was entered relative to the others, its trip count, how many rolled loops
+        /// stand around it, and whether a trip of it may not run.</summary>
+        private readonly record struct UnrolledLoop(FastTensorKey Entry, long Trip, int Order, long Count, long RolledDepth, bool MayNotRun);
 
         /// <summary><c>STATE_UPDATE_LINK(from, to)</c>: the parameter holds <paramref name="to"/> from
         /// here on.</summary>
@@ -416,14 +426,14 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         private static FastTensorKey EnterTrips(
             InternalComputationGraph graph,
             FastTensorKey param,
-            List<(long Loop, long Trip, long Count, FastTensorKey? Ran)> trips,
+            List<(long Loop, long Trip, long Count, long RolledDepth, FastTensorKey? Ran)> trips,
             Dictionary<long, UnrolledLoop> loops,
             FastTensorKey current,
             int fromPos, int toPos,
             Dictionary<FastNodeKey, FastNode> nodeByKey,
             List<(int atPos, FastNode node)> insertions)
         {
-            (long Loop, long Trip, long Count, FastTensorKey? Ran)? restart = null;
+            (long Loop, long Trip, long Count, long RolledDepth, FastTensorKey? Ran)? restart = null;
             int restartOrder = int.MaxValue;
             foreach (var t in trips)
                 if (loops.TryGetValue(t.Loop, out var l) && l.Trip != t.Trip && l.Order < restartOrder)
@@ -443,7 +453,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             foreach (var t in trips)
                 if (!loops.ContainsKey(t.Loop))
                     loops[t.Loop] = new UnrolledLoop(current, t.Trip, loops.Count == 0 ? 0 : loops.Values.Max(l => l.Order) + 1,
-                                                     t.Count, t.Ran is not null);
+                                                     t.Count, t.RolledDepth, t.Ran is not null);
             return current;
         }
 
@@ -485,7 +495,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// that they are ordered.
         /// </summary>
         private static void GateOnTripsRan(
-            FastNode link, List<(long Loop, long Trip, long Count, FastTensorKey? Ran)> trips, FastTensorKey read,
+            FastNode link, List<(long Loop, long Trip, long Count, long RolledDepth, FastTensorKey? Ran)> trips, FastTensorKey read,
             Dictionary<FastNodeKey, int> positionOf, List<(int atPos, FastNode node)> insertions)
         {
             var updated = link.Inputs[1]!.Value;

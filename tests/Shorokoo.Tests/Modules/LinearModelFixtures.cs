@@ -1548,6 +1548,135 @@ public partial class GainGatheredInAnUntakenIfElseArmModel
     }
 }
 
+/// <summary>A stateful model called in a rolled loop's body and in a loop of literal trip count
+/// nested in it whose last trip makes no call.</summary>
+[Module]
+public partial class StatefulCalledAroundALiteralLoopWhoseLastTripSkipsTheCallInARolledLoopModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var m = StatefulGainSubModel.Model();
+        var x = t;
+        foreach (var outer in LoopAPI.Iterate(t.ShapeTensor()[0]))
+        {
+            x = m.Call(x);
+            foreach (var ctx in LoopAPI.Iterate(Scalar(2L)))
+            {
+                x = (ctx.IterationIndex < Scalar(1L)).IfElse(m.Call(x), x * Scalar(3f));
+                ctx.ContinueWhile(Scalar(true));
+            }
+            outer.ContinueWhile(Scalar(true));
+        }
+        return x;
+    }
+}
+
+/// <summary><see cref="StatefulCalledAroundALiteralLoopWhoseLastTripSkipsTheCallInARolledLoopModel"/>
+/// with one more call after the nested loop.</summary>
+[Module]
+public partial class StatefulCalledAroundAndAfterALiteralLoopWhoseLastTripSkipsTheCallInARolledLoopModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var m = StatefulGainSubModel.Model();
+        var x = t;
+        foreach (var outer in LoopAPI.Iterate(t.ShapeTensor()[0]))
+        {
+            x = m.Call(x);
+            foreach (var ctx in LoopAPI.Iterate(Scalar(2L)))
+            {
+                x = (ctx.IterationIndex < Scalar(1L)).IfElse(m.Call(x), x * Scalar(3f));
+                ctx.ContinueWhile(Scalar(true));
+            }
+            x = m.Call(x);
+            outer.ContinueWhile(Scalar(true));
+        }
+        return x;
+    }
+}
+
+/// <summary>A stateful call in an arm of a discarded <c>IfElse</c> nested in an arm of another
+/// discarded one.</summary>
+[Module]
+public partial class StatefulCallInADiscardedIfElseNestedInAnotherModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var m = StatefulGainSubModel.Model();
+        var inner = (t.Reduce(ReduceKind.Max, keepDims: false).Scalar() > Scalar(0f)).IfElse(m.Call(t), t * Scalar(3f));
+        _ = (t.Reduce(ReduceKind.Max, keepDims: false).Scalar() > Scalar(100f)).IfElse(inner, t * Scalar(5f));
+        return t * Scalar(2f);
+    }
+}
+
+/// <summary>A stateful call on a loop's first trip only, in a loop whose continue condition is read
+/// at run time.</summary>
+[Module]
+public partial class StatefulCallOnTheFirstTripOfALoopWithARuntimeConditionModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var m = StatefulGainSubModel.Model();
+        var x = t;
+        foreach (var ctx in LoopAPI.Iterate(Scalar(3L)))
+        {
+            x = (ctx.IterationIndex < Scalar(1L)).IfElse(m.Call(x), x * Scalar(3f));
+            ctx.ContinueWhile(x.Reduce(ReduceKind.Max, keepDims: false).Scalar() < Scalar(1000f));
+        }
+        return x;
+    }
+}
+
+/// <summary>A gain under a square root that an <c>IfElse</c>'s condition reads, and that the arm the
+/// condition chooses reads together with the condition itself.</summary>
+[Module]
+public partial class RootedGainReadByItsOwnConditionInAnArmModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var w = Ones.Init([Scalar(2L)]);
+        var q = (t * w).Sqrt();
+        var c = q.Reduce(ReduceKind.Max, keepDims: false).Scalar() > Scalar(0f);
+        return c.IfElse((Tensor<float32>)OnnxOp.Where(c, q, q * Scalar(2f)), t * w * Scalar(3f));
+    }
+}
+
+/// <summary>A gain under a square root that an <c>IfElse</c>'s condition reads and one arm returns.</summary>
+[Module]
+public partial class RootedGainReadByAConditionAndOneArmModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var w = Ones.Init([Scalar(2L)]);
+        var q = (t * w).Sqrt();
+        return (q.Reduce(ReduceKind.Max, keepDims: false).Scalar() > Scalar(0f)).IfElse(q, t * w * Scalar(3f));
+    }
+}
+
+/// <summary>A gained vector divided by its norm where the norm is not zero.</summary>
+[Module]
+public partial class SafelyNormalizedGainModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var y = t * Ones.Init([Scalar(2L)]);
+        var n = (y * y).Reduce(ReduceKind.Sum, keepDims: false).Scalar().Sqrt();
+        return (n > Scalar(1e-6f)).IfElse(y / n, y);
+    }
+}
+
+/// <summary>A rooted gain chosen by an <c>IfElse</c> whose condition the arm of another computes.</summary>
+[Module]
+public partial class RootedGainInAnIfElseNestedInAnArmModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t, Scalar<bit> cond)
+    {
+        var w = Ones.Init([Scalar(2L)]);
+        var q = (t * w).Sqrt();
+        return cond.IfElse((q.Reduce(ReduceKind.Max, keepDims: false).Scalar() > Scalar(0f)).IfElse(q, q * Scalar(2f)), t * w);
+    }
+}
+
 /// <summary>A stateful model called before a loop and twice in it, whose trip count is computed from
 /// constants too large for the graph's constant folding, so the loop unrolls only when the training
 /// step is built.</summary>

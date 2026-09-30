@@ -180,7 +180,7 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
 
             // Which IfElse arm each forward node belongs to, so a gradient leaving one can be
             // zeroed when that arm did not run.
-            var armOf = FastIfArms.Classify(graph);
+            var armOf = FastIfArms.Classify(graph, gradientReadsOnly: true);
             var armConditions = new Dictionary<FastTensorKey, Scalar<bit>>();
 
             for (int i = topoOrder.Count - 1; i >= 0; i--)

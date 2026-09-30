@@ -333,10 +333,10 @@ public static class OnnxOpAttributeNames
     public const string ShrkAttrCheckpoint = "shrk_checkpoint";
 
     /// <summary>
-    /// On a <c>STATE_UPDATE_LINK</c> an unrolled loop cloned, the trips it belongs to: four values
-    /// per unrolled loop enclosing it — the loop's id, the trip, the loop's trip count, and the
-    /// index among the link's inputs of the flag saying whether that trip ran (-1 where every trip
-    /// runs). Read by
+    /// On a <c>STATE_UPDATE_LINK</c> an unrolled loop cloned, the trips it belongs to: five values
+    /// per unrolled loop enclosing it — the loop's id, the trip, the loop's trip count, how many
+    /// loops still stood around it when it was unrolled, and the index among the link's inputs of
+    /// the flag saying whether that trip ran (-1 where every trip runs). Read by
     /// <see cref="Shorokoo.Core.Nodes.Processors.Fast.FastChainStateUpdatesAcrossCallSites"/>, which
     /// starts each trip from the value the state held entering the loop.
     /// </summary>

@@ -42,7 +42,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         public static string BranchAttribute(bool isThen)
             => isThen ? OnnxOpAttributeNames.AttrThenBranch : OnnxOpAttributeNames.AttrElseBranch;
 
-        public static Dictionary<FastNodeKey, List<IfArm>> Classify(InternalComputationGraph graph)
+        /// <param name="graph">The graph to classify.</param>
+        /// <param name="gradientReadsOnly">Count only the reads a gradient flows through: a
+        /// condition, a comparison or an index reads a value without differentiating it, so for
+        /// where an arm's gradient has to stop such a read leaves the value in the arm.</param>
+        public static Dictionary<FastNodeKey, List<IfArm>> Classify(InternalComputationGraph graph, bool gradientReadsOnly = false)
         {
             if (graph is null) throw new ArgumentNullException(nameof(graph));
 
@@ -59,7 +63,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     foreach (var ok in outs)
                         if (ok is not null && !ok.Value.IsEmpty) producerOf[ok.Value] = node;
 
-            var readersOf = ReadersOf(graph, producerOf);
+            var readersOf = ReadersOf(graph, producerOf, gradientReadsOnly);
             var closeOf = new Dictionary<FastNodeKey, FastNodeKey>();
             foreach (var node in graph.Nodes)
                 if (node.OpCode == OpCodes.IF_CLOSE && node.GraphOpenNodeKey is FastNodeKey openNode)
@@ -114,9 +118,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         }
 
         /// <summary>The nodes reading each node's outputs, graph outputs included, leaving out the
-        /// state dependencies a <c>WITH_STATE_DEPS</c> names only to keep them.</summary>
+        /// state dependencies a <c>WITH_STATE_DEPS</c> names only to keep them — and, where asked,
+        /// every read no gradient flows back through: by an op whose output is a boolean, an index
+        /// or a shape, or by a node nothing differentiated depends on.</summary>
         private static Dictionary<FastNodeKey, List<FastNodeKey?>> ReadersOf(
-            InternalComputationGraph graph, Dictionary<FastTensorKey, FastNode> producerOf)
+            InternalComputationGraph graph, Dictionary<FastTensorKey, FastNode> producerOf, bool gradientReadsOnly)
         {
             var readersOf = new Dictionary<FastNodeKey, List<FastNodeKey?>>();
             void Read(FastTensorKey? key, FastNodeKey? reader)
@@ -126,11 +132,36 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 list.Add(reader);
             }
 
+            // A node passes a gradient back to what it reads when a gradient reaches it: it is an
+            // output, or a node that passes one reads it. Readers come after what they read, so
+            // one walk from the back settles every node.
+            HashSet<FastNodeKey>? passesGradient = null;
+            if (gradientReadsOnly)
+            {
+                passesGradient = [];
+                var reachesAGradient = new HashSet<FastTensorKey>(graph.Outputs);
+                for (int n = graph.Nodes.Count - 1; n >= 0; n--)
+                {
+                    var node = graph.Nodes[n];
+                    if (ReadsWithoutGradient.Contains(node.OpCode)) continue;
+                    if (node.OpCode != InternalOpCodes.AUTO_GRAD
+                        && !node.FullOutputs.Values.Any(outs => outs.Any(o => o is FastTensorKey k && reachesAGradient.Contains(k))))
+                        continue;
+                    passesGradient.Add(node.Key);
+                    foreach (var (_, ins) in node.FullInputs)
+                        foreach (var ik in ins)
+                            if (ik is FastTensorKey k) reachesAGradient.Add(k);
+                }
+            }
+
             foreach (var node in graph.Nodes)
+            {
+                if (passesGradient is not null && !passesGradient.Contains(node.Key)) continue;
                 foreach (var (_, ins) in node.FullInputs)
                     for (int i = 0; i < ins.Count; i++)
                         if (i == 0 || node.OpCode != InternalOpCodes.WITH_STATE_DEPS)
                             Read(ins[i], node.Key);
+            }
             foreach (var output in graph.Outputs)
                 Read(output, null);
             return readersOf;
@@ -171,6 +202,15 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                                 worklist.Push(producer.Key);
             return readOutside;
         }
+
+        /// <summary>Ops whose outputs are booleans, indices or shapes, through which no gradient
+        /// reaches what they read — an <c>IF_OPEN</c>'s condition among them.</summary>
+        private static readonly HashSet<string> ReadsWithoutGradient =
+        [
+            OpCodes.IF_OPEN, OpCodes.GREATER, OpCodes.GREATER_OR_EQUAL, OpCodes.LESS, OpCodes.LESS_OR_EQUAL,
+            OpCodes.EQUAL, OpCodes.AND, OpCodes.OR, OpCodes.XOR, OpCodes.NOT, OpCodes.IS_NAN, OpCodes.IS_INF,
+            OpCodes.SHAPE, OpCodes.SIZE, OpCodes.ARG_MAX, OpCodes.ARG_MIN, OpCodes.NON_ZERO,
+        ];
 
         /// <summary>An input or a parameter is read by a branch, never owned by it.</summary>
         private static bool IsNobodysArm(FastNode node)

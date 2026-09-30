@@ -196,9 +196,9 @@ namespace Shorokoo.Core
         /// would belong to no arm once that branch is swept away, and its update would apply
         /// whichever arm ran. Such an <c>IfElse</c> is kept as one more effect of the scope: one
         /// whose own output nothing in <paramref name="roots"/> reaches, and whose arms reach a
-        /// call effect nothing in <paramref name="roots"/> reaches either — directly, not through
-        /// another recorded <c>IfElse</c>, which is kept for its own arms if at all. Anything the
-        /// scope keeps anyway orders by the branches it is read in.
+        /// call effect nothing in <paramref name="roots"/> reaches either — through another such
+        /// <c>IfElse</c> too, which then nests in it as it would were both results used. Anything
+        /// the scope keeps anyway orders by the branches it is read in.
         /// </summary>
         internal static Variable[] IfElsesKeptForTheirArms(
             IReadOnlyList<Variable> effects,
@@ -227,11 +227,9 @@ namespace Shorokoo.Core
             var dead = effects.Select(e => e.OwningNode).Where(n => !live.Contains(n)).ToHashSet();
             if (dead.Count == 0) return [];
 
-            var branches = ifElses.Select(b => b.Output.OwningNode).ToHashSet();
             return [.. ifElses
                 .Where(b => !live.Contains(b.Output.OwningNode)
-                            && Reach(b.Arms.Select(a => a.OwningNode), n => dead.Contains(n) || branches.Contains(n))
-                                .Overlaps(dead))
+                            && Reach(b.Arms.Select(a => a.OwningNode), dead.Contains).Overlaps(dead))
                 .Select(b => b.Output)];
         }
 

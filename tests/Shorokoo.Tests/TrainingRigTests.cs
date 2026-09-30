@@ -2704,9 +2704,21 @@ public class TrainingRigTrainingLoopCoverageTests
 
     [Fact]
     public void TestADiscardedIfElseChangesNoOtherBranchsUpdate()
-        => Assert.Equal([0f, 0f],
-            [.. StateFieldsAfterOneStep(StatefulCallReadByAnUntakenArmAndADiscardedIfElseModel.ComputationGraph),
-             .. StateFieldsAfterOneStep(StatefulCallInAnUntakenArmOfADiscardedIfElseReadByAnotherModel.ComputationGraph)]);
+        => Assert.Equal([0f], StateFieldsAfterOneStep(StatefulCallReadByAnUntakenArmAndADiscardedIfElseModel.ComputationGraph));
+
+    [Fact]
+    public void TestAStatefulCallInNestedDiscardedIfElsesIsRefusedAsInNestedUsedOnes()
+    {
+        Assert.Contains("nested IfElse", Assert.Throws<InvalidOperationException>(
+            () => StateFieldsAfterOneStep(StatefulCallInAnUntakenArmOfADiscardedIfElseReadByAnotherModel.ComputationGraph)).Message);
+        Assert.Contains("nested IfElse", Assert.Throws<InvalidOperationException>(
+            () => StateFieldsAfterOneStep(StatefulCallInADiscardedIfElseNestedInAnotherModel.ComputationGraph)).Message);
+    }
+
+    [Fact]
+    public void TestALoopWithARuntimeConditionWhoseLaterTripsMakeNoCallIsRefused()
+        => Assert.Contains("continue condition", Assert.Throws<InvalidOperationException>(
+            () => StateFieldsAfterOneStep(StatefulCallOnTheFirstTripOfALoopWithARuntimeConditionModel.ComputationGraph)).Message);
 
     [Fact]
     public void TestAnIfElseReadByOneArmOfAnotherStaysInsideItAfterAStatefulCall()
@@ -2763,6 +2775,28 @@ public class TrainingRigTrainingLoopCoverageTests
         Assert.Equal(2.5f, LossAfterOneStep(GainInBothIfArmsOnARuntimeConditionModel.ComputationGraph), 1e-4f);
         Assert.Equal(2.5f, LossAfterOneStep(SharedGainInBothIfArmsModel.ComputationGraph), 1e-4f);
         Assert.NotEmpty(IfBodyOps(SharedGainInBothIfArmsModel.ComputationGraph));
+    }
+
+    [Fact]
+    public void TestAnUntakenIfElseArmLeaksNoNonFiniteGradientThroughWhatItsConditionReads()
+    {
+        Assert.Equal([0.1f, -13.4f], ParamsAfterOneStep(RootedGainReadByItsOwnConditionInAnArmModel.ComputationGraph, -1f, -4f));
+        Assert.Equal([0.1f, -13.4f], ParamsAfterOneStep(RootedGainReadByAConditionAndOneArmModel.ComputationGraph, -1f, -4f));
+        Assert.Equal([1f, 1f], ParamsAfterOneStep(SafelyNormalizedGainModel.ComputationGraph, 0f, 0f));
+        Assert.Equal([0.9f, -0.6f], [.. TrainedParams(RootedGainInAnIfElseNestedInAnArmModel.ComputationGraph, false, -1f, -4f)
+                                         .Select(v => MathF.Round(v, 4))]);
+    }
+
+    private static float[] ParamsAfterOneStep(ComputationGraph modelGraph, params float[] xs)
+    {
+        object[] values = [.. xs.Select(v => (object)v)];
+        var x = TensorData(DType.Float32, [(long)xs.Length], values);
+        var rig = TrainingRig.FromScratch(modelGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            [new TensorDataModelParam(modelGraph.InputNames[0]!, ModelParamType.InputParam, x)], 0.1f);
+        var step = rig.TrainStep(rig.CreateInitialCheckpoint(), rig.InputDef.FromOrderedData(x),
+            rig.TargetDef.FromOrderedData(TensorData([(long)xs.Length], new float[xs.Length])));
+        return [.. NNLibraryTrainingFixtures.Floats(step.TrainableParams.Fields[rig.TrainableParamStructDef.Fields[0].Name])
+                   .Select(v => MathF.Round(v, 4))];
     }
 
     private static float[] TrainedParams(ComputationGraph modelGraph, bool cond, params float[] xs)

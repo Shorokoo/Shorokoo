@@ -4090,8 +4090,9 @@ namespace Shorokoo
         /// (the flat safetensors file), reconstructing it
         /// against this rig's parameter/state struct definitions so training resumes exactly where it
         /// left off: trainable params, optimizer moments, model state, and the host-owned run counters
-        /// (global step, epoch, batch index) are all restored (schedules resume from that step; older
-        /// checkpoints lacking epoch/batch restore them as null, an unknown position). Throws if the
+        /// (global step, epoch, batch index) are all restored (schedules resume from that step; an
+        /// epoch or batch index the file does not carry — the position was unknown when it was
+        /// saved — restores as null, an unknown position). Throws if the
         /// file's fields don't match this
         /// rig — e.g. a checkpoint produced by a different model or optimizer. The rig must be built
         /// from the same model/loss/optimizer graphs as the one that saved the checkpoint. This entry

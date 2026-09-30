@@ -158,7 +158,7 @@ namespace Shorokoo
         /// consumed by the step, or one passed through <c>.Shared()</c> or <c>.TryConsume()</c>.</param>
         /// <param name="trainingTarget">Training target data, in the same forms.</param>
         public float Step(IData trainingInput, IData trainingTarget)
-            => Advance(Stepped(c => _rig.ResidentStep(c, null, trainingInput, trainingTarget, publish: false))).Loss!.Value;
+            => Advance(Stepped(c => _rig.ResidentStep(c, null, trainingInput, trainingTarget, reclaimSuperseded: !_ownsCurrent))).Loss!.Value;
 
         /// <summary>
         /// Trains on one batch of a rig whose loss reads no target
@@ -180,7 +180,7 @@ namespace Shorokoo
         public float Step(IData hyperparameters, IData trainingInput, IData trainingTarget)
         {
             if (hyperparameters is null) throw new ArgumentNullException(nameof(hyperparameters));
-            return Advance(Stepped(c => _rig.ResidentStep(c, hyperparameters, trainingInput, trainingTarget, publish: false)))
+            return Advance(Stepped(c => _rig.ResidentStep(c, hyperparameters, trainingInput, trainingTarget, reclaimSuperseded: !_ownsCurrent)))
                 .Loss!.Value;
         }
 
@@ -202,7 +202,7 @@ namespace Shorokoo
         /// loader itself.
         /// </summary>
         public float Step(DataBatch batch)
-            => Advance(Stepped(c => _rig.ResidentBatchStep(c, batch, publish: false))).Loss!.Value;
+            => Advance(Stepped(c => _rig.ResidentBatchStep(c, batch, reclaimSuperseded: !_ownsCurrent))).Loss!.Value;
 
         /// <summary>
         /// Trains on one batch and hands you the updated state as an ordinary checkpoint — the step
@@ -215,7 +215,7 @@ namespace Shorokoo
         /// consumed by the step, or one passed through <c>.Shared()</c> or <c>.TryConsume()</c>.</param>
         /// <param name="trainingTarget">Training target data, in the same forms.</param>
         public TrainingCheckpoint StepToCheckpoint(IData trainingInput, IData trainingTarget)
-            => Publish(Stepped(c => _rig.ResidentStep(c, null, trainingInput, trainingTarget, publish: true)));
+            => Publish(Stepped(c => _rig.ResidentStep(c, null, trainingInput, trainingTarget, reclaimSuperseded: !_ownsCurrent)));
 
         /// <summary>
         /// <see cref="StepToCheckpoint(IData, IData)"/> for a rig whose loss reads no target
@@ -235,7 +235,7 @@ namespace Shorokoo
             IData hyperparameters, IData trainingInput, IData trainingTarget)
         {
             if (hyperparameters is null) throw new ArgumentNullException(nameof(hyperparameters));
-            return Publish(Stepped(c => _rig.ResidentStep(c, hyperparameters, trainingInput, trainingTarget, publish: true)));
+            return Publish(Stepped(c => _rig.ResidentStep(c, hyperparameters, trainingInput, trainingTarget, reclaimSuperseded: !_ownsCurrent)));
         }
 
         /// <summary>
@@ -254,7 +254,7 @@ namespace Shorokoo
         /// <see cref="DataBatch.Position"/> as the batch that was used.
         /// </summary>
         public TrainingCheckpoint StepToCheckpoint(DataBatch batch)
-            => Publish(Stepped(c => _rig.ResidentBatchStep(c, batch, publish: true)));
+            => Publish(Stepped(c => _rig.ResidentBatchStep(c, batch, reclaimSuperseded: !_ownsCurrent)));
 
         /// <summary>
         /// The run's state as it stands, as a checkpoint — between steps, without running one and
@@ -317,6 +317,12 @@ namespace Shorokoo
         /// is to another step, consumes the state the run trains from with it — and is not this
         /// run's loss: the step is refused over it before it takes anything, with that state's own
         /// refusal, and so is every step after it.</para>
+        ///
+        /// <para>Each step asks the rig to count the state it supersedes towards a collection only
+        /// where that state is not the run's own (<c>!_ownsCurrent</c>, read before the step): a
+        /// checkpoint the run handed out, or one it began from, which is garbage once the caller
+        /// drops it and whose memory — on a card, device memory — only a finalizer frees. State the
+        /// run owns the step consumes, and there is nothing to count.</para>
         /// </summary>
         private TrainingCheckpoint Stepped(Func<TrainingCheckpoint, TrainingCheckpoint> step)
         {

@@ -3187,8 +3187,8 @@ namespace Shorokoo
         /// <see cref="ResidentTrainingRun"/>, which tracks who owns them, ever asks for them.
         /// The loss is never retained: it is a scalar the host reads every step either way.
         /// <paramref name="call"/> is how a message about the run names it, <c>TrainStep</c> where
-        /// none is given. <paramref name="reclaimSuperseded"/> says whether the checkpoint returned
-        /// is the caller's, whose superseded state is garbage only once the caller drops it
+        /// none is given. <paramref name="reclaimSuperseded"/> says whether the state this step
+        /// supersedes is a checkpoint the caller holds, garbage only once the caller drops it
         /// (<see cref="ReclaimSupersededState"/>); by default, whenever the state is not retained.
         /// </summary>
         private TrainingCheckpoint RunStep(
@@ -3600,18 +3600,18 @@ namespace Shorokoo
             IData? hyperparams,
             IData trainingInput,
             IData trainingOutput,
-            bool publish)
+            bool reclaimSuperseded)
         {
             if (hyperparams is null) RequireNoRuntimeHyperparameters();
             return RunStep(checkpoint, hyperparams, trainingInput, trainingOutput, retainStateOnDevice: true,
-                ResidentStepCall, reclaimSuperseded: publish);
+                ResidentStepCall, reclaimSuperseded);
         }
 
         /// <summary>One step of a <see cref="ResidentTrainingRun"/> on an already-drawn batch; see
         /// <see cref="BatchStep"/>.</summary>
         internal TrainingCheckpoint ResidentBatchStep(
-            TrainingCheckpoint checkpoint, DataBatch batch, bool publish)
-            => BatchStep(checkpoint, batch, retainStateOnDevice: true, ResidentStepCall, reclaimSuperseded: publish);
+            TrainingCheckpoint checkpoint, DataBatch batch, bool reclaimSuperseded)
+            => BatchStep(checkpoint, batch, retainStateOnDevice: true, ResidentStepCall, reclaimSuperseded);
 
         /// <summary>
         /// One step on an already-drawn batch, and the one place the loader-step-and-counter

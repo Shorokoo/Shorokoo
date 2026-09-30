@@ -1085,6 +1085,7 @@ public class CrossDeviceRoutingCoverageTests
             Assert.All(StateOf(home), t => Assert.True(t.IsHostResident));
             TrainingRigHelpers.AssertClose(host, home, 0f);
             Assert.Null(home.FeedMode);
+            Assert.Equal(SharedInputMode.Shared, host.WithTrainableParams(host.TrainableParams.CopyTo(context)).Shared().ToHost().FeedMode);
         }
         finally
         {

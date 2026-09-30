@@ -272,6 +272,16 @@ public class GpuExecutionTests
     /// read it, and read there by every run after until it is written.
     /// </summary>
     [CudaFact]
+    public void CudaProvider_ATensorOnTheCardLargerThanOneArraySavesThroughBoundedPieces()
+    {
+        using var ctx = new ComputeContext();
+        var held = ctx.AllocateUninitialized<float32>(new Shape(640L << 20));
+        long allocated = GC.GetAllocatedBytesForCurrentThread();
+        Onnx.SafeTensorLoader.SaveSafeTensorsToStream(Stream.Null, [new Onnx.SafeTensor("w", held, "F32", [640L << 20])]);
+        Assert.True(GC.GetAllocatedBytesForCurrentThread() - allocated < 64L << 20);
+    }
+
+    [CudaFact]
     public void CudaProvider_AFeedIsConsumedOnTheCardAndAHostOneIsReadThroughOneCopyUntilWritten()
     {
         using var ctx = new ComputeContext();

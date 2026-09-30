@@ -494,8 +494,8 @@ read by one step only, which releases its copies.
   `rig.InputDef.FromOrderedData(tokens, mask.Shared())` keeps the mask and consumes the tokens. A
   field given `.Shared()` is always read; a struct fed `.Shared()` has every field read; otherwise
   each field is fed as given, or as the struct is. `Fields` and the indexer return the tensor
-  itself; `To`, `CopyTo`, `ToHost` and `rig.AdoptCheckpoint` keep each field's mode (a checkpoint's
-  `ToHost()` that copies anything is fed as it is, its `FeedMode` `null`).
+  itself; `To`, `CopyTo`, `ToHost` and `rig.AdoptCheckpoint` keep each field's mode, and a
+  checkpoint's `ToHost()` keeps its `FeedMode`.
 - **Runtime hyperparameters** are fed like a batch. `MakeHyperparameters` builds a fresh struct and
   copies the tensors given to it.
 - **`Fit` and `Train` over arrays read their batches** and feed the initial checkpoint like

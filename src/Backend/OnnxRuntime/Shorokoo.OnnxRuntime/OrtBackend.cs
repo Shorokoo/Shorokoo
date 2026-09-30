@@ -998,9 +998,21 @@ public abstract class OrtBackend : IShorokooBackend
                 $"A {value.GetType().Name} did not come from this backend, so its device memory "
                 + "cannot be read here.");
 
-        var span = ort.Inner.GetTensorMutableRawData();
+        // A Span's length is an int, so one cannot be made over an allocation larger than 2 GiB;
+        // above that the address is taken through a tensor span, whose length is native-sized.
         IntPtr address;
-        fixed (byte* p = span) address = (IntPtr)p;
+        if (ort.Inner.GetTensorSizeInBytes() <= int.MaxValue)
+        {
+            var span = ort.Inner.GetTensorMutableRawData();
+            fixed (byte* p = span) address = (IntPtr)p;
+        }
+        else
+        {
+#pragma warning disable SYSLIB5001 // TensorSpan is an evaluation API; only its address is taken here
+            var tensor = ort.Inner.GetTensorSpanMutableRawData<byte>();
+            fixed (byte* p = &tensor.GetPinnableReference()) address = (IntPtr)p;
+#pragma warning restore SYSLIB5001
+        }
         // Taking the span is the value's last read here, so without this the JIT may retire the
         // local and a collection on any thread free the allocation before the address is used.
         // The caller keeps it alive across the copy itself (Shorokoo/Shorokoo#178).

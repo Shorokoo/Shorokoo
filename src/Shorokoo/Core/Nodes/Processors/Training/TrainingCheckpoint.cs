@@ -227,9 +227,11 @@ namespace Shorokoo
         /// cannot read into host memory of the new checkpoint's own, and takes each one it can as it
         /// is: the very same checkpoint where every tensor already is host-readable.
         ///
-        /// <para>Every other slot — counters, rig, loss, applied hyperparameters, history — carries
-        /// through. A checkpoint that copied anything is fed as it is, whatever
-        /// <see cref="FeedMode"/> this one has, since its copies are nobody else's.</para>
+        /// <para>Every other slot — counters, rig, loss, applied hyperparameters, history and
+        /// <see cref="FeedMode"/> — carries through. The feed mode does because a tensor already
+        /// host-readable is taken as it is, not copied, and is still this checkpoint's too: a
+        /// checkpoint this one's owner only lends must not have its tensors consumed through the
+        /// copy.</para>
         /// </summary>
         /// <exception cref="ObjectDisposedException">A tensor of the state is dead.</exception>
         public TrainingCheckpoint ToHost()
@@ -250,6 +252,7 @@ namespace Shorokoo
                 Loss = Loss,
                 AppliedHyperparameters = AppliedHyperparameters,
                 History = History,
+                FeedMode = FeedMode,
             };
         }
 

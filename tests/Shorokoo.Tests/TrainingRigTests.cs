@@ -3954,6 +3954,28 @@ public class TrainingRigCheckpointCoverageTests
         Assert.NotNull(cp);
     }
 
+    [Fact]
+    public void TestAResidentRunCountsACheckpointItHandedOutOnceAStepHasMovedOnFromIt()
+    {
+        var rig = ShapeRig(ParamOrderAModel.ComputationGraph);
+        var input = rig.InputDef.FromOrderedData(TensorData([4L], [1f, 2f, 3f, 4f]));
+        var target = rig.TargetDef.FromOrderedData(TensorData([4L], [1f, 2f, 3f, 4f]));
+        static long Bytes(TrainingCheckpoint c) => ((TensorDataStruct[])[c.TrainableParams, c.ModelState, c.OptimizerState])
+            .SelectMany(s => s.Fields.Values.OfType<TensorData>()).Sum(t => t.ByteCount);
+
+        using var run = rig.BeginResidentRun();
+        run.Step(input.Shared(), target.Shared());
+        var handed = run.StepToCheckpoint(input.Shared(), target.Shared());
+        Assert.Equal(0, rig.SupersededStateBytesPending);
+        run.Step(input.Shared(), target.Shared());
+        Assert.Equal(Bytes(handed), rig.SupersededStateBytesPending);
+        run.Step(input.Shared(), target.Shared());
+        Assert.Equal(Bytes(handed), rig.SupersededStateBytesPending);
+        var taken = run.TakeCheckpoint();
+        run.Step(input.Shared(), target.Shared());
+        Assert.Equal(Bytes(handed) + Bytes(taken), rig.SupersededStateBytesPending);
+    }
+
     /// <summary>A caller that keeps no checkpoint, and one that keeps a single older checkpoint,
     /// both supersede everything else — so every collection reclaims and the budget must stay at its
     /// base. Neither is distinguishable by watching one recent checkpoint: the one handed back at a

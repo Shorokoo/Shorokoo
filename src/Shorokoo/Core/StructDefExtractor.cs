@@ -13,7 +13,7 @@ using Shorokoo.Onnx;
 namespace Shorokoo.Core
 {
     /// <summary>
-    /// Utility class for extracting TensorStructDef from user-defined IStruct interfaces.
+    /// Utility class for extracting TensorStructDef from user-defined IStruct types.
     /// </summary>
     internal static class StructDefExtractor
     {
@@ -30,11 +30,12 @@ namespace Shorokoo.Core
         }
 
         /// <summary>
-        /// Extracts a TensorStructDef from a user-defined IStruct interface type.
+        /// Extracts a TensorStructDef from a user-defined IStruct interface, record or class.
         /// </summary>
-        /// <param name="type">The IStruct interface type to extract from</param>
+        /// <param name="type">The IStruct type to extract from</param>
         /// <returns>A TensorStructDef describing the struct's fields</returns>
         /// <exception cref="InvalidOperationException">Thrown if type is DTypeStruct (requires explicit definition)</exception>
+        /// <exception cref="InvalidOperationException">Thrown if type declares a member a struct field cannot be</exception>
         /// <exception cref="ArgumentException">Thrown if type doesn't implement IStruct</exception>
         public static TensorStructDef ExtractFromType(Type type)
         {
@@ -44,47 +45,42 @@ namespace Shorokoo.Core
             if (!typeof(IStruct).IsAssignableFrom(type))
                 throw new ArgumentException($"Type {type.Name} does not implement IStruct", nameof(type));
 
-            // A struct's fields are its properties. A graph value held in a C# field would be neither a
-            // struct field nor immutable (an index-set on it writes through to the shared instance).
-            var csharpField = type.GetFields(BindingFlags.Public | BindingFlags.Instance)
-                .FirstOrDefault(f => typeof(IValue).IsAssignableFrom(f.FieldType));
+            // A struct's fields are its public instance properties, inherited ones included. A member that
+            // cannot be one — a C# field, a ref-returning property, a property of a type a field cannot
+            // hold — is refused rather than left out of the layout.
+            var csharpField = type.GetFields(BindingFlags.Public | BindingFlags.Instance).FirstOrDefault();
             if (csharpField is not null)
                 throw new InvalidOperationException(
                     $"Struct type {type.Name} declares '{csharpField.Name}' as a C# field; declare struct fields as properties.");
 
             var fields = new List<TensorStructFieldDef>();
-
-            // Get all properties declared in this interface (not inherited from base interfaces)
-            foreach (var prop in type.GetProperties(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly))
+            foreach (var declaring in DeclaringTypes(type))
             {
-                var fieldDef = AnalyzePropertyType(prop.Name, prop.PropertyType);
-                if (fieldDef != null)
-                    fields.Add(fieldDef);
-            }
-
-            // Also get properties from interfaces this type extends (but not IStruct itself)
-            foreach (var iface in type.GetInterfaces())
-            {
-                if (iface == typeof(IStruct) || iface == typeof(IVarType))
-                    continue;
-                    
-                // Only include if it's not IStruct hierarchy
-                if (!typeof(IStruct).IsAssignableFrom(iface))
-                    continue;
-
-                foreach (var prop in iface.GetProperties(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly))
+                foreach (var prop in declaring.GetProperties(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly))
                 {
-                    // Skip if we already have a field with this name
                     if (fields.Any(f => f.Name == prop.Name))
                         continue;
-                        
-                    var fieldDef = AnalyzePropertyType(prop.Name, prop.PropertyType);
-                    if (fieldDef != null)
-                        fields.Add(fieldDef);
+                    var fieldDef = prop.PropertyType.IsByRef || prop.GetIndexParameters().Length > 0
+                        ? null
+                        : AnalyzePropertyType(prop.Name, prop.PropertyType);
+                    fields.Add(fieldDef ?? throw new InvalidOperationException(
+                        $"Struct type {type.Name} declares property '{prop.Name}' of type {prop.PropertyType.Name}, which a struct field cannot hold; " +
+                        "a field is a Tensor, Vector, Scalar, TensorSequence, OptionalTensor or TensorStruct."));
                 }
             }
 
             return new TensorStructDef(fields, type.FullName) { DeclaringType = type };
+        }
+
+        /// <summary>The types whose own properties make up <paramref name="type"/>'s fields, in field order:
+        /// a class's base classes from the root down, then the type itself, then the IStruct interfaces it extends.</summary>
+        private static IEnumerable<Type> DeclaringTypes(Type type)
+        {
+            var classes = new List<Type>();
+            for (var t = type; t is not null && t != typeof(object) && t != typeof(ValueType); t = t.BaseType)
+                classes.Insert(0, t);
+            return classes.Concat(type.GetInterfaces()
+                .Where(i => i != typeof(IStruct) && i != typeof(IVarType) && typeof(IStruct).IsAssignableFrom(i)));
         }
 
         /// <summary>

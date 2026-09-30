@@ -199,25 +199,30 @@ How a hyper is supplied depends on the route:
 
 ## Struct values
 
-A struct type is an `IStruct` interface or record whose **properties** are its
-fields. A struct value is immutable: updating a field means building a new struct.
+A struct type is an `IStruct` interface, record or class. Its fields are its public
+instance properties, inherited ones included, and each is a `Tensor`, `Vector`, `Scalar`,
+`TensorSequence`, `OptionalTensor` or `TensorStruct<T>` (a nested struct). A struct value
+is immutable: updating a field means building a new struct.
 
 `Tensor<T>`'s index setter (`t[0..2] = r;`) rebinds a local, so it cannot write through
-a field. `s.A[0..2] = r;` does not compile (CS1612), whether `A` is an interface or
-record property or `GetField<T>("A")`. Copy the field, set the copy, and bind a new
-struct to `s`:
+a field. `s.A[0..2] = r;` does not compile (CS1612), whether `A` is a property or
+`GetField<T>("A")`. Copy the field, set the copy, and bind a new struct to `s`:
 
 ```csharp
-var a = s.A;                                   // s : MyStruct (IStruct interface)
-a[0..2] = r;                                   // s is unchanged
-s = TensorStruct<MyStruct>(a);                 // interface: build a new struct
-s = s with { A = a };                          // record: same, with `with`
+var a = s.A;                                   // s is unchanged
+a[0..2] = r;
+s = TensorStruct<MyStruct>(a);                 // MyStruct an IStruct interface
+p = p with { A = a };                          // p a record: `with` does the same
 ```
 
 This is the same inside a `LoopAPI.Iterate` body, where a rebound `s` is carried to the
-next iteration, and when the new struct is an `IfElse` arm. A struct type that declares a
-graph value as a C# **field** (`public Tensor<float32> A;`) is refused when its layout is
-read: that field would be neither a struct field nor immutable.
+next iteration. `IfElse` chooses between `TensorStruct<T>` handles, so to choose between
+structs build them with `TensorStructCreate<MyStruct>(...)` and read the chosen one's
+fields with `GetField<T>`.
+
+A struct type with a member that cannot be a field is refused when the type is first
+used as a struct (a module input or output, `TensorStruct<T>(...)`): a public C# field
+(`public Tensor<float32> A;`), a `ref`-returning property, or a property of any other type.
 
 ## Workflow: one module, many variants
 

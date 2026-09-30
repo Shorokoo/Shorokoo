@@ -852,6 +852,25 @@ namespace Shorokoo.Tests.Modules
         public Tensor<float32> A;
     }
 
+    public interface RefPropertyStruct : IStruct
+    {
+        ref Tensor<float32> A { get; }
+    }
+
+    public class ArrayFieldStruct : IStruct
+    {
+        public Tensor<float32>[] A = [];
+    }
+
+    public class NullableFieldStruct : IStruct
+    {
+        public Tensor<float32>? A;
+    }
+
+    public record NestedRecordPropertyStruct(TensorFieldRecord A) : IStruct;
+
+    public record DerivedFieldRecord(Tensor<float32> A, Tensor<float32> B) : TensorFieldRecord(A);
+
     public static class StructFieldIndexSetLayers
     {
         public static Tensor<float32> CopyLeavesStruct(TensorFieldStruct s)
@@ -867,6 +886,13 @@ namespace Shorokoo.Tests.Modules
             a[0..1] = Vector(9f);
             s = TensorStruct<TensorFieldStruct>(a);
             return s.A;
+        }
+
+        public static Tensor<float32> RecordCopyLeavesStruct(TensorFieldRecord s)
+        {
+            var a = s.A;
+            a[0..1] = Vector(9f);
+            return a * Scalar(10f) + s.A;
         }
 
         public static Tensor<float32> RecordWith(TensorFieldRecord s)

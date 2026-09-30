@@ -1586,6 +1586,7 @@ public class ModulesCoverageTests
         float[] RunRecord(Func<TensorFieldRecord, Tensor<float32>> body) => RunStructInput(body, StructIn<TensorFieldRecord>(("A", a)));
         Assert.Equal([91f, 22f, 33f], Run(StructFieldIndexSetLayers.CopyLeavesStruct));
         Assert.Equal([9f, 2f, 3f], Run(StructFieldIndexSetLayers.RebuiltStruct));
+        Assert.Equal([91f, 22f, 33f], RunRecord(StructFieldIndexSetLayers.RecordCopyLeavesStruct));
         Assert.Equal([9f, 2f, 3f], RunRecord(StructFieldIndexSetLayers.RecordWith));
         Assert.Equal([100f, 2f, 3f], Run(StructFieldIndexSetLayers.LoopCarriedStruct));
         Assert.Equal([100f, 2f, 3f], RunRecord(StructFieldIndexSetLayers.LoopCarriedRecord));
@@ -1594,9 +1595,29 @@ public class ModulesCoverageTests
         Assert.Equal([9f, 2f, 3f], Run(StructFieldIndexSetLayers.IfElseRebuiltStruct));
     }
 
+    private static string StructRefusal<TStruct>() where TStruct : IStruct
+        => Assert.Throws<InvalidOperationException>(() => StructDefExtractor.ExtractFromType<TStruct>()).Message;
+
     [Fact]
-    public void TestAStructTypeDeclaringATensorAsACSharpFieldIsRefusedNamingTheField()
-        => Assert.Contains("'A'", Assert.Throws<InvalidOperationException>(() => StructDefExtractor.ExtractFromType<CSharpFieldStruct>()).Message);
+    public void TestAStructTypeWhoseMemberCannotBeAFieldIsRefusedNamingTheMember()
+    {
+        Assert.Contains("'A'", StructRefusal<CSharpFieldStruct>());
+        Assert.Contains("'A'", StructRefusal<ArrayFieldStruct>());
+        Assert.Contains("'A'", StructRefusal<NullableFieldStruct>());
+        Assert.Contains("'A'", StructRefusal<RefPropertyStruct>());
+        Assert.Contains("'A'", StructRefusal<NestedRecordPropertyStruct>());
+        Assert.Throws<InvalidOperationException>(() => ModuleFactory.ComputationGraph((Func<CSharpFieldStruct, Tensor<float32>>)(s => s.A)));
+        Assert.Throws<InvalidOperationException>(() => TensorStruct<RefPropertyStruct>(Vector(1f)));
+    }
+
+    [Fact]
+    public void TestADerivedRecordsInheritedPropertiesAreFieldsOfItsStruct()
+    {
+        var a = TensorData([2L], 1f, 2f);
+        var b = TensorData([2L], 10f, 20f);
+        Assert.Equal(["A", "B"], StructDefExtractor.ExtractFromType<DerivedFieldRecord>().Fields.Select(f => f.Name));
+        Assert.Equal([11f, 22f], RunStructInput<DerivedFieldRecord>(s => s.A + s.B, StructIn<DerivedFieldRecord>(("A", a), ("B", b))));
+    }
 
     [Fact]
     public void TestGeometryResolvesBesideAnAbsentOptionalASequenceOrAStructInput()

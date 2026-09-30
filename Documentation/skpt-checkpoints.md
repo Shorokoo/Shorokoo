@@ -529,6 +529,9 @@ Rules:
   [named weight sets](#named-weight-sets-default--ema). A training checkpoint's extra
   `models/` entries bind no weights.
 - A single data entry must hold under 2 GB of tensor data, both stored and decompressed.
+- An archive holds under 4 GiB and at most 65,535 entries. A save that would exceed either
+  limit, or put more than `int.MaxValue` bytes in one entry, is refused with
+  `NotSupportedException` before anything is written, leaving any previous file intact.
 - The flat safetensors training format carries no rig constituents: rebuild the rig from
   the same graphs, then `rig.LoadCheckpoint`.
 - Precompiled artifacts are not supported.

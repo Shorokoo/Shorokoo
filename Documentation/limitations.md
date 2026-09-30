@@ -274,7 +274,7 @@ outputs in host memory on every execution provider, including ones flagged in
 loaded through `IsolatedBackend.Load` or `BackendPackage.TryLoad`, and a sequence
 moves to another context element by element.
 
-### Device-memory readings are the device's, and device 0's
+### Device-memory readings are process-wide, and device 0's
 
 Device-memory configuration is per context, session and run
 (`ComputeContext.DeviceMemory`, `RunSettings`; see
@@ -283,12 +283,13 @@ host can have separate budgets and arena strategies.
 
 Reporting is process-wide. `DeviceMemory.Read()` and `Sample()` query the CUDA
 device current for the calling thread (device 0, which the shipped GPU backends
-use) and return the whole device's usage, including other processes.
-`PeakUsedBytes` is one record for the process. `CompiledGraph.ReadArenaStatistics()`
-reads one session's arena and `ComputeContext.ReadDeviceMemoryUse()` what a
-context holds against its budget (see
-[What one session's arena did](inference.md#what-one-sessions-arena-did)); nothing
-reports this process's total share of the card.
+use) and return the whole device's usage, including other processes, and this
+process's share of it (`ProcessBytes`). `PeakUsedBytes` and `PeakProcessBytes`
+are one record each for the process: two contexts training side by side in one
+process share them, and neither can be split between contexts.
+`CompiledGraph.ReadArenaStatistics()` reads one session's arena and
+`ComputeContext.ReadDeviceMemoryUse()` what a context holds against its budget
+(see [What one session's arena did](inference.md#what-one-sessions-arena-did)).
 
 ### Backprop through dynamic loops
 
@@ -427,7 +428,7 @@ included, are unaffected. Declare the struct as an `IStruct` interface instead.
 
 Import reads every standard-domain (`ai.onnx`) node against its current definition (opset 21,
 or the operator's own opset for an operator introduced after 21, with the attributes opsets
-22–26 add; the range of the bundled ONNX Runtime 1.26, which pins ONNX 1.21). It does not
+22–26 add; the range the bundled ONNX Runtime 1.30 loads). It does not
 check the opset the model declares and converts nothing. **Models older than opset 21 are not
 supported, and their behaviour is undefined**: import does not refuse them, and where an
 operator's signature changed after the model's opset, either of these can happen:
@@ -445,7 +446,7 @@ Convert an older model to opset 21 before importing it, for example with
 Export stamps models at the **opset-21 baseline**, raised only as far as the graph
 requires. Post-21 operators have export floors (`RMSNormalization` and
 `RotaryEmbedding` 23; `Attention`, `Swish` and `TensorScatter` 24, `Attention`
-because ORT 1.26's CPU kernel starts there; `BitCast` and `CumProd` 26), but an
+because Shorokoo defines it with the opset-24 inputs; `BitCast` and `CumProd` 26), but an
 authored graph never emits one:
 
 - `Attention`, `AttentionWithKVCache`, `RotaryEmbedding`, `BitCast` and `CumProd`
@@ -456,7 +457,7 @@ authored graph never emits one:
   authored and stamps at 24.
 
 The baseline is 21 rather than 26 because the stamp selects ONNX Runtime kernel
-versions, and ORT 1.26's CPU provider lacks some: it registers no opset-22 kernels
+versions, and ORT 1.30's CPU provider lacks some: it registers no opset-22 kernels
 for `GlobalLpPool` or `RandomNormalLike`, so a model stamped at opset ≥ 22 fails to
 load where the opset-21 model runs.
 

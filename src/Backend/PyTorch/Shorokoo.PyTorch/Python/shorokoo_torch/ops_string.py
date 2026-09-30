@@ -107,10 +107,11 @@ def tf_idf_vectorizer(x, /, *, max_gram_length, max_skip_count, min_gram_length,
     if mode == "IDF":
         counts = (counts > 0).astype(np.float32)
     if mode in ("IDF", "TFIDF") and weights is not None and len(weights):
-        # A weight per output position, as ONNX Runtime and the reference implementation read them.
+        # The i-th weight is the i-th n-gram of the pool's, as the spec reads them, applied at the output
+        # position that n-gram is counted in.
         scale = np.zeros(width, dtype=np.float32)
-        known = min(width, len(weights))
-        scale[:known] = weights[:known]
+        for gram_id, weight in enumerate(weights[:len(ngram_indexes)]):
+            scale[ngram_indexes[gram_id]] = weight
         counts = counts * scale
     result = counts.reshape(-1) if host.ndim <= 1 else counts
     return _on_device(result, torch.float32)

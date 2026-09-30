@@ -779,9 +779,9 @@ folder and load the second with `IsolatedBackend`:
      is the usual route, and this recipe cuts that route on purpose. -->
 <PackageReference Include="Shorokoo.OnnxRuntime" Version="..." />
 
-<PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.26.0"
+<PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.30.0"
                   ExcludeAssets="all" GeneratePathProperty="true" />
-<PackageReference Include="Microsoft.ML.OnnxRuntime.Gpu.Linux" Version="1.26.0"
+<PackageReference Include="Microsoft.ML.OnnxRuntime.Gpu.Linux" Version="1.30.0"
                   ExcludeAssets="all" GeneratePathProperty="true" />
 
 <ShorokooBackendNatives BackendId="cpu"
@@ -932,15 +932,29 @@ for (int step = 0; step < steps; step++)
     run.Step(input.Shared(), target.Shared());   // read, so the next step can use them
     DeviceMemory.Sample();
 }
-Console.WriteLine($"peak {DeviceMemory.PeakUsedBytes / (1024 * 1024)} MiB");
+Console.WriteLine($"this process at its peak {DeviceMemory.PeakProcessBytes / (1024 * 1024)} MiB");
+Console.WriteLine($"the card at its peak {DeviceMemory.PeakUsedBytes / (1024 * 1024)} MiB");
 ```
 
-`Read()` returns a `DeviceMemoryReading` (`UsedBytes`, `FreeBytes`, `TotalBytes`); `Sample()`
-also folds it into `PeakUsedBytes`; `ResetPeak()` restarts the peak.
+`Read()` returns a `DeviceMemoryReading` (`UsedBytes`, `FreeBytes`, `TotalBytes`,
+`ProcessBytes`); `Sample()` also folds it into `PeakUsedBytes` and `PeakProcessBytes`;
+`ResetPeak()` restarts both.
 
-- The figures are the **device's**, including other processes.
-- `PeakUsedBytes` is the largest of your own `Sample()` calls; nothing samples on its own. A
-  sample costs about a microsecond, so one per step is cheap — and, unlike an external poller
+- `UsedBytes`, `FreeBytes` and `TotalBytes` are the **device's**, including other processes.
+- `ProcessBytes` is **this process's** share: everything it holds on the card — weights and
+  optimizer state, every session's arena, the CUDA context and its libraries' workspaces — and
+  nothing another process holds. `PeakProcessBytes` is therefore the one figure for "the most this
+  run held on the card". It is the figure Task Manager shows per process on Windows, and
+  `nvidia-smi` lists per process where it can.
+- `ProcessBytes` is read from DXGI for a Windows card driven by WDDM (a GeForce, or any card
+  driving a display), where `nvidia-smi` prints `[N/A]` for it, and from NVML everywhere else. It
+  is `null` where neither answers for the card: where DXGI does not, and NVML is not installed,
+  gives no per-process figure, or does not see this process's id, as in a container with its own
+  process-id namespace. The two figures of one reading are taken one after the other, so while
+  this process allocates on another thread its share can momentarily read above the card's.
+- The peaks are the largest of your own `Sample()` calls; nothing samples on its own. A
+  sample cost about a microsecond on an RTX 4090 under WDDM, and NVML's process list about 120
+  microseconds, so one per step is cheap — and, unlike an external poller
   such as `nvidia-smi`, cannot miss the step.
 - With no CUDA runtime both return `null`, so the calls can stay in CPU code.
 - The first reading initializes this process's CUDA context (a few hundred MiB) if none exists;
@@ -1040,11 +1054,14 @@ if (compiled.ReadArenaStatistics() is { } arena)
                     + $"{arena.TotalAllocatedBytes} taken from the device");
 ```
 
-`ArenaStatistics` has nine figures: `InUseBytes`, `MaxInUseBytes`, `MaxAllocSizeBytes`,
-`TotalAllocatedBytes`, `LimitBytes` (the session's arena limit; `-1` with no budget),
-`AllocationCount`, `ArenaExtensionCount`, `ArenaShrinkageCount` and `ReserveCount`. It is
-`null` on a backend that reports none.
+`ArenaStatistics` has ten figures: `InUseBytes`, `RequestedInUseBytes`, `MaxInUseBytes`,
+`MaxAllocSizeBytes`, `TotalAllocatedBytes`, `LimitBytes` (the session's arena limit; `-1` with
+no budget), `AllocationCount`, `ArenaExtensionCount`, `ArenaShrinkageCount` and
+`ReserveCount`. It is `null` on a backend that reports none.
 
+- `RequestedInUseBytes` is the part of `InUseBytes` the callers asked for; the rest is what the
+  arena added to round each allocation up to its block sizes. A backend whose allocator does not
+  report what was requested (JAX) reports `InUseBytes` here, rounding included.
 - `TotalAllocatedBytes` is not a bound on card usage — it can exceed the card's capacity; use
   `DeviceMemory.Read()` for that.
 - `MaxInUseBytes` is a lifetime high-water mark; it cannot be reset and shrinkage does not
@@ -1063,7 +1080,7 @@ if (compiled.ReadPinnedArenaStatistics() is { } pinned)
     Console.WriteLine($"{pinned.MaxInUseBytes} of pinned host memory at its highest");
 ```
 
-Same nine figures, not included in `ReadArenaStatistics()`; `null` on CPU backends. Zero for a
+Same ten figures, not included in `ReadArenaStatistics()`; `null` on CPU backends. Zero for a
 graph that stays on the card.
 
 ### Per-run statistics on the context
@@ -1155,7 +1172,7 @@ second read returns the same trace. `Nodes` is in execution order; inserted `Mem
 
 | what | where | cost | null / none when |
 |---|---|---|---|
-| `DeviceMemory.Read()` | static, the whole card | a microsecond | no CUDA runtime |
+| `DeviceMemory.Read()` | static, the whole card, and this process's share of it | about a microsecond through DXGI; about 120 microseconds through NVML | no CUDA runtime; `ProcessBytes` alone is null where the driver attributes no memory to this process |
 | `CompiledGraph.ReadArenaStatistics()` | one session's allocator | a call into the backend | the backend reports no arena |
 | `CompiledGraph.ReadPinnedArenaStatistics()` | one session's pinned host arena | a call into the backend | the backend stages nothing (every CPU one) |
 | `ComputeContext.ReadDeviceMemoryUse()` | what the context holds in its memory, against its budget | a walk over its list | never null; `LimitBytes` is null with no budget in force |

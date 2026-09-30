@@ -19,8 +19,8 @@ namespace Shorokoo.OnnxRuntime;
 internal static class CudaInterop
 {
     private static string LibraryName => RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
-        ? "cudart64_12.dll"
-        : "libcudart.so.12";
+        ? "cudart64_13.dll"
+        : "libcudart.so.13";
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate int Memcpy(IntPtr destination, IntPtr source, nuint count, int kind);

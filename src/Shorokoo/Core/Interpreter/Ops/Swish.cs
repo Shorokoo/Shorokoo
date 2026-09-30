@@ -13,8 +13,8 @@ namespace Shorokoo.Core.Interpreter.Ops;
 /// Output shape and dtype match the input; values are computed for small float
 /// tensors. It serves imported graphs only: <c>NN.Swish</c>/<c>OnnxOp.Swish</c> lower
 /// to Mul/Sigmoid, so nothing built through the <c>Ops</c>/<c>OnnxOp</c> entry points
-/// contains a <c>Swish</c> node. NOTE: ONNX Runtime 1.26 has no Swish kernel on any
-/// execution provider, so for an imported node the QEE is the only execution path.
+/// contains a <c>Swish</c> node. NOTE: ONNX Runtime runs a <c>Swish</c> node only in a model
+/// stamped at opset 24; at 25 or 26 it has no kernel for it.
 /// </summary>
 internal sealed class SwishOp : QuickOp
 {

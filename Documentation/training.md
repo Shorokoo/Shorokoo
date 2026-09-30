@@ -785,7 +785,7 @@ reporting:
 - **What the step held**: trainable parameters, model state, optimizer state and the batch, each
   with tensor count and size, plus the five largest tensors.
 - **The card's figures** (where a CUDA runtime is installed; `DeviceMemory.Read()`): used, free and
-  total across processes, and this process's arena cap if set.
+  total across processes, how much of it is this process's, and this session's arena cap if set.
 - **This process's memory**: working set, commit charge and managed heap against the limit in force
   (cgroup/container, Job Object, or machine RAM).
 
@@ -798,7 +798,8 @@ or both have room and the arena could not extend by the block it wanted.
 [CR009] Compute context operation failed in TrainingRig.TrainStep: allocating memory for the training
 step at step 1 failed. The failing allocation was for DEVICE memory — the accelerator's arena (backend
 'Shorokoo.WinGPU'). Training state held for this operation: 296 tensor(s), 1.83 GiB in total (...).
-Device: 12.59 GiB of 23.99 GiB in use across all processes, 11.4 GiB free. Host process: working set
+Device: 12.59 GiB of 23.99 GiB in use across all processes, 11.9 GiB of it this process's, 11.4 GiB
+free. Host process: working set
 9.61 GiB, commit 27.4 GiB, managed heap 3.02 GiB; against a configured memory limit of 28 GiB (98%
 used). The device has room, yet this process is close to its own memory limit — and on Windows/WDDM a
 device allocation is backed by system commit, so a limit meant to bound HOST memory bounds DEVICE

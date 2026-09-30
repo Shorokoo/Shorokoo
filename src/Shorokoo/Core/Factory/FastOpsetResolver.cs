@@ -65,13 +65,12 @@ namespace Shorokoo.Core.Factory
         /// <see cref="OpSetVersion.OPS_21"/> because blanket-stamping a higher opset
         /// selects newer kernel versions in ONNX Runtime, and ORT's CPU provider has
         /// gaps there (e.g. GlobalLpPool/RandomNormalLike have no registered opset-22
-        /// kernels even in ORT 1.26, where the opset-22 change was bfloat16-only).
+        /// kernels, although the opset-22 change was bfloat16-only).
         /// </summary>
         private static readonly Dictionary<string, OpSetVersion> MinimumOpsetByOpCode = new()
         {
-            // Attention is defined since opset 23, but ORT 1.26's CPU provider only
-            // registers the kernel for opset 24+ (and the def models the opset-24
-            // input list with nonpad_kv_seqlen), so stamp 24.
+            // Attention is defined since opset 23, but the def models the opset-24
+            // input list with nonpad_kv_seqlen, so stamp 24.
             ["Attention"] = OpSetVersion.OPS_24,
             ["RMSNormalization"] = OpSetVersion.OPS_23,
             ["RotaryEmbedding"] = OpSetVersion.OPS_23,

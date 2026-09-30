@@ -62,6 +62,11 @@ public class QeeNormLinalgAuditTests
     }
 
     [Fact]
+    public void TestDequantizeLinearWithAZeroPointKeepsItsValuesThroughAReshapeOrATranspose()
+        => Assert.True(QeeAudit.Check<QeeDequantizeWithZeroPointReshapeTransposeAuditCheck>(
+            I8([3L], 100, -6, 2), TensorData([3L], (short)1000, (short)-6, (short)2)));
+
+    [Fact]
     public void TestDequantizeLinearPerAxisKeepsItsValuesThroughATransposeOfAKnownRank()
     {
         Assert.True(QeeAudit.Check<QeeDequantizePerAxisTransposeAuditCheck>(I8([2L, 3L], 10, -6, 2, 4, 0, -8)));
@@ -90,10 +95,10 @@ public class QeeNormLinalgAuditTests
     }
 
     [Fact]
-    public void TestOnnxRuntimeLayerNormalizationOfRowsWithALargeMeanIsFarFromItsFunctionBodyOrNaN()
+    public void TestLayerNormalizationOfRowsWithALargeMeanAgreesWithItsFunctionBody()
     {
-        Assert.True(AutoTest.AdvancedTestGraph<LayerNormalizationOfALargeMeanFarFromItsFunctionBodyCheck>([], LargeMeanRows));
-        Assert.True(AutoTest.AdvancedTestGraph<LayerNormalizationOfALargeMeanFarFromItsFunctionBodyCheck>([], RowsAroundAHundred(0.01f)));
+        Assert.True(AutoTest.AdvancedTestGraph<LayerNormalizationOfALargeMeanCheck>([], LargeMeanRows));
+        Assert.True(AutoTest.AdvancedTestGraph<LayerNormalizationOfALargeMeanCheck>([], RowsAroundAHundred(0.01f)));
     }
 
     internal static TensorData[] LargeMeanRows => RowsAroundAHundred(0.1f);

@@ -52,7 +52,7 @@ namespace Shorokoo.Tests.Modules
                 keepAspectRatioPolicy: null, mode: ResizeMode.Nearest,
                 nearestMode: NearestMode.Floor);
             // single-axis scales: axes [3] → floor(8*0.5) = 4 (negative axes are covered by
-            // the QEE-only module below — ORT 1.25.1's Resize kernel rejects them).
+            // the QEE-only module below).
             var axesScales = (Tensor<float32>)OnnxOp.Resize(x, roi: null,
                 scales: Vector(0.5f), sizes: null,
                 antialias: null, axes: [3L], coordinateTransformationMode: null,

@@ -129,8 +129,8 @@ public class QeeOpset26AuditTests
             n => n.OpType == OpCodes.TENSOR_SCATTER);
     }
 
-    // TensorScatter is the one lowered operator with a reference implementation to hand: ORT
-    // 1.26's CPU provider registers a native kernel for it at opset 24. The export list is
+    // TensorScatter is the one lowered operator with a reference implementation to hand: ONNX
+    // Runtime's CPU provider registers a native kernel for it at opset 24. The export list is
     // thread-scoped, so the same graph can be written out fused — one opset-24 TensorScatter node
     // ORT runs itself — or decomposed, and the two runs compared byte for byte. These are data
     // movements, so no tolerance is involved.

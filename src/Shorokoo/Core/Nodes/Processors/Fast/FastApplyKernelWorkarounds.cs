@@ -62,9 +62,12 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// Applies <paramref name="set"/> to <paramref name="graph"/> in place, and returns what it
         /// spliced in. <paramref name="shapesAreConcrete"/> is what every site outside a loop body
         /// reports as <see cref="WorkaroundSite.ShapesAreConcrete"/>; a site inside one reports
-        /// false (<see cref="WorkaroundSite.IsInLoopBody"/>).
+        /// false (<see cref="WorkaroundSite.IsInLoopBody"/>). <paramref name="isFunctionBody"/> says
+        /// the graph is a function's body, whose inputs are values from wherever it is called
+        /// (<see cref="WorkaroundSite.IsFromOutsideBody"/>).
         /// </summary>
-        public static Splices Process(InternalComputationGraph graph, KernelWorkaroundSet? set, bool shapesAreConcrete = false)
+        public static Splices Process(
+            InternalComputationGraph graph, KernelWorkaroundSet? set, bool shapesAreConcrete = false, bool isFunctionBody = false)
         {
             if (graph is null) throw new ArgumentNullException(nameof(graph));
             if (set is null || set.IsEmpty) return Splices.None;
@@ -80,6 +83,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
                 tensorInfo ??= FastTensorInfoProcessor.BuildTensorInfoLookup(graph);
                 var producers = graph.BuildProducerByOutputMap();
+                var outsideBody = workaround.ReadsBodies ? OutsideBody(graph, producers, tensorInfo, isFunctionBody) : null;
                 var read = ReadKeys(graph);
                 var plans = new Dictionary<string, List<CachedPlan>>(StringComparer.Ordinal);
                 var rewired = new Dictionary<FastTensorKey, FastTensorKey>();
@@ -103,7 +107,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                         loops--;
 
                     if (!workaround.OpCodes.Contains(node.OpCode)
-                        || WorkaroundSite.TryCreate(node, tensorInfo, producers, read, shapesAreConcrete, inLoopBody: loops > 0) is not { } site
+                        || WorkaroundSite.TryCreate(node, tensorInfo, producers, read, shapesAreConcrete, inLoopBody: loops > 0, outsideBody: outsideBody?.Invoke(node)) is not { } site
                         || !Applies(workaround, site, node))
                     {
                         newNodes.Add(node);
@@ -151,6 +155,88 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 ? Splices.None
                 : new Splices(minted, hosts, [.. graph.Nodes.Select(n => n.Key)], gaps, leadingGap, tensorInfo);
         }
+
+        /// <summary>
+        /// For a node of <paramref name="graph"/>, the test <see cref="WorkaroundSite.IsFromOutsideBody"/>
+        /// answers of its inputs: whether a value comes from outside the innermost loop or branch
+        /// body the node is in — its producer stands no later than the body's open node, which
+        /// itself produces the body's inputs, or it has none. At a function body's top level, where
+        /// the node is in no body of its own, the function's inputs are the values from outside: the
+        /// runtime puts the body in place wherever the function is called, a loop body among them.
+        /// Null for a node in no body of a graph that is not a function's.
+        ///
+        /// <para>Bodies are read off the graph as the model is emitted from it: a copy with its scopes
+        /// configured (<see cref="InternalComputationGraph.ConfigureScopes"/>), which moves each
+        /// branch's nodes inside its <c>If</c> — they are traced before the <c>IF_OPEN</c> — and
+        /// every other node into the widest scope its data flow allows. The copy is made on the first
+        /// question asked of a node in the walk.</para>
+        ///
+        /// <para>A value is traced back through what the runtime removes before it runs — an
+        /// <c>Identity</c>, and a <c>Cast</c> to the type it already has — since the call then reads
+        /// what those pass on.</para>
+        /// </summary>
+        private static Func<FastNode, Func<FastTensorKey, bool>?> OutsideBody(
+            InternalComputationGraph graph, IReadOnlyDictionary<FastTensorKey, FastNode> producers,
+            IReadOnlyDictionary<FastTensorKey, FastTensorInfo> tensorInfo, bool isFunctionBody)
+        {
+            var layout = new Lazy<(Dictionary<FastNodeKey, int> Position, Dictionary<FastNodeKey, int> Enclosing)>(() =>
+            {
+                IReadOnlyList<FastNode> nodes = graph.Nodes;
+                if (nodes.Any(n => FastOpsetResolver.IsOpenOpCode(n.OpCode)))
+                    try
+                    {
+                        var emitted = graph.Clone();
+                        emitted.ConfigureScopes();
+                        nodes = emitted.Nodes;
+                    }
+                    // A graph whose scopes cannot be configured yet is read as it stands.
+                    catch (InvalidOperationException) { }
+
+                var position = new Dictionary<FastNodeKey, int>(nodes.Count);
+                var enclosing = new Dictionary<FastNodeKey, int>(nodes.Count);
+                var open = new Stack<int>();
+                for (int i = 0; i < nodes.Count; i++)
+                {
+                    var node = nodes[i];
+                    if (FastOpsetResolver.IsCloseOpCode(node.OpCode) && open.Count > 0) open.Pop();
+                    position[node.Key] = i;
+                    enclosing[node.Key] = open.Count > 0 ? open.Peek() : -1;
+                    if (FastOpsetResolver.IsOpenOpCode(node.OpCode)) open.Push(i);
+                }
+                return (position, enclosing);
+            });
+
+            FastNode? Source(FastTensorKey key)
+            {
+                for (int hops = 0; hops <= graph.Nodes.Count; hops++)
+                {
+                    if (!producers.TryGetValue(key, out var producer)) return null;
+                    if (!PassesThrough(producer, tensorInfo) || producer.Inputs is not [{ } input, ..]) return producer;
+                    key = input;
+                }
+                return null;
+            }
+
+            return node =>
+            {
+                var (position, enclosing) = layout.Value;
+                if (enclosing.TryGetValue(node.Key, out var body) && body >= 0)
+                    return key => Source(key) is not { } producer
+                                  || !position.TryGetValue(producer.Key, out var at) || at <= body;
+                if (isFunctionBody)
+                    return key => Source(key) is not { } producer || InternalOpCodes.IsModelInputOp(producer.OpCode);
+                return null;
+            };
+        }
+
+        /// <summary>Whether the runtime removes <paramref name="node"/> before it runs, so what reads
+        /// its output reads its input: an <c>Identity</c>, or a <c>Cast</c> to the type its input
+        /// already has.</summary>
+        private static bool PassesThrough(FastNode node, IReadOnlyDictionary<FastTensorKey, FastTensorInfo> tensorInfo)
+            => node.OpCode == OpCodes.IDENTITY
+            || node.OpCode == OpCodes.CAST && node.Inputs is [{ } input, ..] && node.Outputs is [{ } output, ..]
+               && tensorInfo.TryGetValue(input, out var from) && tensorInfo.TryGetValue(output, out var to)
+               && from.DType != DType.Invalid && from.DType.IsSameElementTypeAs(to.DType);
 
         private static bool Applies(KernelWorkaround workaround, WorkaroundSite site, FastNode node)
         {

@@ -220,7 +220,7 @@ internal sealed class PoolPaddingWorkaround : KernelWorkaround
             var padded = Pad(x, padding, value);
             pooled = pool(padded, null, kept, strides, ceilMode, kind == PoolKind.AverageIncludingPad);
             if (pooled.Length > 1)
-                pooled[1] = UnpaddedIndices(pooled[1], x, padded, Constant(written[..n]), n, storageOrder);
+                pooled[1] = UnpaddedIndices(pooled[1], x, padded, Constant(written[..n]), n, storageOrder, dilations);
         }
 
         if (!ceilMode || written[n..].All(w => w == 0)) return pooled;
@@ -241,8 +241,17 @@ internal sealed class PoolPaddingWorkaround : KernelWorkaround
     /// per axis, negative where the start is cropped): the leading batch-and-channel block is kept,
     /// and the spatial position is split into its coordinates, shifted, and recombined over
     /// <paramref name="x"/>'s extents — the last axis varying fastest for <c>storage_order</c> 0,
-    /// the first for 1.</summary>
-    private static Variable UnpaddedIndices(Variable indices, Variable x, Variable padded, Variable before, int n, long storageOrder)
+    /// the first for 1.
+    ///
+    /// <para>With <paramref name="dilations"/>, the padding was written into the input as its lowest
+    /// value, so an index names written padding only where the window holds nothing above it: every
+    /// element ties, and the pool took the window's first position, its start along every axis. The
+    /// spec's index is then the window's first input element, which along an axis where the start lies
+    /// in the written padding is the first position of the window past it,
+    /// <c>c + d · ceil(-c / d)</c>; along every other axis the start is already an input
+    /// position.</para></summary>
+    private static Variable UnpaddedIndices(Variable indices, Variable x, Variable padded, Variable before, int n, long storageOrder,
+        long[]? dilations = null)
     {
         var paddedShape = Shape(padded);
         var shape = Shape(x);
@@ -258,6 +267,13 @@ internal sealed class PoolPaddingWorkaround : KernelWorkaround
         {
             var extent = Extent(paddedShape, axis);
             coordinates[axis] = Sub(Mod(rest, extent), Gather(before, Constant((long)axis), 0L));
+            if (dilations is not null)
+            {
+                var c = coordinates[axis];
+                var d = Constant(dilations[axis]);
+                var skipped = Div(Sub(Add(Neg(c), d), Constant(1L)), d);
+                coordinates[axis] = Where(Less(c, Constant(0L)), Add(c, Mul(skipped, d)), c);
+            }
             rest = Div(rest, extent);
         }
         Variable position = Constant(0L);

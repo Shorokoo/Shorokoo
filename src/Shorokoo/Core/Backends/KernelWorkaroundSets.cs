@@ -10,4 +10,8 @@ public static class KernelWorkaroundSets
 {
     /// <summary>The rewrites around ONNX Runtime's kernels.</summary>
     public const string OnnxRuntime = "onnxruntime";
+
+    /// <summary>The rewrites around ONNX Runtime's kernels on its CUDA execution provider: those of
+    /// <see cref="OnnxRuntime"/>, and those around what that provider alone does otherwise.</summary>
+    public const string OnnxRuntimeCuda = "onnxruntime-cuda";
 }

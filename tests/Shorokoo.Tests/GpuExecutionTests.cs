@@ -29,6 +29,19 @@ public partial class AttentionLayerModel
     public static Tensor<float32> Inline(Tensor<float32> x) => TransformerEncoderLayer.Call(64L, 4L, 256L, true, x);
 }
 
+/// <summary>Sixty-four 64-by-64 weights, each its own parameter of one shape, so that initializing
+/// the model runs one draw session sixty-four times over.</summary>
+[Module]
+public partial class SquareStackModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+    {
+        for (int i = 0; i < 64; i++)
+            x = x.MatMul(Shorokoo.Modules.Initializers.XavierUniform.Init([Scalar(64L), Scalar(64L)]));
+        return x;
+    }
+}
+
 /// <summary>
 /// What the CUDA execution provider actually does, run rather than read: a graph on the card, the
 /// device-memory budget and the shrinking arena a resident training loop needs, and the memory
@@ -85,6 +98,19 @@ public class GpuExecutionTests
         }
 
         Assert.Equal(Train().Select(BitConverter.SingleToInt32Bits), Train().Select(BitConverter.SingleToInt32Bits));
+    }
+
+    [CudaFact]
+    public void CudaProvider_RigsFromOneSeedStartFromTheSameWeights()
+    {
+        var x = TensorData([2L, 64L], new float[128]);
+        float[] Initial() => Weights(TrainingRig.FromScratch(
+            SquareStackModel.ComputationGraph, L2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph, [x],
+            new AdamWOptimizerHyperparameters { LearningRate = 1e-3f },
+            runtimeContext: new ComputeContext(), rngConfig: new RngConfig { MasterSeed = 7 }).CreateInitialCheckpoint());
+
+        var first = Initial();
+        for (int i = 0; i < 4; i++) Assert.Equal(first, Initial());
     }
 
     /// <summary>
@@ -500,7 +526,7 @@ public class GpuExecutionTests
     }
 
     /// <summary>
-    /// The nine arena figures off a CUDA allocator, which is what the whole statistics surface
+    /// The ten arena figures off a CUDA allocator, which is what the whole statistics surface
     /// rests on and what no CPU machine can ask for: the allocator is built by name and a box
     /// without a card refuses it, so only the failure path has ever run. And what the arena holds
     /// before the first run — the session's weights, out of this same arena, so run 1's peak is
@@ -518,6 +544,7 @@ public class GpuExecutionTests
         var built = Assert.IsType<ArenaStatistics>(compiled.ReadArenaStatistics());
         Assert.Equal(ArenaProbeModels.WeightBytes, built.MaxInUseBytes);
         Assert.Equal(ArenaProbeModels.WeightBytes, built.InUseBytes);
+        Assert.Equal(ArenaProbeModels.WeightBytes, built.RequestedInUseBytes);
         Assert.Equal(ArenaProbeModels.WeightBytes, built.MaxAllocSizeBytes);
         Assert.Equal(ArenaProbeModels.WeightBytes, built.TotalAllocatedBytes);
         Assert.Equal(1L, built.AllocationCount);
@@ -684,6 +711,25 @@ public class GpuExecutionTests
         {
             DeviceMemory.ResetPeak();
         }
+    }
+
+    /// <summary>
+    /// The card's figure for this process alone, which #406 asked for: a gigabyte held on the card
+    /// is in it, and it is a part of what the card reports across every process.
+    /// </summary>
+    [CudaFact]
+    public void CudaProvider_TheProcessFigureHoldsWhatThisProcessPutOnTheCard()
+    {
+        using var ctx = new ComputeContext();
+        Assert.True(DeviceMemory.Read()!.Value.ProcessBytes > 0);
+
+        var held = ctx.AllocateUninitialized<float32>(new Shape(256L << 20));
+        DeviceMemoryReading reading;
+        try { reading = DeviceMemory.Read()!.Value; }
+        finally { held.Delete(); }
+
+        Assert.True(reading.ProcessBytes >= 1L << 30);
+        Assert.True(reading.ProcessBytes <= reading.UsedBytes);
     }
 
     /// <summary>

@@ -13,11 +13,11 @@
     A project opts in by declaring one ShorokooBackendNatives item per backend, pointing at a
     package's native folder and naming the folder to deploy it under:
 
-      <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.26.0"
+      <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.30.0"
                         ExcludeAssets="all" GeneratePathProperty="true" />
-      <PackageReference Include="Microsoft.ML.OnnxRuntime.Gpu.Linux" Version="1.26.0"
+      <PackageReference Include="Microsoft.ML.OnnxRuntime.Gpu.Linux" Version="1.30.0"
                         ExcludeAssets="all" GeneratePathProperty="true" />
-      <PackageReference Include="Microsoft.ML.OnnxRuntime.Managed" Version="1.26.0" />
+      <PackageReference Include="Microsoft.ML.OnnxRuntime.Managed" Version="1.30.0" />
 
       <ShorokooBackendNatives Include="$(PkgMicrosoft_ML_OnnxRuntime)\runtimes\linux-x64\native\*"
                               BackendId="cpu" />

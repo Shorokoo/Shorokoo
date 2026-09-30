@@ -1,7 +1,7 @@
 # Operator support matrix
 
 Shorokoo supports the standard `ai.onnx` domain from **opset 21** up to **opset 26**, the
-maximum implemented by the bundled ONNX Runtime 1.26; import does not convert older models.
+maximum the bundled ONNX Runtime 1.30 loads; import does not convert older models.
 Exported models are stamped at the
 **opset-21 baseline**; only a few post-21 attributes on imported (or
 `NodeBuilder`-built) nodes raise the stamp, and no post-21 operator reaches an
@@ -11,8 +11,8 @@ Every operator Shorokoo defines is listed below: the opset-21 set plus the
 post-21 additions (`Attention`, `RMSNormalization`, `RotaryEmbedding` at opset 23;
 `Swish`, `TensorScatter` at 24; `BitCast`, `CumProd` at 26), grouped by family.
 Each introducing opset is also the operator's export floor (see
-[limitations.md](limitations.md)), except `Attention`, floored at 24 because ORT
-1.26's CPU provider registers its kernel only from 24.
+[limitations.md](limitations.md)), except `Attention`, floored at 24 because Shorokoo
+defines it with the opset-24 inputs (`nonpad_kv_seqlen`).
 
 - **Build & run**: the operator can be constructed and executes on the ONNX
   Runtime backend. Footnotes flag spec-legal corners restricted in-framework or by
@@ -53,7 +53,7 @@ order they apply.
 | Abs | ✅ | ✅ | ✅ |
 | Acos | ✅ | ✅ | ✅ |
 | Acosh | ✅ | ✅ | ✅ |
-| Add | ✅ [16] | ✅ | ✅ |
+| Add | ✅ | ✅ | ✅ |
 | Asin | ✅ | ✅ | ✅ |
 | Asinh | ✅ | ✅ | ✅ |
 | Atan | ✅ | ✅ | ✅ |
@@ -68,7 +68,7 @@ order they apply.
 | Cosh | ✅ | ✅ | ✅ |
 | CumProd | ❌ [1] | ✅ | ✅ |
 | CumSum | ✅ | ✅ | ✅ |
-| Div | ✅ [16] | ✅ | ✅ |
+| Div | ✅ | ✅ | ✅ |
 | Elu | ✅ | ✅ | ✅ |
 | Erf | ✅ | 🟡 [6] | ✅ |
 | Exp | ✅ | ✅ | ✅ |
@@ -85,7 +85,7 @@ order they apply.
 | Min | ✅ | ✅ | ✅ [9] |
 | Mish | ✅ | ✅ | ✅ |
 | Mod | ✅ | ✅ | ✅ [10] |
-| Mul | ✅ [16] | ✅ | ✅ |
+| Mul | ✅ | ✅ | ✅ |
 | Neg | ✅ | ✅ | ✅ |
 | PRelu | 🟡 [11] | ✅ | ✅ |
 | Pow | 🟡 [12] | ✅ | ✅ [13] |
@@ -102,7 +102,7 @@ order they apply.
 | Softplus | ✅ | ✅ | ✅ |
 | Softsign | ✅ | ✅ | ✅ |
 | Sqrt | ✅ | ✅ | ✅ |
-| Sub | ✅ [16] | ✅ | ✅ |
+| Sub | ✅ | ✅ | ✅ |
 | Sum | ✅ | ✅ | ✅ |
 | Swish | ✅ [15] | ✅ | ✅ |
 | Tan | ✅ | ✅ | ✅ |
@@ -130,16 +130,8 @@ order they apply.
     the exponent is a constant).
 14. Float tensors only; the spec also allows signed integers since opset 14.
 15. Lowers inline to `Mul`/`Sigmoid` (`y = x * sigmoid(alpha * x)`), so it runs on
-    any execution provider; ONNX Runtime 1.26 has no `Swish` kernel.
-16. ONNX Runtime's graph optimization removes an `Add` or `Mul` with an empty
-    constant operand, and a `Sub` or `Div` with an empty constant right operand,
-    giving the other operand where the spec gives the empty broadcast result. Its
-    backend rewrites such a call when it builds a session, when the operand is a
-    `Constant` of the model and the other operand is not: the empty operand is
-    rebuilt from the other one, as a value ONNX Runtime does not compute when it
-    builds the session. Two `Constant` operands, and an empty operand ONNX
-    Runtime computes from constants when it builds the session, are left as
-    they are: accepted as ONNX Runtime's behaviour ([#454](https://github.com/Shorokoo/Shorokoo/issues/454)).
+    any execution provider; ONNX Runtime runs a `Swish` node only in a model stamped at
+    opset 24.
 
 ## Comparisons & logic
 
@@ -186,16 +178,16 @@ Boolean/integer outputs are non-differentiable, hence N/A.
 |---|---|---|---|
 | ArgMax | ✅ | ✅ | N/A [1] |
 | ArgMin | ✅ | ✅ | N/A [1] |
-| ReduceL1 | ✅ [5] | ✅ | ✅ |
+| ReduceL1 | ✅ [5, 6] | ✅ | ✅ |
 | ReduceL2 | ✅ [5] | ✅ | ✅ |
 | ReduceLogSum | ✅ [5] | 🟡 [4] | ✅ |
 | ReduceLogSumExp | ✅ [5] | 🟡 [4] | ✅ |
 | ReduceMax | ✅ [5] | 🟡 [4] | ✅ [2] |
-| ReduceMean | ✅ [5] | 🟡 [4] | ✅ |
+| ReduceMean | ✅ [5, 6] | 🟡 [4] | ✅ |
 | ReduceMin | ✅ [5] | 🟡 [4] | ✅ [2] |
-| ReduceProd | ✅ [5] | ✅ | ✅ [3] |
-| ReduceSum | ✅ [5] | ✅ | ✅ |
-| ReduceSumSquare | ✅ [5] | ✅ | ✅ |
+| ReduceProd | ✅ [5, 6] | ✅ | ✅ [3] |
+| ReduceSum | ✅ [5, 6] | ✅ | ✅ |
+| ReduceSumSquare | ✅ [5, 6] | ✅ | ✅ |
 
 `noop_with_empty_axes` set with no axes, or an empty axes tensor, means no axis is
 reduced: each element is a group of its own, and the output, of the input's shape,
@@ -233,23 +225,20 @@ shape and type.
      reduced axes put back by an `Unsqueeze`, and an empty input with empty axes is
      viewed with a trailing axis of one that alone is reduced — no branch and no
      copy ([#409](https://github.com/Shorokoo/Shorokoo/issues/409)).
-   - A float16 `ReduceSumSquare`, `ReduceL1` or `ReduceLogSum` with no axes input:
-     ONNX Runtime's kernel crashes the process on an empty input. The call becomes
-     an `If` on the input's element count, the product of its shape, that reduces
-     an empty input in float32 and casts the result back. ONNX Runtime folds the
-     `If` away when it builds the session wherever that shape follows from the
-     stated input dimensions; where it depends on the data, the `If` runs with the
-     session ([#411](https://github.com/Shorokoo/Shorokoo/issues/411)).
-   - An integer or boolean `ReduceMax`/`ReduceMin`: ONNX Runtime gives an empty
-     group 0 for every integer type, and throws when a reduced axis of a `bool`
-     input has extent 0. A `bool` call becomes a uint8 `ReduceMax` of the input
-     cast back — over the negated input, negated back, for `ReduceMin` — whose
-     empty group gives 0, that is false: exact for every input, with no branch. An
-     integer call becomes an `If` on the input's element count being 0, folded as
-     above: the other branch is the plain operator, and the empty branch fills its
-     output shape with the identity from note 4. An unsigned `ReduceMax`, whose
-     identity is 0, and a reduction with no axes and `noop_with_empty_axes` set are
-     left alone ([#382](https://github.com/Shorokoo/Shorokoo/issues/382)).
+   - A `bool` `ReduceMax`/`ReduceMin`: ONNX Runtime throws when a reduced axis of a
+     `bool` input has extent 0. The call becomes a uint8 `ReduceMax` of the input cast
+     back — over the negated input, negated back, for `ReduceMin` — whose empty group
+     gives 0, that is false: exact for every input, with no branch. A reduction with no
+     axes and `noop_with_empty_axes` set is left alone
+     ([#382](https://github.com/Shorokoo/Shorokoo/issues/382)).
+6. Over an integer input, Shorokoo's folding and QEE compute the sum, mean, product,
+   L1 norm and sum of squares in the declared width, wrapping as two's complement:
+   int32 `ReduceSum([2147483647, 2147483647])` is −2, and the mean of the same pair is
+   −1. ONNX Runtime's CPU kernels accumulate an int32 or int64 group in double and clamp
+   the result to the type's range, so that sum and mean both give 2147483647; an int64
+   group is also rounded once its accumulation passes 2^53
+   (`ReduceSum([9007199254740993, 0])` gives 9007199254740992). A result within the
+   type and below 2^53 is exact on both. Accepted as ONNX Runtime's behaviour.
 
 ## Shape & data movement
 
@@ -401,18 +390,11 @@ shape and type.
      only the type's lowest value a wrong index. When the `Indices` output is
      read, the pool is computed over the input cast to float32 and its values cast
      back ([#420](https://github.com/Shorokoo/Shorokoo/issues/420)).
-   - Not rewritten: ONNX Runtime's float16, float32 and float64 `MaxPool` gives a
-     window whose maximum is at or below the type's lowest finite value (for
-     float16, which it pools in float32, a window of only −inf) a wrong index —
-     −1 in a single-channel pool over one axis, another number elsewhere — and,
-     for float32 and float64, the lowest finite value in place of −inf. Accepted
-     as ONNX Runtime's behaviour
-     ([#437](https://github.com/Shorokoo/Shorokoo/issues/437)).
-   - Not rewritten: ONNX Runtime's float32 and float64 `MaxPool` without an
-     `Indices` output gives a window of only −inf the type's lowest finite value
-     instead of −inf; float16, pooled in float32, gives float32's lowest finite
-     value or −inf, depending on what reads the pool. Accepted as ONNX Runtime's
-     behaviour ([#426](https://github.com/Shorokoo/Shorokoo/issues/426)).
+   - A `MaxPool` whose `Indices` output is read, with pads as large as the kernel:
+     the padding written into the input is the element type's lowest value, so in a
+     window whose input elements are all that value every position ties and the pool
+     takes the window's start, which may be written padding. Such an index is carried
+     to the window's first input element, the spec's.
    - On the [PyTorch backend](pytorch-backend.md#limitations), which pads the
      input with −inf itself, a window whose maximum is −inf takes a padded
      position before the input element holding it as its first maximum: its
@@ -434,7 +416,7 @@ shape and type.
 | GroupNormalization | ✅ | 🟡 [5] | ✅ |
 | InstanceNormalization | ✅ | 🟡 [5] | ✅ |
 | LRN | ✅ | 🟡 [5] | ✅ |
-| LayerNormalization | ✅ [8] | 🟡 [5] | ✅ [6] |
+| LayerNormalization | ✅ | 🟡 [5] | ✅ [6] |
 | LpNormalization | ✅ | 🟡 [5] | ✅ |
 | MeanVarianceNormalization | ✅ | 🟡 [5] | ✅ |
 | NegativeLogLikelihoodLoss | ✅ | 🟡 [5] | ✅ |
@@ -456,14 +438,6 @@ shape and type.
 7. Lowers inline to opset-21 primitives
    (`y = x / sqrt(mean(x², suffix axes) + epsilon) * scale`, via
    `ReduceMean`/`Sqrt`/`Div`/`Mul`), so it runs on any execution provider.
-8. ONNX Runtime's CPU kernel takes the variance as `E[x²] − E[x]²`, which
-   cancels catastrophically for float32 rows whose mean is large next to their
-   spread: rows of mean 100 and spread 0.1 come out off by tens, and a spread of
-   0.01 gives NaN. The operator's function body centres the input before
-   squaring it, `E[(x − E[x])²]`, and the PyTorch backend computes that form;
-   subtracting each row's mean before the call gives the same result without
-   the loss. Accepted as ONNX Runtime's behaviour
-   ([#384](https://github.com/Shorokoo/Shorokoo/issues/384)).
 
 ## MatMul & linear algebra
 
@@ -699,7 +673,7 @@ String operators are non-differentiable.
 
 | Op | Build & run | QEE | Gradient |
 |---|---|---|---|
-| If | ✅ [5] | ✅ | ✅ [1] |
+| If | ✅ | ✅ | ✅ [1] |
 | Loop | ✅ | 🟡 [2] | 🟡 [3] |
 | Scan | ❌ [4] | ❌ [4] | ❌ [4] |
 
@@ -711,15 +685,6 @@ String operators are non-differentiable.
 4. A model containing `Scan` is rejected at import; see
    [limitations.md](limitations.md). Use an explicit `Loop` (in Shorokoo,
    `LoopAPI` with `ctx.Scan`).
-5. ONNX Runtime fails to build a session in which it has folded an `If` to a
-   branch holding a constant of 128 bytes or more: the build throws
-   `OnnxRuntimeException` (`!utils::HasExternalDataInMemory(tensor_proto)`). It
-   folds an `If` whose condition it computes when it builds the session, from
-   constants and the input dimensions the session states. Accepted as ONNX
-   Runtime's behaviour; a branch value computed from the model's inputs, rather
-   than from constants alone, avoids it. The `If`s its backend's own rewrites
-   build never hold such a constant
-   ([#455](https://github.com/Shorokoo/Shorokoo/issues/455)).
 
 ## Shorokoo-specific operators
 

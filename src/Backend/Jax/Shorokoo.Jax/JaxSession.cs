@@ -187,7 +187,7 @@ internal sealed class JaxSession : IShorokooSession
                 using var item = figures[index];
                 return item.As<long>();
             }
-            return new ArenaStatistics(At(0), At(1), At(2), At(3), At(4), At(5), At(6), At(7), At(8));
+            return new ArenaStatistics(At(0), At(1), At(2), At(3), At(4), At(5), At(6), At(7), At(8), At(9));
         }
     }
 

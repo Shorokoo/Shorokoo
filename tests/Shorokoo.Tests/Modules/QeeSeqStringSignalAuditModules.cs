@@ -395,8 +395,8 @@ namespace Shorokoo.Tests.Modules
     /// make an empty piece; at whitespace runs without one; maxsplit 1), Unique over strings, and
     /// Cast between numbers and strings: a float as printf's %.8g, an integer and a bool in
     /// decimal, and strings read back as floats (exponent form, INF in any case) and as integers;
-    /// a reversing Slice of strings whose start clamps to the first; TfIdfVectorizer weighting by
-    /// output position in TFIDF and IDF modes; RegexFullMatch in RE2's syntax, whose \d and \s
+    /// a reversing Slice of strings whose start clamps to the first; TfIdfVectorizer weighting each
+    /// n-gram of the pool by its own weight in TFIDF and IDF modes, wherever its output position is; RegexFullMatch in RE2's syntax, whose \d and \s
     /// are ASCII, with POSIX classes, \pL, \x{41} and \z.
     /// Inputs x = ["Hello World", "the  quick fox"], f = [1, 0.1, −3.5, 1e20, 1e−5, 123456789],
     /// i = [−7, 0, 9007199254740993].</summary>
@@ -436,8 +436,8 @@ namespace Shorokoo.Tests.Modules
                     Vector(1L, 1L)) +
                 IntMismatch((Tensor<int64>)OnnxOp.Cast(Strings("42", "-17"), null, DType.Int64), Vector(42L, -17L)) +
                 Mismatch(x.Slice(Vector(-4L), Vector(-10L), Vector(0L), Vector(-1L)), Strings("Hello World")) +
-                FloatMismatch(TfIdf(i, "TFIDF"), Vector(0.5f, 1.5f, 5f)) +
-                FloatMismatch(TfIdf(i, "IDF"), Vector(0.5f, 1.5f, 2.5f)) +
+                FloatMismatch(TfIdf(i, "TFIDF"), Vector(1.5f, 2.5f, 1f)) +
+                FloatMismatch(TfIdf(i, "IDF"), Vector(1.5f, 2.5f, 0.5f)) +
                 IntMismatch(Matches(Strings("123", "١٢٣"), @"\d+"), Vector(1L, 0L)) +
                 IntMismatch(Matches(Strings(" ", "\u00a0"), @"\s"), Vector(1L, 0L)) +
                 IntMismatch(Matches(Strings("abc", "ab1"), "[[:alpha:]]+"), Vector(1L, 0L)) +

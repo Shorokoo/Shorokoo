@@ -14,7 +14,7 @@ namespace Shorokoo.Core.Backends;
 /// <code>
 /// [assembly: ShorokooBackend("linux", "x64", "cuda",
 ///     Natives = "libonnxruntime.so;libonnxruntime_providers_cuda.so",
-///     RequiresCudaRuntime = "12")]
+///     RequiresCudaRuntime = "13")]
 /// </code>
 /// </summary>
 [AttributeUsage(AttributeTargets.Assembly, AllowMultiple = false)]

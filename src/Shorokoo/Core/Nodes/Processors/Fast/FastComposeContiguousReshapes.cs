@@ -16,17 +16,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// dim from the direct producer, so those are excluded; <c>-1</c> derives from the invariant
     /// element count and composes fine). Bypassed producers keep serving any other consumers.
     ///
-    /// <para><b>Why this exists:</b> ONNX Runtime's <c>ReshapeFusion::FuseContiguousReshapes</c>
-    /// (present through at least 1.26) fuses a Reshape/Squeeze/Unsqueeze chain that ends in a
-    /// statically-known shape into one Reshape — and crashes session initialization when the
-    /// chain's FIRST node carries a live (node-produced) secondary input, e.g. a shape computed
-    /// via <c>Shape → Concat</c>: <c>FinalizeNodeFusion</c> tries to move that edge onto the fused
-    /// two-input node and throws <c>"Attempting to get index by a name which does not
-    /// exist"</c>. GroupNorm produces exactly that layout (its shape-restoring reshape feeds
-    /// from <c>Shape(x)</c>), so any user static reshape placed directly after a GroupNorm-style
-    /// layer made the exported model fail to load (Shorokoo/Shorokoo#10). Composing the chain
-    /// here removes the dynamic-reshape → static-reshape adjacency the fusion mis-handles —
-    /// and drops a redundant runtime reshape as a bonus.</para>
+    /// <para>The static reshape then reads the chain's root directly, so it does not wait on
+    /// reshapes whose shapes are computed at run time — GroupNorm's shape-restoring reshape, which
+    /// feeds from <c>Shape(x)</c>, say — and a chain step nothing else reads drops out of the
+    /// model with the rest of the dead nodes.</para>
     ///
     /// <para>The walk deliberately stops at anything but RESHAPE/SQUEEZE/UNSQUEEZE — in
     /// particular at IDENTITY, which <see cref="FastAddIdentityForOuterScopeValues"/> has already
@@ -60,12 +53,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
                 // Walk up through metadata-only producers; every step preserves the element
                 // sequence this reshape reinterprets. A SAME-SCOPE IDENTITY (e.g. a lowered
-                // state-update link) is transparent too: ONNX Runtime's EliminateIdentity
-                // removes it in the same L1 optimization loop as ReshapeFusion, so declining
-                // to compose across it would leave the crashing dynamic-reshape→static-reshape
-                // adjacency reachable (Shorokoo/Shorokoo#10). Cross-scope identities — the
-                // outer-scope wrapping FastAddIdentityForOuterScopeValues inserts — remain
-                // barriers, so composition never crosses a scope boundary.
+                // state-update link) is transparent too: it passes the element sequence through
+                // unchanged. Cross-scope identities — the outer-scope wrapping
+                // FastAddIdentityForOuterScopeValues inserts — remain barriers, so composition
+                // never crosses a scope boundary.
                 var nodeScope = scopeOf[node.Key];
                 var root = dataKey;
                 while (nodeByKey.TryGetValue(root.FastNodeKey, out var producer)

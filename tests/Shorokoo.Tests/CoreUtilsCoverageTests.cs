@@ -880,26 +880,29 @@ public class CoreUtilsCoverageTests
     }
 
     /// <summary>A reading is null on a machine with no CUDA runtime and a real one where there is
-    /// a card, so the first assertion holds either way; the fold into the peak is driven through
+    /// a card, so the first assertion holds either way; the fold into the peaks is driven through
     /// the seam so it is pinned on both.</summary>
     [Fact]
-    public void TestDeviceMemoryReadsTheCardWhenThereIsOneAndSampleFoldsIntoThePeak()
+    public void TestDeviceMemoryReadsTheCardWhenThereIsOneAndSampleFoldsIntoBothPeaks()
     {
         Assert.True(DeviceMemory.Read() is not { TotalBytes: <= 0 });
+        Assert.True(DeviceMemory.Read() is not { ProcessBytes: <= 0 });
 
         DeviceMemory.ResetPeak();
-        Assert.Equal(0L, DeviceMemory.PeakUsedBytes);
         Assert.Null(DeviceMemory.SampleFrom(null));
-        Assert.Equal(0L, DeviceMemory.PeakUsedBytes);
+        Assert.Equal((0L, 0L), (DeviceMemory.PeakUsedBytes, DeviceMemory.PeakProcessBytes));
 
-        var reading = new DeviceMemoryReading(4096, 1024, 5120);
+        var reading = new DeviceMemoryReading(4096, 1024, 5120, 1024);
         Assert.Equal(reading, DeviceMemory.SampleFrom(reading));
-        Assert.Equal(4096L, DeviceMemory.PeakUsedBytes);
-        Assert.Equal(4096L, DeviceMemory.ObservePeak(512));
-        Assert.Equal(8192L, DeviceMemory.ObservePeak(8192));
-        Assert.Equal(8192L, DeviceMemory.PeakUsedBytes);
+        Assert.Equal((4096L, 1024L), (DeviceMemory.PeakUsedBytes, DeviceMemory.PeakProcessBytes));
+        DeviceMemory.SampleFrom(new DeviceMemoryReading(512, 4608, 5120, 256));
+        Assert.Equal((4096L, 1024L), (DeviceMemory.PeakUsedBytes, DeviceMemory.PeakProcessBytes));
+        DeviceMemory.SampleFrom(new DeviceMemoryReading(2048, 3072, 5120, 2048));
+        Assert.Equal((4096L, 2048L), (DeviceMemory.PeakUsedBytes, DeviceMemory.PeakProcessBytes));
+        DeviceMemory.SampleFrom(new DeviceMemoryReading(5000, 120, 5120, null));
+        Assert.Equal((5000L, 2048L), (DeviceMemory.PeakUsedBytes, DeviceMemory.PeakProcessBytes));
         DeviceMemory.ResetPeak();
-        Assert.Equal(0L, DeviceMemory.PeakUsedBytes);
+        Assert.Equal((0L, 0L), (DeviceMemory.PeakUsedBytes, DeviceMemory.PeakProcessBytes));
     }
 
     private static byte[] DoublingModel()
@@ -925,7 +928,7 @@ public class CoreUtilsCoverageTests
     /// still lands where it thinks it does. The hazard it guards is not a missing feature but a
     /// wrong one — a field that moved hands back some other pointer, which the binding then calls
     /// as a function — so it names every step: the internal type holding the one <c>OrtApi</c>, the
-    /// field on it, each entry point by name and type, and the nine figures a real session
+    /// field on it, each entry point by name and type, and the ten figures a real session
     /// allocator answers with. ORT's own default allocator implements none of them, which is the
     /// other half of why the allocator has to come from the session.
     /// </summary>
@@ -982,6 +985,8 @@ public class CoreUtilsCoverageTests
         Assert.True(after.AllocationCount > 0);
         Assert.True(after.TotalAllocatedBytes >= after.MaxInUseBytes);
         Assert.True(after.MaxAllocSizeBytes > 0);
+        Assert.InRange(after.RequestedInUseBytes, 0L, after.InUseBytes);
+        Assert.Equal(0L, before.RequestedInUseBytes);
         Assert.Null(compiled.ReadPinnedArenaStatistics());
 
         IShorokooSession unanswering = new RunSettingsRecorder();
@@ -1095,7 +1100,7 @@ public class CoreUtilsCoverageTests
     public void TestTheRecentRunRingIsBoundedWhileTheAggregatesStayExactOverEveryRun()
     {
         static ArenaStatistics Arena(long maxInUse, long allocs) =>
-            new(0, -1, 16, maxInUse, allocs, allocs, 0, 0, maxInUse * 2);
+            new(0, -1, 16, maxInUse, allocs, allocs, 0, 0, maxInUse * 2, 0);
 
         static RunStatistics Fold(int capacity, params long[] peaks)
         {
@@ -2235,17 +2240,17 @@ public class CoreUtilsCoverageTests
     public void TestTheDeviceReadingSeparatesAFullCardFromAnArenaThatCouldNotExtend()
     {
         var roomy = new DeviceMemoryReading(
-            UsedBytes: 13L << 30, FreeBytes: 11L << 30, TotalBytes: 24L << 30);
+            UsedBytes: 13L << 30, FreeBytes: 11L << 30, TotalBytes: 24L << 30, ProcessBytes: 12L << 30);
         var full = new DeviceMemoryReading(
-            UsedBytes: 24L << 30, FreeBytes: 64L << 20, TotalBytes: 24L << 30);
+            UsedBytes: 24L << 30, FreeBytes: 64L << 20, TotalBytes: 24L << 30, ProcessBytes: null);
 
         var cappedHost = Report(ArenaFailure, Facts(27, 28), "Shorokoo.WinGPU", roomy);
-        Assert.Contains("11 GiB free", cappedHost);
+        Assert.Contains("12 GiB of it this process's, 11 GiB free", cappedHost);
         Assert.Contains("The device has room", cappedHost);
         Assert.Contains("This is the limit, not the model", cappedHost);
 
         var fullCard = Report(ArenaFailure, Facts(12, 128), "Shorokoo.WinGPU", full);
-        Assert.Contains("64 MiB free", fullCard);
+        Assert.Contains("across all processes, 64 MiB free", fullCard);
         Assert.Contains("the accelerator itself running out", fullCard);
         Assert.DoesNotContain("The device has room", fullCard);
 

@@ -12,7 +12,7 @@ namespace Shorokoo.Tests.Utils;
 /// project is referenced in the test deployment, not by a runtime preference.
 /// To enable CUDA-gated tests on a dev box, add a project reference to a GPU
 /// backend (Shorokoo.WinGPU on Windows, Shorokoo.LinuxGPU on Linux) and have
-/// CUDA Toolkit 12.x + cuDNN 9.x installed.
+/// CUDA Toolkit 13.x + cuDNN 9.x installed.
 ///
 /// <para>The backend alone is not enough: a GPU backend deploys and loads on a machine with no
 /// card, and every test gated on it then failed inside ONNX Runtime's session creation instead of
@@ -36,7 +36,7 @@ public sealed class CudaFactAttribute : FactAttribute
         if (!assemblyName.EndsWith("GPU", StringComparison.OrdinalIgnoreCase))
             skip = $"CUDA EP not available -- loaded backend is '{assemblyName}'. " +
                    "Reference a GPU backend (Shorokoo.WinGPU on Windows, Shorokoo.LinuxGPU on " +
-                   "Linux) with CUDA Toolkit 12.x + cuDNN 9.x to run.";
+                   "Linux) with CUDA Toolkit 13.x + cuDNN 9.x to run.";
         else if (DeviceMemory.Read() is null)
             skip = $"No CUDA device answers on this machine -- the loaded backend is '{assemblyName}', " +
                    "but there is no card for it to run on. Run this on a CUDA machine.";

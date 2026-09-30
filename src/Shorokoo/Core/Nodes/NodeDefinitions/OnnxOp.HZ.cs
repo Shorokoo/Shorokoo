@@ -656,8 +656,8 @@ public static partial class OnnxOp
 
     /// <summary>Swish activation y = x * sigmoid(alpha * x) (ONNX Swish, opset 24+).
     /// Lowered inline to opset-21 primitives (Mul/Sigmoid) so the emitted ONNX stays at opset 21 —
-    /// ONNX Runtime 1.26 registers no Swish kernel on any provider. The fused SWISH op definition
-    /// is retained; restore the fused emission here once a runtime supports it.</summary>
+    /// ONNX Runtime runs a Swish node only in a model stamped at opset 24. The fused SWISH op
+    /// definition is retained for imported graphs.</summary>
     public static Variable Swish(Variable x, float? alpha = null)
     {
         var a = alpha ?? 1.0f;

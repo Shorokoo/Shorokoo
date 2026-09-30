@@ -60,6 +60,10 @@ public enum MemoryFigureKind
 /// reported 32,462 MiB here; the likeliest reading is that an arena pressed to the card's edge
 /// gives regions back and takes others while this counter does not follow all the way down. For
 /// what the card is carrying, read <see cref="DeviceMemory"/>.</param>
+/// <param name="RequestedInUseBytes">Bytes the callers asked for and have not given back: the part of
+/// <paramref name="InUseBytes"/> they requested, without what the arena added to round each
+/// allocation up to its own block sizes. A backend whose allocator does not report what was
+/// requested reports <paramref name="InUseBytes"/> here, rounding included.</param>
 public readonly record struct ArenaStatistics(
     long InUseBytes,
     long LimitBytes,
@@ -69,4 +73,5 @@ public readonly record struct ArenaStatistics(
     long ArenaExtensionCount,
     long ArenaShrinkageCount,
     long ReserveCount,
-    long TotalAllocatedBytes);
+    long TotalAllocatedBytes,
+    long RequestedInUseBytes);

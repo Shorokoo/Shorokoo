@@ -126,9 +126,12 @@ public abstract class OrtBackend : IShorokooBackend
     /// <summary>
     /// <see cref="KernelWorkaroundSets.OnnxRuntime"/>: the rewrites around ONNX Runtime's kernels,
     /// on every execution provider, since each rewrite computes what the operator it replaces
-    /// computes.
+    /// computes; and on a CUDA backend <see cref="KernelWorkaroundSets.OnnxRuntimeCuda"/>, those
+    /// and the rewrites around what the CUDA provider alone does otherwise.
     /// </summary>
-    public string? KernelWorkaroundSet => KernelWorkaroundSets.OnnxRuntime;
+    public string? KernelWorkaroundSet => _cudaDeviceId is null
+        ? KernelWorkaroundSets.OnnxRuntime
+        : KernelWorkaroundSets.OnnxRuntimeCuda;
 
     /// <summary>
     /// Creates an ORT inference session over a serialized ONNX model, on this backend's
@@ -704,7 +707,7 @@ public abstract class OrtBackend : IShorokooBackend
     /// it, so this defers to it. On a CUDA backend it is the card's own memory: the buffer comes
     /// from that device's ORT allocator and the bytes cross the bus once, here — rather than being
     /// left on the host for the execution provider to copy over on every run of every session they
-    /// are fed to, which is what a tensor "moved onto the card" used to mean.</para>
+    /// are fed to.</para>
     ///
     /// <para>The card's memory comes out of one allocator per device, shared by every compute
     /// context on it (<see cref="CudaDeviceAllocator"/>), so nothing here bounds it: a context's

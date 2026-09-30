@@ -3,21 +3,10 @@ using Shorokoo.Modules.Layers;
 
 namespace Shorokoo.Tests;
 
-// Regression test for Shorokoo/Shorokoo#10.
-//
-// GroupNorm restores its output shape via Reshape(normalized, Shape(x)) — a reshape whose
-// shape input is a LIVE node. When such a reshape directly feeds a Reshape with a fully
-// static constant target (e.g. [72]), ONNX Runtime's ReshapeFusion::FuseContiguousReshapes
-// (present through at least ORT 1.26) fuses the pair into one node and then crashes session
-// initialization while moving the live shape edge onto the fused two-input node ("Attempting
-// to get index by a name which does not exist: ... for node: ..._new_reshape"). A [-1]
-// flatten never triggers it (its output shape stays uninferable, so no fusion), and
-// initializer-shaped reshapes are safe (initializers carry no edges) — the trigger is exactly
-// (live-node shape input) + (following static-target reshape).
-//
-// Shorokoo works around the upstream ORT bug at ONNX prep: FastComposeContiguousReshapes
-// rewires the static reshape to bypass the metadata-only producer chain, removing the
-// adjacency the fusion mis-handles. This module pins that the pattern loads and runs.
+// Shorokoo/Shorokoo#10: GroupNorm restores its output shape via Reshape(normalized, Shape(x)),
+// a reshape whose shape input is a live node, and a static-target reshape directly after it
+// ([72]) is composed across that chain at ONNX prep (FastComposeContiguousReshapes). These
+// modules pin that the layout loads and runs.
 [Module]
 public partial class GroupNormStaticReshapeRepro
 {
@@ -29,11 +18,9 @@ public partial class GroupNormStaticReshapeRepro
     }
 }
 
-// Companion pin for Shorokoo/Shorokoo#12: the copy-dim spelling of the same flatten. The
-// shape input carries a 0 ("copy dim 0 from the input", allowzero unset), so
-// FastComposeContiguousReshapes deliberately declines to compose it — this module pins that
-// ORT's ReshapeFusion also declines such targets and the uncomposed pattern loads and runs.
-// A future ORT that extends the fusion to 0-targets would surface here.
+// Shorokoo/Shorokoo#12: the copy-dim spelling of the same flatten. Its shape input carries a 0
+// ("copy dim 0 from the input", allowzero unset), which FastComposeContiguousReshapes declines
+// to compose, so the pattern loads and runs uncomposed.
 [Module]
 public partial class GroupNormKeepAxesReshapeRepro
 {
@@ -61,8 +48,7 @@ public class GroupNormStaticReshapeRegressionTests
         var x = Range([2L, 4L, 3L, 3L], 0.7f, -10f);
         Assert.True(AutoTest.AdvancedTestGraph<GroupNormStaticReshapeRepro>(hyperparamInputs: [], runtimeInputs: [x]));
         // One IDENTITY deeper: a STATEFUL module's WITH_STATE_DEPS wrapper lowers to an Identity
-        // between the dynamic restore reshape and the static one, which ORT's EliminateIdentity
-        // re-fuses unless FastComposeContiguousReshapes walks through same-scope identities.
+        // between the dynamic restore reshape and the static one.
         Assert.True(AutoTest.AdvancedTestGraph<StatefulGroupNormStaticReshapeRepro>(hyperparamInputs: [], runtimeInputs: [x]));
         Assert.True(AutoTest.AdvancedTestGraph<GroupNormKeepAxesReshapeRepro>(hyperparamInputs: [], runtimeInputs: [x]));
     }

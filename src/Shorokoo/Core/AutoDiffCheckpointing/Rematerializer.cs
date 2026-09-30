@@ -240,10 +240,10 @@ internal class Rematerializer
 
             // Every ranked single is worth an evaluation: the ranking is by ESTIMATED relief,
             // and the estimate is wrong often enough that the committed candidate can sit well
-            // down the list. An earlier version stopped after twelve rejections in a row to save
-            // the evaluations a family like encoder2 spends without committing; that stop also
-            // walked past the one candidate the one-layer encoder had, turning the pass off on
-            // it entirely. The budget is the only stop.
+            // down the list. A stop after a run of rejections would save the evaluations a family
+            // like encoder2 spends without committing, but it can also walk past the one
+            // candidate a graph such as the one-layer encoder has, turning the pass off on it
+            // entirely. The budget is the only stop.
             var accepted = false;
             foreach (var candidate in candidates)
             {

@@ -1526,7 +1526,10 @@ namespace Shorokoo.Core.Factory
 
         /// <summary>
         /// Decomposes every operator on <see cref="ExportLoweredOpCodes"/>, and refuses the export
-        /// when one survives the pass.
+        /// when one survives the pass. The persistence dialect (<paramref name="keepAuthoredOps"/>)
+        /// decomposes only the listed operators opset 21 has no node for, so a saved architecture
+        /// keeps every other operator as authored and the export that later runs over the reloaded
+        /// graph decomposes it then.
         ///
         /// <para>Unlike the engines, this caller has no graceful degradation to fall back on. An
         /// operator on this list is one the single opset Shorokoo writes has no node for, so a node
@@ -1534,12 +1537,15 @@ namespace Shorokoo.Core.Factory
         /// cannot use by leaving the node alone and one that is wrong by throwing; here the two mean
         /// the same thing — there is nothing to emit — so both stop the build.</para>
         /// </summary>
-        private static void LowerForExport(InternalComputationGraph graph)
+        private static void LowerForExport(InternalComputationGraph graph, bool keepAuthoredOps)
         {
-            FastLowerRegisteredOps.Process(graph, ExportLoweredOpCodes);
+            IReadOnlySet<string> opCodes = keepAuthoredOps
+                ? ExportLoweredOpCodes.Where(OnnxOpset.OperatorsIntroducedLater.ContainsKey).ToHashSet()
+                : ExportLoweredOpCodes;
+            FastLowerRegisteredOps.Process(graph, opCodes);
 
             foreach (var node in graph.Nodes)
-                if (ExportLoweredOpCodes.Contains(node.OpCode))
+                if (opCodes.Contains(node.OpCode))
                     throw new InvalidOperationException(
                         $"FastOnnxModelBuilder: '{node.OpCode}' has no node at the opset Shorokoo emits, "
                         + "and its registered lowering could not be built for this node, so there is "
@@ -1580,10 +1586,11 @@ namespace Shorokoo.Core.Factory
             //   - before FastUseUniqueNames and the tensor-info lookup below, so the spliced
             //     nodes are named and typed with the rest of the graph.
             // Every dialect runs it, the persistence one included: a .srk payload is an opset-21
-            // model like any other, so a saved graph carries the decomposition, which computes what
-            // the operator does — and what the engines and the autodiff pass, which lower it the
-            // same way, would compute in its place.
-            LowerForExport(graph);
+            // model like any other, so a saved graph carries the decomposition of each operator
+            // opset 21 has no node for, which computes what the operator does — and what the
+            // engines and the autodiff pass, which lower it the same way, would compute in its
+            // place. Every other listed operator is kept as authored there.
+            LowerForExport(graph, keepAuthoredOps: !applyExecutionLowerings);
             // The backend's kernel workarounds, for a session's model only (see BuildOnnxModelCore):
             // after the export lowerings, so a decomposition's calls are rewritten too, and before
             // the outer-scope identities, the ONNX prep and the call-stack strip, for the reasons

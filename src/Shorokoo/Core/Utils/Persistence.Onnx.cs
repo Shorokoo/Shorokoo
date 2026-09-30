@@ -246,10 +246,23 @@ namespace Shorokoo
             if (!File.Exists(filePath))
                 throw new FileNotFoundException($"'{filePath}': ONNX file not found.", filePath);
 
+            FileStream file;
+            try
+            {
+                file = OnnxStreamingScan.Open(filePath);
+            }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+            {
+                throw new InvalidDataException($"'{filePath}': could not be read ({e.Message}).", e);
+            }
+            // The one handle serves the scan and the read of the weights it references, so those
+            // are the weights of the file scanned.
+            using var modelFile = file;
+
             IR.ModelProto model;
             try
             {
-                model = OnnxStreamingScan.ReadModel(filePath);
+                model = OnnxStreamingScan.ReadModel(file);
             }
             catch (Exception e) when (e is ProtoBuf.ProtoException
                 or EndOfStreamException
@@ -287,7 +300,7 @@ namespace Shorokoo
                 {
                     var fullDir = Path.GetDirectoryName(Path.GetFullPath(filePath));
                     OnnxOpset.ThrowIfNotAtVersion(model);
-                    onDevice = OnnxExternalData.LoadIntoModel(model, fullDir, onto);
+                    onDevice = OnnxExternalData.LoadIntoModel(model, fullDir, onto, file);
                     (graph, taggedKind) = OnnxModelImporter.FromLoadedModelProtoWithKindTag(model, inputShapes);
                 }
                 catch (Exception e) when (e is ProtoBuf.ProtoException

@@ -276,6 +276,7 @@ public class OnnxExternalDataTests
             var g = new GraphProto { Name = "payloads" };
             g.Inputs.Add(TensorInfo("x", FloatElem, N));
             g.Initializers.Add(Init("raw", FloatElem, [N], FloatBytes(Values(1f))));
+            g.Initializers.Add(new TensorProto { Name = "stated", data_type = FloatElem, Dims = [N], RawData = FloatBytes(Values(1.5f)), data_location = TensorProto.DataLocation.Default });
             g.Initializers.Add(new TensorProto { Name = "packed", data_type = FloatElem, Dims = [N], FloatDatas = Values(2f) });
             g.Initializers.Add(new TensorProto { Name = "wide", data_type = DoubleElem, Dims = [N], DoubleDatas = [.. Values(3f).Select(v => (double)v)] });
             g.Initializers.Add(new TensorProto { Name = "varint", data_type = Int64Elem, Dims = [N], Int64Datas = [.. Enumerable.Range(0, N).Select(i => (long)i)] });
@@ -289,15 +290,16 @@ public class OnnxExternalDataTests
             ifNode.Attributes.Add(new AttributeProto { Name = "then_branch", Type = AttributeProto.AttributeType.Graph, G = Branch("then", 6f) });
             ifNode.Attributes.Add(new AttributeProto { Name = "else_branch", Type = AttributeProto.AttributeType.Graph, G = Branch("else", 7f) });
             g.Nodes.Add(ifNode);
-            string[] terms = ["raw", "packed", "widef", "varintf", "surplus", "c", "branch"];
+            string[] terms = ["raw", "stated", "packed", "widef", "varintf", "surplus", "c", "branch"];
             for (int i = 0; i < terms.Length; i++)
                 g.Nodes.Add(Node("Add", "add" + i, [i == 0 ? "x" : "s" + i, terms[i]], [i == terms.Length - 1 ? "y" : "s" + (i + 1)]));
             g.Outputs.Add(TensorInfo("y", FloatElem, N));
             var path = WriteModel(dir, "payloads.onnx", WrapModel(g));
 
-            var scanned = OnnxStreamingScan.ReadModel(path);
+            ModelProto Scan(string file) { using var stream = OnnxStreamingScan.Open(file); return OnnxStreamingScan.ReadModel(stream); }
+            var scanned = Scan(path);
             var external = TensorProto.DataLocation.External;
-            Assert.Equal([external, external, external, default, default, default, default], scanned.Graph.Initializers.Select(t => t.data_location));
+            Assert.Equal([external, external, external, external, default, default, default, default], scanned.Graph.Initializers.Select(t => t.data_location));
             Assert.Equal(external, scanned.Graph.Nodes[0].Attributes[0].T.data_location);
             Assert.All(scanned.Graph.Nodes[3].Attributes, a => Assert.Equal(external, a.G.Nodes[0].Attributes[0].T.data_location));
 
@@ -306,6 +308,35 @@ public class OnnxExternalDataTests
             var parsedWhole = Run(OnnxModelImporter.FromOnnxModel(File.ReadAllBytes(path)));
             Assert.Equal(parsedWhole, Run(Persistence.ImportOnnx(path)));
             Assert.Equal(parsedWhole, Run(OnnxModelImporter.FromOnnxModel(path)));
+
+            var original = File.ReadAllBytes(path);
+            g.Initializers[0] = Init("raw", FloatElem, [N], FloatBytes(Values(-1f)));
+            var replacement = File.ReadAllBytes(WriteModel(dir, "replacement.onnx", WrapModel(g)));
+            byte[] Replaced(Func<ComputationGraph> import)
+            {
+                OnnxStreamingScan.ScannedInjection = file =>
+                {
+                    try { File.WriteAllBytes(file + ".new", replacement); File.Move(file + ".new", file, overwrite: true); }
+                    catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
+                };
+                try { return Run(import()); }
+                finally { OnnxStreamingScan.ScannedInjection = null; File.WriteAllBytes(path, original); }
+            }
+            Assert.Equal(parsedWhole, Replaced(() => Persistence.ImportOnnx(path)));
+            Assert.Equal(parsedWhole, Replaced(() => OnnxModelImporter.FromOnnxModel(path)));
+
+            long ScanAllocation(int count)
+            {
+                var inline = new GraphProto { Name = "inline" };
+                inline.Initializers.Add(Init("inline", FloatElem, [count], new byte[4 * count + 4]));
+                var file = WriteModel(dir, $"inline{count}.onnx", WrapModel(inline));
+                Scan(file);
+                var before = GC.GetAllocatedBytesForCurrentThread();
+                Scan(file);
+                return GC.GetAllocatedBytesForCurrentThread() - before;
+            }
+            const int Inline = 1 << 20;
+            Assert.True(ScanAllocation(Inline) - ScanAllocation(1) < 3 * 4L * Inline);
 
             var truncated = Path.Combine(dir, "truncated.onnx");
             File.WriteAllBytes(truncated, File.ReadAllBytes(path)[..^(N * 4)]);

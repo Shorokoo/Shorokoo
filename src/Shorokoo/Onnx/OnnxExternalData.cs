@@ -53,9 +53,13 @@ namespace Shorokoo.Onnx
         /// elements: that one is read into <paramref name="onto"/>'s memory, its proto given a
         /// placeholder without values, and the pair returned. On failure every tensor read onto
         /// <paramref name="onto"/> is deleted.</para>
+        ///
+        /// <para><paramref name="modelFile"/>, the model's own file as its scan read it
+        /// (<see cref="OnnxStreamingScan.Open"/>), serves every reference into that file, so each
+        /// is read from the bytes the scan found it in. It is left open, the caller's to dispose.</para>
         /// </summary>
         internal static Dictionary<TensorAttribute, TensorData> LoadIntoModel(
-            ModelProto model, string? baseDirectory, ComputeContext? onto = null)
+            ModelProto model, string? baseDirectory, ComputeContext? onto = null, FileStream? modelFile = null)
         {
             var onDevice = new Dictionary<TensorAttribute, TensorData>(ReferenceEqualityComparer.Instance);
             var toDevice = onto is null || model.Graph is null
@@ -70,7 +74,12 @@ namespace Shorokoo.Onnx
                 {
                     if (tensor.data_location != TensorProto.DataLocation.External)
                         continue;
-                    openFiles ??= new Dictionary<string, FileStream>(StringComparer.Ordinal);
+                    if (openFiles is null)
+                    {
+                        openFiles = new Dictionary<string, FileStream>(StringComparer.Ordinal);
+                        if (modelFile is not null)
+                            openFiles[Path.GetFullPath(modelFile.Name)] = modelFile;
+                    }
                     MaterializeExternalTensor(tensor, baseDirectory, openFiles,
                         toDevice.Contains(tensor) ? onto : null, onDevice);
                 }
@@ -84,7 +93,8 @@ namespace Shorokoo.Onnx
             {
                 if (openFiles is not null)
                     foreach (var fs in openFiles.Values)
-                        fs.Dispose();
+                        if (fs != modelFile)
+                            fs.Dispose();
             }
             return onDevice;
         }

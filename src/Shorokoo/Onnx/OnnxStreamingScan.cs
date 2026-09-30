@@ -20,10 +20,16 @@ namespace Shorokoo.Onnx
     /// node attributes, through nested graphs and function bodies. A payload is referenced when it
     /// is <c>raw_data</c>, or packed <c>float_data</c> of a float tensor or <c>double_data</c> of a
     /// double one (the same little-endian bytes), exactly the shape's worth of bytes, and the tensor
-    /// carries no external data of its own. Any other payload stays inline, as it is read without
+    /// carries no external data of its own — no <c>external_data</c> entry, and no
+    /// <c>data_location</c> but <c>DEFAULT</c>. Any other payload stays inline, as it is read without
     /// the scan: the varint-coded ones (<c>int32_data</c>, <c>int64_data</c>, <c>uint64_data</c>),
     /// strings, and a tensor's bytes that disagree with its shape. Everything else in the file is
     /// kept as it is. A sparse initializer, which the importer does not read, is refused.</para>
+    ///
+    /// <para>The file is walked twice. The first walk writes nothing and measures each message it
+    /// rewrites; the second writes the rewritten model, each length prefix from the first walk,
+    /// into one buffer of exactly its size. What stays inline is so held once, however deeply it is
+    /// nested.</para>
     /// </summary>
     internal sealed class OnnxStreamingScan
     {
@@ -33,6 +39,7 @@ namespace Shorokoo.Onnx
 
         private const int WireVarint = 0, WireFixed64 = 1, WireLengthDelimited = 2, WireFixed32 = 5;
         private const int RawDataField = 9, FloatDataField = 4, DoubleDataField = 10;
+        private const int ExternalDataField = 13, DataLocationField = 14;
         private const int FloatType = 1, StringType = 8, DoubleType = 11;
 
         private enum Kind { Model, Graph, Node, Attribute, Function, Tensor, Opaque }
@@ -40,7 +47,15 @@ namespace Shorokoo.Onnx
         private readonly Stream _file;
         private readonly string _path;
         private readonly string _location;
-        private readonly byte[] _copyBuffer = new byte[81920];
+
+        /// <summary>The size of each rewritten message, in the order the messages open: the first
+        /// walk records it, the second writes it as the message's length prefix.</summary>
+        private readonly List<long> _sizes = [];
+        private int _nextSize;
+
+        /// <summary>The rewritten model, null during the first walk.</summary>
+        private byte[]? _output;
+        private int _written;
 
         private OnnxStreamingScan(Stream file, string path)
         {
@@ -49,15 +64,27 @@ namespace Shorokoo.Onnx
             _location = Path.GetFileName(path);
         }
 
-        /// <summary>The model at <paramref name="filePath"/>, its large tensor payloads referenced
-        /// in place rather than read. A truncated or malformed file throws
+        /// <summary>Test hook: invoked with the model's path once its scan is done, before any of
+        /// its weights is read. Thread-scoped, so a hook installed by one parallel test is invisible
+        /// to every other thread; still reset it in a <c>finally</c>.</summary>
+        [ThreadStatic]
+        internal static Action<string>? ScannedInjection;
+
+        /// <summary>The model file at <paramref name="filePath"/>, opened for its scan
+        /// (<see cref="ReadModel"/>) and for the read of the weights the scan references in it
+        /// (<see cref="OnnxExternalData.LoadIntoModel"/>): the one handle serves both, so the
+        /// weights read are those of the file scanned, whatever replaces it on disk meanwhile.</summary>
+        internal static FileStream Open(string filePath)
+            => new(filePath, FileMode.Open, FileAccess.Read, FileShare.Read, 1 << 16);
+
+        /// <summary>The model in <paramref name="file"/>, its large tensor payloads referenced in
+        /// place rather than read. A truncated or malformed file throws
         /// <see cref="EndOfStreamException"/> or <see cref="ProtoBuf.ProtoException"/>, as parsing
         /// it whole does.</summary>
-        internal static ModelProto ReadModel(string filePath)
+        internal static ModelProto ReadModel(FileStream file)
         {
-            byte[] model;
-            using (var file = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read, 1 << 16))
-                model = new OnnxStreamingScan(file, filePath).Message(Kind.Model, file.Length);
+            var model = new OnnxStreamingScan(file, file.Name).Scan();
+            ScannedInjection?.Invoke(file.Name);
             using var stream = new MemoryStream(model, writable: false);
             return ProtoBuf.Serializer.Deserialize<ModelProto>(stream);
         }
@@ -81,9 +108,28 @@ namespace Shorokoo.Onnx
             _ => Kind.Opaque,
         };
 
-        private byte[] Message(Kind kind, long end)
+        private byte[] Scan()
         {
-            var output = new MemoryStream();
+            long end = _file.Length;
+            _file.Position = 0;
+            long size = Message(Kind.Model, end);
+            if (size > Array.MaxLength)
+                throw new InvalidDataException(
+                    $"'{_path}': the ONNX model holds {size} bytes besides the weights it references, " +
+                    "more than one protobuf message can.");
+
+            _output = GC.AllocateUninitializedArray<byte>((int)size);
+            _nextSize = 0;
+            _file.Position = 0;
+            Message(Kind.Model, end);
+            if (_written != size)
+                throw new IOException($"'{_path}' changed while it was read.");
+            return _output;
+        }
+
+        private long Message(Kind kind, long end)
+        {
+            long size = 0;
             while (_file.Position < end)
             {
                 var (key, field, wire) = ReadKey(end);
@@ -91,22 +137,29 @@ namespace Shorokoo.Onnx
                     throw SparseInitializerRefusal($"'{_path}'");
                 if (wire != WireLengthDelimited || ChildOf(kind, field) is Kind.Opaque)
                 {
-                    CopyField(key, wire, end, output);
+                    size += CopyField(key, wire, end);
                     continue;
                 }
                 long length = ReadLength(end);
-                long childEnd = _file.Position + length;
-                var child = ChildOf(kind, field) == Kind.Tensor ? Tensor(childEnd) : Message(ChildOf(kind, field), childEnd);
-                WriteVarint(output, key);
-                WriteVarint(output, (ulong)child.Length);
-                output.Write(child);
+                size += Child(key, ChildOf(kind, field), _file.Position + length);
             }
-            return output.ToArray();
+            return size;
         }
 
-        private byte[] Tensor(long end)
+        private long Child(ulong key, Kind kind, long end)
         {
-            var output = new MemoryStream();
+            int slot = _nextSize++;
+            if (_output is null) _sizes.Add(0);
+            long size = WriteVarint(key);
+            if (_output is not null) size += WriteVarint((ulong)_sizes[slot]);
+            long body = kind == Kind.Tensor ? Tensor(end) : Message(kind, end);
+            if (_output is null) size += WriteVarint((ulong)(_sizes[slot] = body));
+            return size + body;
+        }
+
+        private long Tensor(long end)
+        {
+            long size = 0;
             int dataType = 0;
             var dims = new List<long>();
             bool external = false;
@@ -121,39 +174,42 @@ namespace Shorokoo.Onnx
                     _file.Seek(length, SeekOrigin.Current);
                     continue;
                 }
-                external |= field is 13 or 14;
-                if (field == 2 && wire == WireVarint)
+                external |= field == ExternalDataField;
+                if (field == DataLocationField && wire == WireVarint)
+                {
+                    var value = ReadVarint(end);
+                    external |= value == (ulong)TensorProto.DataLocation.External;
+                    size += WriteVarint(key) + WriteVarint(value);
+                }
+                else if (field == 2 && wire == WireVarint)
                 {
                     var value = ReadVarint(end);
                     dataType = unchecked((int)value);
-                    WriteVarint(output, key);
-                    WriteVarint(output, value);
+                    size += WriteVarint(key) + WriteVarint(value);
                 }
                 else if (field == 1 && wire == WireVarint)
                 {
                     var value = ReadVarint(end);
                     dims.Add(unchecked((long)value));
-                    WriteVarint(output, key);
-                    WriteVarint(output, value);
+                    size += WriteVarint(key) + WriteVarint(value);
                 }
                 else if (field == 1 && wire == WireLengthDelimited)
                 {
                     long length = ReadLength(end);
                     long packedEnd = _file.Position + length;
-                    var packed = new MemoryStream();
+                    int first = dims.Count;
                     while (_file.Position < packedEnd)
-                    {
-                        var value = ReadVarint(packedEnd);
-                        dims.Add(unchecked((long)value));
-                        WriteVarint(packed, value);
-                    }
-                    WriteVarint(output, key);
-                    WriteVarint(output, (ulong)packed.Length);
-                    packed.WriteTo(output);
+                        dims.Add(unchecked((long)ReadVarint(packedEnd)));
+                    long packed = 0;
+                    for (int i = first; i < dims.Count; i++)
+                        packed += VarintLength(unchecked((ulong)dims[i]));
+                    size += WriteVarint(key) + WriteVarint((ulong)packed);
+                    for (int i = first; i < dims.Count; i++)
+                        size += WriteVarint(unchecked((ulong)dims[i]));
                 }
                 else
                 {
-                    CopyField(key, wire, end, output);
+                    size += CopyField(key, wire, end);
                 }
             }
 
@@ -164,41 +220,43 @@ namespace Shorokoo.Onnx
                 && bytes == OnnxExternalData.TryGetExpectedByteLength(
                     new TensorProto { data_type = dataType, Dims = [.. dims] }))
             {
-                WriteExternalEntry(output, OnnxExternalData.LocationKey, _location);
-                WriteExternalEntry(output, OnnxExternalData.OffsetKey, offset.ToString(CultureInfo.InvariantCulture));
-                WriteExternalEntry(output, OnnxExternalData.LengthKey, bytes.ToString(CultureInfo.InvariantCulture));
-                WriteVarint(output, 14 << 3 | WireVarint);
-                WriteVarint(output, (ulong)TensorProto.DataLocation.External);
-                return output.ToArray();
+                size += WriteExternalEntry(OnnxExternalData.LocationKey, _location);
+                size += WriteExternalEntry(OnnxExternalData.OffsetKey, offset.ToString(CultureInfo.InvariantCulture));
+                size += WriteExternalEntry(OnnxExternalData.LengthKey, bytes.ToString(CultureInfo.InvariantCulture));
+                size += WriteVarint(DataLocationField << 3 | WireVarint);
+                size += WriteVarint((ulong)TensorProto.DataLocation.External);
+                return size;
             }
 
             foreach (var (key, _, start, length) in payloads)
             {
                 _file.Position = start;
-                WriteVarint(output, key);
-                WriteVarint(output, (ulong)length);
-                Copy(length, output);
+                size += WriteVarint(key) + WriteVarint((ulong)length) + Copy(length);
             }
             _file.Position = end;
-            return output.ToArray();
+            return size;
         }
 
-        private static void WriteExternalEntry(MemoryStream output, string key, string value)
+        private long WriteExternalEntry(string key, string value)
         {
-            var entry = new MemoryStream();
-            WriteString(entry, 1, key);
-            WriteString(entry, 2, value);
-            WriteVarint(output, 13 << 3 | WireLengthDelimited);
-            WriteVarint(output, (ulong)entry.Length);
-            entry.WriteTo(output);
+            long entry = StringLength(1, key) + StringLength(2, value);
+            return WriteVarint(ExternalDataField << 3 | WireLengthDelimited) + WriteVarint((ulong)entry)
+                + WriteString(1, key) + WriteString(2, value);
         }
 
-        private static void WriteString(MemoryStream output, int field, string value)
+        private static long StringLength(int field, string value)
         {
-            var bytes = Encoding.UTF8.GetBytes(value);
-            WriteVarint(output, (ulong)(field << 3 | WireLengthDelimited));
-            WriteVarint(output, (ulong)bytes.Length);
-            output.Write(bytes);
+            int count = Encoding.UTF8.GetByteCount(value);
+            return VarintLength((ulong)(field << 3 | WireLengthDelimited)) + VarintLength((ulong)count) + count;
+        }
+
+        private long WriteString(int field, string value)
+        {
+            int count = Encoding.UTF8.GetByteCount(value);
+            long size = WriteVarint((ulong)(field << 3 | WireLengthDelimited)) + WriteVarint((ulong)count) + count;
+            if (_output is not null)
+                _written += Encoding.UTF8.GetBytes(value, _output.AsSpan(_written));
+            return size;
         }
 
         private (ulong Key, int Field, int Wire) ReadKey(long end)
@@ -209,27 +267,22 @@ namespace Shorokoo.Onnx
             return (key, (int)(key >> 3), (int)(key & 7));
         }
 
-        private void CopyField(ulong key, int wire, long end, MemoryStream output)
+        private long CopyField(ulong key, int wire, long end)
         {
-            WriteVarint(output, key);
+            long size = WriteVarint(key);
             switch (wire)
             {
                 case WireVarint:
-                    WriteVarint(output, ReadVarint(end));
-                    break;
+                    return size + WriteVarint(ReadVarint(end));
                 case WireFixed64:
                     RequireWithin(end, 8);
-                    Copy(8, output);
-                    break;
+                    return size + Copy(8);
                 case WireFixed32:
                     RequireWithin(end, 4);
-                    Copy(4, output);
-                    break;
+                    return size + Copy(4);
                 case WireLengthDelimited:
                     long length = ReadLength(end);
-                    WriteVarint(output, (ulong)length);
-                    Copy(length, output);
-                    break;
+                    return size + WriteVarint((ulong)length) + Copy(length);
                 default:
                     throw new ProtoBuf.ProtoException($"Unsupported wire type {wire} at byte {_file.Position}.");
             }
@@ -263,25 +316,41 @@ namespace Shorokoo.Onnx
             if (end - _file.Position < count) throw new EndOfStreamException();
         }
 
-        private void Copy(long length, Stream output)
+        /// <summary>The next <paramref name="length"/> bytes of the file, written as they are —
+        /// skipped by the first walk, which only measures.</summary>
+        private long Copy(long length)
         {
-            while (length > 0)
+            if (_output is null)
             {
-                int chunk = (int)Math.Min(length, _copyBuffer.Length);
-                _file.ReadExactly(_copyBuffer, 0, chunk);
-                output.Write(_copyBuffer, 0, chunk);
-                length -= chunk;
+                _file.Seek(length, SeekOrigin.Current);
+                return length;
             }
+            _file.ReadExactly(_output.AsSpan(_written, (int)length));
+            _written += (int)length;
+            return length;
         }
 
-        private static void WriteVarint(Stream output, ulong value)
+        /// <summary>Writes <paramref name="value"/> as a varint — the first walk only measures
+        /// it — and returns its length.</summary>
+        private long WriteVarint(ulong value)
         {
+            if (_output is null)
+                return VarintLength(value);
+            int start = _written;
             while (value >= 0x80)
             {
-                output.WriteByte((byte)(value | 0x80));
+                _output[_written++] = (byte)(value | 0x80);
                 value >>= 7;
             }
-            output.WriteByte((byte)value);
+            _output[_written++] = (byte)value;
+            return _written - start;
+        }
+
+        private static int VarintLength(ulong value)
+        {
+            int length = 1;
+            for (; value >= 0x80; value >>= 7) length++;
+            return length;
         }
     }
 }

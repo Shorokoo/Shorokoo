@@ -81,8 +81,9 @@ namespace Shorokoo.Onnx
 
         private static ComputationGraph FromOnnxModelFile(string filePath, IReadOnlyDictionary<string, long[]>? inputShapes)
         {
-            return Wrap(FromModelProtoWithKindTag(OnnxStreamingScan.ReadModel(filePath),
-                Path.GetDirectoryName(Path.GetFullPath(filePath)), inputShapes));
+            using var file = OnnxStreamingScan.Open(filePath);
+            return Wrap(FromModelProtoWithKindTag(OnnxStreamingScan.ReadModel(file),
+                Path.GetDirectoryName(Path.GetFullPath(filePath)), inputShapes, file));
         }
 
         /// <summary>
@@ -153,16 +154,18 @@ namespace Shorokoo.Onnx
         /// post-parse half of <see cref="FromOnnxModelWithKindTag(Stream, string?, IReadOnlyDictionary{string, long[]}?)"/>
         /// (external-data materialization, the reader, and the kind-tag consistency check). Split out so a boundary (e.g.
         /// <c>Persistence.ImportOnnx</c>) can inspect or validate the proto between parsing
-        /// it and building the graph without re-deserializing.
+        /// it and building the graph without re-deserializing. <paramref name="modelFile"/> is the
+        /// model's own file as its scan read it, which the scan's references into it are read from.
         /// </summary>
         internal static (InternalComputationGraph Graph, Shorokoo.Graph.GraphKind? TaggedKind)
             FromModelProtoWithKindTag(
                 IR.ModelProto model,
                 string? externalDataDirectory = null,
-                IReadOnlyDictionary<string, long[]>? inputShapes = null)
+                IReadOnlyDictionary<string, long[]>? inputShapes = null,
+                FileStream? modelFile = null)
         {
             Shorokoo.Core.Factory.OnnxOpset.ThrowIfNotAtVersion(model);
-            OnnxExternalData.LoadIntoModel(model, externalDataDirectory);
+            OnnxExternalData.LoadIntoModel(model, externalDataDirectory, modelFile: modelFile);
             return FromLoadedModelProtoWithKindTag(model, inputShapes);
         }
 
@@ -223,8 +226,9 @@ namespace Shorokoo.Onnx
         /// <summary>Internal-graph form of <see cref="FromOnnxModel(string)"/>.</summary>
         internal static InternalComputationGraph FromOnnxModelToInternalGraph(string filePath)
         {
-            return FromModelProtoWithKindTag(OnnxStreamingScan.ReadModel(filePath),
-                Path.GetDirectoryName(Path.GetFullPath(filePath))).Graph;
+            using var file = OnnxStreamingScan.Open(filePath);
+            return FromModelProtoWithKindTag(OnnxStreamingScan.ReadModel(file),
+                Path.GetDirectoryName(Path.GetFullPath(filePath)), modelFile: file).Graph;
         }
 
         /// <summary>Internal-graph form of <see cref="FromOnnxModel(byte[], string?)"/>.</summary>

@@ -897,9 +897,7 @@ public class AutoDiffCheckpointingCoverageTests
         return batch.All(dropped => Measure(batch.Where(c => c != dropped)) is var r && !(r.Score < committed.Score && r.Peak <= committed.Peak));
     }
 
-    // The rematerializer commits a ranked prefix of candidates whole, members that add compute without lowering the peak included:
-    // https://github.com/Shorokoo/Shorokoo/issues/478
-    [Fact(Skip = "Shorokoo/Shorokoo#478: the rematerializer commits a candidate prefix whole, including members that add compute without lowering the peak")]
+    [Fact]
     public void TestNoMemberOfACommittedRecomputeBatchCanBeDroppedForABetterScoreCoverage()
     {
         var rig = TrainingRig.FromScratch(SdpaMeanPoolModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,

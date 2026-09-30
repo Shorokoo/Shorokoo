@@ -208,7 +208,30 @@ internal class Rematerializer
                         if (Better(high) && Score(high!) < Score(best))
                             (best, placement) = (high, Placement.BeforeFirstConsumer);
                     }
-                    Commit(best!, prefix, placement);
+                    // A prefix is cut by estimated rank, so members that add compute without
+                    // lowering the peak ride along with the ones that do. Backward elimination
+                    // drops each member whose removal scores no worse at no higher peak, lowest
+                    // ranked first; a sweep carries on past a drop instead of restarting, so it
+                    // costs at most one evaluation per member, and sweeps repeat until one drops
+                    // nothing or the budget runs out. Every member of the original prefix is
+                    // marked tried: a dropped one was just measured to buy nothing here.
+                    var members = new List<RematCandidate>(prefix);
+                    for (var pruning = true; pruning && members.Count > 1;)
+                    {
+                        pruning = false;
+                        for (int i = members.Count - 1; i >= 0 && members.Count > 1; i--)
+                        {
+                            var trial = Trial([.. members.Where((_, j) => j != i)], placement);
+                            if (trial is null) { pruning = false; break; }
+                            if (Score(trial) <= Score(best!) && trial.Eval.PeakMemoryBytes <= best!.Eval.PeakMemoryBytes)
+                            {
+                                best = trial;
+                                members.RemoveAt(i);
+                                pruning = true;
+                            }
+                        }
+                    }
+                    Commit(best!, members, placement);
                     foreach (var c in prefix) tried.Add(c.Identity);
                     continue;
                 }

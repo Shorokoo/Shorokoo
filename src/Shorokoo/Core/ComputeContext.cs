@@ -1162,6 +1162,46 @@ namespace Shorokoo.Runtime
         /// (<see cref="DeviceMemorySettings.LimitBytes"/>).</exception>
         public TensorData AllocateUninitialized(Shape shape, DType dtype)
         {
+            var bytes = FlatByteCount(shape, dtype);
+            if (_isHost)
+                return TensorData.NewHostTensor(shape, dtype, new byte[bytes]);
+
+            var backend = ResolvedBackend;
+            return Placed(bytes, () => $"AllocateUninitialized of {shape}:{dtype}", () => TensorData.Create(
+                shape, dtype, backend.CreateUninitializedTensorInBackendMemory(
+                    (ShorokooTensorElementType)(int)dtype, (long[])shape), backend));
+        }
+
+        /// <summary>
+        /// A tensor of <paramref name="shape"/> and <paramref name="dtype"/> in this context's
+        /// memory holding the next bytes of <paramref name="source"/> — as many as the tensor
+        /// covers — read into it where it lives: on a card, through one bounded host buffer a piece
+        /// at a time (<see cref="StagedUpload"/>), so its contents are never whole in host memory.
+        /// What a load puts a tensor on the device with (Shorokoo/Shorokoo#436). Attached, budgeted
+        /// and refused as <see cref="AllocateUninitialized(Shape, DType)"/> is; throws
+        /// <see cref="EndOfStreamException"/> where the stream ends first.
+        /// </summary>
+        internal TensorData ReadTensor(Shape shape, DType dtype, Stream source)
+        {
+            ArgumentNullException.ThrowIfNull(source);
+            var bytes = FlatByteCount(shape, dtype);
+            if (_isHost)
+            {
+                var contents = new byte[bytes];
+                source.ReadExactly(contents);
+                return TensorData.NewHostTensor(shape, dtype, contents);
+            }
+
+            var backend = ResolvedBackend;
+            return Placed(bytes, () => $"a load of {shape}:{dtype}", () => TensorData.Create(
+                shape, dtype, StagedUpload.Read(
+                    backend, (ShorokooTensorElementType)(int)dtype, (long[])shape, bytes, source), backend));
+        }
+
+        /// <summary>The bytes a flat buffer of this shape and dtype takes, refusing — alike on
+        /// every context, before any budget is asked — a dtype or shape that has none.</summary>
+        private long FlatByteCount(Shape shape, DType dtype)
+        {
             ArgumentNullException.ThrowIfNull(dtype);
             ObjectDisposedException.ThrowIf(_disposed, this);
             // Refused here rather than left to the backend, so the same dtype is refused in the
@@ -1184,14 +1224,7 @@ namespace Shorokoo.Runtime
                     $"A tensor of {shape}:{dtype} cannot be allocated as a flat buffer: its "
                     + "elements have no whole-byte stride, or its shape has no known element count.");
 
-            var bytes = checked(shape.Count * (bits / 8));
-            if (_isHost)
-                return TensorData.NewHostTensor(shape, dtype, new byte[bytes]);
-
-            var backend = ResolvedBackend;
-            return Placed(bytes, () => $"AllocateUninitialized of {shape}:{dtype}", () => TensorData.Create(
-                shape, dtype, backend.CreateUninitializedTensorInBackendMemory(
-                    (ShorokooTensorElementType)(int)dtype, (long[])shape), backend));
+            return checked(shape.Count * (bits / 8));
         }
 
         /// <summary>

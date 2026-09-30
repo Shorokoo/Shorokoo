@@ -343,6 +343,14 @@ namespace Shorokoo
             private set => _runtimeContext = value;
         }
 
+        /// <summary>
+        /// Where a checkpoint loaded for this rig puts its state: the memory the rig trains in where
+        /// that is a device's, so the state goes from the file straight onto the card through one
+        /// bounded buffer (Shorokoo/Shorokoo#436), and the framework's own host memory otherwise.
+        /// </summary>
+        internal ComputeContext LoadDestination
+            => RuntimeContext.Device.Space.Kind == MemoryKind.Host ? ComputeContext.Host : RuntimeContext;
+
         private ComputeContext? _runtimeContext;
 
         /// <summary>

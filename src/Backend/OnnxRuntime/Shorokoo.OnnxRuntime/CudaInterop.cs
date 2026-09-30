@@ -65,6 +65,21 @@ internal static class CudaInterop
         => Copy(source, (memcpy, pinned) => memcpy(destination, pinned, (nuint)count, HostToDevice));
 
     /// <summary>
+    /// Fills the device allocation at <paramref name="destination"/> — any range of one, since the
+    /// caller offsets the address — from <paramref name="source"/>. What streams a tensor onto the
+    /// card through one reused buffer, a piece at a time. Answers as
+    /// <see cref="CopyDeviceToHost(IntPtr, Span{byte})"/> does.
+    /// </summary>
+    public static unsafe int? CopyHostToDevice(ReadOnlySpan<byte> source, IntPtr destination)
+    {
+        var memcpy = Bind();
+        if (memcpy is null) return null;
+        if (source.IsEmpty) return 0;
+        fixed (byte* pinned = source)
+            return memcpy(destination, (IntPtr)pinned, (nuint)source.Length, HostToDevice);
+    }
+
+    /// <summary>
     /// Runs <paramref name="copy"/> over <paramref name="hostBuffer"/> pinned, once the runtime is
     /// bound. The pin is what makes the managed array's address meaningful to the CUDA runtime,
     /// which knows nothing of the GC and would otherwise be handed an address a collection may

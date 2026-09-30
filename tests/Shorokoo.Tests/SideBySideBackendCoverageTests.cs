@@ -380,6 +380,8 @@ public class SideBySideBackendCoverageTests
 
         public bool TryCopyTensorRangeToHost(IShorokooTensorValue value, long byteOffset, Span<byte> destination)
             => inner.TryCopyTensorRangeToHost(value, byteOffset, destination);
+        public bool TryCopyHostToTensorRange(IShorokooTensorValue value, long byteOffset, ReadOnlySpan<byte> source)
+            => inner.TryCopyHostToTensorRange(value, byteOffset, source);
 
         public IShorokooTensorValue CreateTensorInBackendMemory(
             ShorokooTensorElementType elementType, byte[] data, long[] shape)

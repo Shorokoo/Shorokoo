@@ -1093,6 +1093,48 @@ public class CrossDeviceRoutingCoverageTests
         }
     }
 
+    [Fact]
+    public void TestACheckpointLoadsStraightOntoACardInBoundedPiecesOrOneWholeCopyPerTensor()
+    {
+        var rig = TrainingRigHelpers.LoaderRig(batchSize: 2, features: 4);
+        var host = rig.CreateInitialCheckpoint();
+        var (flat, zip, dir, zstd) = (TrainingRigHelpers.TempPath("flat") + ".safetensors", TrainingRigHelpers.TempPath("zip") + ".skpt",
+            TrainingRigHelpers.TempPath("dir"), TrainingRigHelpers.TempPath("zstd") + ".skpt");
+        int stored = StateOf(host).Count(t => t.ContentByteLength > 0);
+        (int RangeWrites, int Built) Loaded(bool copiesRanges, Func<ComputeContext, TrainingCheckpoint> load)
+        {
+            var card = new StubBackend(ComputeDevice.Cuda, 0) { CopiesRanges = copiesRanges };
+            using var context = new ComputeContext(card);
+            var loaded = load(context);
+            Assert.All(StateOf(loaded), t => Assert.False(t.IsHostResident));
+            Assert.All(StateOf(loaded), t => Assert.Contains(t, context.Tensors));
+            TrainingRigHelpers.AssertClose(host, loaded.ToHost(), 0f);
+            return (card.RangeWrites, card.Built.Count);
+        }
+        TrainingCheckpoint Skpt(string path, ComputeContext context) => Persistence.LoadTrainingCheckpointFromSkpt(
+            path, rig.TrainableParamStructDef, rig.ModelStateDef, rig.OptimizerStateDef, null, rig, context);
+        try
+        {
+            host.Save(flat);
+            Persistence.SaveTrainingCheckpointToSkpt(host, zip);
+            Persistence.ForTrainingCheckpoint(host).SaveAsDirectory(dir);
+            Persistence.ForTrainingCheckpoint(host).WithZstdCompressedData().Save(zstd);
+
+            Assert.Equal((stored, StateOf(host).Count()), Loaded(true, c => TrainingCheckpoint.LoadFlat(
+                flat, rig.TrainableParamStructDef, rig.ModelStateDef, rig.OptimizerStateDef, null, rig, c)));
+            Assert.Equal((0, StateOf(host).Count() + stored), Loaded(false, c => TrainingCheckpoint.LoadFlat(
+                flat, rig.TrainableParamStructDef, rig.ModelStateDef, rig.OptimizerStateDef, null, rig, c)));
+            Assert.Equal((stored, StateOf(host).Count()), Loaded(true, c => Skpt(zip, c)));
+            Assert.Equal((stored, StateOf(host).Count()), Loaded(true, c => Skpt(dir, c)));
+            Assert.Equal((stored, StateOf(host).Count()), Loaded(true, c => Skpt(zstd, c)));
+        }
+        finally
+        {
+            foreach (var path in (string[])[flat, zip, zstd]) File.Delete(path);
+            if (Directory.Exists(dir)) Directory.Delete(dir, recursive: true);
+        }
+    }
+
     private static IEnumerable<TensorData> StateOf(TrainingCheckpoint checkpoint)
         => ((TensorDataStruct[])[checkpoint.TrainableParams, checkpoint.ModelState, checkpoint.OptimizerState])
             .SelectMany(s => s.Fields.Values.OfType<TensorData>());
@@ -1256,6 +1298,17 @@ public class CrossDeviceRoutingCoverageTests
             if (!CopiesRanges) return false;
             RangeCopies++;
             ((StubValue)value).Bytes.AsSpan((int)byteOffset, destination.Length).CopyTo(destination);
+            return true;
+        }
+
+        /// <summary>How many ranges of its values it has written from the host.</summary>
+        public int RangeWrites { get; private set; }
+
+        public bool TryCopyHostToTensorRange(IShorokooTensorValue value, long byteOffset, ReadOnlySpan<byte> source)
+        {
+            if (!CopiesRanges) return false;
+            RangeWrites++;
+            source.CopyTo(((StubValue)value).Bytes.AsSpan((int)byteOffset, source.Length));
             return true;
         }
 

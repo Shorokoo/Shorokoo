@@ -415,7 +415,7 @@ public class GpuExecutionTests
     }
 
     [CudaFact]
-    public void CudaProvider_AFittedCheckpointSavesFromTheCardInBoundedPiecesAndLoadsBackAsItsHostCopy()
+    public void CudaProvider_AFittedCheckpointSavesFromTheCardAndLoadsOntoItInBoundedPieces()
     {
         TrainingRig Rig(ComputationGraph model) => TrainingRig.FromScratch(
             model, L2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph,
@@ -423,43 +423,49 @@ public class GpuExecutionTests
         TrainingCheckpoint Fitted(TrainingRig rig, long width) => rig.Fit(
             [rig.InputDef.FromOrderedData(TensorData([1L], [2f]))], [rig.TargetDef.FromOrderedData(TensorData([width], new float[width]))],
             numEpochs: 2).FinalCheckpoint;
-        var wideRig = Rig(WideMultiplyModel.ComputationGraph);
-        var wide = Fitted(wideRig, 1L << 20);
-        var narrow = Fitted(Rig(ScalarMultiplyModel.ComputationGraph), 1L);
+        var (wideRig, narrowRig) = (Rig(WideMultiplyModel.ComputationGraph), Rig(ScalarMultiplyModel.ComputationGraph));
+        var (wide, narrow) = (Fitted(wideRig, 1L << 20), Fitted(narrowRig, 1L));
         var home = wide.ToHost();
         float[] State(TrainingCheckpoint c) =>
             [.. TrainingRigHelpers.FlattenStruct(c.TrainableParams), .. TrainingRigHelpers.FlattenStruct(c.OptimizerState)];
-        Assert.All(wide.TrainableParams.Fields.Values.OfType<TensorData>(), t => Assert.False(t.IsHostResident));
+        bool OnCard(TrainingCheckpoint c) => c.TrainableParams.Fields.Values.Concat(c.OptimizerState.Fields.Values)
+            .OfType<TensorData>().All(t => !t.IsHostResident);
+        long stateBytes = 4L * State(home).Length;
+        Assert.True(OnCard(wide));
 
+        (Action<TrainingCheckpoint, string> Save, Func<TrainingRig, string, TrainingCheckpoint> Load, string Suffix)[] forms =
+        [
+            ((c, p) => c.Save(p), (r, p) => r.LoadCheckpoint(p), ".safetensors"),
+            ((c, p) => Persistence.SaveTrainingCheckpointToSkpt(c, p), (r, p) => r.LoadCheckpointFromSkpt(p), ".skpt"),
+            ((c, p) => Persistence.ForTrainingCheckpoint(c).SaveAsDirectory(p), (r, p) => r.LoadCheckpointFromSkpt(p), "_dir"),
+        ];
         var path = TrainingRigHelpers.TempPath("device_ckpt");
         try
         {
-            void Flat(TrainingCheckpoint c) => c.Save(path + ".safetensors");
-            void Zip(TrainingCheckpoint c) => Persistence.SaveTrainingCheckpointToSkpt(c, path + ".skpt");
-            void Dir(TrainingCheckpoint c) => Persistence.ForTrainingCheckpoint(c).SaveAsDirectory(path);
-            long stateBytes = 4L * State(home).Length;
-            foreach (var save in (Action<TrainingCheckpoint>[])[Flat, Zip, Dir])
+            foreach (var (save, load, suffix) in forms)
             {
-                Assert.True(SaveAllocation(() => save(wide)) - SaveAllocation(() => save(narrow)) < stateBytes / 2);
-                save(wide);
+                var (widePath, narrowPath) = (path + "_wide" + suffix, path + "_narrow" + suffix);
+                Assert.True(Allocation(() => save(wide, widePath)) - Allocation(() => save(narrow, narrowPath)) < stateBytes / 2);
+                Assert.True(Allocation(() => load(wideRig, widePath)) - Allocation(() => load(narrowRig, narrowPath)) < stateBytes / 2);
+                var loaded = load(wideRig, widePath);
+                Assert.True(OnCard(loaded));
+                Assert.Equal(State(home), State(loaded.ToHost()));
             }
-
-            Assert.Equal(State(home), State(wideRig.LoadCheckpoint(path + ".safetensors")));
-            Assert.Equal(State(home), State(wideRig.LoadCheckpointFromSkpt(path + ".skpt")));
-            Assert.Equal(State(home), State(wideRig.LoadCheckpointFromSkpt(path)));
         }
         finally
         {
-            foreach (var file in (string[])[path + ".safetensors", path + ".skpt"]) File.Delete(file);
-            if (Directory.Exists(path)) Directory.Delete(path, recursive: true);
+            foreach (var (_, _, suffix) in forms)
+                foreach (var p in (string[])[path + "_wide" + suffix, path + "_narrow" + suffix])
+                    if (Directory.Exists(p)) Directory.Delete(p, recursive: true);
+                    else File.Delete(p);
         }
     }
 
-    private static long SaveAllocation(Action save)
+    private static long Allocation(Action act)
     {
-        save();
+        act();
         var before = GC.GetAllocatedBytesForCurrentThread();
-        save();
+        act();
         return GC.GetAllocatedBytesForCurrentThread() - before;
     }
 

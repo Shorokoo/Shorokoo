@@ -144,6 +144,10 @@ namespace Shorokoo
         /// <see cref="CheckpointComponents.Loss"/> → a <c>null</c> loss,
         /// <see cref="CheckpointComponents.History"/> → an empty history); without a rig, an
         /// absent-but-expected kind fails loud.</para>
+        ///
+        /// <para>The state is read into <paramref name="destination"/>'s memory as it streams off
+        /// the file: on a card, through one bounded host buffer, so host memory never holds it
+        /// (Shorokoo/Shorokoo#436).</para>
         /// </summary>
         internal static TrainingCheckpoint LoadTrainingCheckpointFromSkpt(
             string filePath,
@@ -151,7 +155,8 @@ namespace Shorokoo
             TensorStructDef modelStateDef,
             TensorStructDef optimizerStateDef,
             CheckpointComponents? components,
-            TrainingRig? rigForDefaults)
+            TrainingRig? rigForDefaults,
+            ComputeContext destination)
         {
             if (trainableParamDef is null) throw new ArgumentNullException(nameof(trainableParamDef));
             if (modelStateDef is null) throw new ArgumentNullException(nameof(modelStateDef));
@@ -190,7 +195,11 @@ namespace Shorokoo
             var modelMapping = GetDefaultMappingTensors(manifest, SkptFileFormat.DefaultModelKey);
             var optimizerMapping = GetDefaultMappingTensors(
                 manifest, training.Rig?.OptimizerModel ?? SkptFileFormat.OptimizerModelKey);
-            var tensorsByDataKey = new Dictionary<string, OrderedDictionary<string, TensorData>>(StringComparer.Ordinal);
+            // State is read straight into the memory the rig trains in -- on a card, through one bounded
+            // buffer, never whole in host memory (Shorokoo/Shorokoo#436). The history is read on the
+            // host, where it is read back.
+            var tensorsByDataKey = new SkptDataEntries(dataKey =>
+                dataKey == SkptFileFormat.HistoryDataKey ? ComputeContext.Host : destination);
 
             bool Want(CheckpointComponents c) => components is null || (components.Value & c) != 0;
 
@@ -287,7 +296,7 @@ namespace Shorokoo
         private static (TensorDataStruct Trainable, TensorDataStruct ModelState) ReconstructArchOwnedState(
             SkptContainer container, SkptManifest manifest, IReadOnlyDictionary<string, SkptTensorRef>? mapping,
             TensorStructDef trainableParamDef, TensorStructDef modelStateDef,
-            Dictionary<string, OrderedDictionary<string, TensorData>> tensorsByDataKey, string filePath)
+            SkptDataEntries tensorsByDataKey, string filePath)
         {
             if (mapping is null)
             {
@@ -348,7 +357,7 @@ namespace Shorokoo
         private static TensorDataStruct ReconstructOptimizerState(
             SkptContainer container, SkptManifest manifest, IReadOnlyDictionary<string, SkptTensorRef>? mapping,
             TensorStructDef def,
-            Dictionary<string, OrderedDictionary<string, TensorData>> tensorsByDataKey, string filePath)
+            SkptDataEntries tensorsByDataKey, string filePath)
         {
             if (mapping is null)
             {
@@ -408,7 +417,7 @@ namespace Shorokoo
             SkptContainer container, SkptManifest manifest,
             Dictionary<string, (string Id, SkptTensorRef Ref)> byField,
             TensorStructDef def, string role, string mismatchHint,
-            Dictionary<string, OrderedDictionary<string, TensorData>> tensorsByDataKey, string filePath)
+            SkptDataEntries tensorsByDataKey, string filePath)
         {
             var fields = new List<KeyValuePair<string, IData>>(def.Fields.Length);
             foreach (var fieldDef in def.Fields)

@@ -985,6 +985,45 @@ public abstract class OrtBackend : IShorokooBackend
         return true;
     }
 
+    /// <summary>
+    /// <paramref name="source"/> copied into <paramref name="value"/>'s contents at
+    /// <paramref name="byteOffset"/> — through the CUDA runtime to the device address plus the
+    /// offset where the value is on the card, so a tensor streams onto it through one reused buffer
+    /// instead of arriving whole. False only where the CUDA runtime is absent, for the caller to fall
+    /// back to <see cref="CreateTensorInBackendMemory"/>.
+    /// </summary>
+    public bool TryCopyHostToTensorRange(IShorokooTensorValue value, long byteOffset, ReadOnlySpan<byte> source)
+    {
+        ArgumentNullException.ThrowIfNull(value);
+
+        if (value.IsHostAccessible)
+        {
+            var destination = value.GetTensorMutableDataAsSpan<byte>();
+            if (byteOffset < 0 || byteOffset > destination.Length - source.Length)
+                throw RangeOutside(byteOffset, source.Length, destination.Length);
+            source.CopyTo(destination.Slice((int)byteOffset, source.Length));
+            GC.KeepAlive(value);
+            return true;
+        }
+
+        if (value.ValueType != ShorokooOnnxValueType.Tensor)
+            throw new InvalidOperationException(
+                $"Only a tensor can be written into device memory; this is a {value.ValueType}.");
+
+        var length = TensorElementLayout.ByteLength(value.ElementType, value.Shape);
+        if (byteOffset < 0 || byteOffset > length - source.Length)
+            throw RangeOutside(byteOffset, source.Length, length);
+        var status = CudaInterop.CopyHostToDevice(source, DevicePointer(value) + (nint)byteOffset);
+        GC.KeepAlive(value);
+        if (status is null) return false;
+        if (status != 0)
+            throw new InvalidOperationException(
+                $"Copying {source.Length} bytes into this tensor ({string.Join('x', value.Shape)}:"
+                + $"{value.ElementType}) at offset {byteOffset} in {Description}'s device memory failed "
+                + $"with CUDA error {status}.");
+        return true;
+    }
+
     private static ArgumentOutOfRangeException RangeOutside(long byteOffset, int count, long length)
         => new(nameof(byteOffset), $"{count} bytes from offset {byteOffset} run past the value's {length}.");
 

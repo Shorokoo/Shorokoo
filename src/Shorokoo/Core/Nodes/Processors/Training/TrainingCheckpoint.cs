@@ -654,7 +654,7 @@ namespace Shorokoo
                 "(or rebuild the whole rig from it with the static TrainingRig.Load(path)).");
             var raw = LoadFlat(
                 filePath, r.TrainableParamStructDef, r.ModelStateDef, r.OptimizerStateDef,
-                components, r);
+                components, r, r.LoadDestination);
             // Attach the rig (sets Rig, preserves counters). Reading against the rig's own defs
             // settles the field names, so the def check inside AdoptCheckpoint passes by construction
             // — but the dimension check there does not: the defs carry no shapes, so a checkpoint from
@@ -686,7 +686,7 @@ namespace Shorokoo
                 "Load a flat safetensors training checkpoint with rig.LoadCheckpoint(path).");
             var raw = Persistence.LoadTrainingCheckpointFromSkpt(
                 filePath, r.TrainableParamStructDef, r.ModelStateDef, r.OptimizerStateDef,
-                components, r);
+                components, r, r.LoadDestination);
             return r.AdoptCheckpoint(raw);
         }
 
@@ -734,9 +734,18 @@ namespace Shorokoo
             TensorStructDef? modelStateDef,
             TensorStructDef? optimizerStateDef,
             CheckpointComponents? components,
-            TrainingRig? rigForDefaults)
+            TrainingRig? rigForDefaults,
+            ComputeContext destination)
         {
-            var tensors = SafeTensorLoader.LoadSafeTensors(filePath);
+            // The state sections are read straight into the memory the rig trains in -- on a card,
+            // through one bounded buffer, never whole in host memory (Shorokoo/Shorokoo#436). The
+            // marker, the counters and the history are read on the host, where they are read back.
+            var tensors = SafeTensorLoader.LoadSafeTensors(filePath, name =>
+                name.StartsWith(TrainableSection + "/", StringComparison.Ordinal)
+                || name.StartsWith(ModelStateSection + "/", StringComparison.Ordinal)
+                || name.StartsWith(OptimizerStateSection + "/", StringComparison.Ordinal)
+                    ? destination
+                    : ComputeContext.Host);
             var byName = tensors.ToDictionary(t => t.Name, t => t.Data);
 
             // A null def means "read what the file says it holds": the flat format is

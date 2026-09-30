@@ -1050,7 +1050,7 @@ Console.WriteLine(save);
 // 200,000,077 bytes in 0.252s (757 MiB/s): write 0.051s, flush 0.194s, commit 0.007s
 ```
 
-`Write` serializes into the staged file (for `.skpt`, also compressing and hashing), `Flush` is the
+`Write` serializes into the staged file (for `.skpt`, also hashing, and compressing Zstd entries), `Flush` is the
 fsync, `Commit` the rename plus sweeping stale staged files. They sum to `Elapsed`; `BytesWritten`
 is the file size and `BytesPerSecond` the achieved rate. `Persistence.SaveTrainingCheckpoint`,
 `Persistence.SaveTrainingCheckpointToSkpt` and the `Persistence.ForTrainingCheckpoint(...)`
@@ -1065,10 +1065,16 @@ steady.Start();
 savedBytes += save.BytesWritten;
 ```
 
-The flat safetensors save streams each tensor from its storage with no extra copy. The `.skpt` save
-holds a full serialized copy of the training state in memory before writing. Neither can exceed the
-safetensors 2 GB ceiling: a larger checkpoint is written without complaint and cannot be read back
-([#48](https://github.com/Shorokoo/Shorokoo/issues/48)).
+The flat safetensors save streams each tensor from its storage with no extra copy. It has no size
+guard: a file over the 2 GB safetensors read limit is written without complaint and cannot be read
+back ([#48](https://github.com/Shorokoo/Shorokoo/issues/48)).
+
+The `.skpt` save also streams each entry straight from the tensors' storage, with no managed copy of
+the training state. The exception is an entry compressed with `WithZstdCompressedData`: it is built
+in memory and then compressed, one entry at a time, so the peak is that entry rather than the whole
+state. An entry over `int.MaxValue` bytes, an archive of 4 GiB or more, or more than 65,535 entries
+is refused with `NotSupportedException` before anything is written, and any previous file at the
+target is left intact.
 
 ### Bind trained weights into an inference model
 

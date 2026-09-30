@@ -105,17 +105,22 @@ namespace Shorokoo
         /// One safetensors data entry of a <c>.skpt</c>, as it is stored. Uncompressed, it is
         /// produced straight out of the tensors' own storage as the archive is written, so writing
         /// it costs no managed copy of those tensors (Shorokoo/Shorokoo#402); the entry is aligned. With
-        /// a Zstd <paramref name="zstdLevel"/>, the safetensors bytes are built once and wrapped in
-        /// a single Zstd frame, and the entry skips the alignment a compressed entry cannot use.
+        /// a Zstd <paramref name="zstdLevel"/>, it is produced the same way through a compressor into a
+        /// single Zstd frame — compressed afresh on each of the archive writer's passes, which a
+        /// compressor fed the same bytes at the same level answers identically, so neither the entry
+        /// nor its compressed form is ever held whole (Shorokoo/Shorokoo#436) — and it skips the
+        /// alignment a compressed entry cannot use.
         /// </summary>
         internal static (SkptFileFormat.EntryPayload Stored, string Compression, bool Align) SafeTensorsDataEntry(
             List<SafeTensor> tensors, int? zstdLevel)
         {
             void Produce(Stream s) => SafeTensorLoader.SaveSafeTensorsToStream(s, tensors);
             return zstdLevel is int level
-                ? (SkptFileFormat.EntryPayload.Of(
-                       CompressedFormatUtils.Compress(SkptFileFormat.EntryPayload.ProduceBytes(Produce), level)),
-                   SkptFileFormat.CompressionZstd, false)
+                ? (SkptFileFormat.EntryPayload.Produced(s =>
+                   {
+                       using var compressed = new ZstdSharp.CompressionStream(s, level, leaveOpen: true);
+                       Produce(compressed);
+                   }), SkptFileFormat.CompressionZstd, false)
                 : (SkptFileFormat.EntryPayload.Produced(Produce), SkptFileFormat.CompressionNone, true);
         }
 

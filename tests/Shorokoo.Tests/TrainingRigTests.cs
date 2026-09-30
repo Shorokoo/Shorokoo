@@ -4387,12 +4387,14 @@ public class TrainingRigCheckpointCoverageTests
         {
             void Zip(TrainingCheckpoint c) => Persistence.SaveTrainingCheckpointToSkpt(c, skpt);
             void Dir(TrainingCheckpoint c) => Persistence.ForTrainingCheckpoint(c).SaveAsDirectory(dir);
+            void Zstd(TrainingCheckpoint c) => Persistence.ForTrainingCheckpoint(c).WithZstdCompressedData().Save(skpt);
             void Model(ComputationGraph m) => Persistence.From(m).WithModel().WithWeights().Save(skpt);
             var wideModel = wide.ToInferenceModel();
             var narrowModel = narrow.ToInferenceModel();
 
             Assert.True(SaveAllocation(() => Zip(wide)) - SaveAllocation(() => Zip(narrow)) < stateBytes / 2);
             Assert.True(SaveAllocation(() => Dir(wide)) - SaveAllocation(() => Dir(narrow)) < stateBytes / 2);
+            Assert.True(SaveAllocation(() => Zstd(wide)) - SaveAllocation(() => Zstd(narrow)) < stateBytes / 2);
             Assert.True(SaveAllocation(() => Model(wideModel)) - SaveAllocation(() => Model(narrowModel)) < stateBytes / 6);
 
             Zip(wide);

@@ -1153,17 +1153,19 @@ guard: a file over the 2 GB safetensors read limit is written without complaint 
 back ([#48](https://github.com/Shorokoo/Shorokoo/issues/48)).
 
 The `.skpt` save also streams each entry straight from the tensors' storage, with no managed copy of
-the training state. The exception is an entry compressed with `WithZstdCompressedData`: it is built
-in memory and then compressed, one entry at a time, so the peak is that entry rather than the whole
-state. An entry over `int.MaxValue` bytes, an archive of 4 GiB or more, or more than 65,535 entries
-is refused with `NotSupportedException` before anything is written, and any previous file at the
-target is left intact.
+the training state. An entry compressed with `WithZstdCompressedData` is compressed as it streams,
+afresh on each pass the writer makes over it, so it is never held whole either; its length is known
+only once it is compressed, so its tensors are read three times rather than two. An entry over
+`int.MaxValue` bytes, an archive of 4 GiB or more, or more than 65,535 entries is refused with
+`NotSupportedException` before anything is written, and any previous file at the target is left
+intact.
 
 A checkpoint in device memory is saved from there: the flat and `.skpt` saves (file and directory
 form) write each tensor through one bounded host staging buffer (8 MiB), piece by piece, so the
 state is never whole in host memory. On ONNX Runtime CUDA the CUDA runtime copies the pieces; a
 backend that cannot copy part of a tensor (the PyTorch and JAX backends) stages one whole tensor at
 a time instead. The `.skpt` save reads each device tensor twice, once to hash it for the manifest
+and once to write it, and binds the model it writes from the weights' shapes and dtypes, copying
 only the smallest weights to the host. There is no direct device-to-disk path.
 
 Loading is the same in reverse. A checkpoint loaded for a rig that trains on a device

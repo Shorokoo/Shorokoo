@@ -141,7 +141,10 @@ namespace Shorokoo.Core.Nodes.Processors.Training
                             "FastRebuildModelInputsForTrainingProcessor: a state update reads a value that is "
                             + "not one this state field has held, so the field it updates cannot be "
                             + "identified and its update would be dropped.");
-                    currentByField[field] = resolvedUpdatedState;
+                    // An unrolled trip a later trip supersedes is read within its own trip, but its
+                    // update is not the one the field carries out.
+                    if (!FastChainStateUpdatesAcrossCallSites.IsSuperseded(node))
+                        currentByField[field] = resolvedUpdatedState;
                     heldByField[field].Add(resolvedUpdatedState);
 
                     var outputKey = GetSingleOutputKey(node);
@@ -202,7 +205,15 @@ namespace Shorokoo.Core.Nodes.Processors.Training
             foreach (var su in currentByField)
                 graph.AddOutput(su);
 
+            // A trainable parameter that only a discarded stateful call reads reaches nothing once
+            // the WITH_STATE_DEPS that kept the call is gone, but it is still a parameter of the
+            // step, whose gradient for it is zero. Its field reads only the parameter struct input,
+            // so it goes back at the start of the body.
+            var paramFieldNodeKeys = paramFieldKeys.Select(k => k.FastNodeKey).ToHashSet();
+            var paramFieldNodes = graph.Nodes.Where(n => paramFieldNodeKeys.Contains(n.Key)).ToList();
             FastProcessorHelper.RemoveUnreachableNodes(graph);
+            var kept = graph.Nodes.Select(n => n.Key).ToHashSet();
+            graph.InsertAtBodyStart(paramFieldNodes.Where(n => !kept.Contains(n.Key)));
 
             var rebuiltModelOutput = ResolveRemap(remap, modelOutputKey);
             var rebuiltParamFieldKeys = paramFieldKeys.Select(k => ResolveRemap(remap, k)).ToArray();

@@ -29,6 +29,10 @@ Related: [core-types.md](core-types.md) · [inference.md](inference.md) ·
   - Each **call** of a module registers its update: calling one model twice applies
     both in order, the second reading what the first wrote (a call whose result is
     discarded still updates).
+  - A call in a `LoopAPI.Iterate` body is one call site however many trips the loop
+    runs: every trip starts from the value the state held entering the loop, the calls
+    within a trip compose in order, and the update is the one the last trip that ran
+    made. The loop composes with calls before and after it like any other call.
   - In an `IfElse`, only the arm that runs updates; calls within an arm compose with
     each other and with calls before the branch. A call the branch does not choose
     between must come before the ones it does.

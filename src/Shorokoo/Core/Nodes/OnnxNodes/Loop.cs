@@ -95,6 +95,16 @@ namespace Shorokoo
         /// own at the end of one of THIS loop's iterations unless the nested loop carries it out.</summary>
         private HashSet<Variable> nestedBodyThirdPassOutputs = new HashSet<Variable>();
 
+        /// <summary>The body's calls of models that update state, recorded on the canonical pass
+        /// (see <see cref="InternalGlobals.RegisterCallEffect"/>). A body value reaches nothing
+        /// after the loop unless the loop carries it out, so <see cref="BuildLoopCloseNode"/> hangs
+        /// these on a value the loop does carry out, and names that value as a call effect of the
+        /// enclosing scope in turn.</summary>
+        private List<Variable>? callEffects;
+
+        /// <summary>Records one stateful call made in this loop's body.</summary>
+        internal void AddCallEffect(Variable callOutput) => (callEffects ??= []).Add(callOutput);
+
         // private HashSet<Variable> zombieScanVariableOutputs = new HashSet<Variable>();
 
         private HashSet<Variable> allExternalInputs = new HashSet<Variable>();
@@ -1101,6 +1111,23 @@ namespace Shorokoo
             var closeNodeScanLoopVariables = thirdPassOutputs.Values.Where(x => x.IsLocalScanVariable).ToArray();
             var closeNodeScanInputs = closeNodeScanLoopVariables.Select(x => x.CloseNodeInput.AssertNotNull()).ToArray();
 
+            // A stateful call whose result the body discards is kept by what the loop carries
+            // out: the first carried value (else the first scanned one) takes the calls as
+            // dependencies, and its close output becomes a call effect of the enclosing scope. A
+            // loop that carries nothing out has nothing to keep its body alive with.
+            int effectCarrier = -1;
+            if (this.callEffects is { Count: > 0 } effects)
+            {
+                var carrierLoopVariable = Array.FindIndex(closeNodeLoopVariables, x => !x.IsLagCarry);
+                effectCarrier = carrierLoopVariable >= 0 ? carrierLoopVariable
+                    : closeNodeScanInputs.Length > 0 ? closeNodeLoopInputs.Length
+                    : -1;
+                if (effectCarrier >= 0 && effectCarrier < closeNodeLoopInputs.Length)
+                    closeNodeLoopInputs[effectCarrier] = InternalOp.WithStateDeps(closeNodeLoopInputs[effectCarrier], [.. effects]);
+                else if (effectCarrier >= 0)
+                    closeNodeScanInputs[0] = InternalOp.WithStateDeps(closeNodeScanInputs[0], [.. effects]);
+            }
+
             var loopCloseNode = OnnxOp.LoopClose(
                             this.continueWhileTensor ?? Globals.Scalar(true),
                             closeNodeLoopInputs,
@@ -1126,10 +1153,20 @@ namespace Shorokoo
                     this.closeNodeOutputs[closeNodeOutputVariable] = loopVariable;
                 }
 
-                Debug.Assert(Object.ReferenceEquals(loopVariable.CloseNodeInput, closeNodeInputVariable));
+                Debug.Assert(Object.ReferenceEquals(loopVariable.CloseNodeInput, closeNodeInputVariable)
+                             || closeNodeInputVariable?.OwningNode.NodeDef.FullNodeOpName == InternalOpCodes.WITH_STATE_DEPS);
             }
 
             this.CloseLoopNode = loopCloseNode;
+
+            if (effectCarrier >= 0)
+            {
+                var carried = loopCloseNode.Outputs[effectCarrier].AssertNotNull();
+                if (this.LoopDepth > 0)
+                    GraphTrace.Loopers[this.LoopDepth - 1].AddCallEffect(carried);
+                else
+                    GraphTrace.CallEffects?.Add(carried);
+            }
 
             // A lag carry's FirstPassOutput is the trailed carry's, which already appears in this
             // mapping under its own close output; leaving it in would overwrite that entry.

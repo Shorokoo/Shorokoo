@@ -175,6 +175,10 @@ namespace Shorokoo.Graph
                 "After FastConvertModelParamIdRefToModelParam");
             FastGraphCycleDetector.AssertAcyclic(fastGraph, "After FastConvertModelParamIdRefToModelParam");
 
+            // The calls one loop body makes compose within a trip. Before the simplify, which
+            // unrolls loops and with that loses the order the calls were made in.
+            FastChainStateUpdatesAcrossCallSites.ChainWithinLoopBodies(fastGraph);
+
             Stage("Simplify");
             FastSimplify.Process(fastGraph);
             DebugPrintFast(fastGraph, debugRequests, GraphCreationPoint.AfterFirstSimplify);

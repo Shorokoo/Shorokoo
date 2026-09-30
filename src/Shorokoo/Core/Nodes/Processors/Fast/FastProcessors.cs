@@ -6002,8 +6002,13 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 // Its value does vary per iteration, so it clones like anything else that does.
                 // Same predicate the rematerializer uses to refuse cloning a draw, read the other
                 // way round: there a clone would be a second sample, here that is the point.
+                //
+                // A state update is cloned for the same reason: each trip makes its own, and only
+                // the last trip's is the loop's — the earlier ones are marked below, which a
+                // shared node cannot be.
                 bool anyLoopDepIn =
-                    !Shorokoo.Core.AutoDiffCheckpointing.Rematerializer.IsDeterministicOpCode(b.OpCode);
+                    !Shorokoo.Core.AutoDiffCheckpointing.Rematerializer.IsDeterministicOpCode(b.OpCode)
+                    || b.OpCode == InternalOpCodes.STATE_UPDATE_LINK;
                 foreach (var kvp in b.FullInputs)
                     foreach (var ik in kvp.Value)
                         if (ik is FastTensorKey ikt && loopDependentTensors.Contains(ikt)) { anyLoopDepIn = true; break; }
@@ -6199,6 +6204,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 }
             }
 
+            // Each state update's value as of the last trip that ran (under a dynamic condition).
+            var gatedUpdateOf = new Dictionary<FastNodeKey, FastTensorKey>();
+
             for (long iter = 0; iter < iterCount; iter++)
             {
                 // Build iterInputRemap: body-visible TensorKeys whose source was an OPEN
@@ -6326,6 +6334,12 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                         TargetFunction = b.TargetFunction,
                     };
 
+                    // A later trip follows this one, so this trip's state update is not the loop's.
+                    if (b.OpCode == InternalOpCodes.STATE_UPDATE_LINK && iter < iterCount - 1)
+                        cloned.Attributes = OnnxCSharpAttributes.FromCSharpVals(
+                            new Dictionary<string, object?> { [OnnxOpAttributeNames.ShrkAttrSupersededByLaterIteration] = true },
+                            Definitions.NodeDefinitions[InternalOpCodes.STATE_UPDATE_LINK].AttributeDefs);
+
                     foreach (var kvp in b.FullInputs)
                     {
                         var list = new List<FastTensorKey?>(kvp.Value.Count);
@@ -6350,6 +6364,23 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                             curBodyOutputMap[ok.Value] = newTk;
                         }
                         cloned.FullOutputs[kvp.Key] = list;
+                    }
+
+                    // A trip the continue condition skips makes no update, so under a dynamic
+                    // condition each trip's update falls back to the previous trip's where this one
+                    // did not run — the last trip's is then the last update that happened, or the
+                    // value entering the loop when none did.
+                    if (hasCondChain && b.OpCode == InternalOpCodes.STATE_UPDATE_LINK
+                        && allPrevCondKey is FastTensorKey ran
+                        && cloned.FullInputs[""] is [FastTensorKey entering, FastTensorKey updated])
+                    {
+                        var gateKey = FastNodeKey.New();
+                        newNodes.Add(FastNodeCreationHelpers.CreateFastNode(
+                            gateKey, OpCodes.WHERE, new Dictionary<string, object?>(),
+                            [ran, updated, gatedUpdateOf.TryGetValue(b.Key, out var previous) ? previous : entering]));
+                        var gated = new FastTensorKey(gateKey, 0);
+                        cloned.FullInputs[""][1] = gated;
+                        gatedUpdateOf[b.Key] = gated;
                     }
 
                     newNodes.Add(cloned);

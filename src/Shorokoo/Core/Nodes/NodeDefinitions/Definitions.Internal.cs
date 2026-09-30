@@ -258,6 +258,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Tensor<AnyLike>("T")
                 .Input("originalState", "T", rank: "R")
                 .Input("updatedState", "T", rank: "R")
+                .AttributeBool(ShrkAttrSupersededByLaterIteration)
                 .Output("linkedUpdatedState", "T", rank: "R"),
 
             // WITH_STATE_DEPS: Creates graph dependencies from updated state tensors to module output.

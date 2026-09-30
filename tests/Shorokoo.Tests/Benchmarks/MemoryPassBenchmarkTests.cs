@@ -199,11 +199,11 @@ public class MemoryPassBenchmarkTests
             Assert.True(now.PeakBytes <= was.PeakBytes * PeakRegressionFactor);
             Assert.True(now.ComputeTime <= was.ComputeTime * ComputeRegressionFactor);
 
-            // A family the pass used to act on must still get most of the relief it got. The
-            // factors above are one-sided with slack, so a change that switches the pass off on
-            // one family reads as a couple of percent and slips through; that is how a premature
-            // stop in the rematerializer's candidate walk once disabled the pass on the one-layer
-            // encoder, and the same stop quietly cost chunked attention part of its relief while
+            // A family the baseline records the pass acting on must still get most of the relief
+            // recorded for it. The factors above are one-sided with slack, so a change that
+            // switches the pass off on one family reads as a couple of percent and slips through:
+            // a premature stop in the rematerializer's candidate walk can disable the pass on the
+            // one-layer encoder, or quietly cost chunked attention part of its relief while
             // leaving the strategy name intact.
             if (was.Strategy != BaselineStrategy)
             {

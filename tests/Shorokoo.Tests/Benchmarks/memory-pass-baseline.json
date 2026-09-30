@@ -96,12 +96,12 @@
       "UnoptimizedRealPeakBytes": 7745536,
       "RealPeakBytes": 8327168,
       "UnoptimizedComputeTime": 5298733.00596,
-      "ComputeTime": 5809240.756360001,
+      "ComputeTime": 5403442.62004,
       "UnoptimizedKernelTimeMs": 3.647,
       "KernelTimeMs": 3.08,
       "OrtOrderVsGraph": 0.5223880597014925,
       "OrtOrderVsReverseDfs": 0.7910447761194029,
-      "Nodes": 440,
+      "Nodes": 431,
       "Strategy": "RematReorder"
     },
     "attn-chunk4": {

@@ -24,7 +24,7 @@ namespace Shorokoo.Tests;
 ///
 /// <para><see cref="TestComputeMemoryObjectiveIsScaleFreeCoverage"/> guards the property the
 /// whole pass rests on: the objective must weigh the same proportional trade identically at
-/// any model size. A byte-scaled coefficient — what this replaced — passes every other test
+/// any model size. A byte-scaled coefficient would pass every other test
 /// in the suite while silently reducing the pass to a no-op on real models.</para>
 /// </summary>
 [Trait("Domain", "Core")]
@@ -68,8 +68,7 @@ public class AutoDiffCheckpointingCoverageTests
         var reordered = scheduler.Reorder(graph, shapeInfo);
         Assert.Equal(graph.Nodes.Count, reordered.Nodes.Count);
 
-        var rematerializer = new Rematerializer(
-            new ComputeMemoryObjective(1.0, 1.0, eval), maxIterations: 20);
+        var rematerializer = new Rematerializer(new ComputeMemoryObjective(1.0, 1.0, eval));
         var (rematGraph, rematShapeInfo) = rematerializer.Apply(graph, shapeInfo);
         Assert.True(rematGraph.Nodes.Count >= graph.Nodes.Count);
         foreach (var node in rematGraph.Nodes)
@@ -85,7 +84,6 @@ public class AutoDiffCheckpointingCoverageTests
         var fullOptimizer = new MemoryAwareGraphOptimizer(
             computeFactor: 1.0,
             memoryFactor: 1.0,
-            maxRematerializationIterations: 20,
             shapeInference: new ShapeInferenceInterpreter(CpuContext));
         var fullResult = fullOptimizer.Optimize(graph, inputData, weightsData, biasData, biasData);
         Assert.NotNull(fullResult.OptimizedGraph);
@@ -848,21 +846,26 @@ public class AutoDiffCheckpointingCoverageTests
         }
     }
 
-    [Fact]
-    public void TestRematerializerClonesEachChainOnceWithinBudgetAndNeverRaisesThePeakCoverage()
+    private static (InternalComputationGraph Graph, ShapeInferenceResult ShapeInfo) SdpaMeanPoolStep(long d)
     {
         var rig = TrainingRig.FromScratch(SdpaMeanPoolModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
-            [new TensorDataModelParam("input", ModelParamType.InputParam, Pattern([2L, 4L, 256L, 32L], 1f))], 0.01f);
+            [new TensorDataModelParam("input", ModelParamType.InputParam, Pattern([2L, 4L, 256L, d], 1f))], 0.01f);
         var graph = rig.PreOptimizationGraph.ToInternal();
-        var shapeInfo = new ShapeInferenceInterpreter(CpuContext).Infer(graph,
-            rig.OptimizationInputShapes.Select(s => Synthesize(s.Shape, s.DType)).ToArray());
-        var evaluator = new GraphEvaluator();
+        return (graph, new ShapeInferenceInterpreter(CpuContext).Infer(graph,
+            rig.OptimizationInputShapes.Select(s => Synthesize(s.Shape, s.DType)).ToArray()));
+    }
+
+    private static readonly Lazy<(InternalComputationGraph Graph, ShapeInferenceResult ShapeInfo)> SdpaMeanPoolStepD64 = new(() => SdpaMeanPoolStep(64L));
+
+    private static readonly StepState SdpaStepStateInPlace = new([(0, 0), (1, 1), (2, 2)], WrittenInPlace: true);
+
+    private static Rematerializer RematerializeWithinBudget(InternalComputationGraph graph, ShapeInferenceResult shapeInfo, GraphEvaluator evaluator, int budget)
+    {
         var before = evaluator.Evaluate(graph, shapeInfo);
-        var remat = new Rematerializer(new ComputeMemoryObjective(1.0, 2.0, before), evaluator: evaluator);
+        var remat = new Rematerializer(new ComputeMemoryObjective(1.0, 2.0, before), evaluator, budget);
         var (after, afterInfo) = remat.Apply(graph, shapeInfo);
 
-        Assert.NotEmpty(remat.CommitLog);
-        Assert.True(remat.EvaluationsUsed <= Rematerializer.MaxEvaluationsPerCall);
+        Assert.True(remat.EvaluationsUsed <= budget);
         Assert.Equal(graph.Nodes.Count + remat.CommitLog.Sum(c => c.ChainLength), after.Nodes.Count);
         var originals = graph.Nodes.Select(n => n.Key).ToHashSet();
         var read = after.Nodes.SelectMany(n => n.Inputs).OfType<FastTensorKey>().ToHashSet();
@@ -873,18 +876,34 @@ public class AutoDiffCheckpointingCoverageTests
             foreach (var output in node.Outputs)
                 if (output is not null)
                     Assert.NotNull(afterInfo.GetTensorInfo(output.Value));
+        return remat;
+    }
+
+    [Fact]
+    public void TestRematerializerClonesEachChainOnceWithinBudgetAndNeverRaisesThePeakCoverage()
+    {
+        var (graph, shapeInfo) = SdpaMeanPoolStep(32L);
+        Assert.NotEmpty(RematerializeWithinBudget(graph, shapeInfo, new GraphEvaluator(), Rematerializer.MaxEvaluationsPerCall).CommitLog);
+    }
+
+    [Fact]
+    public void TestRematerializerStopsAtAnyBudgetMidSearchWithoutRaisingThePeakCoverage()
+    {
+        var (graph, shapeInfo) = SdpaMeanPoolStepD64.Value;
+        var evaluator = new GraphEvaluator(state: SdpaStepStateInPlace);
+        foreach (var budget in (int[])[1, 2, 3, 5, 6, 8, 12])
+            Assert.True(RematerializeWithinBudget(graph, shapeInfo, evaluator, budget).BudgetBound);
     }
 
     private static bool FirstCommittedBatchIsMinimal(InternalComputationGraph graph, ShapeInferenceResult shapeInfo, GraphEvaluator evaluator)
     {
         var baseline = evaluator.Evaluate(graph, shapeInfo);
         var objective = new ComputeMemoryObjective(1.0, 2.0, baseline);
-        var remat = new Rematerializer(objective, evaluator: evaluator);
+        var remat = new Rematerializer(objective, evaluator);
         remat.Apply(graph, shapeInfo);
         var log = remat.CommitLog.TakeWhile(c => c.PeakBefore == baseline.PeakMemoryBytes).ToList();
         var candidates = remat.FindCandidates(Rematerializer.Liveness.Build(graph, baseline, shapeInfo), shapeInfo, []);
-        List<Rematerializer.RematCandidate> batch = [.. log.Select(c => candidates.First(k => k.Rewires[0].Target.Equals(c.Target)
-            && k.Variant == c.Variant && k.Chain.Count == c.ChainLength && k.Rewires.Sum(r => r.Consumers.Count) == c.RewiredConsumers))];
+        List<Rematerializer.RematCandidate> batch = [.. log.Select(c => candidates.Single(k => k.Identity == c.Identity && k.Variant == c.Variant && k.Chain.Count == c.ChainLength))];
 
         (double Score, long Peak) Measure(IEnumerable<Rematerializer.RematCandidate> members)
         {
@@ -894,21 +913,14 @@ public class AutoDiffCheckpointingCoverageTests
         }
 
         var committed = Measure(batch);
-        return batch.All(dropped => Measure(batch.Where(c => c != dropped)) is var r && !(r.Score < committed.Score && r.Peak <= committed.Peak));
+        return log[0].PrunedFrom > 1 && batch.All(dropped => Measure(batch.Where(c => c != dropped)) is var r && !(r.Score < committed.Score && r.Peak <= committed.Peak));
     }
 
-    // The rematerializer commits a ranked prefix of candidates whole, members that add compute without lowering the peak included:
-    // https://github.com/Shorokoo/Shorokoo/issues/478
-    [Fact(Skip = "Shorokoo/Shorokoo#478: the rematerializer commits a candidate prefix whole, including members that add compute without lowering the peak")]
+    [Fact]
     public void TestNoMemberOfACommittedRecomputeBatchCanBeDroppedForABetterScoreCoverage()
     {
-        var rig = TrainingRig.FromScratch(SdpaMeanPoolModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
-            [new TensorDataModelParam("input", ModelParamType.InputParam, Pattern([2L, 4L, 256L, 64L], 1f))], 0.01f);
-        var graph = rig.PreOptimizationGraph.ToInternal();
-        var shapeInfo = new ShapeInferenceInterpreter(CpuContext).Infer(graph,
-            rig.OptimizationInputShapes.Select(s => Synthesize(s.Shape, s.DType)).ToArray());
-
-        Assert.True(FirstCommittedBatchIsMinimal(graph, shapeInfo, new GraphEvaluator(state: new StepState([(0, 0), (1, 1), (2, 2)], WrittenInPlace: true))));
+        var (graph, shapeInfo) = SdpaMeanPoolStepD64.Value;
+        Assert.True(FirstCommittedBatchIsMinimal(graph, shapeInfo, new GraphEvaluator(state: SdpaStepStateInPlace)));
     }
 
     [Fact]

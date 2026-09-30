@@ -473,7 +473,7 @@ public class SideBySideBackendCoverageTests
         // inference.md promises users, and the message has to name the way home.
         var refused = Assert.Throws<InvalidOperationException>(
             () => BackendTransfer.CopyTo(target, new UnreadableValue()));
-        Assert.Contains("StepToCheckpoint", refused.Message);
+        Assert.Contains("ToHost()", refused.Message);
 
         // And a value that is neither a tensor nor a sequence has no contents to rebuild at all.
         Assert.Throws<InvalidOperationException>(

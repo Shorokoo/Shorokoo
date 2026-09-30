@@ -577,8 +577,8 @@ leave nothing whole to return, while the state between two steps always is.
   `TrainingStepReport`: `Step`, `Epoch`, `BatchIndex`, `Loss`, `Elapsed` and the full `Entry` (the
   step's [history](#the-training-history) entry). All of it is already on the host, so watching
   costs no transfer, and a run given no callback builds no report.
-  - `report.RequestStop()` ends the run after this step (`StopReason.StopRequested`), e.g. for early
-    stopping on a validation metric.
+  - `report.RequestStop()` ends the run after this step (`StopReason.StopRequested`, or
+    `Completed` when it was the last step anyway), e.g. for early stopping on a validation metric.
   - `report.TakeCheckpoint()` returns the state after this step as a checkpoint, without a copy (see
     `TakeCheckpoint` above), to save it or evaluate it while the run goes on.
   - A report is valid only during its callback; acting on a kept one throws.

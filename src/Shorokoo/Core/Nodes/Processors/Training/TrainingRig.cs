@@ -3762,6 +3762,8 @@ namespace Shorokoo
 
             for (int epoch = 0; epoch < numEpochs && stop == TrainingStopReason.Completed; epoch++)
             {
+                // Once per epoch as well as per step, so a run with no batches reads it too.
+                if (cancellationToken.IsCancellationRequested) { stop = TrainingStopReason.Cancelled; break; }
                 float epochLoss = 0;
                 int steps = 0;
 
@@ -3773,7 +3775,12 @@ namespace Shorokoo
                     // Read, not consumed: the same batch is fed again next epoch.
                     epochLoss += run.Step(trainingInputs[i].Shared(), trainingOutputs[i].Shared());
                     steps++;
-                    if (Reported(run, onStep, began)) { stop = TrainingStopReason.StopRequested; break; }
+                    // A stop asked for on the last step ends nothing early: the run is complete.
+                    if (Reported(run, onStep, began))
+                    {
+                        if (epoch < numEpochs - 1 || i < trainingInputs.Length - 1) stop = TrainingStopReason.StopRequested;
+                        break;
+                    }
                 }
 
                 if (steps > 0 || trainingInputs.Length == 0) epochLosses.Add(epochLoss / steps);
@@ -3942,7 +3949,12 @@ namespace Shorokoo
                 }
                 epochLossSum += loss;
                 epochBatchCount++;
-                if (Reported(run, onStep, began)) { stop = TrainingStopReason.StopRequested; break; }
+                // A stop asked for on the last step ends nothing early: the run is complete.
+                if (Reported(run, onStep, began))
+                {
+                    if (loader.Position.Epoch < targetEpoch) stop = TrainingStopReason.StopRequested;
+                    break;
+                }
             }
             if (epochBatchCount > 0)
                 epochLosses.Add(epochLossSum / epochBatchCount);

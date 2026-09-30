@@ -86,6 +86,12 @@ namespace Shorokoo
         /// which it only ever reads and so cannot lose.</summary>
         private bool _handedOut;
 
+        /// <summary>The checkpoint the caller holds for <see cref="_current"/>, which the run reads
+        /// through a <c>.Shared()</c> view of it: handed back as it was handed out, so taking it again
+        /// gives the caller the same checkpoint and not the run's view. <c>null</c> once a step has
+        /// moved on from it.</summary>
+        private TrainingCheckpoint? _published;
+
         private bool _disposed;
 
         internal ResidentTrainingRun(TrainingRig rig, TrainingCheckpoint initialCheckpoint)
@@ -142,6 +148,7 @@ namespace Shorokoo
             // A checkpoint over the very same tensors, fed the same way: which of them the run owns,
             // and what a failed step would lose, is unchanged.
             _current = Current.WithHistory(history);
+            _published = _published?.WithHistory(history);
         }
 
         /// <summary>
@@ -280,15 +287,19 @@ namespace Shorokoo
         public TrainingCheckpoint TakeCheckpoint()
         {
             var current = Current;
+            // A checkpoint handed out before goes back as it was handed out, not as the run's
+            // .Shared() view of it.
+            if (_published is { } published) return published;
             // The run's own state is handed over as Publish hands a step's; a checkpoint the caller
             // passed in as it is would otherwise still be consumed by the next step, although the
-            // caller now holds it again. One already only read -- a checkpoint handed out before,
-            // or one the caller passed .Shared() -- is handed back as it stands.
+            // caller now holds it again. One the caller passed .Shared() is handed back as it
+            // stands.
             if (_ownsCurrent || current.FeedMode != SharedInputMode.Shared)
             {
                 _current = current.Shared();
                 _ownsCurrent = false;
                 _handedOut = true;
+                _published = current;
             }
             return current;
         }
@@ -390,6 +401,7 @@ namespace Shorokoo
         {
             _current = next;
             _ownsCurrent = true;
+            _published = null;
             return next;
         }
 
@@ -402,6 +414,7 @@ namespace Shorokoo
             _current = next.Shared();
             _ownsCurrent = false;
             _handedOut = true;
+            _published = next;
             return next;
         }
 
@@ -418,6 +431,7 @@ namespace Shorokoo
             // Drop the released checkpoint rather than pinning its whole object graph for the
             // lifetime of a run that is finished with it.
             _current = null!;
+            _published = null;
             _disposed = true;
         }
     }

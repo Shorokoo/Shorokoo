@@ -3047,6 +3047,8 @@ public class TrainingRigTrainingLoopCoverageTests
         Assert.Equal((TrainingStopReason.StopRequested, 5L, true), StopAndResume(5, cancel: false));
         Assert.Equal((TrainingStopReason.StopRequested, 7L, true), StopAndResume(7, cancel: false));
         Assert.Equal(TrainingStopReason.Completed, Stopped(8, cancel: true).StopReason);
+        Assert.Equal(TrainingStopReason.Completed, Stopped(8, cancel: false).StopReason);
+        Assert.Equal(TrainingStopReason.Completed, rig.Fit([inputs], [targets], 2, onStep: r => { if (r.Step == 1) r.RequestStop(); }).StopReason);
         Assert.Equal([2, 1], [Stopped(5, cancel: false).EpochLosses.Length, Stopped(3, cancel: false).EpochLosses.Length]);
     }
 
@@ -3077,6 +3079,11 @@ public class TrainingRigTrainingLoopCoverageTests
         var none = rig.Fit(new InMemoryDataLoader(inputs, targets, batchSize: 2), 2, initial, cancellationToken: cancelled.Token);
         Assert.Equal((TrainingStopReason.Cancelled, 0, 0L), (none.StopReason, none.EpochLosses.Length, none.FinalCheckpoint.Step));
         Assert.Same(initial, none.FinalCheckpoint);
+        Assert.Equal(TrainingStopReason.Cancelled, rig.Fit([], [], 2, cancellationToken: cancelled.Token).StopReason);
+
+        var keptLast = rig.Fit(new InMemoryDataLoader(inputs, targets, batchSize: 2), 2, onStep: r => { if (r.Step == 7) taken = r.TakeCheckpoint(); });
+        Assert.Same(taken, keptLast.FinalCheckpoint);
+        Assert.Null(keptLast.FinalCheckpoint.FeedMode);
 
         var batches = rig.Fit([inputs, inputs], [targets, targets], 3, onStep: r => { if (r.Step == 2) r.RequestStop(); });
         Assert.Equal((TrainingStopReason.StopRequested, 3L, 2), (batches.StopReason, batches.FinalCheckpoint.Step, batches.EpochLosses.Length));

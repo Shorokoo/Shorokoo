@@ -264,6 +264,65 @@ public class GpuExecutionTests
         Assert.Contains("BFCArena", Assert.ThrowsAny<OnnxRuntimeException>(() => Run(onHost)).Message);
     }
 
+    [CudaFact]
+    public void CudaProvider_ATensorOnTheCardLargerThanOneArraySavesItsBytesThroughBoundedPieces()
+    {
+        const int N = 640 << 20;
+        using var ctx = new ComputeContext();
+        var limit = InputScalar<int32>("l");
+        var compiled = ctx.Compile(new InternalComputationGraph([limit], [OnnxOp.Range(Scalar(0), limit, Scalar(1))]));
+        var held = compiled.Execute([TensorData(DType.Int32, [], N)], [true])[0].ToTensorData();
+        Assert.False(held.IsHostResident);
+        long[] sampled = [0, (1L << 29) - 1, 1L << 29, (1L << 29) + 1, (9L << 26) + 12345, N - 1];
+        var probe = new SamplingStream(sampled);
+
+        long allocated = GC.GetAllocatedBytesForCurrentThread();
+        held.WriteContentTo(probe);
+        Assert.True(GC.GetAllocatedBytesForCurrentThread() - allocated < 64L << 20);
+        Assert.Equal(4L * N, probe.Length);
+        Assert.Equal(sampled.Select(i => (int)i), probe.Values);
+    }
+
+    [CudaFact]
+    public void CudaProvider_ACopyTheCudaRuntimeFailsIsAnErrorRatherThanADeclinedRange()
+    {
+        using var info = new OrtMemoryInfo("Cuda", OrtAllocatorType.DeviceAllocator, 0, OrtMemType.Default);
+        using var bogus = new OrtTensorValue(OrtValue.CreateTensorValueWithData(info, Microsoft.ML.OnnxRuntime.Tensors.TensorElementType.Float, [4L], (IntPtr)16, 16));
+        Assert.Throws<InvalidOperationException>(() => DefaultBackend.Instance.TryCopyTensorRangeToHost(bogus, 0, new byte[16]));
+        using var ctx = new ComputeContext();
+        Assert.Equal(5f, AddTwoScalars(ctx, 2f, 3f));
+    }
+
+    /// <summary>Keeps the <c>int32</c> element at each sampled index of what is written to it, and
+    /// nothing else.</summary>
+    private sealed class SamplingStream(long[] sampled) : Stream
+    {
+        private readonly byte[] _pending = new byte[4];
+        private long _position;
+        public List<int> Values { get; } = [];
+        public override void Write(ReadOnlySpan<byte> buffer)
+        {
+            foreach (var index in sampled)
+                for (long b = 4 * index; b < 4 * index + 4; b++)
+                    if (b >= _position && b < _position + buffer.Length)
+                    {
+                        _pending[b - 4 * index] = buffer[(int)(b - _position)];
+                        if (b == 4 * index + 3) Values.Add(BitConverter.ToInt32(_pending));
+                    }
+            _position += buffer.Length;
+        }
+        public override void Write(byte[] buffer, int offset, int count) => Write(buffer.AsSpan(offset, count));
+        public override bool CanRead => false;
+        public override bool CanSeek => false;
+        public override bool CanWrite => true;
+        public override long Length => _position;
+        public override long Position { get => _position; set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+    }
+
     /// <summary>
     /// A tensor fed to a run on the card as it is goes to that run: one in the card's memory is
     /// handed over where it is, and one in host memory goes to the session from the host, or as the
@@ -271,16 +330,6 @@ public class GpuExecutionTests
     /// <c>.Shared()</c>, a host tensor is copied onto the card once, attached to the context that
     /// read it, and read there by every run after until it is written.
     /// </summary>
-    [CudaFact]
-    public void CudaProvider_ATensorOnTheCardLargerThanOneArraySavesThroughBoundedPieces()
-    {
-        using var ctx = new ComputeContext();
-        var held = ctx.AllocateUninitialized<float32>(new Shape(640L << 20));
-        long allocated = GC.GetAllocatedBytesForCurrentThread();
-        Onnx.SafeTensorLoader.SaveSafeTensorsToStream(Stream.Null, [new Onnx.SafeTensor("w", held, "F32", [640L << 20])]);
-        Assert.True(GC.GetAllocatedBytesForCurrentThread() - allocated < 64L << 20);
-    }
-
     [CudaFact]
     public void CudaProvider_AFeedIsConsumedOnTheCardAndAHostOneIsReadThroughOneCopyUntilWritten()
     {

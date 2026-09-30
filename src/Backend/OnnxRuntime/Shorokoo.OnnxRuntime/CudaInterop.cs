@@ -25,6 +25,9 @@ internal static class CudaInterop
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate int Memcpy(IntPtr destination, IntPtr source, nuint count, int kind);
 
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate int GetLastError();
+
     private const int HostToDevice = 1;
     private const int DeviceToHost = 2;
 
@@ -33,22 +36,23 @@ internal static class CudaInterop
     private static bool _bound;
 
     public static bool CopyDeviceToHost(IntPtr source, byte[] destination)
-        => CopyDeviceToHost(source, destination.AsSpan());
+        => CopyDeviceToHost(source, destination.AsSpan()) == 0;
 
     /// <summary>
     /// Fills <paramref name="destination"/> from the device allocation at
     /// <paramref name="source"/> — any range of one, since the caller offsets the address. What
-    /// streams a tensor off the card through one reused buffer, a piece at a time.
+    /// streams a tensor off the card through one reused buffer, a piece at a time. Answers the CUDA
+    /// runtime's error code, <c>0</c> on success, or <c>null</c> where there is no runtime to ask.
     /// </summary>
-    public static unsafe bool CopyDeviceToHost(IntPtr source, Span<byte> destination)
+    public static unsafe int? CopyDeviceToHost(IntPtr source, Span<byte> destination)
     {
         var memcpy = Bind();
-        if (memcpy is null) return false;
-        if (destination.IsEmpty) return true;
+        if (memcpy is null) return null;
+        if (destination.IsEmpty) return 0;
         // Pinned for the length of the call, as Copy pins an array: the CUDA runtime knows nothing
         // of the GC, and a span over managed memory is a moveable address until fixed.
         fixed (byte* pinned = destination)
-            return memcpy((IntPtr)pinned, source, (nuint)destination.Length, DeviceToHost) == 0;
+            return memcpy((IntPtr)pinned, source, (nuint)destination.Length, DeviceToHost);
     }
 
     /// <summary>
@@ -91,8 +95,21 @@ internal static class CudaInterop
             // Try rather than Load: both report a missing or unloadable CUDA runtime by returning
             // false, so there is nothing here to catch -- the caller reports the absence.
             if (NativeLibrary.TryLoad(LibraryName, out var handle)
-                && NativeLibrary.TryGetExport(handle, "cudaMemcpy", out var entry))
-                _memcpy = Marshal.GetDelegateForFunctionPointer<Memcpy>(entry);
+                && NativeLibrary.TryGetExport(handle, "cudaMemcpy", out var entry)
+                && NativeLibrary.TryGetExport(handle, "cudaGetLastError", out var lastError))
+            {
+                var memcpy = Marshal.GetDelegateForFunctionPointer<Memcpy>(entry);
+                var clear = Marshal.GetDelegateForFunctionPointer<GetLastError>(lastError);
+                // A failed copy leaves its error as the thread's last CUDA error, which the execution
+                // provider reads after its own next launch on this thread and reports as that run's
+                // failure. The copy's error is answered here, so it is cleared here.
+                _memcpy = (destination, source, count, kind) =>
+                {
+                    var status = memcpy(destination, source, count, kind);
+                    if (status != 0) clear();
+                    return status;
+                };
+            }
             return _memcpy;
         }
     }

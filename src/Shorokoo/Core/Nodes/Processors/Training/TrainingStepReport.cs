@@ -13,8 +13,8 @@ namespace Shorokoo
         /// steps.</summary>
         Cancelled,
 
-        /// <summary>The step callback called <see cref="TrainingStepReport.RequestStop"/>, and the
-        /// run stopped after that step.</summary>
+        /// <summary>The step callback called <see cref="TrainingStepReport.RequestStop"/> before the
+        /// last step, and the run stopped after that step.</summary>
         StopRequested,
     }
 

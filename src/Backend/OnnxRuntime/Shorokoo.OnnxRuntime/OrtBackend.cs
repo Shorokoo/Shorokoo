@@ -974,9 +974,15 @@ public abstract class OrtBackend : IShorokooBackend
         var length = TensorElementLayout.ByteLength(value.ElementType, value.Shape);
         if (byteOffset < 0 || byteOffset > length - destination.Length)
             throw RangeOutside(byteOffset, destination.Length, length);
-        var copied = CudaInterop.CopyDeviceToHost(DevicePointer(value) + (nint)byteOffset, destination);
+        var status = CudaInterop.CopyDeviceToHost(DevicePointer(value) + (nint)byteOffset, destination);
         GC.KeepAlive(value);
-        return copied;
+        if (status is null) return false;
+        if (status != 0)
+            throw new InvalidOperationException(
+                $"Copying {destination.Length} bytes at offset {byteOffset} of this tensor "
+                + $"({string.Join('x', value.Shape)}:{value.ElementType}) out of {Description}'s device "
+                + $"memory failed with CUDA error {status}.");
+        return true;
     }
 
     private static ArgumentOutOfRangeException RangeOutside(long byteOffset, int count, long length)

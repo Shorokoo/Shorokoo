@@ -433,9 +433,7 @@ public class CodegenFreeModuleTests
         Assert.Equal(2f, StateValue(updated));
     }
 
-    // Shorokoo/Shorokoo#480: the state lowering makes the update inside the rolled loop's body a
-    // graph output directly, rather than carrying it out of the loop.
-    [Fact(Skip = "Shorokoo/Shorokoo#480")]
+    [Fact]
     public void TestAStatefulCallInALoopWithARuntimeTripCountRunsWithItsState()
     {
         var input = TensorData([2L], 1f, 2f);
@@ -443,6 +441,27 @@ public class CodegenFreeModuleTests
         var (_, updated) = ComputeContext.Default.ExecuteWithState(concrete, input.Shared());
         Assert.Equal(1f, StateValue(updated));
     }
+
+    private static float StateAfterOneExecution(ComputationGraph cg)
+    {
+        var input = TensorData([2L], 1f, 2f);
+        var concrete = cg.ToConcreteArchitecture([input]).ToConcreteModel();
+        return StateValue(ComputeContext.Default.ExecuteWithState(concrete, input.Shared()).updatedGraph);
+    }
+
+    [Fact]
+    public void TestStatefulCallsInAndAroundARolledLoopComposeWithIt()
+    {
+        Assert.Equal(2f, StateAfterOneExecution(StatefulCalledTwiceInARolledLoopModel.ComputationGraph));
+        Assert.Equal(2f, StateAfterOneExecution(StatefulCalledBeforeAndInARolledLoopModel.ComputationGraph));
+        Assert.Equal(2f, StateAfterOneExecution(StatefulCalledInARolledLoopAndAfterModel.ComputationGraph));
+        Assert.Equal(3f, StateAfterOneExecution(StatefulCalledAroundANestedRolledLoopModel.ComputationGraph));
+    }
+
+    [Fact]
+    public void TestAStatefulCallInAnIfElseInARolledLoopIsRefusedWhenRunWithState()
+        => Assert.Contains("IfElse", Assert.Throws<InvalidOperationException>(
+            () => StateAfterOneExecution(StatefulCalledInAnIfElseInARolledLoopModel.ComputationGraph)).Message);
 
     /// <summary>
     /// One model handle called twice updates its state once per call, and the executor still takes

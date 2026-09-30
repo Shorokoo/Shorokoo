@@ -175,10 +175,6 @@ namespace Shorokoo.Graph
                 "After FastConvertModelParamIdRefToModelParam");
             FastGraphCycleDetector.AssertAcyclic(fastGraph, "After FastConvertModelParamIdRefToModelParam");
 
-            // The calls one loop body makes compose within a trip. Before the simplify, which
-            // unrolls loops and with that loses the order the calls were made in.
-            FastChainStateUpdatesAcrossCallSites.ChainWithinLoopBodies(fastGraph);
-
             Stage("Simplify");
             FastSimplify.Process(fastGraph);
             DebugPrintFast(fastGraph, debugRequests, GraphCreationPoint.AfterFirstSimplify);
@@ -336,6 +332,10 @@ namespace Shorokoo.Graph
             fastGraph.InsertAtBodyStart(specialized);
 
             FastSimplify.Process(fastGraph);
+
+            // A baked trip count can unroll a loop that stayed rolled when the graph was built,
+            // and the stateful calls in and around it are ordered only now it is.
+            FastChainStateUpdatesAcrossCallSites.Process(fastGraph, onlyLoopsUnrolledSince: true);
 
             // A baked value can decide an output's shape — a flag choosing a branch — so a concrete
             // graph's outputs have their recorded shapes settled again against it (see

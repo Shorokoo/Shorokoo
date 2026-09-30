@@ -421,6 +421,29 @@ public class CodegenFreeModuleTests
         Assert.Equal(2f, StateValue(updated2));
     }
 
+    [Fact]
+    public void TestAStatefulLoopUnrolledByBakingItsTripCountComposesItsCalls()
+    {
+        var input = TensorData([2L], 1f, 2f);
+        var concrete = StatefulCalledTwiceInALoopOfAnInputTripCountModel.ComputationGraph
+            .ToConcreteArchitecture([input, TensorData([], 3L)]);
+        var specialized = concrete.Specialize(new ModelParamList(
+            [new KeyValuePair<string, TensorData>(concrete.InputNames[1]!, TensorData([], 3L))], ModelParamType.InputParam)).ToConcreteModel();
+        var (_, updated) = ComputeContext.Default.ExecuteWithState(specialized, input.Shared());
+        Assert.Equal(2f, StateValue(updated));
+    }
+
+    // Shorokoo/Shorokoo#480: the state lowering makes the update inside the rolled loop's body a
+    // graph output directly, rather than carrying it out of the loop.
+    [Fact(Skip = "Shorokoo/Shorokoo#480")]
+    public void TestAStatefulCallInALoopWithARuntimeTripCountRunsWithItsState()
+    {
+        var input = TensorData([2L], 1f, 2f);
+        var concrete = StatefulGainInRolledLoopModel.ComputationGraph.ToConcreteArchitecture([input]).ToConcreteModel();
+        var (_, updated) = ComputeContext.Default.ExecuteWithState(concrete, input.Shared());
+        Assert.Equal(1f, StateValue(updated));
+    }
+
     /// <summary>
     /// One model handle called twice updates its state once per call, and the executor still takes
     /// one value per state parameter. The same architecture executed without state — the pure

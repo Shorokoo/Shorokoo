@@ -333,12 +333,13 @@ public static class OnnxOpAttributeNames
     public const string ShrkAttrCheckpoint = "shrk_checkpoint";
 
     /// <summary>
-    /// On a <c>STATE_UPDATE_LINK</c>, set when the link belongs to an unrolled loop iteration that
-    /// a later iteration of the same loop follows. A loop body is one call site however many trips
-    /// it runs, and its update is the last trip's: such a link is still read within its own
-    /// iteration, but it is neither a call site of its own nor the value the step ends with.
+    /// On a <c>STATE_UPDATE_LINK</c> an unrolled loop cloned, the trips it belongs to: one triple
+    /// per unrolled loop enclosing it — the loop's id, the trip, and the index among the link's
+    /// inputs of the flag saying whether that trip ran (-1 where every trip runs). Read by
+    /// <see cref="Shorokoo.Core.Nodes.Processors.Fast.FastChainStateUpdatesAcrossCallSites"/>, which
+    /// starts each trip from the value the state held entering the loop.
     /// </summary>
-    public const string ShrkAttrSupersededByLaterIteration = "shrk_superseded_by_later_iteration";
+    public const string ShrkAttrLoopTrips = "shrk_loop_trips";
 
 
 

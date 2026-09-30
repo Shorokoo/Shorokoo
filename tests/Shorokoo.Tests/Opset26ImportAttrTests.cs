@@ -91,6 +91,43 @@ public class Opset26ImportAttrTests
                 .AccessMemory().ToArray());
     }
 
+    [Fact]
+    public void TestDequantizeOutputDtypeFloat16OverridesFloat32ScaleOnImport()
+    {
+        const int Float16Elem = 10;
+        var dq = new GraphProto { Name = "dq" };
+        dq.Inputs.Add(TensorInfo("x", UInt8Elem, 4));
+        dq.Initializers.Add(Init("scale", FloatElem, [], System.BitConverter.GetBytes(0.5f)));
+        var dqNode = new NodeProto { OpType = "DequantizeLinear", Name = "dq0" };
+        dqNode.Inputs.AddRange(["x", "scale"]);
+        dqNode.Outputs.Add("y");
+        dqNode.Attributes.Add(IntAttr("output_dtype", Float16Elem));
+        dq.Nodes.Add(dqNode);
+        dq.Outputs.Add(TensorInfo("y", Float16Elem, 4));
+
+        var dqGraph = Import(WrapModel(dq, 23));
+        TensorData[] dqQeeInputs = [TensorData(DType.UInt8, [4L], (byte)2, (byte)4, (byte)6, (byte)8)];
+        Assert.Equal(DType.Float16, new QuickExecutionEngine().Run(dqGraph, dqQeeInputs)[dqGraph.Outputs[0]].DType);
+
+        var dir = Directory.CreateDirectory(
+            Path.Combine(Path.GetTempPath(), $"ShorokooDqOutputDtype_{System.Guid.NewGuid():N}")).FullName;
+        try
+        {
+            var foreignPath = Path.Combine(dir, "foreign.onnx");
+            using (var fs = File.Create(foreignPath))
+                ProtoBuf.Serializer.Serialize(fs, WrapModel(dq, 23));
+            var reexportPath = Path.Combine(dir, "reexport.onnx");
+            Persistence.ExportOnnx(Persistence.ImportOnnx(foreignPath), reexportPath);
+            using var rs = File.OpenRead(reexportPath);
+            Assert.Equal(Float16Elem, ProtoBuf.Serializer.Deserialize<ModelProto>(rs)
+                .Graph.Outputs.Single().Type.TensorType.ElemType);
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
     private static long ExportedDefaultOpset(string path)
     {
         using var fs = File.OpenRead(path);

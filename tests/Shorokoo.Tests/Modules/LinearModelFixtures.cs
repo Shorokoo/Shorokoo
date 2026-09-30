@@ -1336,6 +1336,97 @@ public partial class StatefulGainInRolledLoopModel
     }
 }
 
+/// <summary><see cref="StatefulGainInRolledLoopModel"/> calling twice in its body.</summary>
+[Module]
+public partial class StatefulCalledTwiceInARolledLoopModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var m = StatefulGainSubModel.Model();
+        var x = t;
+        foreach (var ctx in LoopAPI.Iterate(t.ShapeTensor()[0]))
+        {
+            x = m.Call(m.Call(x));
+            ctx.ContinueWhile(Scalar(true));
+        }
+        return x;
+    }
+}
+
+/// <summary><see cref="StatefulGainInRolledLoopModel"/> with one more call before the loop.</summary>
+[Module]
+public partial class StatefulCalledBeforeAndInARolledLoopModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var m = StatefulGainSubModel.Model();
+        var x = m.Call(t);
+        foreach (var ctx in LoopAPI.Iterate(t.ShapeTensor()[0]))
+        {
+            x = m.Call(x);
+            ctx.ContinueWhile(Scalar(true));
+        }
+        return x;
+    }
+}
+
+/// <summary><see cref="StatefulGainInRolledLoopModel"/> with one more call after the loop.</summary>
+[Module]
+public partial class StatefulCalledInARolledLoopAndAfterModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var m = StatefulGainSubModel.Model();
+        var x = t;
+        foreach (var ctx in LoopAPI.Iterate(t.ShapeTensor()[0]))
+        {
+            x = m.Call(x);
+            ctx.ContinueWhile(Scalar(true));
+        }
+        return m.Call(x);
+    }
+}
+
+/// <summary>A stateful model called in a rolled loop's body, in a rolled loop nested in it, and after
+/// both.</summary>
+[Module]
+public partial class StatefulCalledAroundANestedRolledLoopModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var m = StatefulGainSubModel.Model();
+        var x = t;
+        foreach (var outer in LoopAPI.Iterate(t.ShapeTensor()[0]))
+        {
+            x = m.Call(x);
+            foreach (var ctx in LoopAPI.Iterate(t.ShapeTensor()[0]))
+            {
+                x = m.Call(x);
+                ctx.ContinueWhile(Scalar(true));
+            }
+            outer.ContinueWhile(Scalar(true));
+        }
+        return m.Call(x);
+    }
+}
+
+/// <summary>A stateful model called in an IfElse in a rolled loop's body.</summary>
+[Module]
+public partial class StatefulCalledInAnIfElseInARolledLoopModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var m = StatefulGainSubModel.Model();
+        var x = t;
+        foreach (var ctx in LoopAPI.Iterate(t.ShapeTensor()[0]))
+        {
+            x = (ctx.IterationIndex > Scalar(0L)).IfElse(m.Call(x), x);
+            ctx.ContinueWhile(Scalar(true));
+        }
+        return x;
+    }
+}
+
 /// <summary>The same, on a condition the graph works out at run time, so the branch survives to
 /// the backward pass instead of being folded away, and with each arm creating its own
 /// parameter.</summary>

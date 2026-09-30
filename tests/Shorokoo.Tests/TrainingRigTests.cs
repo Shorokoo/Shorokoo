@@ -2747,11 +2747,17 @@ public class TrainingRigTrainingLoopCoverageTests
         Assert.Equal(1, topLevelIfs);
     }
 
-    // Shorokoo/Shorokoo#492: the backward of the untaken arm's Gather, a ScatterND, runs
-    // unconditionally with indices only the taken arm would have made valid.
-    [Fact(Skip = "Shorokoo/Shorokoo#492")]
+    [Fact]
     public void TestAGatherInAnUntakenIfElseArmTrains()
         => Assert.Equal(2.5f, LossAfterOneStep(GainGatheredInAnUntakenIfElseArmModel.ComputationGraph), 1e-4f);
+
+    [Fact]
+    public void TestAGatherInAnIfElseArmTrainsWhicheverSideAndNestingItSitsIn()
+    {
+        Assert.Equal(2.5f, LossAfterOneStep(GainGatheredInAnUntakenElseArmModel.ComputationGraph), 1e-4f);
+        Assert.Equal(2.5f, LossAfterOneStep(GainGatheredInANestedUntakenIfElseArmModel.ComputationGraph), 1e-4f);
+        Assert.Equal(4f, LossAfterOneStep(GainGatheredInATakenIfElseArmModel.ComputationGraph), 1e-4f);
+    }
 
     [Fact]
     public void TestAStatefulCallInALoopThatCarriesNothingOutIsRefused()

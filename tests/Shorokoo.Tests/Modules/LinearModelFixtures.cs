@@ -2486,3 +2486,42 @@ public partial class SameStridedAveragePoolModel
     public static Tensor<float32> Inline(Tensor<float32> input)
         => (Tensor<float32>)OnnxOp.AveragePool(OnnxOp.Relu(input * InitScalarWeight.Init(Vector(1L))), AutoPad.SameLower, null, null, null, [2L, 1L], null, [3L, 2L]);
 }
+
+/// <summary><see cref="GainGatheredInAnUntakenIfElseArmModel"/> with the gathering arm on the else
+/// side.</summary>
+[Module]
+public partial class GainGatheredInAnUntakenElseArmModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var y = t * Ones.Init([Scalar(2L)]);
+        var picked = (Tensor<float32>)OnnxOp.Gather(y, Vector(5L, 5L), axis: 0);
+        return (t.Reduce(ReduceKind.Max, keepDims: false).Scalar() <= Scalar(100f)).IfElse(y, picked);
+    }
+}
+
+/// <summary>A gain gathered at a valid index, in the <c>IfElse</c> arm the input takes.</summary>
+[Module]
+public partial class GainGatheredInATakenIfElseArmModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var y = t * Ones.Init([Scalar(2L)]);
+        var picked = (Tensor<float32>)OnnxOp.Gather(y, Vector(1L, 1L), axis: 0);
+        return (t.Reduce(ReduceKind.Max, keepDims: false).Scalar() > Scalar(1f)).IfElse(picked, y);
+    }
+}
+
+/// <summary>A gain gathered at indices valid only for longer inputs, in the taken arm of an
+/// <c>IfElse</c> nested in the untaken arm of another.</summary>
+[Module]
+public partial class GainGatheredInANestedUntakenIfElseArmModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var y = t * Ones.Init([Scalar(2L)]);
+        var max = t.Reduce(ReduceKind.Max, keepDims: false).Scalar();
+        var picked = (Tensor<float32>)OnnxOp.Gather(y, Vector(5L, 5L), axis: 0);
+        return (max > Scalar(100f)).IfElse((max > Scalar(1f)).IfElse(picked, y * Scalar(3f)), y);
+    }
+}

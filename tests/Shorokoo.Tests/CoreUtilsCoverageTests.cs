@@ -416,6 +416,21 @@ public class CoreUtilsCoverageTests
     }
 
     [Fact]
+    public void TestAPieceOfAHostTensorPastTwoGibibytesIsWrittenAndReadAtItsOffset()
+    {
+        var backend = DefaultBackend.Instance;
+        using var value = backend.CreateUninitializedTensorInBackendMemory(ShorokooTensorElementType.UInt8, [(1L << 31) + 8]);
+        byte[] piece = [1, 2, 3, 4];
+        foreach (var offset in (long[])[5L, 1L << 31])
+        {
+            var read = new byte[piece.Length];
+            Assert.True(backend.TryCopyHostToTensorRange(value, offset, piece));
+            Assert.True(backend.TryCopyTensorRangeToHost(value, offset, read));
+            Assert.Equal(piece, read);
+        }
+    }
+
+    [Fact]
     public void TestABackendThatDoesNotOverrideTheUninitializedAllocationStillGetsAZeroFilledOne()
     {
         IShorokooBackend defaulting = new ByteWiseOnlyBackend();

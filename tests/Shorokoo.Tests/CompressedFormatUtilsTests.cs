@@ -1346,6 +1346,31 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
     }
 
     [Fact]
+    public async Task TestALoadedCompiledModelHoldsOnlyTheWeightsItsSessionReadsAndKeepsThemUntilDisposed()
+    {
+        var numOut = TensorData(DType.Int64, [], 64L);
+        var input = TensorDataWithSmallVals(DType.Float32, [2L, 64L]);
+        var model = FCLayer.ComputationGraph.ToConcreteArchitecture([numOut, input]).ToConcreteModel();
+        var ema = WeightDataByParam(model).ToDictionary(kv => kv.Key, kv => kv.Value.Shape.Count > 64
+            ? TensorData(kv.Value.Shape.Dims, Enumerable.Repeat(0.5f, (int)kv.Value.Shape.Count).ToArray())
+            : kv.Value.CopyToTensorData(), StringComparer.Ordinal);
+        var path = P("compiled-ema.skpt");
+        Persistence.From(model).WithModel().WithWeights().WithWeights("ema", ema).Save(path);
+        var expected = ExecuteToBytes(Persistence.Load(path, "ema"), numOut, input);
+
+        using var context = new ComputeContext();
+        var compiled = context.LoadCompiled(path, "ema");
+        var weight = Assert.Single(compiled.SuppliedTensors);
+        Assert.Equal([weight], context.Tensors);
+        Assert.Throws<InvalidOperationException>(weight.Delete);
+        Assert.False(weight.TryDelete());
+        Assert.Throws<InvalidOperationException>(() => context.Detach(weight));
+        Assert.False(await weight.DeleteAsync(TimeSpan.Zero));
+        Assert.Equal(expected, compiled.Execute(numOut.Shared(), input.Shared())[0].ToTensorData().AccessRawMemory().ToArray());
+        compiled.Dispose();
+    }
+
+    [Fact]
     public void TestSkptLoadValidationZstdDataAndCompressionFaults()
     {
         var (model, numOut, input) = BuildSkptModel();

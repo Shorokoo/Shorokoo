@@ -69,8 +69,16 @@ namespace Shorokoo.Runtime
         // The weights this graph's session reads where they are rather than from its model -- a
         // model loaded straight onto the device (ComputeContext.LoadCompiled) -- which every session
         // it is built on is handed, a rebuilt one included. The graph owns them: they live exactly
-        // as long as it does, and are deleted once its session is released.
+        // as long as it does, and are deleted once its session is released. The session reads
+        // their memory where it is, so the graph holds a reader lock on each for its whole life:
+        // they stay attached to its context and counted in its budget, and while the graph lives
+        // a delete is refused, declined or held back, a run cannot consume one, and the context
+        // cannot detach one.
         private readonly IReadOnlyList<(SuppliedInitializer Initializer, TensorData Tensor)> _supplied;
+
+        // Who holds the reader lock on each of those weights, as a refusal names it.
+        private static readonly RunIdentity WeightReader =
+            new(() => "the session of a compiled graph, which reads it as a weight until the graph is disposed");
 
         /// <summary>The tensors this graph's session is handed as initializers, each once.</summary>
         internal IEnumerable<TensorData> SuppliedTensors => _supplied.Select(s => s.Tensor).Distinct();
@@ -91,6 +99,21 @@ namespace Shorokoo.Runtime
         {
             _supplied = supplied ?? [];
             _owner = owner;
+            var locked = new List<TensorData>();
+            try
+            {
+                foreach (var tensor in SuppliedTensors)
+                {
+                    ((ILifetimeOwner)tensor).Life.AcquireReadLock(WeightReader);
+                    locked.Add(tensor);
+                    owner.HoldForGraph(tensor, held: true);
+                }
+            }
+            catch
+            {
+                foreach (var tensor in locked) ReleaseWeight(tensor);
+                throw;
+            }
             _onnxInputNameByOriginal = onnxInputNameByOriginal;
             _built = new BuiltSession(session, deviceMemory, BindableOf(session));
             _outputNames = [.. session.OutputNames];
@@ -216,9 +239,19 @@ namespace Shorokoo.Runtime
                 built = _built;
             }
             built.Session.Dispose();
-            // After the session: it reads them for as long as it lives.
+            // After the session: it reads them for as long as it lives. Every lock goes before
+            // any weight is deleted, so a delete that throws leaves none of them held.
+            foreach (var tensor in SuppliedTensors) ReleaseWeight(tensor);
             foreach (var tensor in SuppliedTensors) tensor.Delete();
             GC.SuppressFinalize(this);
+        }
+
+        /// <summary>Drops this graph's reader lock on one of its weights. The memory goes now if a
+        /// delete of it was already waiting for the lock.</summary>
+        private void ReleaseWeight(TensorData tensor)
+        {
+            _owner.HoldForGraph(tensor, held: false);
+            ((ILifetimeOwner)tensor).Life.ReleaseReadLock(WeightReader);
         }
 
         /// <summary>The graph-optimization profile the session was built with (test hook).</summary>
@@ -1055,6 +1088,11 @@ namespace Shorokoo.Runtime
         // as long as its lock.
         private readonly Dictionary<object, int> _locksHeld = new(ReferenceEqualityComparer.Instance);
 
+        // The weights of this context's graphs loaded with LoadCompiled, which their sessions read
+        // for as long as each graph lives: Detach refuses on these too. Weak, as the tensor list
+        // is -- the graph holds its weights, and one the program dropped takes them with it.
+        private readonly ConditionalWeakTable<TensorData, object> _heldByGraphs = new();
+
         // How many reader locks this context holds in all. Disposing a context while it is
         // processing is invalid, and this is what makes that a refusal rather than an assumption.
         private int _leases;
@@ -1123,7 +1161,23 @@ namespace Shorokoo.Runtime
                     throw new InvalidOperationException(
                         $"A run of this compute context is reading tensor {tensor}, so the context "
                         + "cannot detach it until that run returns.");
+                if (_heldByGraphs.TryGetValue(tensor, out _))
+                    throw new InvalidOperationException(
+                        $"A compiled graph of this compute context reads tensor {tensor} as a weight, "
+                        + "so the context cannot detach it until that graph is disposed.");
                 _attached.Remove(tensor);
+            }
+        }
+
+        /// <summary>Records that a compiled graph of this context reads <paramref name="tensor"/>
+        /// as a weight for as long as it lives, or, with <paramref name="held"/> false, that the
+        /// graph is done with it.</summary>
+        internal void HoldForGraph(TensorData tensor, bool held)
+        {
+            lock (_gate)
+            {
+                if (held) _heldByGraphs.AddOrUpdate(tensor, OwnedMarker);
+                else _heldByGraphs.Remove(tensor);
             }
         }
 

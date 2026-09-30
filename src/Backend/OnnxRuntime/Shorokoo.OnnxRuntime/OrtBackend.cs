@@ -1038,6 +1038,13 @@ public abstract class OrtBackend : IShorokooBackend
     {
         ArgumentNullException.ThrowIfNull(value);
 
+        if (value is OrtTensorValue { IsHostAccessible: true } host)
+        {
+            HostPiece(host, byteOffset, destination.Length).CopyTo(destination);
+            GC.KeepAlive(host);
+            return true;
+        }
+
         if (value.IsHostAccessible)
         {
             var source = value.GetTensorDataAsSpan<byte>();
@@ -1077,6 +1084,13 @@ public abstract class OrtBackend : IShorokooBackend
     {
         ArgumentNullException.ThrowIfNull(value);
 
+        if (value is OrtTensorValue { IsHostAccessible: true } host)
+        {
+            source.CopyTo(HostPiece(host, byteOffset, source.Length));
+            GC.KeepAlive(host);
+            return true;
+        }
+
         if (value.IsHostAccessible)
         {
             var destination = value.GetTensorMutableDataAsSpan<byte>();
@@ -1103,6 +1117,21 @@ public abstract class OrtBackend : IShorokooBackend
                 + $"{value.ElementType}) at offset {byteOffset} in {Description}'s device memory failed "
                 + $"with CUDA error {status}.");
         return true;
+    }
+
+    /// <summary>
+    /// The <paramref name="count"/> bytes at <paramref name="byteOffset"/> into a host-accessible
+    /// value's buffer, addressed from where the buffer starts rather than sliced out of a span over
+    /// all of it: a span's length is an int, so ORT cannot make one over a buffer above 2 GiB, and a
+    /// piece of such a buffer is exactly what a load streams through. The caller keeps
+    /// <paramref name="value"/> alive for as long as it uses the piece.
+    /// </summary>
+    private static unsafe Span<byte> HostPiece(OrtTensorValue value, long byteOffset, int count)
+    {
+        var length = TensorElementLayout.ByteLength(value.ElementType, value.Shape);
+        if (byteOffset < 0 || byteOffset > length - count)
+            throw RangeOutside(byteOffset, count, length);
+        return new Span<byte>((byte*)(DevicePointer(value) + (nint)byteOffset), count);
     }
 
     private static ArgumentOutOfRangeException RangeOutside(long byteOffset, int count, long length)

@@ -28,6 +28,9 @@ internal static class CudaInterop
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate int GetLastError();
 
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate int StreamSynchronize(IntPtr stream);
+
     private const int HostToDevice = 1;
     private const int DeviceToHost = 2;
 
@@ -111,16 +114,25 @@ internal static class CudaInterop
             // false, so there is nothing here to catch -- the caller reports the absence.
             if (NativeLibrary.TryLoad(LibraryName, out var handle)
                 && NativeLibrary.TryGetExport(handle, "cudaMemcpy", out var entry)
-                && NativeLibrary.TryGetExport(handle, "cudaGetLastError", out var lastError))
+                && NativeLibrary.TryGetExport(handle, "cudaGetLastError", out var lastError)
+                && NativeLibrary.TryGetExport(handle, "cudaStreamSynchronize", out var streamSync))
             {
                 var memcpy = Marshal.GetDelegateForFunctionPointer<Memcpy>(entry);
                 var clear = Marshal.GetDelegateForFunctionPointer<GetLastError>(lastError);
+                var synchronize = Marshal.GetDelegateForFunctionPointer<StreamSynchronize>(streamSync);
                 // A failed copy leaves its error as the thread's last CUDA error, which the execution
                 // provider reads after its own next launch on this thread and reports as that run's
                 // failure. The copy's error is answered here, so it is cleared here.
                 _memcpy = (destination, source, count, kind) =>
                 {
                     var status = memcpy(destination, source, count, kind);
+                    // From pageable host memory, cudaMemcpy may return once the bytes are staged,
+                    // before the DMA onto the card has landed, and the execution provider's
+                    // kernels run on streams of their own that nothing orders after that DMA. So a
+                    // copy onto the card waits on the stream it was made on (the legacy default
+                    // one) before it counts as done, and one that does not complete is a failed
+                    // copy.
+                    if (status == 0 && kind == HostToDevice) status = synchronize(IntPtr.Zero);
                     if (status != 0) clear();
                     return status;
                 };

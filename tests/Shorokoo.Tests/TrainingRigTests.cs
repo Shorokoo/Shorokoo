@@ -2500,6 +2500,10 @@ public class TrainingRigTrainingLoopCoverageTests
         Assert.Equal(4f, LossAfterOneStep(GainGatheredInATakenIfElseArmModel.ComputationGraph), 1e-4f);
     }
 
+    [Fact]
+    public void TestAGatherInAnUntakenIfElseArmTrainsWhenTheBackwardReadsItsResult()
+        => Assert.Equal(2.5f, LossAfterOneStep(GainGatheredAndSquaredInAnUntakenIfElseArmModel.ComputationGraph), 1e-4f);
+
     private static float[] TrainedParams(ComputationGraph modelGraph, bool cond, params float[] xs)
     {
         object[] values = [.. xs.Select(v => (object)v)];

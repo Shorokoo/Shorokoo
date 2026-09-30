@@ -1511,3 +1511,17 @@ public partial class GainGatheredInANestedUntakenIfElseArmModel
         return (max > Scalar(100f)).IfElse((max > Scalar(1f)).IfElse(picked, y * Scalar(3f)), y);
     }
 }
+
+/// <summary>A gain gathered at indices valid only for longer inputs and then squared, in an
+/// <c>IfElse</c> arm those inputs alone take, so the square's backward reads the gathered
+/// value.</summary>
+[Module]
+public partial class GainGatheredAndSquaredInAnUntakenIfElseArmModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var y = t * Ones.Init([Scalar(2L)]);
+        var picked = (Tensor<float32>)OnnxOp.Gather(y, Vector(5L, 5L), axis: 0);
+        return (t.Reduce(ReduceKind.Max, keepDims: false).Scalar() > Scalar(100f)).IfElse(picked * picked, y);
+    }
+}

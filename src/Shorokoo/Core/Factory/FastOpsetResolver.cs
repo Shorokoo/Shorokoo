@@ -38,85 +38,14 @@ namespace Shorokoo.Core.Factory
     /// </para>
     ///
     /// <para>
-    /// Exports are opset 21 in practice: the builder requests
-    /// <see cref="OpSetVersion.OPS_21"/> as the baseline and <see cref="RaiseToRequired"/>
-    /// only bumps it for ops/attributes actually present in the graph. The post-21 ops in
-    /// <see cref="MinimumOpsetByOpCode"/> never reach emission from an exported graph today —
-    /// Swish and RMSNormalization lower inline to opset-21 primitives in their <c>OnnxOp</c>
-    /// entry points, Attention / RotaryEmbedding / BitCast / CumProd throw
-    /// <c>NotImplementedException</c> there, and TensorScatter is decomposed by the export
-    /// pre-pass that runs before this raise — so the ops' floors are unreachable from an ONNX
-    /// export and kept as the documented restore point for when a runtime registers them at a
-    /// usable opset. TensorScatter's floor is live for the persistence dialect, which turns
-    /// that pre-pass off so a saved architecture reloads as authored. The attribute floors in
-    /// <see cref="MinimumOpsetByAttribute"/> remain live, primarily for imported models: no
-    /// <c>Ops</c>/<c>OnnxOp</c> entry point accepts any of those attributes, so a graph built
-    /// through the public op surface always exports at 21, and only a foreign
-    /// <c>.onnx</c> carrying one of them (or a node
-    /// stamped through the raw <c>NodeBuilder</c> surface) re-exports higher.
+    /// Every node is emitted at <see cref="OnnxOpset.Version"/>, the one opset Shorokoo writes;
+    /// a node that opset does not define — an operator or optional attribute ONNX introduced
+    /// later — is refused (<see cref="OnnxOpset.ThrowIfOutsideVersion(FastNode)"/>) rather than
+    /// emitted.
     /// </para>
     /// </summary>
     internal static class FastOpsetResolver
     {
-        /// <summary>
-        /// Standard ops introduced after opset 21, keyed by op code, with the minimum
-        /// ai.onnx opset that defines them. The exporter raises a model's opset_import
-        /// just enough to cover every op present in the graph. The baseline stays at
-        /// <see cref="OpSetVersion.OPS_21"/> because blanket-stamping a higher opset
-        /// selects newer kernel versions in ONNX Runtime, and ORT's CPU provider has
-        /// gaps there (e.g. GlobalLpPool/RandomNormalLike have no registered opset-22
-        /// kernels, although the opset-22 change was bfloat16-only).
-        /// </summary>
-        private static readonly Dictionary<string, OpSetVersion> MinimumOpsetByOpCode = new()
-        {
-            // Attention is defined since opset 23, but the def models the opset-24
-            // input list with nonpad_kv_seqlen, so stamp 24.
-            ["Attention"] = OpSetVersion.OPS_24,
-            ["RMSNormalization"] = OpSetVersion.OPS_23,
-            ["RotaryEmbedding"] = OpSetVersion.OPS_23,
-            ["TensorScatter"] = OpSetVersion.OPS_24,
-            ["Swish"] = OpSetVersion.OPS_24,
-            ["BitCast"] = OpSetVersion.OPS_26,
-            ["CumProd"] = OpSetVersion.OPS_26,
-        };
-
-        /// <summary>
-        /// Post-21 OPTIONAL ATTRIBUTES on pre-existing ops: when such an attribute is
-        /// actually present on a node, the model must be stamped at the opset that
-        /// introduced it (e.g. ORT rejects <c>round_mode</c> on a Cast in an opset-21
-        /// model as an unrecognized attribute). Keyed by (op code, attribute name).
-        /// </summary>
-        private static readonly Dictionary<(string Op, string Attr), OpSetVersion> MinimumOpsetByAttribute = new()
-        {
-            [("DequantizeLinear", OnnxOpAttributeNames.AttrOutputDtype)] = OpSetVersion.OPS_23,
-            [("QuantizeLinear", OnnxOpAttributeNames.AttrPrecision)] = OpSetVersion.OPS_23,
-            [("Cast", OnnxOpAttributeNames.AttrRoundMode)] = OpSetVersion.OPS_24,
-            [("CastLike", OnnxOpAttributeNames.AttrRoundMode)] = OpSetVersion.OPS_24,
-        };
-
-        /// <summary>
-        /// Returns <paramref name="requested"/> raised to the smallest opset that
-        /// covers every node in <paramref name="nodes"/> (main graph and function
-        /// bodies included by the caller): post-21 ops per
-        /// <see cref="MinimumOpsetByOpCode"/>, and post-21 optional attributes per
-        /// <see cref="MinimumOpsetByAttribute"/>.
-        /// </summary>
-        internal static OpSetVersion RaiseToRequired(IEnumerable<FastNode> nodes, OpSetVersion requested)
-        {
-            var result = requested;
-            foreach (var node in nodes)
-            {
-                if (MinimumOpsetByOpCode.TryGetValue(node.OpCode, out var min) && min > result)
-                    result = min;
-                foreach (var ((op, attr), attrMin) in MinimumOpsetByAttribute)
-                    if (attrMin > result && node.OpCode == op
-                        && node.Attributes.IsAttributeDefined(attr)
-                        && !node.Attributes.IsDefaultValue(attr))
-                        result = attrMin;
-            }
-            return result;
-        }
-
         internal readonly struct OpsetInfo
         {
             public readonly string OpCode;
@@ -176,9 +105,9 @@ namespace Shorokoo.Core.Factory
         public static OpsetInfo? Resolve(
             FastNode node,
             FastNode? graphOpenNode,
-            OpSetVersion opset,
             bool stripCheckpointStamp = true)
         {
+            OnnxOpset.ThrowIfOutsideVersion(node);
             var nodeDef = Definitions.NodeDefinitions[node.OpCode].Resolve(node.Attributes.ToProto());
             if (nodeDef.IsGraphNode && IsOpenOpCode(node.OpCode))
                 return null;
@@ -203,7 +132,7 @@ namespace Shorokoo.Core.Factory
                 return new OpsetInfo(
                     opCode: nodeDef.FullNodeOpName,
                     domain: "",
-                    version: opset,
+                    version: OnnxOpset.Version,
                     attributes: node.Attributes.ToProto(),
                     inputKeys: graphOpenNode.Inputs,
                     outputKeys: node.Outputs,
@@ -260,7 +189,7 @@ namespace Shorokoo.Core.Factory
             return new OpsetInfo(
                 opCode: opCode,
                 domain: domain,
-                version: opset,
+                version: OnnxOpset.Version,
                 attributes: attributes.ToProto(),
                 inputKeys: node.Inputs,
                 outputKeys: node.Outputs,

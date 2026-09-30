@@ -350,8 +350,9 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Tensor<AnyLike>("T2")
                 // .AttributeBool(AttrSaturate)
                 .AttributeDType(AttrTo, "T2")
-                // opset-24 round_mode only affects float8e8m0 targets (unsupported
-                // dtype); declared so imports tolerate and round-trip it.
+                // round_mode (ONNX opset 24) only affects float8e8m0 targets (unsupported
+                // dtype). Opset 21 does not define it, so import and emission refuse it
+                // (OnnxOpset).
                 .AttributeString(AttrRoundMode)
 
                 // .Constraint(AttrSaturate, 1)
@@ -368,11 +369,12 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Tensor<AnyLike>("T1")
                 .Tensor<AnyLike>("T2")
                 .AttributeBool(AttrSaturate)
-                // opset-24 round_mode: tolerated for import round-trips (float8e8m0 only).
+                // round_mode (ONNX opset 24, float8e8m0 only): refused by import and
+                // emission like Cast's (OnnxOpset).
                 .AttributeString(AttrRoundMode)
                 .Input("input", "T1", "R")
                 // target_type only contributes its dtype; its shape/rank is unrelated to
-                // the input's (the definition used to force both ranks to "R").
+                // the input's.
                 .Input("target_type", "T2", "R2")
                 .Output("output", "T2", "R"),
 

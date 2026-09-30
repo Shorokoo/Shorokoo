@@ -111,10 +111,9 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
         /// <summary>
         /// What this pass lowers before it walks backwards: the operators it cannot differentiate.
         /// <c>Softsign</c> and <c>TensorScatter</c> are both here because no <c>[AutoDiff]</c>
-        /// rule covers either — TensorScatter's used to, but only to raise <c>AD003</c>, and a
-        /// rule that refuses the operator is no derivative at all. The list is stated rather than
-        /// derived from the gradient table for exactly that case — a rule's presence does not mean
-        /// the rule differentiates the operator. A hand-written rule still wins wherever one is
+        /// rule differentiates either. The list is stated rather than derived from the gradient
+        /// table because a rule's presence does not mean the rule differentiates the operator: one
+        /// that only raises <c>AD003</c> is no derivative at all. A hand-written rule still wins wherever one is
         /// meant to, by the operator simply not appearing here.
         /// </summary>
         internal static readonly ImmutableHashSet<string> LoweredOpCodes =

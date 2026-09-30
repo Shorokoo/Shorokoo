@@ -133,7 +133,7 @@ namespace Shorokoo.Core.Factory.IR
             return shape;
         }
 
-        public static ModelProto CreateModel(GraphProto graph, FunctionProto[] functions, OpSetVersion opSetVersion)
+        public static ModelProto CreateModel(GraphProto graph, FunctionProto[] functions)
         {
             var model = new ModelProto();
             model.IrVersion = (int)IR.Version.IrVersion;
@@ -142,7 +142,7 @@ namespace Shorokoo.Core.Factory.IR
             model.Functions.AddAll(functions);
 
             var opset = new OperatorSetIdProto();
-            opset.Version = (int)opSetVersion;
+            opset.Version = (int)OnnxOpset.Version;
             opset.Domain = "";
             model.OpsetImports.Add(opset);
 

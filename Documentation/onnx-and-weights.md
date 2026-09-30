@@ -69,17 +69,13 @@ OnnxModelExporter.SaveWithExternalData(model, "model.onnx");
 - The side file is committed first, then the `.onnx`; any in-process failure rolls both
   back, and only a hard crash between the two renames can leave them mismatched.
 
-`BuildOnnxModel(ComputationGraph graph, OpSetVersion opset = OPS_21,
-bool prepForOnnx = false)` requires a `GraphKind.ConcreteModel` graph (else `FW045`,
-naming both kinds). It does not modify the graph. `OPS_21` is a baseline: the stamp
-rises only for post-21 attributes on imported (or `NodeBuilder`-built) nodes
-(`DequantizeLinear.output_dtype`, `QuantizeLinear.precision` → 23;
-`Cast`/`CastLike.round_mode` → 24). No post-21 operator is emitted from an authored graph:
-each either throws `NotImplementedException` or is lowered to opset-21 primitives; an imported
-post-21 operator is kept and raises the stamp to its floor. A graph built through
-`Ops`/`OnnxOp` always exports at opset 21 (`.srk` keeps operators as authored and stamps
-accordingly). Models up to opset 26 run on the bundled ONNX Runtime 1.30. See
-[limitations.md](limitations.md) for the stamping policy and
+`BuildOnnxModel(ComputationGraph graph, bool prepForOnnx = false)` requires a
+`GraphKind.ConcreteModel` graph (else `FW045`, naming both kinds). It does not modify the
+graph. The model and each of its functions are stamped at ONNX opset 21, the one opset
+Shorokoo reads and writes; nothing raises the stamp. No post-21 operator is emitted from an
+authored graph: each either throws `NotImplementedException` or is lowered to opset-21
+primitives. A `NodeBuilder`-built node carrying a post-21 operator or attribute is refused
+with `FW060`, naming it. See [limitations.md](limitations.md#onnx-opset-21-only) and
 [operator-support.md](operator-support.md) per operator.
 
 Each exported input stores its **representative shape** (the dims it was concretized
@@ -125,12 +121,12 @@ ComputationGraph g2 = OnnxModelImporter.FromOnnxModel(byteArray);
 ComputationGraph g3 = OnnxModelImporter.FromOnnxModel(stream);
 ```
 
-Models must be opset 21 or later; an older model's behaviour is undefined. Import neither
-checks the declared opset nor converts, so such a model may be refused by ONNX Runtime when
-compiled (`Unsqueeze` with an `axes` attribute) or run with wrong results (`Squeeze`, the
-reductions, `Softmax`). Convert it to opset 21 first,
-for example with `onnx.version_converter.convert_version(model, 21)` — see
-[limitations.md](limitations.md#onnx-opset-range-and-export-stamping).
+Models must be ONNX opset 21 models. One whose default-domain (`ai.onnx`) opset import is
+missing or names another opset is refused with `FW060`, naming the opset found and the one
+required, and so is an opset-21 model with a node that is an operator, or carries an
+attribute, ONNX introduced after opset 21. Import converts nothing: convert such a model to
+opset 21 first, for example with `onnx.version_converter.convert_version(model, 21)` — see
+[limitations.md](limitations.md#onnx-opset-21-only).
 
 Shorokoo-written models carry a `shrk_graph_kind` metadata prop that sets the imported
 `Kind`; foreign models are classified by op-scanning. A tag impossible for the content

@@ -188,10 +188,9 @@ public sealed class QuickExecutionEngine
     /// <summary>
     /// What this engine lowers before it walks a graph: the operators it cannot compute itself.
     /// <c>Softsign</c> and <c>TensorScatter</c> are both here because no <see cref="QuickOp"/>
-    /// implements either — TensorScatter's used to, but only well enough to infer a shape, and a
-    /// kernel that produces no values leaves the engine as unable to compute the operator as no
-    /// kernel at all. The list is stated rather than derived from <see cref="OpRegistry"/> for
-    /// exactly that case — a kernel's presence does not mean the kernel computes the operator.
+    /// computes either. The list is stated rather than derived from <see cref="OpRegistry"/>
+    /// because a kernel's presence does not mean the kernel computes the operator: one that only
+    /// infers a shape leaves the engine as unable to compute it as no kernel at all.
     /// </summary>
     internal static readonly ImmutableHashSet<string> LoweredOpCodes =
         ImmutableHashSet.Create(StringComparer.Ordinal, OpCodes.SOFTSIGN, OpCodes.TENSOR_SCATTER);

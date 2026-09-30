@@ -722,6 +722,13 @@ namespace Shorokoo
         /// none of them its name (the message names the parameter)</summary>
         public const string FW059 = "FW059";
 
+        /// <summary>An ONNX model is outside opset 21, the one opset Shorokoo reads and writes: an
+        /// imported model declares no default-domain (ai.onnx) opset import or declares another
+        /// opset (the message names the opset found and the one required), or a node — imported, or
+        /// reaching emission — is an operator, or carries an attribute, that ONNX introduced after
+        /// opset 21 (the message names the node, the operator or attribute and its opset)</summary>
+        public const string FW060 = "FW060";
+
         #endregion
 
         #region Utility Error Codes (UT001-UT010)

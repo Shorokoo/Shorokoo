@@ -58,20 +58,25 @@ namespace Shorokoo.Core.Factory.IR
     internal class OnnxModelReader
     {
         private ModelProto model;
-        private OpSetVersion OpSetVersion;
 
+        /// <summary>
+        /// Takes <paramref name="model"/> for reading, refusing it with
+        /// <see cref="ErrorCodes.FW060"/> unless it imports the default domain at
+        /// <see cref="OnnxOpset.Version"/>, the one opset Shorokoo reads. Every import — a foreign
+        /// <c>.onnx</c> and a <c>.srk</c> payload alike — comes through here.
+        /// </summary>
         public OnnxModelReader(ModelProto model)
         {
+            OnnxOpset.ThrowIfNotAtVersion(model);
             this.model = model;
-            this.OpSetVersion = (OpSetVersion)model.OpsetImports[0].Version;
         }
 
         public InternalComputationGraph BuildInternalComputationGraph()
         {
             var tensorStructDefs = ParseTensorStructMetadata(this.model);
 
-            var onnxNameToFunction = internalBuildFunctions(this.model.Functions, this.OpSetVersion, tensorStructDefs);
-            var fastGraph = internalBuildInternalComputationGraph(this.model.Graph, onnxNameToFunction, this.OpSetVersion, tensorStructDefs);
+            var onnxNameToFunction = internalBuildFunctions(this.model.Functions, tensorStructDefs);
+            var fastGraph = internalBuildInternalComputationGraph(this.model.Graph, onnxNameToFunction, tensorStructDefs);
             Shorokoo.Core.Nodes.Processors.Fast.FastUnPrepFromOnnx.Process(fastGraph);
             return fastGraph;
         }
@@ -161,7 +166,6 @@ namespace Shorokoo.Core.Factory.IR
 
         private static Dictionary<string, Function> internalBuildFunctions(
             List<FunctionProto> functionProtos,
-            OpSetVersion opset,
             ImmutableDictionary<int, TensorStructDef>? tensorStructDefs = null)
         {
             var orderedFunctionProtos = SortByReferenceHierarchy(functionProtos).ToList();
@@ -169,7 +173,7 @@ namespace Shorokoo.Core.Factory.IR
 
             foreach (var functionProto in orderedFunctionProtos)
             {
-                functions[functionProto.Name] = internalInitFunction(functionProto, functions.ToImmutableDictionary(), opset, tensorStructDefs);
+                functions[functionProto.Name] = internalInitFunction(functionProto, functions.ToImmutableDictionary(), tensorStructDefs);
             }
 
             return functions;
@@ -178,7 +182,6 @@ namespace Shorokoo.Core.Factory.IR
         private static Function internalInitFunction(
             FunctionProto functionProto,
             ImmutableDictionary<string, Function> functionsMap,
-            OpSetVersion opset,
             ImmutableDictionary<int, TensorStructDef>? tensorStructDefs = null)
         {
             var functionTypeName = functionProto.MetadataProps.FirstOrDefault(x => x.Key == Function.IRFunctionTypeParamName)?.Value;
@@ -212,7 +215,7 @@ namespace Shorokoo.Core.Factory.IR
                 tensorKeys[info.Name] = key;
             }
 
-            CreateFastNodes(fastGraph, EnumerateNodesInProtoOrder(functionProto.Nodes), tensorKeys, functionsMap, opset);
+            CreateFastNodes(fastGraph, EnumerateNodesInProtoOrder(functionProto.Nodes), tensorKeys, functionsMap);
 
             // The formal outputs become the body's output nodes, in output order, closing it.
             foreach (var outputName in functionProto.Outputs)
@@ -519,7 +522,6 @@ namespace Shorokoo.Core.Factory.IR
         private static InternalComputationGraph internalBuildInternalComputationGraph(
             GraphProto graphProto,
             Dictionary<string, Function> onnxNameToFunction,
-            OpSetVersion opset,
             ImmutableDictionary<int, TensorStructDef>? tensorStructDefs = null)
         {
             var fastGraph = new InternalComputationGraph();
@@ -552,7 +554,7 @@ namespace Shorokoo.Core.Factory.IR
             // Walk the proto's nodes in declared order — the canonical order. Sub-graph
             // attributes are recursed into positionally between the parent op's OPEN and
             // CLOSE TempNodes. Materialize one FastNode per visited TempNode.
-            CreateFastNodes(fastGraph, EnumerateNodesInProtoOrder(graphProto.Nodes), tensorKeys, functionsMap, opset);
+            CreateFastNodes(fastGraph, EnumerateNodesInProtoOrder(graphProto.Nodes), tensorKeys, functionsMap);
 
             // .srk dialect: the model-input ops were serialized as ordinary NodeProtos (materialized
             // above by CreateFastNodes, after the initializers) rather than graph-input
@@ -973,8 +975,7 @@ namespace Shorokoo.Core.Factory.IR
             InternalComputationGraph fastGraph,
             IEnumerable<TempNode> tempNodes,
             Dictionary<string, FastTensorKey> tensorKeys,
-            IReadOnlyDictionary<string, Function> functionsMap,
-            OpSetVersion opset)
+            IReadOnlyDictionary<string, Function> functionsMap)
         {
             var graphOpenNodeKeys = new Dictionary<NodeProto, FastNodeKey>();
             var definitions = Definitions.NodeDefinitions;
@@ -1029,6 +1030,7 @@ namespace Shorokoo.Core.Factory.IR
                 }
                 else if (definitions.ContainsKey(opCode))
                 {
+                    OnnxOpset.ThrowIfOutsideVersion(nodeProto);
                     fastNode = BuildFastBuiltinNodeFromProto(opCode, nodeProto, tensorKeys, functionsMap, definitions, graphOpenNodeKeys);
                 }
                 else

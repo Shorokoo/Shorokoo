@@ -424,51 +424,43 @@ TensorStruct by its `IStruct` interface. A struct assembled at runtime from a
 with `Globals.TensorStruct<T>` / `TensorStructCreate<T>`, generic interfaces
 included, are unaffected. Declare the struct as an `IStruct` interface instead.
 
-### ONNX opset range and export stamping
+### ONNX opset 21 only
 
-Import reads every standard-domain (`ai.onnx`) node against its current definition (opset 21,
-or the operator's own opset for an operator introduced after 21, with the attributes opsets
-22–26 add; the range the bundled ONNX Runtime 1.30 loads). It does not
-check the opset the model declares and converts nothing. **Models older than opset 21 are not
-supported, and their behaviour is undefined**: import does not refuse them, and where an
-operator's signature changed after the model's opset, either of these can happen:
+Shorokoo reads and writes a single ONNX opset: **21**.
 
-- ONNX Runtime refuses the compiled model. `Unsqueeze` with an `axes` attribute (before
-  opset 13) fails with `[ErrorCode:InvalidGraph] … has input size 1 not in range [min=2,
-  max=2]`.
-- The model runs with **wrong results**. `Squeeze` and `ReduceSum` (before opset 13) and the
-  other reductions (before opset 18) lose their `axes` attribute and act on every axis;
-  `Softmax`, `LogSoftmax` and `Hardmax` (before opset 13) take the opset-13 meaning of `axis`.
+**Import** — `Persistence.ImportOnnx`, `OnnxModelImporter.FromOnnxModel` and the payload of a
+`.srk` alike — requires the model's default-domain (`""` / `ai.onnx`) opset import to be 21,
+wherever it sits in the model's `opset_import` list, and so for each function that declares
+one. A model that declares no default-domain opset, or any other one, is refused with
+**FW060**, naming the opset found and the one required. Convert such a model to opset 21
+before importing it, for example with `onnx.version_converter.convert_version(model, 21)` in
+Python.
 
-Convert an older model to opset 21 before importing it, for example with
-`onnx.version_converter.convert_version(model, 21)` in Python.
+An opset-21 model is also refused with **FW060**, naming the node, when a node is an operator
+ONNX introduced after opset 21 (`Attention`, `RMSNormalization`, `RotaryEmbedding`,
+`TensorScatter`, `Swish`, `BitCast`, `CumProd`, …) or carries an attribute ONNX added after
+it (`DequantizeLinear.output_dtype`, `QuantizeLinear.precision`,
+`Cast`/`CastLike.round_mode`): opset 21 does not define them, so the model is malformed.
 
-Export stamps models at the **opset-21 baseline**, raised only as far as the graph
-requires. Post-21 operators have export floors (`RMSNormalization` and
-`RotaryEmbedding` 23; `Attention`, `Swish` and `TensorScatter` 24, `Attention`
-because Shorokoo defines it with the opset-24 inputs; `BitCast` and `CumProd` 26), but an
-authored graph never emits one:
+**Export and every save** stamp the model, and each of its functions, at exactly 21 — an
+exported `.onnx`, the model a backend's session is built from and a `.srk` payload alike.
+Nothing raises the stamp. The post-21 operators an authored graph can name never reach the
+file:
 
+- `Swish` and `RMSNormalization` lower inline to opset-21 primitives.
+- `TensorScatter` is written as a `Concat` plus `GatherElements` (see
+  [operator-support.md](operator-support.md)), in an exported file and a saved `.srk` alike;
+  a reloaded graph computes the same values.
 - `Attention`, `AttentionWithKVCache`, `RotaryEmbedding`, `BitCast` and `CumProd`
   throw `NotImplementedException` at their `OnnxOp` entry points.
-- `Swish` and `RMSNormalization` lower inline to opset-21 primitives.
-- `TensorScatter` is exported as a `Concat` plus `GatherElements` (see
-  [operator-support.md](operator-support.md)). A saved architecture keeps it as
-  authored and stamps at 24.
 
-The baseline is 21 rather than 26 because the stamp selects ONNX Runtime kernel
-versions, and ORT 1.30's CPU provider lacks some: it registers no opset-22 kernels
-for `GlobalLpPool` or `RandomNormalLike`, so a model stamped at opset ≥ 22 fails to
-load where the opset-21 model runs.
+No `Ops`/`OnnxOp` entry point accepts the post-21 attributes either. A node built with the
+low-level `NodeBuilder` can carry a post-21 operator or attribute; writing it is refused with
+**FW060**, naming the node, rather than emitted.
 
-Nothing is lost: the opset 22–26 respecifications of pre-existing operators only widen dtype lists (bfloat16, float4e2m1,
-float8e8m0, int2/uint2, all unsupported in Shorokoo; see below) and add three
-optional attributes Shorokoo imports and honors: `DequantizeLinear.output_dtype`
-(opset 23), `QuantizeLinear.precision` (23) and `Cast`/`CastLike.round_mode` (24,
-float8e8m0-only). A non-default value raises the exported stamp to match. No
-`Ops`/`OnnxOp` entry point accepts these attributes, so only imported models and
-nodes built with the low-level `NodeBuilder` (which can set any declared
-attribute) raise the stamp.
+The opset 22–26 respecifications of the operators opset 21 defines only widen dtype lists
+(bfloat16, float4e2m1, float8e8m0, int2/uint2, all unsupported in Shorokoo; see below) besides
+adding those optional attributes, so an opset-21 model expresses everything Shorokoo runs.
 
 ### Sub-byte and complex dtypes
 

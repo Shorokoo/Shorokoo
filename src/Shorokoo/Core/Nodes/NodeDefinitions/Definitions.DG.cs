@@ -72,10 +72,10 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Tensor<FloatLike>("T2")
                 .AttributeLong(AttrAxis)
                 .AttributeLong(AttrBlockSize)
-                // opset-23 output_dtype: declared as a plain int so imported models
-                // setting it resolve cleanly; the QEE dtype rule honors it. The def-level
-                // output group stays bound to x_scale (they only diverge for float8/4
-                // dtypes, which Shorokoo does not support).
+                // output_dtype (ONNX opset 23): declared as a plain int; the QEE dtype rule
+                // honors it. Opset 21 does not define it, so import refuses it and so does
+                // emission (OnnxOpset). The def-level output group stays bound to x_scale
+                // (they only diverge for float8/4 dtypes, which Shorokoo does not support).
                 .AttributeLong(AttrOutputDtype)
 
                 .ConstraintIsSet(AttrBlockSize, true)

@@ -1459,3 +1459,16 @@ public partial class SameStridedAveragePoolModel
     public static Tensor<float32> Inline(Tensor<float32> input)
         => (Tensor<float32>)OnnxOp.AveragePool(OnnxOp.Relu(input * InitScalarWeight.Init(Vector(1L))), AutoPad.SameLower, null, null, null, [2L, 1L], null, [3L, 2L]);
 }
+
+/// <summary>A gain gathered at indices valid only for longer inputs, in an <c>IfElse</c> arm those
+/// inputs alone take.</summary>
+[Module]
+public partial class GainGatheredInAnUntakenIfElseArmModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var y = t * Ones.Init([Scalar(2L)]);
+        var picked = (Tensor<float32>)OnnxOp.Gather(y, Vector(5L, 5L), axis: 0);
+        return (t.Reduce(ReduceKind.Max, keepDims: false).Scalar() > Scalar(100f)).IfElse(picked, y);
+    }
+}

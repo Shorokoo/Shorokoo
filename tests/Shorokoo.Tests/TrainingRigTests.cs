@@ -2488,6 +2488,10 @@ public class TrainingRigTrainingLoopCoverageTests
         Assert.NotEmpty(IfBodyOps(SharedGainInBothIfArmsModel.ComputationGraph));
     }
 
+    [Fact]
+    public void TestAGatherInAnUntakenIfElseArmTrains()
+        => Assert.Equal(2.5f, LossAfterOneStep(GainGatheredInAnUntakenIfElseArmModel.ComputationGraph), 1e-4f);
+
     private static float[] TrainedParams(ComputationGraph modelGraph, bool cond, params float[] xs)
     {
         object[] values = [.. xs.Select(v => (object)v)];

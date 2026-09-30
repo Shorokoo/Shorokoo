@@ -1579,6 +1579,26 @@ public class ModulesCoverageTests
     }
 
     [Fact]
+    public void TestAnIndexSetOnAStructFieldsLocalCopyLeavesTheStructAndReachesItOnlyThroughARebuiltStruct()
+    {
+        var a = TensorData([3L], 1f, 2f, 3f);
+        float[] Run(Func<TensorFieldStruct, Tensor<float32>> body) => RunStructInput(body, StructIn<TensorFieldStruct>(("A", a)));
+        float[] RunRecord(Func<TensorFieldRecord, Tensor<float32>> body) => RunStructInput(body, StructIn<TensorFieldRecord>(("A", a)));
+        Assert.Equal([91f, 22f, 33f], Run(StructFieldIndexSetLayers.CopyLeavesStruct));
+        Assert.Equal([9f, 2f, 3f], Run(StructFieldIndexSetLayers.RebuiltStruct));
+        Assert.Equal([9f, 2f, 3f], RunRecord(StructFieldIndexSetLayers.RecordWith));
+        Assert.Equal([100f, 2f, 3f], Run(StructFieldIndexSetLayers.LoopCarriedStruct));
+        Assert.Equal([100f, 2f, 3f], RunRecord(StructFieldIndexSetLayers.LoopCarriedRecord));
+        Assert.Equal([191f, 62f, 93f], Run(StructFieldIndexSetLayers.LoopCopyLeavesStruct));
+        Assert.Equal([91f, 22f, 33f], Run(StructFieldIndexSetLayers.IfElseArmsSeeCopyAndStruct));
+        Assert.Equal([9f, 2f, 3f], Run(StructFieldIndexSetLayers.IfElseRebuiltStruct));
+    }
+
+    [Fact]
+    public void TestAStructTypeDeclaringATensorAsACSharpFieldIsRefusedNamingTheField()
+        => Assert.Contains("'A'", Assert.Throws<InvalidOperationException>(() => StructDefExtractor.ExtractFromType<CSharpFieldStruct>()).Message);
+
+    [Fact]
     public void TestGeometryResolvesBesideAnAbsentOptionalASequenceOrAStructInput()
     {
         Assert.Equal(GraphKind.ConcreteArchitecture, Concretize(OptionalThenConvTransposeLayer.ComputationGraph,

@@ -197,6 +197,28 @@ How a hyper is supplied depends on the route:
   `prev = LoopAPI.Carry(acc)` instead, plus `LoopAPI.Init` for a local the body only
   writes. See [limitations.md](limitations.md).
 
+## Struct values
+
+A struct type is an `IStruct` interface or record whose **properties** are its
+fields. A struct value is immutable: updating a field means building a new struct.
+
+`Tensor<T>`'s index setter (`t[0..2] = r;`) rebinds a local, so it cannot write through
+a field. `s.A[0..2] = r;` does not compile (CS1612), whether `A` is an interface or
+record property or `GetField<T>("A")`. Copy the field, set the copy, and bind a new
+struct to `s`:
+
+```csharp
+var a = s.A;                                   // s : MyStruct (IStruct interface)
+a[0..2] = r;                                   // s is unchanged
+s = TensorStruct<MyStruct>(a);                 // interface: build a new struct
+s = s with { A = a };                          // record: same, with `with`
+```
+
+This is the same inside a `LoopAPI.Iterate` body, where a rebound `s` is carried to the
+next iteration, and when the new struct is an `IfElse` arm. A struct type that declares a
+graph value as a C# **field** (`public Tensor<float32> A;`) is refused when its layout is
+read: that field would be neither a struct field nor immutable.
+
 ## Workflow: one module, many variants
 
 A `[Module]` class is a **family** of architectures. Its graph is traced once and

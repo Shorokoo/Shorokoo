@@ -44,8 +44,16 @@ namespace Shorokoo.Core
             if (!typeof(IStruct).IsAssignableFrom(type))
                 throw new ArgumentException($"Type {type.Name} does not implement IStruct", nameof(type));
 
+            // A struct's fields are its properties. A graph value held in a C# field would be neither a
+            // struct field nor immutable (an index-set on it writes through to the shared instance).
+            var csharpField = type.GetFields(BindingFlags.Public | BindingFlags.Instance)
+                .FirstOrDefault(f => typeof(IValue).IsAssignableFrom(f.FieldType));
+            if (csharpField is not null)
+                throw new InvalidOperationException(
+                    $"Struct type {type.Name} declares '{csharpField.Name}' as a C# field; declare struct fields as properties.");
+
             var fields = new List<TensorStructFieldDef>();
-            
+
             // Get all properties declared in this interface (not inherited from base interfaces)
             foreach (var prop in type.GetProperties(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly))
             {

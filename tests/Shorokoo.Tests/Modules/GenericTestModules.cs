@@ -840,6 +840,97 @@ namespace Shorokoo.Tests.Modules
         public static Tensor<float32> Inline(OptionalFieldStruct s) => s.B.HasValue().IfElse(s.A + s.B.TensorValue(), s.A);
     }
 
+    public interface TensorFieldStruct : IStruct
+    {
+        Tensor<float32> A { get; }
+    }
+
+    public record TensorFieldRecord(Tensor<float32> A) : IStruct;
+
+    public class CSharpFieldStruct : IStruct
+    {
+        public Tensor<float32> A;
+    }
+
+    public static class StructFieldIndexSetLayers
+    {
+        public static Tensor<float32> CopyLeavesStruct(TensorFieldStruct s)
+        {
+            var a = s.A;
+            a[0..1] = Vector(9f);
+            return a * Scalar(10f) + s.A;
+        }
+
+        public static Tensor<float32> RebuiltStruct(TensorFieldStruct s)
+        {
+            var a = s.A;
+            a[0..1] = Vector(9f);
+            s = TensorStruct<TensorFieldStruct>(a);
+            return s.A;
+        }
+
+        public static Tensor<float32> RecordWith(TensorFieldRecord s)
+        {
+            var a = s.A;
+            a[0..1] = Vector(9f);
+            s = s with { A = a };
+            return s.A;
+        }
+
+        public static Tensor<float32> LoopCarriedStruct(TensorFieldStruct s)
+        {
+            foreach (var ctx in LoopAPI.Iterate(Scalar(2L)))
+            {
+                var a = s.A;
+                a[0..1] = a[0..1] * Scalar(10f);
+                s = TensorStruct<TensorFieldStruct>(a);
+            }
+            return s.A;
+        }
+
+        public static Tensor<float32> LoopCarriedRecord(TensorFieldRecord s)
+        {
+            foreach (var ctx in LoopAPI.Iterate(Scalar(2L)))
+            {
+                var a = s.A;
+                a[0..1] = a[0..1] * Scalar(10f);
+                s = s with { A = a };
+            }
+            return s.A;
+        }
+
+        public static Tensor<float32> LoopCopyLeavesStruct(TensorFieldStruct s)
+        {
+            var acc = s.A;
+            foreach (var ctx in LoopAPI.Iterate(Scalar(2L)))
+            {
+                var a = s.A;
+                a[0..1] = Vector(9f);
+                acc = acc + a;
+            }
+            return acc * Scalar(10f) + s.A;
+        }
+
+        public static Tensor<float32> IfElseArmsSeeCopyAndStruct(TensorFieldStruct s)
+        {
+            var a = s.A;
+            a[0..1] = Vector(9f);
+            var high = (s.A[0L].Scalar() > Scalar(0f)).IfElse(a, s.A);
+            var low = (s.A[0L].Scalar() < Scalar(0f)).IfElse(a, s.A);
+            return high * Scalar(10f) + low;
+        }
+
+        public static Tensor<float32> IfElseRebuiltStruct(TensorFieldStruct s)
+        {
+            var a = s.A;
+            a[0..1] = Vector(9f);
+            TensorStruct<TensorFieldStruct> rebuilt = TensorStructCreate<TensorFieldStruct>(a);
+            TensorStruct<TensorFieldStruct> kept = TensorStructCreate<TensorFieldStruct>(s.A);
+            var chosen = (s.A[0L].Scalar() > Scalar(0f)).IfElse(rebuilt, kept);
+            return chosen.GetField<Tensor<float32>>("A");
+        }
+    }
+
     public static class PairThenConvTransposeLayer
     {
         public static Tensor<float32> Inline(GenericPairStruct pair, Tensor<float32> x)

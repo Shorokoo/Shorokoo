@@ -274,6 +274,12 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
         /// scattered back into a tensor they do not fit (Shorokoo/Shorokoo#492). An optional's
         /// value may be absent where the arm did not run, so its zero still reads the
         /// gradient.</para>
+        ///
+        /// <para>The arm's forward intermediates that its backward reads stay in the arm too:
+        /// read only from the gate's taken branch, on the arm's own condition, they are handed out
+        /// of the arm's <c>If</c> to it (<see cref="Fast.FastIfBranchScoper"/>). The backward
+        /// reads what the forward computed, a random draw included, and nothing of the arm runs
+        /// on a step that does not take it.</para>
         /// </summary>
         private static Variable GateOnLeavingAnArm(
             Variable grad,

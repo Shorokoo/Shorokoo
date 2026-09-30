@@ -1565,3 +1565,16 @@ public partial class GatherSquaredInOneIfArmModel
         return cond.IfElse(picked * picked, y);
     }
 }
+
+/// <summary>An always-on Dropout squared in one arm of an <c>IfElse</c> on an input condition, so
+/// the arm's backward reads the mask and the output the forward drew.</summary>
+[Module]
+public partial class DropoutSquaredInOneIfArmModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t, Scalar<bit> cond)
+    {
+        var y = t * Ones.Init([Scalar(8L)]);
+        var dropped = Shorokoo.Modules.Layers.Dropout.Call(Scalar(0.5f), Scalar(true), y);
+        return cond.IfElse(dropped * dropped, y);
+    }
+}

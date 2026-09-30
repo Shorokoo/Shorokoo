@@ -2509,6 +2509,9 @@ public class TrainingRigTrainingLoopCoverageTests
     }
 
     private static float[] TrainedParams(ComputationGraph modelGraph, bool cond, params float[] xs)
+        => LossAndTrainedParams(modelGraph, cond, xs).Params;
+
+    private static (float Loss, float[] Params) LossAndTrainedParams(ComputationGraph modelGraph, bool cond, params float[] xs)
     {
         object[] values = [.. xs.Select(v => (object)v)];
         var x = TensorData(DType.Float32, [(long)xs.Length], values);
@@ -2518,8 +2521,8 @@ public class TrainingRigTrainingLoopCoverageTests
              new TensorDataModelParam("cond", ModelParamType.InputParam, c)], 0.1f);
         var step = rig.TrainStep(rig.CreateInitialCheckpoint(), rig.InputDef.FromOrderedData(x, c),
             rig.TargetDef.FromOrderedData(TensorData([(long)xs.Length], new float[xs.Length])));
-        return NNLibraryTrainingFixtures.Floats(
-            step.TrainableParams.Fields[rig.TrainableParamStructDef.Fields[0].Name]);
+        return (step.Loss!.Value, NNLibraryTrainingFixtures.Floats(
+            step.TrainableParams.Fields[rig.TrainableParamStructDef.Fields[0].Name]));
     }
 
     // The arm that did not run contributes exactly zero, whether or not its own derivative is a
@@ -2537,6 +2540,15 @@ public class TrainingRigTrainingLoopCoverageTests
     {
         Assert.Equal<float>([1f, -5.4f], TrainedParams(GatherSquaredInOneIfArmModel.ComputationGraph, true, 1f, 2f));
         Assert.Equal<float>([0.9f, 0.6f], TrainedParams(GatherSquaredInOneIfArmModel.ComputationGraph, false, 1f, 2f));
+    }
+
+    [Fact]
+    public void TestADropoutInAnIfElseArmTrainsOnTheMaskItsForwardDrew()
+    {
+        var (loss, weights) = LossAndTrainedParams(DropoutSquaredInOneIfArmModel.ComputationGraph, true, 1f, 1f, 1f, 1f, 1f, 1f, 1f, 1f);
+        int kept = weights.Count(w => Math.Abs(w - 0.2f) < 1e-5f);
+        Assert.Equal((double)loss, 2.0 * kept, 1e-4);
+        Assert.Equal(8 - kept, weights.Count(w => w == 1f));
     }
 
     private static TrainingRig OptionalBiasRig(OptionalTensorData bias, TensorData x)

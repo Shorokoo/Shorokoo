@@ -137,6 +137,15 @@ namespace Shorokoo.Core
             ? TraceContext.Current.CallEffects
             : null;
 
+        /// <summary>
+        /// The <c>IfElse</c>s of this module build, for the harvest to keep those its stateful
+        /// calls need (see <see cref="InternalGlobals.IfElsesKeptForTheirArms"/>); null when no
+        /// module build is in progress.
+        /// </summary>
+        internal static List<(Variable[] Arms, Variable Output)>? IfElses => TraceContext.Current?.IsModuleBuild == true
+            ? TraceContext.Current.IfElses
+            : null;
+
         /// <summary>Hands the recorded calls to the harvest and clears them, as
         /// <see cref="StateUpdates"/> and <see cref="Pins"/> are taken.</summary>
         internal static Variable[] TakeCallEffects()
@@ -211,6 +220,9 @@ namespace Shorokoo.Core
 
         /// <summary>The stateful calls of this trace (see <see cref="GraphTrace.CallEffects"/>).</summary>
         internal List<Variable> CallEffects { get; } = new List<Variable>();
+
+        /// <summary>The <c>IfElse</c>s of this trace (see <see cref="GraphTrace.IfElses"/>).</summary>
+        internal List<(Variable[] Arms, Variable Output)> IfElses { get; } = new();
 
         protected override void OnExiting()
             => Debug.Assert(Loopers.Count == 0,

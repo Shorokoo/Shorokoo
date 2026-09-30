@@ -29,7 +29,7 @@ public static partial class OnnxOp
     public static Variable[] IfClose(Variable[] thenBranch, Variable[] elseBranch, Node openNode)
     {
         var outputs = NodeBuilder.BuildNodeMultiOut(IF_CLOSE, [], [(AttrThenBranch, thenBranch), (AttrElseBranch, elseBranch)], openNode: openNode);
-        InternalGlobals.KeepIfElseOfArmCallEffects([.. thenBranch, .. elseBranch], outputs[0]);
+        InternalGlobals.RecordIfElse([.. thenBranch, .. elseBranch], outputs[0]);
         return outputs;
     }
 

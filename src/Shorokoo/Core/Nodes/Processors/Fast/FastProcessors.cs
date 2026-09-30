@@ -5314,7 +5314,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             // What only the arm the condition does not take computes goes with it — a stateful call
             // made there included, which a WITH_STATE_DEPS names only to keep it, so it is not
             // named any more.
-            var armsOf = FastIfArms.Classify(graph);
+            var armsOf = graph.Nodes.Any(n => n.OpCode == InternalOpCodes.WITH_STATE_DEPS)
+                ? FastIfArms.Classify(graph) : [];
             bool OnlyInALosingArm(FastTensorKey? key)
                 => key is FastTensorKey k && producerByOutput.TryGetValue(k, out var p)
                    && armsOf.TryGetValue(p.Key, out var arms)
@@ -6035,7 +6036,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// <see cref="OnnxOpAttributeNames.ShrkAttrLoopTrips"/>, with the flag saying whether the trip
         /// ran as one more input where that is decided at run time.
         /// </summary>
-        private static void TagLoopTrip(FastNode cloned, FastNode original, long loopId, long trip, long tripCount, FastTensorKey? ran)
+        private static void TagLoopTrip(
+            FastNode cloned, FastNode original, long loopId, long trip, long tripCount, long rolledDepth, FastTensorKey? ran)
         {
             // Ordered while the loop was rolled: it carries its state out as a loop variable.
             if (FastChainStateUpdatesAcrossCallSites.IsOrdered(original)) return;
@@ -6046,7 +6048,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 flagIndex = inputs.Count;
                 inputs.Add(r);
             }
-            long[] trips = [.. original.Attributes.GetLongsVal(OnnxOpAttributeNames.ShrkAttrLoopTrips) ?? [], loopId, trip, tripCount, flagIndex];
+            long[] trips = [.. original.Attributes.GetLongsVal(OnnxOpAttributeNames.ShrkAttrLoopTrips) ?? [],
+                            loopId, trip, tripCount, rolledDepth, flagIndex];
             cloned.Attributes = OnnxCSharpAttributes.FromCSharpVals(
                 new Dictionary<string, object?> { [OnnxOpAttributeNames.ShrkAttrLoopTrips] = trips },
                 Definitions.NodeDefinitions[InternalOpCodes.STATE_UPDATE_LINK].AttributeDefs);
@@ -6101,6 +6104,12 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             if (bodyNodes.Any(b => b.OpCode == InternalOpCodes.STATE_UPDATE_LINK))
                 loopDependentTensors.UnionWith(StateValues(graph));
             long loopId = Interlocked.Increment(ref s_nextLoopId);
+
+            // The loops still standing around this one, which a call in it is inside of too.
+            long rolledDepth = 0;
+            for (int j = 0; j < openIdx; j++)
+                if (graph.Nodes[j].OpCode == OpCodes.LOOP_OPEN) rolledDepth++;
+                else if (graph.Nodes[j].OpCode == OpCodes.LOOP_CLOSE) rolledDepth--;
 
             var bodyByKey = new Dictionary<FastNodeKey, int>(bodyNodes.Count);
             for (int bi = 0; bi < bodyNodes.Count; bi++) bodyByKey[bodyNodes[bi].Key] = bi;
@@ -6469,7 +6478,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     // time whether that trip ran, so the calls around and within the loop can be
                     // ordered once it is unrolled.
                     if (b.OpCode == InternalOpCodes.STATE_UPDATE_LINK)
-                        TagLoopTrip(cloned, b, loopId, iter, iterCount, hasCondChain ? allPrevCondKey : null);
+                        TagLoopTrip(cloned, b, loopId, iter, iterCount, rolledDepth, hasCondChain ? allPrevCondKey : null);
 
                     newNodes.Add(cloned);
                     clonedThisIter.Add((b, cloned));

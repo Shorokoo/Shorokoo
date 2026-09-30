@@ -249,8 +249,7 @@ namespace Shorokoo.Core.Utils
                 or FormatException)
             {
                 // These are the exceptions the protobuf/ONNX layer raises on malformed payload
-                // bytes — garbage, truncation, or an empty model (e.g. OpsetImports[0] on an
-                // empty ModelProto). Name the file and the cause instead of surfacing a bare
+                // bytes — garbage or truncation. Name the file and the cause instead of surfacing a bare
                 // deep-in-the-importer exception. Deliberately NOT catching Exception broadly:
                 // a NullReferenceException/InvalidOperationException/NotSupportedException from a
                 // valid-but-unsupported graph (or a framework bug), and OutOfMemoryException, must

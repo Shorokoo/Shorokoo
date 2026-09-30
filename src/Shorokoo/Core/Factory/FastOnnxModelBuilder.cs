@@ -29,7 +29,7 @@ namespace Shorokoo.Core.Factory
     ///
     /// <para>
     /// All five pre-passes have Fast-side implementations, so the main pipeline
-    /// no longer round-trips through CG: the input graph is cloned, mutated by
+    /// stays on the Fast graph: the input graph is cloned, mutated by
     /// the Fast pre-passes (<see cref="FastLowerRandomOps"/>,
     /// <see cref="FastAddIdentityForOuterScopeValues"/>,
     /// <see cref="FastPrepForOnnx"/>, <see cref="FastStripCallStacks"/>,
@@ -92,7 +92,6 @@ namespace Shorokoo.Core.Factory
         /// </summary>
         public static ModelProto BuildOnnxModel(
             Shorokoo.Graph.ComputationGraph graph,
-            OpSetVersion opset = OpSetVersion.OPS_21,
             bool prepForOnnx = false)
         {
             if (graph is null) throw new ArgumentNullException(nameof(graph));
@@ -108,20 +107,19 @@ namespace Shorokoo.Core.Factory
                     "(ToConcreteArchitecture -> ToConcreteModel) and export that. Shorokoo's own .srk/.zsrk " +
                     "persistence (CompressedFormatUtils.SaveFastGraphToFile/SaveFastGraphToBinary) accepts every graph kind. " +
                     Shorokoo.Core.Utils.SrkFileFormat.WithKindRemedyHint);
-            return BuildOnnxModelCore(graph.ToInternal(), opset, prepForOnnx, vanillaExport: true, stage: graph.Kind);
+            return BuildOnnxModelCore(graph.ToInternal(), prepForOnnx, vanillaExport: true, stage: graph.Kind);
         }
 
         /// <summary>
-        /// Internal-graph form of <see cref="BuildOnnxModel(Shorokoo.Graph.ComputationGraph, OpSetVersion, bool)"/> for callers below the
+        /// Internal-graph form of <see cref="BuildOnnxModel(Shorokoo.Graph.ComputationGraph, bool)"/> for callers below the
         /// readonly wrapper (no stamped kind — the vanilla-dialect op scan is the gate).
         /// </summary>
         internal static ModelProto BuildOnnxModel(
             InternalComputationGraph fastGraph,
-            OpSetVersion opset = OpSetVersion.OPS_21,
             bool prepForOnnx = false)
-            // The emitted model is always stamped IR_10 (OnnxIRFactory.CreateModel);
-            // there is deliberately no irVersion parameter to suggest otherwise.
-            => BuildOnnxModelCore(fastGraph, opset, prepForOnnx, vanillaExport: true);
+            // The emitted model is always stamped IR_10 and opset 21 (OnnxIRFactory.CreateModel);
+            // there is deliberately no parameter for either to suggest otherwise.
+            => BuildOnnxModelCore(fastGraph, prepForOnnx, vanillaExport: true);
 
         /// <summary>
         /// Internal-dialect ONNX serialization for Shorokoo's own persistence
@@ -130,10 +128,9 @@ namespace Shorokoo.Core.Factory
         /// names and module-stage graphs serialize their Shorokoo-internal ops
         /// unchecked. Files produced this way are re-importable only by
         /// <see cref="Shorokoo.Onnx.OnnxModelImporter"/>; use
-        /// <see cref="BuildOnnxModel(Shorokoo.Graph.ComputationGraph, OpSetVersion, bool)"/> for anything meant to leave Shorokoo.
+        /// <see cref="BuildOnnxModel(Shorokoo.Graph.ComputationGraph, bool)"/> for anything meant to leave Shorokoo.
         /// </summary>
         /// <param name="fastGraph">The graph to serialize.</param>
-        /// <param name="opset">Default-domain opset stamp (raised as required).</param>
         /// <param name="prepForOnnx">Run the ONNX-executability prep pass.</param>
         /// <param name="stage">Graph kind to stamp into the model metadata, when known.</param>
         /// <param name="applyExecutionLowerings">Run the semantics-narrowing execution
@@ -162,14 +159,13 @@ namespace Shorokoo.Core.Factory
         /// the one a session is built from, and to no other.</param>
         internal static ModelProto BuildInternalOnnxModel(
             InternalComputationGraph fastGraph,
-            OpSetVersion opset = OpSetVersion.OPS_21,
             bool prepForOnnx = false,
             Shorokoo.Graph.GraphKind? stage = null,
             bool applyExecutionLowerings = true,
             bool emitInputsAsNodes = false,
             IReadOnlyList<long[]?>? inputDims = null,
             KernelWorkaroundSet? workarounds = null)
-            => BuildOnnxModelCore(fastGraph, opset, prepForOnnx, vanillaExport: false, stage: stage,
+            => BuildOnnxModelCore(fastGraph, prepForOnnx, vanillaExport: false, stage: stage,
                 applyExecutionLowerings: applyExecutionLowerings, emitInputsAsNodes: emitInputsAsNodes,
                 inputDims: inputDims, workarounds: workarounds);
 
@@ -219,7 +215,6 @@ namespace Shorokoo.Core.Factory
 
         private static ModelProto BuildOnnxModelCore(
             InternalComputationGraph fastGraph,
-            OpSetVersion opset,
             bool prepForOnnx,
             bool vanillaExport,
             Shorokoo.Graph.GraphKind? stage = null,
@@ -270,14 +265,6 @@ namespace Shorokoo.Core.Factory
             // during subgraph extraction relies on this invariant.
             prepFast.ConfigureScopes();
 
-            // Raise the opset stamp just enough to cover post-opset-21 ops anywhere in
-            // the model (main graph or function bodies); see FastOpsetResolver.RaiseToRequired.
-            opset = FastOpsetResolver.RaiseToRequired(
-                prepFast.Nodes
-                    .Concat(CollectFunctionsPostOrder(prepFast)
-                        .SelectMany(fn => fn.OriginalFastGraph.Nodes)),
-                opset);
-
             // The activation-checkpoint stamp is Shorokoo-private: stripped from anything ORT will
             // run or a user will export, kept in the .srk dialect (no execution lowerings, not
             // vanilla) so a reloaded architecture still carries its [Module(Checkpoint = true)].
@@ -298,7 +285,6 @@ namespace Shorokoo.Core.Factory
             var graphProto = BuildGraphProto(
                 graphName: MainGraphName,
                 fastGraph: prepFast,
-                opset: opset,
                 isFunction: false,
                 tensorInfoLookup: tensorInfoLookup,
                 emitInputsAsNodes: emitInputsAsNodes,
@@ -321,10 +307,10 @@ namespace Shorokoo.Core.Factory
             // a FunctionProto for each.
             var functions = CollectFunctionsPostOrder(prepFast);
             var functionProtos = functions
-                .Select(fn => BuildFunctionProto(fn, opset, prepForOnnx, applyExecutionLowerings, stripCheckpointStamp, flattenFunctionBodies, forSession, workarounds, shapesAreConcrete))
+                .Select(fn => BuildFunctionProto(fn, prepForOnnx, applyExecutionLowerings, stripCheckpointStamp, flattenFunctionBodies, forSession, workarounds, shapesAreConcrete))
                 .ToArray();
 
-            var model = (ModelProto)OnnxIRFactory.CreateModel(graphProto, functionProtos, opset);
+            var model = (ModelProto)OnnxIRFactory.CreateModel(graphProto, functionProtos);
 
             // ----- 4b. Drop the FunctionProtos nothing in the emitted model reaches. The list
             // above comes from walking each function's un-flattened body, so a callee whose only
@@ -1272,8 +1258,7 @@ namespace Shorokoo.Core.Factory
                 if (asArithmetic)
                 {
                     if (scaleMeta?.ProtoElemType != (int)TensorProto.DataType.Float
-                        || node.Attributes.Any(a => a.Name == OnnxOpAttributeNames.AttrBlockSize && a.I != 0
-                            || a.Name == OnnxOpAttributeNames.AttrOutputDtype && a.I != (int)TensorProto.DataType.Float))
+                        || node.Attributes.Any(a => a.Name == OnnxOpAttributeNames.AttrBlockSize && a.I != 0))
                         continue;
                     var lowered = new List<NodeProto>(14);
                     if (scaleDims is [1])
@@ -1498,12 +1483,24 @@ namespace Shorokoo.Core.Factory
         /// so absent here — is why exporting an inference model still yields a <c>Softsign</c>.
         ///
         /// <para><c>TensorScatter</c> is the one entry: ONNX introduced it at opset 24 and
-        /// opset 21 has no node for it, so a graph carrying one is written out as the concat and
-        /// gather its lowering decomposes it into. The pass tests the list before it walks
-        /// anything, so a graph with no such node pays nothing beyond one scan.</para>
+        /// opset 21 has no node for it, so a graph carrying one is written out — as an exported
+        /// file, a session's model or a <c>.srk</c> payload — as the concat and gather its lowering
+        /// decomposes it into. A graph with no such node pays for two scans of its node list —
+        /// the pass's own test for a listed node, and the check that none survived — and
+        /// allocates nothing.</para>
         /// </summary>
         private static readonly ImmutableHashSet<string> DefaultExportLoweredOpCodes =
             ImmutableHashSet.Create(StringComparer.Ordinal, OpCodes.TENSOR_SCATTER);
+
+        /// <summary>
+        /// The part of <see cref="DefaultExportLoweredOpCodes"/> the persistence dialect lowers:
+        /// the operators opset 21 has no node for.
+        /// </summary>
+        private static readonly ImmutableHashSet<string> DefaultPersistenceLoweredOpCodes =
+            PersistenceSubset(DefaultExportLoweredOpCodes);
+
+        private static ImmutableHashSet<string> PersistenceSubset(IEnumerable<string> opCodes)
+            => opCodes.Where(OnnxOpset.OperatorsIntroducedLater.ContainsKey).ToImmutableHashSet(StringComparer.Ordinal);
 
         /// <summary>Thread-scoped substitute installed by <see cref="OverrideExportLoweredOpCodes"/>.</summary>
         [ThreadStatic]
@@ -1539,23 +1536,26 @@ namespace Shorokoo.Core.Factory
 
         /// <summary>
         /// Decomposes every operator on <see cref="ExportLoweredOpCodes"/>, and refuses the export
-        /// when one survives the pass.
+        /// when one survives the pass. The persistence dialect (<paramref name="keepAuthoredOps"/>)
+        /// decomposes only the listed operators opset 21 has no node for, so a saved architecture
+        /// keeps every other operator as authored and the export that later runs over the reloaded
+        /// graph decomposes it then.
         ///
         /// <para>Unlike the engines, this caller has no graceful degradation to fall back on. An
         /// operator on this list is one the single opset Shorokoo writes has no node for, so a node
-        /// left in place is emitted as itself and <see cref="FastOpsetResolver.RaiseToRequired"/> —
-        /// which runs after the pre-passes — raises the file's stamp to that operator's own opset.
-        /// What ships is then a model ONNX Runtime's CPU provider will not load, with nothing said
-        /// about why. The pass reports a decomposition it merely cannot use by leaving the node
-        /// alone and one that is wrong by throwing; here the two mean the same thing — there is
-        /// nothing to emit — so both stop the export.</para>
+        /// left in place has nothing to be emitted as. The pass reports a decomposition it merely
+        /// cannot use by leaving the node alone and one that is wrong by throwing; here the two mean
+        /// the same thing — there is nothing to emit — so both stop the build.</para>
         /// </summary>
-        private static void LowerForExport(InternalComputationGraph graph)
+        private static void LowerForExport(InternalComputationGraph graph, bool keepAuthoredOps)
         {
-            FastLowerRegisteredOps.Process(graph, ExportLoweredOpCodes);
+            IReadOnlySet<string> opCodes = !keepAuthoredOps ? ExportLoweredOpCodes
+                : exportLoweredOpCodesOverride is { } overridden ? PersistenceSubset(overridden)
+                : DefaultPersistenceLoweredOpCodes;
+            FastLowerRegisteredOps.Process(graph, opCodes);
 
             foreach (var node in graph.Nodes)
-                if (ExportLoweredOpCodes.Contains(node.OpCode))
+                if (opCodes.Contains(node.OpCode))
                     throw new InvalidOperationException(
                         $"FastOnnxModelBuilder: '{node.OpCode}' has no node at the opset Shorokoo emits, "
                         + "and its registered lowering could not be built for this node, so there is "
@@ -1595,11 +1595,12 @@ namespace Shorokoo.Core.Factory
             //     reproducible;
             //   - before FastUseUniqueNames and the tensor-info lookup below, so the spliced
             //     nodes are named and typed with the rest of the graph.
-            // Off for the persistence dialect — the one caller that turns the execution lowerings
-            // off — because a saved architecture must load back as the operator it was authored
-            // with rather than as its decomposition; the export that later runs over the reloaded
-            // graph decomposes it then.
-            if (applyExecutionLowerings) LowerForExport(graph);
+            // Every dialect runs it, the persistence one included: a .srk payload is an opset-21
+            // model like any other, so a saved graph carries the decomposition of each operator
+            // opset 21 has no node for, which computes what the operator does — and what the
+            // engines and the autodiff pass, which lower it the same way, would compute in its
+            // place. Every other listed operator is kept as authored there.
+            LowerForExport(graph, keepAuthoredOps: !applyExecutionLowerings);
             // The backend's kernel workarounds, for a session's model only (see BuildOnnxModelCore):
             // after the export lowerings, so a decomposition's calls are rewritten too, and before
             // the outer-scope identities, the ONNX prep and the call-stack strip, for the reasons
@@ -1671,7 +1672,7 @@ namespace Shorokoo.Core.Factory
         // ----------- function emission -----------
 
         private static FunctionProto BuildFunctionProto(
-            Function function, OpSetVersion opset, bool prepForOnnx, bool applyExecutionLowerings,
+            Function function, bool prepForOnnx, bool applyExecutionLowerings,
             bool stripCheckpointStamp = true, bool flattenBody = true, bool forSession = false,
             KernelWorkaroundSet? workarounds = null, bool shapesAreConcrete = false)
         {
@@ -1705,7 +1706,6 @@ namespace Shorokoo.Core.Factory
             var fnGraphProto = BuildGraphProto(
                 graphName: function.DefaultName,
                 fastGraph: fnFast,
-                opset: opset,
                 isFunction: true,
                 tensorInfoLookup: fnTensorInfoLookup,
                 stripCheckpointStamp: stripCheckpointStamp,
@@ -1720,7 +1720,7 @@ namespace Shorokoo.Core.Factory
             fnProto.Name = OnnxFunctionName.Encode(function.DefaultName);
             fnProto.Domain = "Functions";
 
-            var defaultOpset = new OperatorSetIdProto { Domain = "", Version = (int)opset };
+            var defaultOpset = new OperatorSetIdProto { Domain = "", Version = (int)OnnxOpset.Version };
             fnProto.OpsetImports.Add(defaultOpset);
             var fnOpset = new OperatorSetIdProto { Domain = "Functions", Version = 1 };
             fnProto.OpsetImports.Add(fnOpset);
@@ -1783,7 +1783,6 @@ namespace Shorokoo.Core.Factory
         private static GraphProto BuildGraphProto(
             string graphName,
             InternalComputationGraph fastGraph,
-            OpSetVersion opset,
             bool isFunction,
             Dictionary<FastTensorKey, FastTensorInfo>? tensorInfoLookup = null,
             bool emitInputsAsNodes = false,
@@ -1879,7 +1878,7 @@ namespace Shorokoo.Core.Factory
                     };
                 }
 
-                var info = FastOpsetResolver.Resolve(node, graphOpenNode, opset, stripCheckpointStamp);
+                var info = FastOpsetResolver.Resolve(node, graphOpenNode, stripCheckpointStamp);
                 if (info is null) continue; // open node — already handled by IsBoundaryOrOpen, but defensive
                 var nodeProto = FastOnnxProtoFactory.CreateNodeProto(node, info.Value, graphAttrs);
                 protoByIndex[i] = nodeProto;
@@ -1897,7 +1896,7 @@ namespace Shorokoo.Core.Factory
             // so they are valid at the front), and emit no graph-input ValueInfoProtos — the reader
             // reconstructs the input list from these nodes in this order.
             if (inputsAsNodes)
-                topLevelNodes.AddRange(BuildBoundaryNodeProtos(fastGraph.InputNodes, opset, stripCheckpointStamp));
+                topLevelNodes.AddRange(BuildBoundaryNodeProtos(fastGraph.InputNodes, stripCheckpointStamp));
             foreach (var (idx, proto) in protoByIndex.OrderBy(kv => kv.Key))
             {
                 if (swallowed.Contains(idx)) continue;
@@ -1905,7 +1904,7 @@ namespace Shorokoo.Core.Factory
             }
             // .srk dialect: the output nodes close the node list the same way, in output order.
             if (inputsAsNodes)
-                topLevelNodes.AddRange(BuildBoundaryNodeProtos(fastGraph.OutputNodes, opset, stripCheckpointStamp));
+                topLevelNodes.AddRange(BuildBoundaryNodeProtos(fastGraph.OutputNodes, stripCheckpointStamp));
 
             var initializers = isFunction
                 ? Array.Empty<TensorProto>()
@@ -1931,12 +1930,12 @@ namespace Shorokoo.Core.Factory
         /// attributes verbatim. The reader collects these nodes, in this order, as the graph's inputs
         /// and outputs.
         /// </summary>
-        private static NodeProto[] BuildBoundaryNodeProtos(IReadOnlyList<FastNode> boundaryNodes, OpSetVersion opset, bool stripCheckpointStamp)
+        private static NodeProto[] BuildBoundaryNodeProtos(IReadOnlyList<FastNode> boundaryNodes, bool stripCheckpointStamp)
         {
             var protos = new List<NodeProto>();
             foreach (var node in boundaryNodes)
             {
-                var info = FastOpsetResolver.Resolve(node, graphOpenNode: null, opset, stripCheckpointStamp)
+                var info = FastOpsetResolver.Resolve(node, graphOpenNode: null, stripCheckpointStamp)
                     ?? throw new InvalidOperationException(
                         $"FastOnnxModelBuilder: boundary op {node.OpCode} did not resolve to an emittable node.");
                 protos.Add(FastOnnxProtoFactory.CreateNodeProto(node, info, graphAttributes: null));

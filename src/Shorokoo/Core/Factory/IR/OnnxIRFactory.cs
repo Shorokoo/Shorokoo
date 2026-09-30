@@ -133,7 +133,7 @@ namespace Shorokoo.Core.Factory.IR
             return shape;
         }
 
-        public static ModelProto CreateModel(GraphProto graph, FunctionProto[] functions, OpSetVersion opSetVersion)
+        public static ModelProto CreateModel(GraphProto graph, FunctionProto[] functions)
         {
             var model = new ModelProto();
             model.IrVersion = (int)IR.Version.IrVersion;
@@ -142,7 +142,7 @@ namespace Shorokoo.Core.Factory.IR
             model.Functions.AddAll(functions);
 
             var opset = new OperatorSetIdProto();
-            opset.Version = (int)opSetVersion;
+            opset.Version = (int)OnnxOpset.Version;
             opset.Domain = "";
             model.OpsetImports.Add(opset);
 
@@ -170,7 +170,7 @@ namespace Shorokoo.Core.Factory.IR
             return graph;
         }
 
-        public static NodeProto CreateNode(string name, string opCode, string domain, OpSetVersion version, string[] inputTensors, string[] outputTensors, OnnxProtoAttributes attributes, Dictionary<string, GraphProto> graphAttributes, string? identifierTemplate, string? stackTrace, string? nodeKeyGuid = null, bool isEtherealIdentity = false)
+        public static NodeProto CreateNode(string name, string opCode, string domain, string[] inputTensors, string[] outputTensors, OnnxProtoAttributes attributes, Dictionary<string, GraphProto> graphAttributes, string? identifierTemplate, string? stackTrace, string? nodeKeyGuid = null, bool isEtherealIdentity = false)
         {
             var node = new NodeProto();
             node.Name = name;

@@ -23,11 +23,7 @@ internal sealed class DequantizeLinearOp : QuickOp
         var x = inputs.Length > 0 ? inputs[0] : null;
         var scale = inputs.Length > 1 ? inputs[1] : null;
         var zeroPoint = inputs.Length > 2 ? inputs[2] : null;
-        // opset-23 output_dtype (TensorProto dtype number) overrides the
-        // x_scale-derived output type when set.
-        var outputDtypeNum = attrs.GetLongVal(OnnxOpAttributeNames.AttrOutputDtype);
-        var dtype = outputDtypeNum is { } n ? (DType)(int)n
-            : scale?.DType ?? DType.Float32;
+        var dtype = scale?.DType ?? DType.Float32;
         var rt = RuntimeTensorFactory.Create(dtype, x?.Shape);
 
         if (x?.Shape is null || x.IntData is not { } xd

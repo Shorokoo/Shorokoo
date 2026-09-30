@@ -311,8 +311,8 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Input("input", "T1", 2)
                 .Output("output", "T2", 2)
 
-                // dtype unset: the spec default is int32 (the "T2" used here previously was
-                // an unresolvable IndexLike token — nothing bound it without the attribute).
+                // dtype unset: the spec default is int32 (nothing binds an IndexLike token
+                // without the attribute).
                 .ConstraintIsSet(AttrDtype, false)
                 .Input("input", "T1", 2)
                 .Output("output", "T3", 2),
@@ -330,7 +330,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Output("loss", "T", "R2")
 
                 // reduction explicitly "mean"/"sum" must resolve to the scalar-loss
-                // variant (it used to fall through to the "none" variant's R2 rank).
+                // variant, not the "none" variant's R2 rank.
                 .Constraint(AttrReduction, "mean")
                 .Input("input", "T", "R")
                 .Input("target", "Tind", "R2")
@@ -356,7 +356,6 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .AttributeLong(AttrBlockSize)
                 .AttributeDType(AttrOutputDtype, "T2") // spec wire name is "output_dtype"
                 .AttributeBool(AttrSaturate)
-                .AttributeLong(AttrPrecision)
                 .Input("x", "T1", "R")
                 .Input("y_scale", "T1", "R2")
                 .Input("y_zero_point", "T2?", "R2")

@@ -505,8 +505,8 @@ namespace Shorokoo
                 maxGramLength, maxSkipCount, minGramLength, mode,
                 ngramCounts, ngramIndexes, poolInt64s, poolStrings, weights);
 
-        // -- Post-opset-21 operators (the exporter raises the model opset stamp
-        //    per-graph; see FastOpsetResolver.RaiseToRequired) -------------------
+        // -- Post-opset-21 operators (each lowers to opset-21 primitives or throws at
+        //    its OnnxOp entry point: Shorokoo writes opset 21 only) ----------------
 
         /// <summary>Scaled dot-product attention returning Y only (ONNX Attention, opset 23+).</summary>
         public static Tensor<T> Attention<T>(Tensor<T> q, Tensor<T> k, Tensor<T> v,

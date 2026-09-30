@@ -2485,7 +2485,7 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
     {
         var (model, _, _) = BuildSkptModel();
         var ex = Assert.Throws<ModelException>(
-            () => Persistence.ExportOnnx(model, P("over-ceiling.onnx"), OpSetVersion.OPS_21, null, 8));
+            () => Persistence.ExportOnnx(model, P("over-ceiling.onnx"), null, 8));
         Assert.Equal(ErrorCodes.XD007, ex.ErrorCode);
         Assert.Contains("SaveWithExternalData", ex.Message);
         Assert.False(File.Exists(P("over-ceiling.onnx")));
@@ -2520,15 +2520,15 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
         var viaExporter = Path.Combine(exporterDir, "same.onnx");
         Persistence.ExportOnnx(model, viaFacade, externalData: new OnnxExternalDataOptions { SizeThreshold = 0 });
         OnnxModelExporter.SaveWithExternalData(
-            FastOnnxModelBuilder.BuildOnnxModel(model, OpSetVersion.OPS_21),
+            FastOnnxModelBuilder.BuildOnnxModel(model),
             viaExporter, new OnnxExternalDataOptions { SizeThreshold = 0 });
         Assert.Equal(File.ReadAllBytes(viaExporter), File.ReadAllBytes(viaFacade));
         Assert.Equal(File.ReadAllBytes(viaExporter + ".data"), File.ReadAllBytes(viaFacade + ".data"));
 
         // The ceiling refusal applies to the self-contained form only.
         Assert.Throws<ModelException>(
-            () => Persistence.ExportOnnx(model, P("ceiling.onnx"), OpSetVersion.OPS_21, null, 8));
-        Persistence.ExportOnnx(model, P("no-ceiling.onnx"), OpSetVersion.OPS_21,
+            () => Persistence.ExportOnnx(model, P("ceiling.onnx"), null, 8));
+        Persistence.ExportOnnx(model, P("no-ceiling.onnx"),
             new OnnxExternalDataOptions { SizeThreshold = 0 }, 8);
         Assert.True(File.Exists(P("no-ceiling.onnx.data")));
     }

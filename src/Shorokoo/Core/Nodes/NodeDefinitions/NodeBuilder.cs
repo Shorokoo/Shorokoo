@@ -734,7 +734,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                     Debug.Assert(rank <= int.MaxValue,
                         $"Rank value {rank} exceeds int.MaxValue limit for tensor rank processing");
 
-                    // -1 is the legacy "unknown rank" sentinel emitted by Function.Call
+                    // -1 is the "unknown rank" sentinel emitted by Function.Call
                     // (Function.cs L160 packs int? into long[] via `x ?? -1`). Decode it
                     // back to null here so downstream consumers see the int? null they
                     // expect for unknown-rank tensors.
@@ -749,7 +749,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                     Debug.Assert(longRanks.All(x => x <= int.MaxValue),
                         $"One or more rank values exceed int.MaxValue limit for tensor rank processing: [{string.Join(",", longRanks)}]");
 
-                    // -1 elements are the legacy "unknown rank" sentinel emitted by
+                    // -1 elements are the "unknown rank" sentinel emitted by
                     // Function.Call (Function.cs L160 packs int? into long[] via `x ?? -1`).
                     return longRanks.Select(x => x == -1 ? null : (int?)x).ToArray();
                 }
@@ -1166,6 +1166,9 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
         public static Node BuildNode(string opCode, Variable?[] inputs, (string attributeName, object? attributeValue)[] attrs, string? identifierTemplateString = null, string?[]? outputNames = null, Function? targetFunction = null, Node? openNode = null)
         {
             var nodeDefResolver = Definitions.NodeDefinitions[opCode];
+            foreach (var (attributeName, _) in attrs)
+                if (!nodeDefResolver.AttributeDefs.Any(d => d.AttributeName == attributeName))
+                    Shorokoo.Core.Factory.OnnxOpset.ThrowIfAttributeOutsideVersion(opCode, attributeName);
             var csharpAttributeVals = attrs.ToDictionary(x => x.attributeName, x => x.attributeValue);
 
             var fullInputs = new Dictionary<string, Variable?[]>();

@@ -107,6 +107,24 @@ namespace Shorokoo.Tests.Modules
 
     }
 
+    /// <summary>TensorScatter VALUES over a cache scaled by a trained parameter (all ones), so the
+    /// graph has weights to checkpoint. Inputs as <see cref="QeeTensorScatterValueAuditCheck"/>.</summary>
+    [Module]
+    public partial class QeeTensorScatterParamAuditCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float32> cache, Tensor<float32> wide)
+        {
+            var one = Vector(100f, 101f, 200f, 201f).Reshape(Vector(2L, 1L, 2L));
+            var pair = Vector(10f, 11f, 20f, 21f).Reshape(Vector(2L, 2L));
+            var mismatch =
+                Mismatch(Scatter(cache * InitSimple.Init(cache.ShapeTensor()), one, Vector(0L, 2L)),
+                    Vector(100f, 101f, 3f, 4f, 5f, 6f, 7f, 8f, 9f, 10f, 200f, 201f)) +
+                Mismatch(Scatter(wide, pair, Vector(1L, 2L), axis: -1L),
+                    Vector(1f, 10f, 11f, 4f, 5f, 6f, 20f, 21f));
+            return mismatch < Scalar(1L);
+        }
+    }
+
     /// <summary>TensorScatter VALUES against the two worked examples on the ONNX
     /// TensorScatter page (`test_tensorscatter` and `test_tensorscatter_circular`):
     /// past = [2,1,4,5], default axis −2, write_indices [1,2] linear and [1,3] circular. Rank 4

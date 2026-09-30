@@ -609,9 +609,8 @@ public static partial class OnnxOp
 
     /// <summary>Root-mean-square layer normalization over the suffix axes from <paramref name="axis"/> (ONNX RMSNormalization, opset 23+).
     /// Lowered inline to opset-21 primitives — <c>y = x / sqrt(mean(x², suffix axes) + epsilon) * scale</c>
-    /// (ReduceMean/Sqrt/Div/Mul) — so the emitted ONNX stays at opset 21. The fused RMS_NORMALIZATION
-    /// op definition and QEE kernel are retained; restore the fused emission here once a runtime
-    /// registers it at a usable opset. (x and scale are assumed to share a dtype, the spec's common
+    /// (ReduceMean/Sqrt/Div/Mul) — since opset 21, the one opset Shorokoo writes, has no
+    /// <c>RMSNormalization</c> node. (x and scale are assumed to share a dtype, the spec's common
     /// case.)</summary>
     public static Variable RMSNormalization(Variable x, Variable scale,
         long? axis = null, float? epsilon = null, long? stashType = null)
@@ -640,24 +639,19 @@ public static partial class OnnxOp
     }
 
     /// <summary>Rotary positional embedding (ONNX RotaryEmbedding, opset 23+); Y has X's shape.
-    /// Not emittable today: Shorokoo exports a single opset-21 ONNX model, and a faithful lowering of
-    /// the fused op (position-id gather, interleaved vs half-split layouts, partial rotary dim) is
-    /// intricate enough to belong in core (deferred core work) — so this
-    /// throws rather than force a higher model opset. The ROTARY_EMBEDDING op definition and QEE kernel
-    /// are retained; restore the fused emission here once a runtime supports it.</summary>
+    /// Opset 21, the one opset Shorokoo writes, has no <c>RotaryEmbedding</c> node, and Shorokoo has
+    /// no lowering of it to opset-21 primitives (position-id gather, interleaved vs half-split
+    /// layouts, partial rotary dim), so this entry point throws.</summary>
     public static Variable RotaryEmbedding(Variable x, Variable cosCache, Variable sinCache,
         Variable? positionIds = null, bool? interleaved = null, long? numHeads = null,
         long? rotaryEmbeddingDim = null)
         => throw new System.NotImplementedException(
             "RotaryEmbedding (ONNX opset 23) has no opset-21 equivalent, and Shorokoo emits a single " +
-            "opset-21 model. A faithful lowering (position-id gather, interleaved/half-split layouts, " +
-            "partial rotary dim) is deferred to the core project. The op " +
-            "definition is retained; re-enable the fused emission here when a runtime supports it.");
+            "opset-21 model. Build the rotation from primitives instead.");
 
     /// <summary>Swish activation y = x * sigmoid(alpha * x) (ONNX Swish, opset 24+).
-    /// Lowered inline to opset-21 primitives (Mul/Sigmoid) so the emitted ONNX stays at opset 21 —
-    /// ONNX Runtime runs a Swish node only in a model stamped at opset 24. The fused SWISH op
-    /// definition is retained for imported graphs.</summary>
+    /// Lowered inline to opset-21 primitives (Mul/Sigmoid): opset 21, the one opset Shorokoo reads
+    /// and writes, has no Swish node.</summary>
     public static Variable Swish(Variable x, float? alpha = null)
     {
         var a = alpha ?? 1.0f;
@@ -666,8 +660,9 @@ public static partial class OnnxOp
     }
 
     /// <summary>Writes <paramref name="update"/> into <paramref name="pastCache"/> along the sequence axis at the per-batch write indices (ONNX TensorScatter, opset 24+).
-    /// The node is built and kept as itself; only the exported file decomposes it,
-    /// since opset 21 — the single opset Shorokoo writes — has no node for it. See the registered
+    /// The node is built and kept as itself; every ONNX model written from the graph — an exported
+    /// file, a session's model, a <c>.srk</c> payload — decomposes it, since opset 21, the single
+    /// opset Shorokoo writes, has no node for it. See the registered
     /// TensorScatter lowering for the decomposition and what of the spec it covers.
     /// <paramref name="axis"/> names the sequence dimension and so cannot be 0, the batch one.</summary>
     public static Variable TensorScatter(Variable pastCache, Variable update,

@@ -209,7 +209,6 @@ namespace Shorokoo.Core.Factory
                 name: NodeName(node),
                 opCode: info.OpCode,
                 domain: info.Domain,
-                version: info.Version,
                 inputTensors: inputNames,
                 outputTensors: outputNames,
                 attributes: info.Attributes,

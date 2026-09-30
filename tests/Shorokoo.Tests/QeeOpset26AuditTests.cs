@@ -10,6 +10,7 @@ using Shorokoo.Core.Graph;
 using Shorokoo.Core.Nodes.NodeDefinitions;
 using Shorokoo.Onnx;
 using Shorokoo.Runtime;
+using Ort = Microsoft.ML.OnnxRuntime;
 using static Shorokoo.Tests.Utils.QeeAudit;
 
 namespace Shorokoo.Tests;
@@ -21,11 +22,10 @@ namespace Shorokoo.Tests;
 /// normally (the Swish audit is QEE-only only to match the audit-module style — its lowered
 /// graph carries no Swish node and loads anywhere). TensorScatter (@24) is decomposed by
 /// its registered lowering instead, which is a different arrangement: the node is built
-/// and kept as itself, and only the exported file carries the decomposition.
+/// and kept as itself, and every model written from the graph carries the decomposition.
 /// The ops with no opset-21 equivalent — Attention / AttentionWithKVCache /
 /// RotaryEmbedding (opset 23), BitCast / CumProd (opset 26) — cannot be emitted into an
-/// opset-21 model, so their entry points throw at authoring time; their op definitions and
-/// QEE kernels are retained for when a runtime supports them.
+/// opset-21 model, so their entry points throw at authoring time.
 /// </summary>
 [Trait("Domain", "Inference")]
 [Trait("Purpose", "Coverage")]
@@ -70,11 +70,8 @@ public class QeeOpset26AuditTests
                 1f, 2f, 3f, 4f, 5f, 5f, 6f, 7f, 8f, 9f, 8f, 7f, 6f, 5f, 4f, 4f, 3f, 2f, 1f, 0f)));
     }
 
-    // TensorScatter is on the export list and no other: the graph the caller built keeps its
-    // node, and only the written file — which must stay at opset 21, the one opset Shorokoo
-    // emits — carries the decomposition.
     [Fact]
-    public void TestTensorScatterIsDecomposedOnlyOnTheWayOut()
+    public void TestTensorScatterIsDecomposedInEveryWrittenModelAndKeptInTheGraph()
     {
         var dir = Directory.CreateDirectory(
             Path.Combine(Path.GetTempPath(), $"ShorokooTensorScatter_{System.Guid.NewGuid():N}")).FullName;
@@ -91,7 +88,7 @@ public class QeeOpset26AuditTests
             Assert.Contains(concrete.Nodes, n => n.OpCode == OpCodes.TENSOR_SCATTER);
             Assert.DoesNotContain(exported.Graph.Nodes, n => n.OpType == OpCodes.TENSOR_SCATTER);
             Assert.Contains(exported.Graph.Nodes, n => n.OpType == OpCodes.GATHER_ELEMENTS);
-            Assert.Contains(
+            Assert.DoesNotContain(
                 FastOnnxModelBuilder.BuildInternalOnnxModel(concrete, applyExecutionLowerings: false).Graph.Nodes,
                 n => n.OpType == OpCodes.TENSOR_SCATTER);
 
@@ -107,10 +104,6 @@ public class QeeOpset26AuditTests
         }
     }
 
-    // An operator on the export list is one opset 21 has no node for, so a node that reaches the
-    // exporter past OnnxOp's authoring guard — through the raw NodeBuilder surface, or from an
-    // imported model — has to stop the export. Giving up on it silently stamps the file at 24 and
-    // ships a model ONNX Runtime's CPU provider cannot load.
     [Fact]
     public void TestAnExportListedOperatorThatCannotBeDecomposedFailsTheExport()
     {
@@ -124,34 +117,79 @@ public class QeeOpset26AuditTests
         Assert.Contains(OpCodes.TENSOR_SCATTER, Assert.Throws<InvalidOperationException>(
             () => FastOnnxModelBuilder.BuildInternalOnnxModel(
                 graph, prepForOnnx: true, inputDims: [[2L, 3L, 2L], [2L, 1L, 2L]])).Message);
-        Assert.Contains(
-            FastOnnxModelBuilder.BuildInternalOnnxModel(graph, applyExecutionLowerings: false).Graph.Nodes,
-            n => n.OpType == OpCodes.TENSOR_SCATTER);
+        Assert.Contains(OpCodes.TENSOR_SCATTER, Assert.Throws<InvalidOperationException>(
+            () => FastOnnxModelBuilder.BuildInternalOnnxModel(graph, applyExecutionLowerings: false)).Message);
     }
 
     // TensorScatter is the one lowered operator with a reference implementation to hand: ONNX
-    // Runtime's CPU provider registers a native kernel for it at opset 24. The export list is
-    // thread-scoped, so the same graph can be written out fused — one opset-24 TensorScatter node
-    // ORT runs itself — or decomposed, and the two runs compared byte for byte. These are data
-    // movements, so no tolerance is involved.
+    // Runtime's CPU provider registers a native kernel for it at opset 24. The reference runs one
+    // hand-built opset-24 TensorScatter node straight on ONNX Runtime, the decomposition runs
+    // through Shorokoo, and the two are compared byte for byte. These are data movements, so no
+    // tolerance is involved.
     private static (long[] Dims, byte[] Bytes) Scatter(bool fused, DType type,
         long[] past, long[] update, long[]? writeIndices, long? axis, TensorScatterMode? mode)
     {
+        TensorData[] feed = writeIndices is null
+            ? [Ramp(type, past, 1), Ramp(type, update, 100)]
+            : [Ramp(type, past, 1), Ramp(type, update, 100),
+               TensorData([(long)writeIndices.Length], writeIndices)];
+        if (fused) return OnOrt(FusedScatter(type, feed.Length, axis, mode), feed);
+
         var cache = Globals.InputTensor(type, "past", rank: past.Length);
         var window = Globals.InputTensor(type, "update", rank: update.Length);
         var starts = writeIndices is null ? null : Globals.InputTensor(DType.Int64, "starts", rank: 1);
         ImmutableArray<Variable> inputs = starts is null ? [cache, window] : [cache, window, starts];
         var graph = new InternalComputationGraph(
             inputs, [OnnxOp.TensorScatter(cache, window, starts, axis, mode)]);
-        IData[] feed = starts is null
-            ? [Ramp(type, past, 1), Ramp(type, update, 100)]
-            : [Ramp(type, past, 1), Ramp(type, update, 100),
-               TensorData([(long)writeIndices!.Length], writeIndices)];
-
-        using IDisposable? fuse = fused
-            ? FastOnnxModelBuilder.OverrideExportLoweredOpCodes(OpCodes.ABS) : null;
-        var present = ComputeContext.Default.Execute(graph, feed)[0].ToTensorData();
+        var present = ComputeContext.Default.Execute(graph, [.. feed])[0].ToTensorData();
         return (present.Shape.Dims, present.AccessRawMemory().ToArray());
+    }
+
+    private static readonly string[] ScatterInputs = ["past", "update", "starts"];
+
+    private static byte[] FusedScatter(DType type, int inputCount, long? axis, TensorScatterMode? mode)
+    {
+        TypeProto Typed(DType t) => new() { TensorType = new TypeProto.Tensor { ElemType = t.ProtoTypeNum } };
+        var g = new GraphProto { Name = "scatter" };
+        for (int i = 0; i < inputCount; i++)
+            g.Inputs.Add(new ValueInfoProto { Name = ScatterInputs[i], Type = Typed(i < 2 ? type : DType.Int64) });
+        var node = new NodeProto { OpType = OpCodes.TENSOR_SCATTER, Name = "scatter" };
+        node.Inputs.AddRange(ScatterInputs.Take(inputCount));
+        node.Outputs.Add("present");
+        if (axis is { } a)
+            node.Attributes.Add(new AttributeProto { Name = OnnxOpAttributeNames.AttrAxis, Type = AttributeProto.AttributeType.Int, I = a });
+        if (mode is { } m)
+            node.Attributes.Add(new AttributeProto { Name = OnnxOpAttributeNames.AttrMode, Type = AttributeProto.AttributeType.String,
+                S = System.Text.Encoding.UTF8.GetBytes(m == TensorScatterMode.Circular ? "circular" : "linear") });
+        g.Nodes.Add(node);
+        g.Outputs.Add(new ValueInfoProto { Name = "present", Type = Typed(type) });
+        var model = new ModelProto { IrVersion = 10, Graph = g };
+        model.OpsetImports.Add(new OperatorSetIdProto { Domain = "", Version = 24 });
+        using var ms = new MemoryStream();
+        ProtoBuf.Serializer.Serialize(ms, model);
+        return ms.ToArray();
+    }
+
+    private static (long[] Dims, byte[] Bytes) OnOrt(byte[] model, TensorData[] feed)
+    {
+        using var session = new Ort.InferenceSession(model);
+        using var runOptions = new Ort.RunOptions();
+        var values = feed.Select(t =>
+        {
+            var value = Ort.OrtValue.CreateAllocatedTensorValue(
+                Ort.OrtAllocator.DefaultInstance, (Ort.Tensors.TensorElementType)t.DType.ProtoTypeNum, t.Shape.Dims);
+            t.AccessRawMemory().CopyTo(value.GetTensorMutableRawData());
+            return value;
+        }).ToArray();
+        try
+        {
+            using var outputs = session.Run(runOptions, ScatterInputs.Take(feed.Length).ToArray(), values, ["present"]);
+            return (outputs[0].GetTensorTypeAndShape().Shape, outputs[0].GetTensorMutableRawData().ToArray());
+        }
+        finally
+        {
+            foreach (var value in values) value.Dispose();
+        }
     }
 
     private static bool Matches(DType type, long[] past, long[] update,

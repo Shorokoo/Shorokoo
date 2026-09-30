@@ -1,18 +1,14 @@
 # Operator support matrix
 
-Shorokoo supports the standard `ai.onnx` domain from **opset 21** up to **opset 26**, the
-maximum the bundled ONNX Runtime 1.30 loads; import does not convert older models.
-Exported models are stamped at the
-**opset-21 baseline**; only a few post-21 attributes on imported (or
-`NodeBuilder`-built) nodes raise the stamp, and no post-21 operator reaches an
-exported ONNX file. See [limitations.md](limitations.md) for the details and the reason.
+Shorokoo reads and writes the standard `ai.onnx` domain at **opset 21** only: import
+refuses a model at any other opset, and every model Shorokoo writes is stamped 21. See
+[limitations.md](limitations.md#onnx-opset-21-only) for the details.
 
 Every operator Shorokoo defines is listed below: the opset-21 set plus the
 post-21 additions (`Attention`, `RMSNormalization`, `RotaryEmbedding` at opset 23;
-`Swish`, `TensorScatter` at 24; `BitCast`, `CumProd` at 26), grouped by family.
-Each introducing opset is also the operator's export floor (see
-[limitations.md](limitations.md)), except `Attention`, floored at 24 because Shorokoo
-defines it with the opset-24 inputs (`nonpad_kv_seqlen`).
+`Swish`, `TensorScatter` at 24; `BitCast`, `CumProd` at 26), grouped by family. A
+post-21 addition is never written as itself: each is lowered to opset-21 operators or
+its entry point throws, and import refuses a model that carries one.
 
 - **Build & run**: the operator can be constructed and executes on the ONNX
   Runtime backend. Footnotes flag spec-legal corners restricted in-framework or by
@@ -130,8 +126,7 @@ order they apply.
     the exponent is a constant).
 14. Float tensors only; the spec also allows signed integers since opset 14.
 15. Lowers inline to `Mul`/`Sigmoid` (`y = x * sigmoid(alpha * x)`), so it runs on
-    any execution provider; ONNX Runtime runs a `Swish` node only in a model stamped at
-    opset 24.
+    any execution provider.
 
 ## Comparisons & logic
 
@@ -299,9 +294,9 @@ shape and type.
 12. Reductions `none`/`add` only; `mul`/`min`/`max` throw.
 13. Exact when a `steps` input is wired (any stride, including negative); without
     `steps`, negative starts/ends are clamped approximately.
-14. Exported as `update` concatenated onto `past_cache` along the sequence axis
-    plus one `GatherElements`, so the model stamps at opset 21; a saved
-    architecture keeps the operator. The decomposition is checked element for
+14. Written as `update` concatenated onto `past_cache` along the sequence axis
+    plus one `GatherElements`, in an exported model and a saved `.srk` alike, so
+    both stay at opset 21. The decomposition is checked element for
     element against ONNX Runtime's opset-24 kernel in both modes, with and
     without `write_indices`, at ranks 2 to 4, including empty inputs and every
     element type (bool and bfloat16 included). The spec's preconditions are **not checked**, and violating them
@@ -504,8 +499,8 @@ shape and type.
    training.
 4. `NN.QuantizeLinear` and `OnnxOp.QuantizeLinear` do not expose the opset-23
    `precision` attribute (it selects float8/float4 targets, which Shorokoo does
-   not support). An imported model carrying it round-trips and re-exports at
-   opset 23.
+   not support). Opset 21 does not define it, so import refuses a model carrying
+   it.
 
 ## Recurrent (RNN family)
 

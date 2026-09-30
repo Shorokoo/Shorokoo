@@ -17,7 +17,7 @@ namespace Shorokoo
     /// <summary>
     /// The ONNX exchange boundary, mirroring the safetensors boundary in
     /// <c>Persistence.SafeTensors.cs</c>:
-    /// <see cref="ExportOnnx(ComputationGraph, string, OpSetVersion, OnnxExternalDataOptions)"/>
+    /// <see cref="ExportOnnx(ComputationGraph, string, OnnxExternalDataOptions)"/>
     /// writes a concrete model
     /// to a standard, externally-loadable ("vanilla" dialect) <c>.onnx</c>, and
     /// <see cref="ImportOnnx(string, ModuleParamSetNamingScheme?)"/> turns a foreign vanilla <c>.onnx</c> back into a native
@@ -43,6 +43,11 @@ namespace Shorokoo
         /// carrying Shorokoo-internal orchestration ops is refused (naming the offending ops)
         /// rather than written as a file only a Shorokoo runtime could load.
         ///
+        /// <para>The file is stamped at ONNX opset 21, the one opset Shorokoo writes. A node that
+        /// opset does not define — an operator or optional attribute ONNX introduced later, reachable
+        /// only through the raw <c>NodeBuilder</c> surface — is refused with
+        /// <see cref="ErrorCodes.FW060"/>, naming it.</para>
+        ///
         /// <para>Self-contained by default, so the file stays a single truly vanilla <c>.onnx</c>;
         /// a model whose tensor data exceeds protobuf's 2 GB message ceiling is then refused with
         /// <c>XD007</c>, naming <paramref name="externalData"/> as the remedy. Passing
@@ -57,23 +62,19 @@ namespace Shorokoo
         /// </summary>
         /// <param name="concreteModel">The weight-filled concrete model to export.</param>
         /// <param name="filePath">Target path; a <c>.onnx</c> extension is conventional.</param>
-        /// <param name="opset">Default-domain opset stamp; raised automatically when the
-        /// graph uses ops introduced in a later opset.</param>
         /// <param name="externalData">Null (the default) writes the self-contained form. Supply
         /// options to store large initializers in a side file instead; see
         /// <see cref="OnnxExternalDataOptions"/> for the size threshold and alignment.</param>
         public static void ExportOnnx(
             ComputationGraph concreteModel,
             string filePath,
-            OpSetVersion opset = OpSetVersion.OPS_21,
             OnnxExternalDataOptions? externalData = null)
-            => ExportOnnx(concreteModel, filePath, opset, externalData,
+            => ExportOnnx(concreteModel, filePath, externalData,
                 OnnxModelExporter.MaxSelfContainedTensorBytes);
 
         internal static void ExportOnnx(
             ComputationGraph concreteModel,
             string filePath,
-            OpSetVersion opset,
             OnnxExternalDataOptions? externalData,
             long maxTensorBytes)
         {
@@ -85,7 +86,7 @@ namespace Shorokoo
             // offending ops on failure. It also writes each input's representative shape into that
             // input's own ValueInfoProto metadata — no out-of-band, cross-graph pairing here; the
             // builder owns it end-to-end. ImportOnnx re-attaches on load.
-            var model = FastOnnxModelBuilder.BuildOnnxModel(concreteModel, opset);
+            var model = FastOnnxModelBuilder.BuildOnnxModel(concreteModel);
             // Through the exporter rather than straight to the writer: it owns the 2 GB
             // protobuf-ceiling pre-check (XD007) and the external-data layout, either of which a
             // serialization here of its own would silently skip.
@@ -115,6 +116,12 @@ namespace Shorokoo
         /// <para>Fails loudly, naming the offending op and the file, on a construct the reader
         /// cannot ingest (an op outside the vanilla ONNX dialect Shorokoo reads, or a node in
         /// an unknown domain); a truncated or garbage file fails loudly naming the file.</para>
+        ///
+        /// <para>The model must be an ONNX opset-21 model: one whose default-domain
+        /// (<c>ai.onnx</c>) opset import is missing or names another opset is refused with
+        /// <see cref="ErrorCodes.FW060"/>, naming the opset found and the one required, and so is a
+        /// node that is an operator, or carries an attribute, that ONNX introduced after opset 21.
+        /// Convert such a model to opset 21 first.</para>
         ///
         /// <para>Like every concrete graph, the imported one records a representative shape on each
         /// input (see <c>ToConcreteArchitecture</c>). A model Shorokoo
@@ -419,8 +426,7 @@ namespace Shorokoo
                 var domain = node.Domain;
                 bool ok = domain switch
                 {
-                    "" or "ai.onnx" or "ai.onnx.ml"
-                        => Definitions.VanillaOpNames.Contains(node.OpType),
+                    "" or "ai.onnx" => Definitions.VanillaOpNames.Contains(node.OpType),
                     "Functions" => declaredFunctions.Contains(node.OpType),
                     _ => false,
                 };

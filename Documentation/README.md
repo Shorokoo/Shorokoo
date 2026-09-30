@@ -34,7 +34,7 @@ Which document covers what. For an overview of Shorokoo and an end-to-end exampl
 
 - [orientation.md](orientation.md) — namespaces and `using` directives, including which `Shorokoo.Core.*` namespaces are documented public API.
 - [glossary.md](glossary.md) — term lookup.
-- [operator-support.md](operator-support.md) — per-operator support matrix (build & run, QEE, gradients) for the full supported operator set (opset 21 plus the post-21 additions through opset 26).
+- [operator-support.md](operator-support.md) — per-operator support matrix (build & run, QEE, gradients) for the full supported operator set (ONNX opset 21, the one opset Shorokoo reads and writes, plus the post-21 additions it lowers or refuses).
 - [param-naming-format-dsl.md](param-naming-format-dsl.md) / [param-naming-pattern-dsl.md](param-naming-pattern-dsl.md) — the two DSLs for mapping parameter names when binding third-party weights (`ToConcreteModel(weights, namingScheme)`).
 - [debugging.md](debugging.md) — watch a long build stage by stage with a `progress:` sink, and snapshot the graph at chosen points of `ToConcreteArchitecture` lowering with `DebugRequests`.
 - [limitations.md](limitations.md) — known limitations, permanent and otherwise.

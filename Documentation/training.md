@@ -582,6 +582,10 @@ leave nothing whole to return, while the state between two steps always is.
   - `report.TakeCheckpoint()` returns the state after this step as a checkpoint, without a copy (see
     `TakeCheckpoint` above), to save it or evaluate it while the run goes on.
   - A report is valid only during its callback; acting on a kept one throws.
+  - A callback that throws ends the run with a `TrainingCallbackException`: its `InnerException` is
+    what the callback threw, and its `Checkpoint` is the state after that step — whole, since the
+    callback runs between steps — so the training done is kept. Passing it back resumes at the next
+    batch, as from a run stopped with `RequestStop()`.
 - **The result** is the state after the last step taken, whatever ended the run, with its data
   position. Passing it back resumes at the next batch exactly as a completed run's would, for the
   loader and the array forms alike; `numEpochs` counts from the resume epoch (see

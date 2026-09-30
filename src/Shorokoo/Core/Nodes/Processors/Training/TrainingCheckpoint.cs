@@ -652,14 +652,14 @@ namespace Shorokoo
             Persistence.VerifyFlatTrainingCheckpoint(filePath,
                 "Load a .skpt training checkpoint with rig.LoadCheckpointFromSkpt(path) " +
                 "(or rebuild the whole rig from it with the static TrainingRig.Load(path)).");
-            var raw = LoadFlat(
-                filePath, r.TrainableParamStructDef, r.ModelStateDef, r.OptimizerStateDef,
-                components, r, r.LoadDestination);
             // Attach the rig (sets Rig, preserves counters). Reading against the rig's own defs
             // settles the field names, so the def check inside AdoptCheckpoint passes by construction
             // — but the dimension check there does not: the defs carry no shapes, so a checkpoint from
-            // a model of another width reaches this point and is refused as it is adopted.
-            return r.AdoptCheckpoint(raw);
+            // a model of another width is read and then refused as it is adopted. Adopted inside the
+            // load, so a refusal frees what was read onto the rig's card.
+            return LoadFlat(
+                filePath, r.TrainableParamStructDef, r.ModelStateDef, r.OptimizerStateDef,
+                components, r, r.LoadDestination, r.AdoptCheckpoint);
         }
 
         /// <summary>
@@ -684,10 +684,9 @@ namespace Shorokoo
             var r = ValidateRigLoadArguments(filePath, rig, components);
             Persistence.VerifySkptContainer(filePath,
                 "Load a flat safetensors training checkpoint with rig.LoadCheckpoint(path).");
-            var raw = Persistence.LoadTrainingCheckpointFromSkpt(
+            return Persistence.LoadTrainingCheckpointFromSkpt(
                 filePath, r.TrainableParamStructDef, r.ModelStateDef, r.OptimizerStateDef,
-                components, r, r.LoadDestination);
-            return r.AdoptCheckpoint(raw);
+                components, r, r.LoadDestination, r.AdoptCheckpoint);
         }
 
         /// <summary>The argument contract <see cref="Load"/> and <see cref="LoadFromSkpt"/> share:
@@ -727,6 +726,9 @@ namespace Shorokoo
         /// <paramref name="components"/> (null ⇒ everything present). A component not present in the
         /// file (or not requested) is filled from <paramref name="rigForDefaults"/>'s initial values
         /// when a rig is supplied; without a rig, an absent-but-expected section fails loud.
+        /// <paramref name="adopt"/>, when given, takes the checkpoint read (a rig adopting it), and
+        /// what it returns is the result: a load it refuses fails as one that could not be read does,
+        /// leaving nothing it read in <paramref name="destination"/>'s memory.
         /// </summary>
         internal static TrainingCheckpoint LoadFlat(
             string filePath,
@@ -735,17 +737,55 @@ namespace Shorokoo
             TensorStructDef? optimizerStateDef,
             CheckpointComponents? components,
             TrainingRig? rigForDefaults,
-            ComputeContext destination)
+            ComputeContext destination,
+            Func<TrainingCheckpoint, TrainingCheckpoint>? adopt = null)
         {
+            bool Want(CheckpointComponents c) => components is null || (components.Value & c) != 0;
             // The state sections are read straight into the memory the rig trains in -- on a card,
             // through one bounded buffer, never whole in host memory (Shorokoo/Shorokoo#436). The
-            // marker, the counters and the history are read on the host, where they are read back.
+            // marker, the counters and the history are read on the host, where they are read back,
+            // and so is a section the rig fills from its own values: nothing is put on a card that
+            // the checkpoint does not hold.
+            bool Kept(CheckpointComponents c) => Want(c) || rigForDefaults is null;
             var tensors = SafeTensorLoader.LoadSafeTensors(filePath, (name, _) =>
-                name.StartsWith(TrainableSection + "/", StringComparison.Ordinal)
-                || name.StartsWith(ModelStateSection + "/", StringComparison.Ordinal)
-                || name.StartsWith(OptimizerStateSection + "/", StringComparison.Ordinal)
+                (name.StartsWith(TrainableSection + "/", StringComparison.Ordinal)
+                 || name.StartsWith(ModelStateSection + "/", StringComparison.Ordinal)) && Kept(CheckpointComponents.InferenceState)
+                || name.StartsWith(OptimizerStateSection + "/", StringComparison.Ordinal) && Kept(CheckpointComponents.OptimizerState)
                     ? destination
                     : ComputeContext.Host);
+            try
+            {
+                var read = ReadFlat(filePath, tensors, trainableParamDef, modelStateDef, optimizerStateDef,
+                    components, rigForDefaults);
+                return adopt is null ? read : adopt(read);
+            }
+            catch
+            {
+                // Nothing holds what was read onto the card but the checkpoint that is not returned.
+                DeleteReadOnto(destination, tensors.Select(t => t.Data));
+                throw;
+            }
+        }
+
+        /// <summary>Deletes every tensor of <paramref name="read"/> that a load put in
+        /// <paramref name="destination"/>'s memory, for a load that fails after reading it: nothing
+        /// else holds it, and on a card its memory is not the collector's to free.</summary>
+        internal static void DeleteReadOnto(ComputeContext destination, IEnumerable<TensorData> read)
+        {
+            foreach (var tensor in read)
+                if (destination.Attaches(tensor)) tensor.Delete();
+        }
+
+        private static TrainingCheckpoint ReadFlat(
+            string filePath,
+            IReadOnlyList<SafeTensor> tensors,
+            TensorStructDef? trainableParamDef,
+            TensorStructDef? modelStateDef,
+            TensorStructDef? optimizerStateDef,
+            CheckpointComponents? components,
+            TrainingRig? rigForDefaults)
+        {
+            bool Want(CheckpointComponents c) => components is null || (components.Value & c) != 0;
             var byName = tensors.ToDictionary(t => t.Name, t => t.Data);
 
             // A null def means "read what the file says it holds": the flat format is
@@ -791,7 +831,6 @@ namespace Shorokoo
             modelStateDef ??= InferSectionDef(tensors, ModelStateSection, "ModelState");
             optimizerStateDef ??= InferSectionDef(tensors, OptimizerStateSection, "OptimizerState");
 
-            bool Want(CheckpointComponents c) => components is null || (components.Value & c) != 0;
             bool SectionPresent(string section)
             {
                 var prefix = section + "/";

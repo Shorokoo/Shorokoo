@@ -1,4 +1,6 @@
 using Shorokoo.Core.Backends;
+using Shorokoo.Modules.Losses;
+using Shorokoo.Modules.Optimizers;
 using Shorokoo.Onnx;
 using Shorokoo.Runtime;
 
@@ -1134,6 +1136,51 @@ public class CrossDeviceRoutingCoverageTests
             if (Directory.Exists(dir)) Directory.Delete(dir, recursive: true);
         }
     }
+
+    [Fact]
+    public void TestACheckpointLoadOntoACardLeavesOnItOnlyTheStateItReturned()
+    {
+        var (adamW, trained, _, _) = TrainingRigHelpers.BuildTrainedAdamWRig(1);
+        var narrow = ShapeRigOn(ParamShapeNarrowModel.ComputationGraph, ComputeContext.Default);
+        var (flat, skpt, narrowFlat, narrowSkpt) = (TrainingRigHelpers.TempPath("parts") + ".safetensors",
+            TrainingRigHelpers.TempPath("parts") + ".skpt", TrainingRigHelpers.TempPath("narrow") + ".safetensors",
+            TrainingRigHelpers.TempPath("narrow") + ".skpt");
+        int Left(Func<ComputeContext, TrainingCheckpoint> load)
+        {
+            using var context = new ComputeContext(new StubBackend(ComputeDevice.Cuda, 0) { CopiesRanges = true });
+            try { var loaded = load(context); return context.Tensors.Except(StateOf(loaded)).Count(); }
+            catch (ArgumentException) { return context.Tensors.Count; }
+        }
+        TrainingCheckpoint Flat(string path, ComputeContext c, CheckpointComponents? parts) => TrainingCheckpoint.LoadFlat(
+            path, adamW.TrainableParamStructDef, adamW.ModelStateDef, adamW.OptimizerStateDef, parts, adamW, c);
+        TrainingCheckpoint Skpt(string path, ComputeContext c, CheckpointComponents? parts) => Persistence.LoadTrainingCheckpointFromSkpt(
+            path, adamW.TrainableParamStructDef, adamW.ModelStateDef, adamW.OptimizerStateDef, parts, adamW, c);
+        try
+        {
+            trained.Save(flat);
+            Persistence.SaveTrainingCheckpointToSkpt(trained, skpt);
+            var narrowCkpt = narrow.CreateInitialCheckpoint();
+            narrowCkpt.Save(narrowFlat);
+            Persistence.SaveTrainingCheckpointToSkpt(narrowCkpt, narrowSkpt);
+
+            Assert.NotEmpty(adamW.OptimizerStateDef.Fields);
+            Assert.Equal(0, Left(c => Flat(flat, c, CheckpointComponents.InferenceState)));
+            Assert.Equal(0, Left(c => Flat(flat, c, CheckpointComponents.OptimizerState)));
+            Assert.Equal(0, Left(c => Skpt(skpt, c, CheckpointComponents.InferenceState)));
+            Assert.Equal(0, Left(c => Skpt(skpt, c, CheckpointComponents.OptimizerState)));
+            Assert.Equal(0, Left(c => ShapeRigOn(ParamShapeWideModel.ComputationGraph, c).LoadCheckpoint(narrowFlat)));
+            Assert.Equal(0, Left(c => ShapeRigOn(ParamShapeWideModel.ComputationGraph, c).LoadCheckpointFromSkpt(narrowSkpt)));
+        }
+        finally
+        {
+            foreach (var path in (string[])[flat, skpt, narrowFlat, narrowSkpt]) File.Delete(path);
+        }
+    }
+
+    private static TrainingRig ShapeRigOn(ComputationGraph model, ComputeContext runtime) => TrainingRig.FromScratch(
+        model, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+        [new TensorDataModelParam("x", ModelParamType.InputParam, TensorData([4L, 4L], new float[16]))],
+        new SGDOptimizerHyperparameters { LearningRate = 0.1f }, runtimeContext: runtime);
 
     private static IEnumerable<TensorData> StateOf(TrainingCheckpoint checkpoint)
         => ((TensorDataStruct[])[checkpoint.TrainableParams, checkpoint.ModelState, checkpoint.OptimizerState])

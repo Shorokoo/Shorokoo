@@ -3061,6 +3061,15 @@ public class TrainingRigTrainingLoopCoverageTests
         var finished = rig.FitUntilEpoch(Loader(), 2, reference);
         Assert.Equal((TrainingStopReason.Completed, 0), (finished.StopReason, finished.EpochLosses.Length));
         Assert.Same(reference, finished.FinalCheckpoint);
+        TrainingCheckpoint At(long epoch, long batch)
+        {
+            var initial = rig.CreateInitialCheckpoint();
+            return new() { TrainableParams = initial.TrainableParams, ModelState = initial.ModelState,
+                OptimizerState = initial.OptimizerState, Epoch = epoch, BatchIndex = batch };
+        }
+        Assert.All(((long Epoch, long Batch)[])[(0, 7), (0, 3), (0, -5), (-1, 0)],
+            p => Assert.Throws<ArgumentOutOfRangeException>(() => rig.Fit(xs, ys, 1, At(p.Epoch, p.Batch))));
+        Assert.Equal(1L, rig.Fit(xs, ys, 1, At(0, 2)).FinalCheckpoint.Epoch);
     }
 
     [Fact]
@@ -3098,6 +3107,16 @@ public class TrainingRigTrainingLoopCoverageTests
 
         var batches = rig.Fit([inputs, inputs], [targets, targets], 3, onStep: r => { if (r.Step == 2) r.RequestStop(); });
         Assert.Equal((TrainingStopReason.StopRequested, 3L, 2), (batches.StopReason, batches.FinalCheckpoint.Step, batches.EpochLosses.Length));
+
+        var thrown = new InvalidOperationException();
+        void Throws(TrainingStepReport r) { if (r.Step == 2) throw thrown; }
+        var fromLoader = Assert.Throws<TrainingCallbackException>(() => rig.Fit(new InMemoryDataLoader(inputs, targets, batchSize: 2), 2, onStep: Throws));
+        var fromArrays = Assert.Throws<TrainingCallbackException>(() => rig.Fit([inputs, inputs], [targets, targets], 3, onStep: Throws));
+        Assert.Equal((thrown, thrown, 3L, 3L), (fromLoader.InnerException, fromArrays.InnerException, fromLoader.Checkpoint.Step, fromArrays.Checkpoint.Step));
+        Assert.Equal(FlattenStruct(fit.FinalCheckpoint.TrainableParams),
+            FlattenStruct(rig.Fit(new InMemoryDataLoader(inputs, targets, batchSize: 2), 2, fromLoader.Checkpoint).FinalCheckpoint.TrainableParams));
+        Assert.Equal(FlattenStruct(rig.Fit([inputs, inputs], [targets, targets], 3).FinalCheckpoint.TrainableParams),
+            FlattenStruct(rig.Fit([inputs, inputs], [targets, targets], 2, fromArrays.Checkpoint).FinalCheckpoint.TrainableParams));
     }
 
     [Fact]

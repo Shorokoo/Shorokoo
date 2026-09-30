@@ -3713,7 +3713,8 @@ namespace Shorokoo
         /// <para>Batch <c>i</c> of an epoch is at batch index <c>i</c>: each step's epoch and batch
         /// index feed the scheduler and are stamped on the state it produces, as a loader's are. A
         /// checkpoint with a position resumes one batch past it, and <paramref name="numEpochs"/>
-        /// counts from the epoch it resumes in.</para>
+        /// counts from the epoch it resumes in; one whose batch index is not an index into the arrays
+        /// (or whose epoch is negative) is refused before any step.</para>
         ///
         /// <para>The arrays are a dataset, fed once per epoch, so every step <b>reads</b> its batch —
         /// as if it were passed <c>.Shared()</c> — and the batches are all alive and unchanged when
@@ -3729,7 +3730,9 @@ namespace Shorokoo
         /// <param name="onStep">Called after every step with what it did, in order, before the next
         /// step starts; it may end the run there (<see cref="TrainingStepReport.RequestStop"/>) or take
         /// the state as a checkpoint. See <see cref="TrainingStepReport"/>. A run given none builds no
-        /// report.</param>
+        /// report. If it throws, the run ends with a <see cref="TrainingCallbackException"/> whose
+        /// <see cref="TrainingCallbackException.Checkpoint"/> is the state after that step, to resume
+        /// from.</param>
         /// <param name="cancellationToken">Stops the run between two steps: the step running when it
         /// is cancelled finishes, and the run returns the state after it — never a step cut short,
         /// whose state could not be recovered. Unlike the runtime context's
@@ -3775,6 +3778,13 @@ namespace Shorokoo
             int startBatch = 0;
             if (initialCheckpoint.Epoch is long usedEpoch && initialCheckpoint.BatchIndex is long usedBatch)
             {
+                // Refused before any step, as a loader refuses it: a position outside these batches
+                // names a batch this run never had, so resuming from it could only guess.
+                if (usedEpoch < 0 || usedBatch < 0 || usedBatch >= trainingInputs.Length)
+                    throw new ArgumentOutOfRangeException(nameof(initialCheckpoint), (usedEpoch, usedBatch),
+                        $"The checkpoint's position (epoch {usedEpoch}, batch {usedBatch}) is out of range for "
+                        + $"{trainingInputs.Length} batch(es) per epoch. Was this checkpoint produced with a "
+                        + "different batch size / dataset?");
                 bool epochDone = usedBatch + 1 >= trainingInputs.Length;
                 startEpoch = epochDone ? usedEpoch + 1 : usedEpoch;
                 startBatch = epochDone ? 0 : (int)(usedBatch + 1);
@@ -3909,7 +3919,10 @@ namespace Shorokoo
         /// <c>.Shared()</c>.</param>
         /// <param name="onStep">Called after every step with what it did, in order, before the next
         /// step starts; it may end the run there or take the state as a checkpoint. See
-        /// <see cref="TrainingStepReport"/>.</param>
+        /// <see cref="TrainingStepReport"/>. If it throws, the run ends with a
+        /// <see cref="TrainingCallbackException"/> whose
+        /// <see cref="TrainingCallbackException.Checkpoint"/> is the state after that step, to resume
+        /// from.</param>
         /// <param name="cancellationToken">Stops the run between two steps: the step running when it
         /// is cancelled finishes, and the run returns the state after it, before the loader draws
         /// another batch — so the returned checkpoint's position names the last batch trained, and
@@ -4031,6 +4044,11 @@ namespace Shorokoo
         /// Hands the step <paramref name="run"/> just took to <paramref name="onStep"/>, and says
         /// whether it asked to stop there. Nothing is built for a run without a callback. The report
         /// is valid only for the length of the call.
+        ///
+        /// <para>A callback that throws ends the run with a <see cref="TrainingCallbackException"/>
+        /// carrying the state after this step. The callback runs between two steps, where the state
+        /// is whole, and it is taken here, before the exception unwinds through the run's disposal,
+        /// which would release it: the checkpoint the run began from went with its first step.</para>
         /// </summary>
         private static bool Reported(ResidentTrainingRun run, Action<TrainingStepReport>? onStep, long began)
         {
@@ -4038,14 +4056,20 @@ namespace Shorokoo
             var history = run.History;
             var report = new TrainingStepReport(
                 run, history[history.Count - 1], System.Diagnostics.Stopwatch.GetElapsedTime(began));
+            Exception? thrown = null;
             try
             {
                 onStep(report);
+            }
+            catch (Exception e)
+            {
+                thrown = e;
             }
             finally
             {
                 report.Expire();
             }
+            if (thrown is not null) throw new TrainingCallbackException(run.TakeCheckpoint(), thrown);
             return report.StopRequested;
         }
 

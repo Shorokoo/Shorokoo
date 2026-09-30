@@ -153,6 +153,11 @@ namespace Shorokoo
         /// <para>The state is read into <paramref name="destination"/>'s memory as it streams off
         /// the file: on a card, through one bounded host buffer, so host memory never holds it
         /// (Shorokoo/Shorokoo#436).</para>
+        ///
+        /// <para><paramref name="adopt"/>, when given, takes the checkpoint read (a rig adopting it),
+        /// and what it returns is the result. A load that fails — reading an entry, covering a def,
+        /// or the adoption — leaves nothing it read in <paramref name="destination"/>'s
+        /// memory.</para>
         /// </summary>
         internal static TrainingCheckpoint LoadTrainingCheckpointFromSkpt(
             string filePath,
@@ -161,7 +166,8 @@ namespace Shorokoo
             TensorStructDef optimizerStateDef,
             CheckpointComponents? components,
             TrainingRig? rigForDefaults,
-            ComputeContext destination)
+            ComputeContext destination,
+            Func<TrainingCheckpoint, TrainingCheckpoint>? adopt = null)
         {
             if (trainableParamDef is null) throw new ArgumentNullException(nameof(trainableParamDef));
             if (modelStateDef is null) throw new ArgumentNullException(nameof(modelStateDef));
@@ -205,7 +211,28 @@ namespace Shorokoo
             // host, where it is read back.
             var tensorsByDataKey = new SkptDataEntries((dataKey, _) =>
                 dataKey == SkptFileFormat.HistoryDataKey ? ComputeContext.Host : destination);
+            try
+            {
+                var read = ReadTrainingCheckpointState(container, manifest, training, modelMapping, optimizerMapping,
+                    trainableParamDef, modelStateDef, optimizerStateDef, components, rigForDefaults,
+                    tensorsByDataKey, filePath);
+                return adopt is null ? read : adopt(read);
+            }
+            catch
+            {
+                // Nothing holds the entries read onto the card but the checkpoint that is not returned.
+                TrainingCheckpoint.DeleteReadOnto(destination, tensorsByDataKey.Values.SelectMany(entry => entry.Values));
+                throw;
+            }
+        }
 
+        private static TrainingCheckpoint ReadTrainingCheckpointState(
+            SkptContainer container, SkptManifest manifest, SkptTrainingInfo training,
+            Dictionary<string, SkptTensorRef>? modelMapping, Dictionary<string, SkptTensorRef>? optimizerMapping,
+            TensorStructDef trainableParamDef, TensorStructDef modelStateDef, TensorStructDef optimizerStateDef,
+            CheckpointComponents? components, TrainingRig? rigForDefaults,
+            SkptDataEntries tensorsByDataKey, string filePath)
+        {
             bool Want(CheckpointComponents c) => components is null || (components.Value & c) != 0;
 
             // Counters (step/epoch/batch) ride with the Counters component; the loss is its own

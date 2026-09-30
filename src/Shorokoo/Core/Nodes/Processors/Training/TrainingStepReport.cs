@@ -19,6 +19,26 @@ namespace Shorokoo
     }
 
     /// <summary>
+    /// What a <c>Fit</c> or <c>Train</c> run throws when its step callback throws: the callback's
+    /// exception is the <see cref="Exception.InnerException"/>, and <see cref="Checkpoint"/> is the
+    /// run's state after the last step it took — the step the callback was reporting — so the
+    /// training done is not lost with the run. Pass it back as the initial checkpoint to resume
+    /// exactly where the run stopped, as from a run stopped with
+    /// <see cref="TrainingStepReport.RequestStop"/>.
+    /// </summary>
+    public sealed class TrainingCallbackException : Exception
+    {
+        internal TrainingCallbackException(TrainingCheckpoint checkpoint, Exception thrown)
+            : base($"The training step callback threw after step {checkpoint.Step - 1}; the run stopped "
+                   + "there. The state after that step is this exception's Checkpoint: resume from it.", thrown)
+            => Checkpoint = checkpoint;
+
+        /// <summary>The run's state after the step the callback was reporting, whole and the
+        /// caller's, as <see cref="TrainingStepReport.TakeCheckpoint"/> hands it over.</summary>
+        public TrainingCheckpoint Checkpoint { get; }
+    }
+
+    /// <summary>
     /// What one step of a <c>Fit</c> or <c>Train</c> run did, handed to the run's step callback
     /// right after the step — in order, one per step, on the thread running the loop, before the
     /// next step starts.

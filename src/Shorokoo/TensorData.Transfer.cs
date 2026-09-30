@@ -406,5 +406,39 @@ namespace Shorokoo
         /// consume the tensor, and no delete release it, from under the copy.
         /// </summary>
         private byte[] HostBytes() => Reading(CopyContentBytes);
+
+        /// <summary>
+        /// The bytes this tensor's contents cover, as <see cref="WriteContentTo"/> writes them —
+        /// measured, never read, so asking costs no copy whatever memory the tensor is in.
+        /// </summary>
+        internal virtual long ContentByteLength => AccessRawMemory().Length;
+
+        /// <summary>
+        /// Writes this tensor's contents to <paramref name="destination"/>, whatever memory they
+        /// are in, under a reader lock for the length of the write, so no run consumes the tensor
+        /// and no delete releases it from under it. Host memory is written straight from the
+        /// tensor's own storage; memory an execution provider keeps is streamed through one bounded
+        /// host buffer (<see cref="StagedReadBack"/>), so a device-resident tensor is saved without
+        /// its whole contents ever being in host memory at once.
+        /// </summary>
+        internal void WriteContentTo(Stream destination)
+        {
+            ArgumentNullException.ThrowIfNull(destination);
+            Reading(() =>
+            {
+                WriteContentBytes(destination);
+                return true;
+            });
+        }
+
+        /// <summary><see cref="WriteContentTo"/> without the lock: the storage's own bytes, for
+        /// a tensor whose storage is host memory.</summary>
+        private protected virtual void WriteContentBytes(Stream destination)
+        {
+            destination.Write(AccessRawMemory());
+            // The span is a window onto storage this tensor owns and roots nothing itself
+            // (Shorokoo/Shorokoo#178).
+            GC.KeepAlive(this);
+        }
     }
 }

@@ -89,9 +89,9 @@ namespace Shorokoo
         /// training loop advances (the graph never does), persisted so a resumed run restores
         /// its position in the data schedule — or <c>null</c> when it is genuinely <b>unknown</b>: a
         /// checkpoint produced without a data loader or an explicit epoch (an initial checkpoint, or one
-        /// trained through <see cref="TrainingRig.Train"/> / <see cref="TrainingRig.Fit(TensorDataStruct[], TensorDataStruct[], int, TrainingCheckpoint?)"/>
+        /// trained through <see cref="TrainingRig.Train"/> / <see cref="TrainingRig.Fit(TensorDataStruct[], TensorDataStruct[], int, TrainingCheckpoint?, Action{TrainingStepReport}?, System.Threading.CancellationToken)"/>
         /// / the counter-agnostic <c>TrainStep</c>) carries <c>null</c> rather than a misleading <c>0</c>.
-        /// The loader-driven and explicit-counter paths (<see cref="TrainingRig.Fit(IDataLoader, int, TrainingCheckpoint?)"/>,
+        /// The loader-driven and explicit-counter paths (<see cref="TrainingRig.Fit(IDataLoader, int, TrainingCheckpoint?, Action{TrainingStepReport}?, System.Threading.CancellationToken)"/>,
         /// <see cref="TrainingRig.TrainStep(TrainingCheckpoint, IDataLoader)"/>,
         /// <see cref="TrainingRig.TrainStep(TrainingCheckpoint, IData, IData, long, long)"/>)
         /// set a concrete value. Persisted as its own presence-gated part of the
@@ -113,7 +113,7 @@ namespace Shorokoo
         /// The <see cref="TrainingRig"/> this checkpoint belongs to, or <c>null</c> for a bare
         /// checkpoint constructed without one. Every rig-produced checkpoint carries its rig
         /// (<see cref="TrainingRig.CreateInitialCheckpoint()"/>, <see cref="TrainingRig.TrainStep(TrainingCheckpoint, IData, IData)"/>,
-        /// <see cref="TrainingRig.Train"/>/<see cref="TrainingRig.Fit(TensorDataStruct[], TensorDataStruct[], int, TrainingCheckpoint?)"/>, load, and
+        /// <see cref="TrainingRig.Train"/>/<see cref="TrainingRig.Fit(TensorDataStruct[], TensorDataStruct[], int, TrainingCheckpoint?, Action{TrainingStepReport}?, System.Threading.CancellationToken)"/>, load, and
         /// <see cref="TrainingRig.AdoptCheckpoint"/> all set it), so <see cref="ToInferenceModel()"/>
         /// can extract the inference model with no re-supplied graph. The rig does not store
         /// checkpoints, so there is no reference cycle. Attach one to a bare checkpoint via
@@ -218,6 +218,40 @@ namespace Shorokoo
         /// <see cref="Shared"/>'s is.
         /// </summary>
         public TrainingCheckpoint TryConsume() => Derive(feedMode: SharedInputMode.TryConsume);
+
+        /// <summary>
+        /// This checkpoint with its state in host memory, where its elements can be read. A
+        /// checkpoint a training run hands out keeps its tensors where the run left them — on a GPU,
+        /// the training device's memory — and nothing needs them on the host to save, resume or
+        /// train from it; reading the elements is what does. So this copies each tensor the host
+        /// cannot read into host memory of the new checkpoint's own, and takes each one it can as it
+        /// is: the very same checkpoint where every tensor already is host-readable.
+        ///
+        /// <para>Every other slot — counters, rig, loss, applied hyperparameters, history — carries
+        /// through. A checkpoint that copied anything is fed as it is, whatever
+        /// <see cref="FeedMode"/> this one has, since its copies are nobody else's.</para>
+        /// </summary>
+        /// <exception cref="ObjectDisposedException">A tensor of the state is dead.</exception>
+        public TrainingCheckpoint ToHost()
+        {
+            var (trainable, model, optimizer) = (TrainableParams.ToHost(), ModelState.ToHost(), OptimizerState.ToHost());
+            if (ReferenceEquals(trainable, TrainableParams) && ReferenceEquals(model, ModelState)
+                && ReferenceEquals(optimizer, OptimizerState))
+                return this;
+            return new()
+            {
+                TrainableParams = trainable,
+                ModelState = model,
+                OptimizerState = optimizer,
+                Step = Step,
+                Epoch = Epoch,
+                BatchIndex = BatchIndex,
+                Rig = Rig,
+                Loss = Loss,
+                AppliedHyperparameters = AppliedHyperparameters,
+                History = History,
+            };
+        }
 
         /// <summary>
         /// Packages trainable params, model state and optimizer state, plus the run counters and the

@@ -2225,6 +2225,38 @@ public class TrainingRigScheduleCoverageTests
     }
 
     [Fact]
+    public void TestAResidentRunHandsOverItsStateBetweenStepsWithoutStepping()
+    {
+        var (sample, input, target) = ScalarMultiplyBatches();
+        var rig = SgdRig(sample, Schedules.Linear(0.2f, 0f, 8));
+        var begun = rig.TrainStep(rig.CreateInitialCheckpoint(), input.Shared(), target.Shared());
+        var reference = rig.TrainStep(rig.TrainStep(begun.Shared(), input.Shared(), target.Shared()), input.Shared(), target.Shared());
+        static bool Whole(TrainingCheckpoint c) => c.TrainableParams.Fields.Values.OfType<TensorData>().All(t => !t.IsDisposed);
+
+        TrainingCheckpoint before, taken, again, after;
+        var run = rig.BeginResidentRun(begun);
+        using (run)
+        {
+            before = run.TakeCheckpoint();
+            run.Step(input.Shared(), target.Shared());
+            run.Step(input.Shared(), target.Shared());
+            taken = run.TakeCheckpoint();
+            again = run.TakeCheckpoint();
+            after = run.StepToCheckpoint(input.Shared(), target.Shared());
+        }
+        Assert.Same(begun, before);
+        Assert.True(Whole(begun));
+        AssertClose(reference, taken, 0f);
+        Assert.Equal(reference.Step, taken.Step);
+        Assert.Equal([0L, 1L, 2L], taken.History.Steps);
+        Assert.Same(taken.TrainableParams, again.TrainableParams);
+        Assert.True(Whole(taken));
+        Assert.Same(taken, taken.ToHost());
+        AssertClose(rig.TrainStep(taken.Shared(), input.Shared(), target.Shared()), after, 0f);
+        Assert.Throws<ObjectDisposedException>(() => run.TakeCheckpoint());
+    }
+
+    [Fact]
     public void TestAStepThatFailsReadingItsOutputsReleasesThemAndLosesOnlyStateItConsumedCoverage()
     {
         var (sample, input, target) = ScalarMultiplyBatches();
@@ -2987,6 +3019,70 @@ public class TrainingRigTrainingLoopCoverageTests
     }
 
     [Fact]
+    public void TestAFitStoppedBetweenStepsResumesToTheUninterruptedResult()
+    {
+        var rig = LoaderRig(batchSize: 2, features: 1);
+        var (inputs, targets) = IndexDataset(rig, n: 8, features: 1);
+        InMemoryDataLoader Loader() => new(inputs, targets, batchSize: 2, shuffle: true, seed: 777);
+        var reference = rig.Fit(Loader(), numEpochs: 2).FinalCheckpoint;
+
+        TrainingResult Stopped(int steps, bool cancel)
+        {
+            using var cts = new CancellationTokenSource();
+            int seen = 0;
+            return rig.Fit(Loader(), 2, null, r => { if (++seen == steps) { if (cancel) cts.Cancel(); else r.RequestStop(); } }, cts.Token);
+        }
+        float[] expected = FlattenStruct(reference.TrainableParams);
+        (TrainingStopReason, long, bool) StopAndResume(int steps, bool cancel)
+        {
+            var stopped = Stopped(steps, cancel);
+            var step = stopped.FinalCheckpoint.Step;
+            var resumed = rig.Fit(Loader(), numEpochs: 2 - steps / 4, stopped.FinalCheckpoint).FinalCheckpoint;
+            return (stopped.StopReason, step, expected.SequenceEqual(FlattenStruct(resumed.TrainableParams)));
+        }
+
+        Assert.Equal((TrainingStopReason.Cancelled, 1L, true), StopAndResume(1, cancel: true));
+        Assert.Equal((TrainingStopReason.Cancelled, 3L, true), StopAndResume(3, cancel: true));
+        Assert.Equal((TrainingStopReason.Cancelled, 4L, true), StopAndResume(4, cancel: true));
+        Assert.Equal((TrainingStopReason.StopRequested, 5L, true), StopAndResume(5, cancel: false));
+        Assert.Equal((TrainingStopReason.StopRequested, 7L, true), StopAndResume(7, cancel: false));
+        Assert.Equal(TrainingStopReason.Completed, Stopped(8, cancel: true).StopReason);
+        Assert.Equal([2, 1], [Stopped(5, cancel: false).EpochLosses.Length, Stopped(3, cancel: false).EpochLosses.Length]);
+    }
+
+    [Fact]
+    public void TestTheStepCallbackSeesEveryStepInOrderAndHoldsItsReportOnlyWhileItRuns()
+    {
+        var rig = LoaderRig(batchSize: 2, features: 1);
+        var (inputs, targets) = IndexDataset(rig, n: 8, features: 1);
+        List<TrainingStepReport> reports = [];
+        TrainingCheckpoint? taken = null;
+        var fit = rig.Fit(new InMemoryDataLoader(inputs, targets, batchSize: 2), 2,
+            onStep: r => { reports.Add(r); if (r.Step == 2) taken = r.TakeCheckpoint(); });
+
+        Assert.Equal(fit.FinalCheckpoint.History, reports.Select(r => r.Entry));
+        Assert.Equal([0L, 1L, 2L, 3L, 4L, 5L, 6L, 7L], reports.Select(r => r.Step));
+        Assert.Equal([0L, 0L, 0L, 0L, 1L, 1L, 1L, 1L], reports.Select(r => r.Epoch!.Value));
+        Assert.Equal([0L, 1L, 2L, 3L, 0L, 1L, 2L, 3L], reports.Select(r => r.BatchIndex!.Value));
+        Assert.True(reports.Zip(reports.Skip(1)).All(p => p.First.Elapsed <= p.Second.Elapsed));
+        Assert.Throws<InvalidOperationException>(() => reports[0].RequestStop());
+        Assert.Throws<InvalidOperationException>(() => reports[0].TakeCheckpoint());
+        Assert.Equal(3L, taken!.Step);
+        Assert.Equal(FlattenStruct(taken.TrainableParams),
+            FlattenStruct(rig.Fit(new InMemoryDataLoader(inputs, targets, batchSize: 2), 2, null, r => { if (r.Step == 2) r.RequestStop(); }).FinalCheckpoint.TrainableParams));
+
+        using var cancelled = new CancellationTokenSource();
+        cancelled.Cancel();
+        var initial = rig.CreateInitialCheckpoint();
+        var none = rig.Fit(new InMemoryDataLoader(inputs, targets, batchSize: 2), 2, initial, cancellationToken: cancelled.Token);
+        Assert.Equal((TrainingStopReason.Cancelled, 0, 0L), (none.StopReason, none.EpochLosses.Length, none.FinalCheckpoint.Step));
+        Assert.Same(initial, none.FinalCheckpoint);
+
+        var batches = rig.Fit([inputs, inputs], [targets, targets], 3, onStep: r => { if (r.Step == 2) r.RequestStop(); });
+        Assert.Equal((TrainingStopReason.StopRequested, 3L, 2), (batches.StopReason, batches.FinalCheckpoint.Step, batches.EpochLosses.Length));
+    }
+
+    [Fact]
     public void TestInferenceModelExtractionSingleAndMultiInputCoverage()
     {
         var (sample, input, target) = ScalarMultiplyBatches();
@@ -3325,7 +3421,7 @@ public class TrainingRigTrainingLoopCoverageTests
         Assert.Throws<OnnxRuntimeException>(() => run.Step(outOfRange.Shared(), target.Shared()));
         Assert.True(float.IsFinite(run.Step(input.Shared(), target.Shared())));
         Assert.Throws<OnnxRuntimeException>(() => run.Step(outOfRange.Shared(), target.Shared()));
-        Assert.Contains("the last checkpoint you took with StepToCheckpoint", Assert.Throws<InvalidOperationException>(
+        Assert.Contains("the last checkpoint you took with TakeCheckpoint() or StepToCheckpoint(...)", Assert.Throws<InvalidOperationException>(
             () => run.Step(input.Shared(), target.Shared())).Message);
         Assert.DoesNotContain(Tensors(published), t => t.IsDisposed);
     }

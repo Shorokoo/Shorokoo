@@ -33,8 +33,23 @@ internal static class CudaInterop
     private static bool _bound;
 
     public static bool CopyDeviceToHost(IntPtr source, byte[] destination)
-        => Copy(destination, (memcpy, pinned)
-            => memcpy(pinned, source, (nuint)destination.Length, DeviceToHost));
+        => CopyDeviceToHost(source, destination.AsSpan());
+
+    /// <summary>
+    /// Fills <paramref name="destination"/> from the device allocation at
+    /// <paramref name="source"/> — any range of one, since the caller offsets the address. What
+    /// streams a tensor off the card through one reused buffer, a piece at a time.
+    /// </summary>
+    public static unsafe bool CopyDeviceToHost(IntPtr source, Span<byte> destination)
+    {
+        var memcpy = Bind();
+        if (memcpy is null) return false;
+        if (destination.IsEmpty) return true;
+        // Pinned for the length of the call, as Copy pins an array: the CUDA runtime knows nothing
+        // of the GC, and a span over managed memory is a moveable address until fixed.
+        fixed (byte* pinned = destination)
+            return memcpy((IntPtr)pinned, source, (nuint)destination.Length, DeviceToHost) == 0;
+    }
 
     /// <summary>
     /// Fills <paramref name="count"/> bytes of the device allocation at

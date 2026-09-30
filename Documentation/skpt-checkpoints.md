@@ -123,7 +123,7 @@ checkpoints:
 ```csharp
 using Shorokoo;   // Persistence, TrainingRig, TrainingCheckpoint
 
-// checkpoint: from rig.CreateInitialCheckpoint() / TrainStep(); it carries its rig.
+// checkpoint: from rig.CreateInitialCheckpoint() / TrainStep() / a resident run; it carries its rig.
 // (For a bare checkpoint, attach a rig first via rig.AdoptCheckpoint(checkpoint).)
 Persistence.SaveTrainingCheckpointToSkpt(checkpoint, "run.skpt");
 
@@ -132,6 +132,11 @@ var rig     = TrainingRig.FromScratch(modelGraph, lossGraph, optimizerGraph, sam
 var resumed = rig.LoadCheckpointFromSkpt("run.skpt");
 var next    = rig.TrainStep(resumed, inputBatch, targetBatch);   // trainstep compiled internally, cached per fed shape
 ```
+
+A checkpoint whose state is in device memory (one a resident run or `Fit` handed out on a GPU)
+is saved from there, each tensor written through one bounded host staging buffer, so the state is
+never whole in host memory — see [What a save costs](training.md#what-a-save-costs). Loading
+goes through host memory.
 
 Or resume from the file **alone**: the static `TrainingRig.Load` rebuilds the rig from
 the constituents the file carries and returns it with the loaded checkpoint:

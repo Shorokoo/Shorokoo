@@ -223,6 +223,30 @@ public interface IShorokooBackend
         return bytes;
     }
 
+    // Copies `destination.Length` bytes of this value's contents, starting `byteOffset` bytes in,
+    // into `destination` -- a piece of what CopyTensorToHost returns whole, into a buffer the caller
+    // owns and reuses. It is how a tensor is written out of the provider's own memory without its
+    // whole contents ever sitting in host memory at once: a save moves it through one bounded
+    // buffer, piece by piece.
+    //
+    // Returns false, having copied nothing, where this backend cannot copy part of a value; the
+    // caller then falls back to CopyTensorToHost. The default serves a value the host can read
+    // itself, and a backend whose provider keeps values in its own memory overrides it where it can
+    // reach an arbitrary range of the allocation.
+    bool TryCopyTensorRangeToHost(IShorokooTensorValue value, long byteOffset, Span<byte> destination)
+    {
+        ArgumentNullException.ThrowIfNull(value);
+        if (!value.IsHostAccessible) return false;
+        var source = value.GetTensorDataAsSpan<byte>();
+        if (byteOffset < 0 || byteOffset > source.Length - destination.Length)
+            throw new ArgumentOutOfRangeException(nameof(byteOffset),
+                $"{destination.Length} bytes from offset {byteOffset} run past the value's {source.Length}.");
+        source.Slice((int)byteOffset, destination.Length).CopyTo(destination);
+        // The span is the value's last read (Shorokoo/Shorokoo#178).
+        GC.KeepAlive(value);
+        return true;
+    }
+
     // A tensor of this backend holding `data`, allocated where this backend's tensors live -- the
     // mirror of CopyTensorToHost above, and the one call that puts host bytes into MemorySpace.
     // For a host backend that is host memory; for a CUDA one it is the card's own memory, which is

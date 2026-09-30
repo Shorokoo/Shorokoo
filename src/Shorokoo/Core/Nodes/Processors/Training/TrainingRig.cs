@@ -25,14 +25,24 @@ namespace Shorokoo
     {
         /// <summary>The checkpoint after the last epoch.</summary>
         public TrainingCheckpoint FinalCheckpoint { get; }
-        /// <summary>Mean loss per epoch, in epoch order.</summary>
+        /// <summary>Mean loss per epoch, in epoch order — over the steps the run took in each epoch
+        /// it trained in, so a run that stopped part-way through an epoch reports that epoch's mean
+        /// over the steps it ran.</summary>
         public float[] EpochLosses { get; }
 
-        /// <summary>Packages the final checkpoint and the per-epoch losses.</summary>
-        public TrainingResult(TrainingCheckpoint finalCheckpoint, float[] epochLosses)
+        /// <summary>Why the run ended: every epoch trained, a cancellation, or a stop the step
+        /// callback requested. <see cref="FinalCheckpoint"/> is the state after the last step the
+        /// run took whichever it was, so a stopped run resumes from it as a completed one does.</summary>
+        public TrainingStopReason StopReason { get; }
+
+        /// <summary>Packages the final checkpoint, the per-epoch losses and why the run ended.</summary>
+        public TrainingResult(
+            TrainingCheckpoint finalCheckpoint, float[] epochLosses,
+            TrainingStopReason stopReason = TrainingStopReason.Completed)
         {
             FinalCheckpoint = finalCheckpoint;
             EpochLosses = epochLosses;
+            StopReason = stopReason;
         }
     }
 
@@ -454,7 +464,7 @@ namespace Shorokoo
         /// rig sees that the input is unreachable from the loss output and derives no target field, so
         /// there is nothing for a caller to construct. Use <see cref="HasTargets"/> to ask, and the
         /// target-free <see cref="TrainStep(TrainingCheckpoint, IData)"/> /
-        /// <see cref="Fit(TensorDataStruct[], int, TrainingCheckpoint?)"/> to step such a rig.</para>
+        /// <see cref="Fit(TensorDataStruct[], int, TrainingCheckpoint?, Action{TrainingStepReport}?, CancellationToken)"/> to step such a rig.</para>
         /// </summary>
         public TensorStructDef TargetDef { get; private set; } = null!;
 
@@ -1638,6 +1648,31 @@ namespace Shorokoo
         }
 
         /// <summary>
+        /// <see cref="BindInferenceWeights"/> against the checkpoint's parameter <b>descriptions</b>:
+        /// the same concrete model, each weight carrying its shape and dtype, and its elements only
+        /// where it is small enough for a shape pass to read them. What a <c>.skpt</c> save binds,
+        /// since it strips the weights from the model it writes and writes them out of the
+        /// checkpoint's own tensors — so it copies no parameter to the host, which for a checkpoint
+        /// still on the training device would bring the whole model off the card for nothing.
+        /// </summary>
+        internal InternalComputationGraph BindInferenceWeightDescriptions(TrainingCheckpoint checkpoint)
+        {
+            if (checkpoint is null) throw new ArgumentNullException(nameof(checkpoint));
+            static IEnumerable<KeyValuePair<string, TensorAttribute>> Described(TensorDataStruct s) =>
+                s.Definition.Fields.Select(f => s.Fields[f.Name] is TensorData t
+                    ? new KeyValuePair<string, TensorAttribute>(f.Name,
+                        t.Shape.Count <= Shorokoo.Core.AutoDiffCheckpointing.ShapeInferenceInterpreter.MaxSmallTensorElements
+                            ? t.CopyTo(ComputeContext.Host).MoveToAttribute()
+                            : TensorAttribute.WithoutValues(t.Shape, t.DType))
+                    : throw new NotSupportedException(
+                        $"Field '{f.Name}' is a {s.Fields[f.Name].GetType().Name}; only plain tensors can "
+                        + "be bound into a model as weights."));
+            return _concreteArch.ToConcreteModelDescribed(
+                Described(checkpoint.TrainableParams).Concat(Described(checkpoint.ModelState)),
+                _concreteArch.GetShorokooIdNamingScheme());
+        }
+
+        /// <summary>
         /// Returns a NEW checkpoint carrying <paramref name="checkpoint"/>'s values, counters, loss and
         /// history,
         /// with its <see cref="TrainingCheckpoint.Rig"/> set to this rig, so
@@ -2793,7 +2828,7 @@ namespace Shorokoo
         /// <summary>
         /// Executes a single training step on the next batch drawn from <paramref name="loader"/>,
         /// sourcing the epoch / batch counters from the loader — the single-step analogue of
-        /// <see cref="Fit(IDataLoader, int, TrainingCheckpoint?)"/>, sharing its step body so the two
+        /// <see cref="Fit(IDataLoader, int, TrainingCheckpoint?, Action{TrainingStepReport}?, CancellationToken)"/>, sharing its step body so the two
         /// agree on the loader-step-and-counter semantics below.
         ///
         /// <para>The batch's <b>own</b> position (<see cref="DataBatch.Position"/>) both drives the
@@ -2894,7 +2929,7 @@ namespace Shorokoo
         /// The shared body of the loader <c>TrainStep</c>, run against the rig's cached compiled
         /// trainstep (<see cref="_compiledTrainSteps"/>). It draws the batch and hands it to
         /// <see cref="BatchStep"/>, the one place the loader-step-and-counter semantics live
-        /// — the same one <see cref="Fit(IDataLoader, int, TrainingCheckpoint?)"/> and
+        /// — the same one <see cref="Fit(IDataLoader, int, TrainingCheckpoint?, Action{TrainingStepReport}?, CancellationToken)"/> and
         /// <see cref="ResidentTrainingRun"/> step through, so every loader-driven form agrees. It
         /// retains nothing: the checkpoint this returns is the caller's to read.
         /// </summary>
@@ -2904,7 +2939,7 @@ namespace Shorokoo
         {
             if (checkpoint is null) throw new ArgumentNullException(nameof(checkpoint));
             if (loader is null) throw new ArgumentNullException(nameof(loader));
-            return BatchStep(checkpoint, loader.Next(), retain: false, TrainStepCall);
+            return BatchStep(checkpoint, loader.Next(), retainStateOnDevice: false, TrainStepCall);
         }
 
         /// <summary>The checkpoint's value for one reserved counter input ({step, epoch, batchIndex}).
@@ -3148,11 +3183,13 @@ namespace Shorokoo
         /// One training step. <paramref name="retainStateOnDevice"/> leaves the three state outputs
         /// (params, model state, optimizer state) in the execution provider's own memory instead of
         /// fetching them back to the host, so the next step feeds them without crossing the bus —
-        /// the returned checkpoint's tensors are then <b>not</b> host-readable, which is why only
-        /// <see cref="ResidentTrainingRun"/>, which owns their lifetime, ever passes <c>true</c>.
+        /// the returned checkpoint's tensors are then on the device, where only a
+        /// <see cref="ResidentTrainingRun"/>, which tracks who owns them, ever asks for them.
         /// The loss is never retained: it is a scalar the host reads every step either way.
         /// <paramref name="call"/> is how a message about the run names it, <c>TrainStep</c> where
-        /// none is given.
+        /// none is given. <paramref name="reclaimSuperseded"/> says whether the checkpoint returned
+        /// is the caller's, whose superseded state is garbage only once the caller drops it
+        /// (<see cref="ReclaimSupersededState"/>); by default, whenever the state is not retained.
         /// </summary>
         private TrainingCheckpoint RunStep(
             TrainingCheckpoint checkpoint,
@@ -3160,7 +3197,8 @@ namespace Shorokoo
             IData trainingInput,
             IData trainingOutput,
             bool retainStateOnDevice = false,
-            StepCall? call = null)
+            StepCall? call = null,
+            bool? reclaimSuperseded = null)
         {
             call ??= TrainStepCall;
             if (checkpoint is null) throw new ArgumentNullException(nameof(checkpoint));
@@ -3389,12 +3427,12 @@ namespace Shorokoo
             };
 
             // Only state this step superseded and left alive: what it consumed is released already.
-            // A retained step's state belongs to the ResidentTrainingRun, which consumes it with the
+            // State a resident run keeps to itself belongs to the run, which consumes it with the
             // next step or releases it itself, so counting it here would buy a forced blocking gen-2
             // collection per step -- on a model whose state crosses the budget every step, that is a
             // full-heap collection with nothing to collect, in the loop whose whole point is that
             // per-step overhead dominates.
-            if (!retainStateOnDevice)
+            if (reclaimSuperseded ?? !retainStateOnDevice)
                 ReclaimSupersededState(
                     SupersededBytes(checkpoint.TrainableParams, checkpoint.ModelState, checkpoint.OptimizerState),
                     newCheckpoint);
@@ -3540,7 +3578,7 @@ namespace Shorokoo
         /// checkpoint's tensors are copies of the rig's values, so a run begun from
         /// <see cref="CreateInitialCheckpoint()"/> consumes them and takes nothing of the rig's.)
         /// Dispose the run when the loop ends — anything it still holds goes with it, so take the
-        /// checkpoint you want to keep with
+        /// checkpoint you want to keep with <see cref="ResidentTrainingRun.TakeCheckpoint"/> or
         /// <see cref="ResidentTrainingRun.StepToCheckpoint(IData, IData)"/> first.</para>
         ///
         /// <para><b>Steps write the new state over the old.</b> A step's updated state is written
@@ -3562,28 +3600,30 @@ namespace Shorokoo
             IData? hyperparams,
             IData trainingInput,
             IData trainingOutput,
-            bool retain)
+            bool publish)
         {
             if (hyperparams is null) RequireNoRuntimeHyperparameters();
-            return RunStep(checkpoint, hyperparams, trainingInput, trainingOutput, retain, ResidentStepCall);
+            return RunStep(checkpoint, hyperparams, trainingInput, trainingOutput, retainStateOnDevice: true,
+                ResidentStepCall, reclaimSuperseded: publish);
         }
 
         /// <summary>One step of a <see cref="ResidentTrainingRun"/> on an already-drawn batch; see
         /// <see cref="BatchStep"/>.</summary>
         internal TrainingCheckpoint ResidentBatchStep(
-            TrainingCheckpoint checkpoint, DataBatch batch, bool retain)
-            => BatchStep(checkpoint, batch, retain, ResidentStepCall);
+            TrainingCheckpoint checkpoint, DataBatch batch, bool publish)
+            => BatchStep(checkpoint, batch, retainStateOnDevice: true, ResidentStepCall, reclaimSuperseded: publish);
 
         /// <summary>
         /// One step on an already-drawn batch, and the one place the loader-step-and-counter
         /// semantics live: every loader-driven form — <c>TrainStep(loader)</c>,
-        /// <see cref="Fit(IDataLoader, int, TrainingCheckpoint?)"/> and
-        /// <see cref="ResidentTrainingRun"/> — steps through here. The batch is drawn by the caller
-        /// because <c>Fit</c> must see the loader's position after the draw to know whether this is
-        /// the step to bring the state home on.
+        /// <see cref="Fit(IDataLoader, int, TrainingCheckpoint?, Action{TrainingStepReport}?, CancellationToken)"/> and
+        /// <see cref="ResidentTrainingRun"/> — steps through here. The batch is drawn by the caller,
+        /// which is what lets <c>Fit</c> group the step's loss by the epoch the loader was in before
+        /// the draw.
         /// </summary>
         private TrainingCheckpoint BatchStep(
-            TrainingCheckpoint checkpoint, DataBatch batch, bool retain, StepCall call)
+            TrainingCheckpoint checkpoint, DataBatch batch, bool retainStateOnDevice, StepCall call,
+            bool? reclaimSuperseded = null)
         {
             if (checkpoint is null) throw new ArgumentNullException(nameof(checkpoint));
             RequireNoRuntimeHyperparameters();
@@ -3594,7 +3634,8 @@ namespace Shorokoo
             // step's loss — so a later Fit(loader) resumes past this batch via RestoreAfter.
             var stepInput = checkpoint.WithCounters(
                 epoch: batch.Position.Epoch, batchIndex: batch.Position.BatchIndex);
-            return RunStep(stepInput, hyperparams: null, batch.Input, batch.Target, retain, call);
+            return RunStep(stepInput, hyperparams: null, batch.Input, batch.Target, retainStateOnDevice, call,
+                reclaimSuperseded);
         }
 
         /// <summary>The guard the schedule-driven step paths share: a schedule-less runtime
@@ -3672,12 +3713,24 @@ namespace Shorokoo
         /// <param name="trainingInputs">Array of training input batches (each as TensorDataStruct)</param>
         /// <param name="trainingOutputs">Array of training target batches (each as TensorDataStruct)</param>
         /// <param name="numEpochs">Number of passes over the training data</param>
-        /// <returns>Training result with final checkpoint and per-epoch average losses</returns>
+        /// <param name="onStep">Called after every step with what it did, in order, before the next
+        /// step starts; it may end the run there (<see cref="TrainingStepReport.RequestStop"/>) or take
+        /// the state as a checkpoint. See <see cref="TrainingStepReport"/>. A run given none builds no
+        /// report.</param>
+        /// <param name="cancellationToken">Stops the run between two steps: the step running when it
+        /// is cancelled finishes, and the run returns the state after it — never a step cut short,
+        /// whose state could not be recovered. Unlike the runtime context's
+        /// <see cref="Shorokoo.Core.Backends.RunSettings.CancellationToken"/>, which abandons the step
+        /// running.</param>
+        /// <returns>Training result with final checkpoint, per-epoch average losses and why the run
+        /// ended</returns>
         public TrainingResult Train(
             TrainingCheckpoint initialCheckpoint,
             TensorDataStruct[] trainingInputs,
             TensorDataStruct[] trainingOutputs,
-            int numEpochs)
+            int numEpochs,
+            Action<TrainingStepReport>? onStep = null,
+            CancellationToken cancellationToken = default)
         {
             if (initialCheckpoint is null) throw new ArgumentNullException(nameof(initialCheckpoint));
             if (trainingInputs is null) throw new ArgumentNullException(nameof(trainingInputs));
@@ -3699,37 +3752,34 @@ namespace Shorokoo
                     $"{nameof(trainingInputs)}[{i}]", $"{nameof(trainingOutputs)}[{i}]");
 
             // The loop owns every intermediate state and returns only the last, so it trains through a
-            // resident run: the state stays where the provider produced it and crosses to the host on
-            // the final step alone, which is the only one whose checkpoint anybody sees
-            // (Shorokoo/Shorokoo#325).
+            // resident run: the state stays where the provider produced it, and the checkpoint
+            // returned is the last step's state where it is -- on a GPU, the training device's
+            // memory -- taken without a copy (Shorokoo/Shorokoo#325).
             using var run = BeginResidentRun(initialCheckpoint);
-            var checkpoint = initialCheckpoint;
-            var epochLosses = new float[numEpochs];
+            var epochLosses = new List<float>(numEpochs);
+            var stop = TrainingStopReason.Completed;
+            long began = System.Diagnostics.Stopwatch.GetTimestamp();
 
-            for (int epoch = 0; epoch < numEpochs; epoch++)
+            for (int epoch = 0; epoch < numEpochs && stop == TrainingStopReason.Completed; epoch++)
             {
                 float epochLoss = 0;
+                int steps = 0;
 
                 for (int i = 0; i < trainingInputs.Length; i++)
                 {
+                    // Checked before the step, never during it: the state between two steps is
+                    // whole, and a step abandoned part-way would have consumed what it trained from.
+                    if (cancellationToken.IsCancellationRequested) { stop = TrainingStopReason.Cancelled; break; }
                     // Read, not consumed: the same batch is fed again next epoch.
-                    var (input, target) = (trainingInputs[i].Shared(), trainingOutputs[i].Shared());
-                    bool last = epoch == numEpochs - 1 && i == trainingInputs.Length - 1;
-                    if (last)
-                    {
-                        checkpoint = run.StepToCheckpoint(input, target);
-                        epochLoss += checkpoint.Loss!.Value;
-                    }
-                    else
-                    {
-                        epochLoss += run.Step(input, target);
-                    }
+                    epochLoss += run.Step(trainingInputs[i].Shared(), trainingOutputs[i].Shared());
+                    steps++;
+                    if (Reported(run, onStep, began)) { stop = TrainingStopReason.StopRequested; break; }
                 }
 
-                epochLosses[epoch] = epochLoss / trainingInputs.Length;
+                if (steps > 0 || trainingInputs.Length == 0) epochLosses.Add(epochLoss / steps);
             }
 
-            return new TrainingResult(checkpoint, epochLosses);
+            return new TrainingResult(run.TakeCheckpoint(), epochLosses.ToArray(), stop);
         }
 
         /// <summary>
@@ -3751,31 +3801,48 @@ namespace Shorokoo
         /// <c>.Shared()</c> — and the default, a fresh <see cref="CreateInitialCheckpoint()"/>, is
         /// consumed by that step.</para>
         /// </summary>
+        /// <param name="trainingInputs">The input batches, one per step of an epoch.</param>
+        /// <param name="trainingOutputs">The target batches, one per input batch.</param>
+        /// <param name="numEpochs">Number of passes over the batches.</param>
+        /// <param name="initialCheckpoint">State to begin from; defaults to <see cref="CreateInitialCheckpoint()"/>.</param>
+        /// <param name="onStep">Called after every step, as <see cref="Train"/>'s is.</param>
+        /// <param name="cancellationToken">Stops the run between two steps, as <see cref="Train"/>'s does.</param>
         public TrainingResult Fit(
             TensorDataStruct[] trainingInputs,
             TensorDataStruct[] trainingOutputs,
             int numEpochs,
-            TrainingCheckpoint? initialCheckpoint = null)
-            => Train(initialCheckpoint ?? CreateInitialCheckpoint(), trainingInputs, trainingOutputs, numEpochs);
+            TrainingCheckpoint? initialCheckpoint = null,
+            Action<TrainingStepReport>? onStep = null,
+            CancellationToken cancellationToken = default)
+            => Train(initialCheckpoint ?? CreateInitialCheckpoint(), trainingInputs, trainingOutputs, numEpochs,
+                onStep, cancellationToken);
 
         /// <summary>
         /// Fits a rig whose loss reads no target (<see cref="HasTargets"/> is <c>false</c>) over
         /// <paramref name="trainingInputs"/> — the target-free counterpart of
-        /// <see cref="Fit(TensorDataStruct[], TensorDataStruct[], int, TrainingCheckpoint?)"/>
+        /// <see cref="Fit(TensorDataStruct[], TensorDataStruct[], int, TrainingCheckpoint?, Action{TrainingStepReport}?, CancellationToken)"/>
         /// (Shorokoo/Shorokoo#331), for a model that computes its own loss. Throws when the rig's loss
         /// does read a target. Its batches are read, never consumed, and the checkpoint fed as that
         /// overload's are.
         /// </summary>
+        /// <param name="trainingInputs">The input batches, one per step of an epoch.</param>
+        /// <param name="numEpochs">Number of passes over the batches.</param>
+        /// <param name="initialCheckpoint">State to begin from; defaults to <see cref="CreateInitialCheckpoint()"/>.</param>
+        /// <param name="onStep">Called after every step, as <see cref="Train"/>'s is.</param>
+        /// <param name="cancellationToken">Stops the run between two steps, as <see cref="Train"/>'s does.</param>
         public TrainingResult Fit(
             TensorDataStruct[] trainingInputs,
             int numEpochs,
-            TrainingCheckpoint? initialCheckpoint = null)
+            TrainingCheckpoint? initialCheckpoint = null,
+            Action<TrainingStepReport>? onStep = null,
+            CancellationToken cancellationToken = default)
         {
             if (trainingInputs is null) throw new ArgumentNullException(nameof(trainingInputs));
             RequireTargetless(nameof(Fit));
             var noTargets = new TensorDataStruct[trainingInputs.Length];
             for (var i = 0; i < noTargets.Length; i++) noTargets[i] = TargetDef.FromOrderedData();
-            return Train(initialCheckpoint ?? CreateInitialCheckpoint(), trainingInputs, noTargets, numEpochs);
+            return Train(initialCheckpoint ?? CreateInitialCheckpoint(), trainingInputs, noTargets, numEpochs,
+                onStep, cancellationToken);
         }
 
         /// <summary>
@@ -3805,11 +3872,21 @@ namespace Shorokoo
         /// <param name="initialCheckpoint">State to resume from; defaults to <see cref="CreateInitialCheckpoint()"/>.
         /// Fed to the first step as <c>TrainStep</c> feeds one: consumed as it is, read when passed
         /// <c>.Shared()</c>.</param>
-        /// <returns>Final checkpoint (with advanced step / epoch / batch) and the per-epoch mean losses.</returns>
+        /// <param name="onStep">Called after every step with what it did, in order, before the next
+        /// step starts; it may end the run there or take the state as a checkpoint. See
+        /// <see cref="TrainingStepReport"/>.</param>
+        /// <param name="cancellationToken">Stops the run between two steps: the step running when it
+        /// is cancelled finishes, and the run returns the state after it, before the loader draws
+        /// another batch — so the returned checkpoint's position names the last batch trained, and
+        /// passing it back resumes at the next one exactly as a completed run's would.</param>
+        /// <returns>Final checkpoint (with advanced step / epoch / batch), the per-epoch mean losses
+        /// and why the run ended.</returns>
         public TrainingResult Fit(
             IDataLoader loader,
             int numEpochs,
-            TrainingCheckpoint? initialCheckpoint = null)
+            TrainingCheckpoint? initialCheckpoint = null,
+            Action<TrainingStepReport>? onStep = null,
+            CancellationToken cancellationToken = default)
         {
             if (loader is null) throw new ArgumentNullException(nameof(loader));
             if (numEpochs < 1) throw new ArgumentException("Number of epochs must be at least 1.", nameof(numEpochs));
@@ -3842,19 +3919,18 @@ namespace Shorokoo
             // state stays where the provider produced it across the whole fit (Shorokoo/Shorokoo#325).
             // Each step keeps the loader-step-and-counter semantics of TrainStep(loader): the batch's
             // own position feeds the scheduler and is stamped on the checkpoint the step produces.
-            // The batch is drawn here rather than inside the step because only the loader's position
-            // AFTER the draw says whether this is the last step — the one to bring the state home on,
-            // since its checkpoint is the run's result.
+            // The result is the last step's state where it is -- on a GPU, the training device's
+            // memory -- taken without a copy once the loop ends.
             using var run = BeginResidentRun(checkpoint);
+            var stop = TrainingStopReason.Completed;
+            long began = System.Diagnostics.Stopwatch.GetTimestamp();
             while (loader.Position.Epoch < targetEpoch)
             {
+                // Checked before the draw, never during a step: the loader has not moved past the
+                // last batch trained, and the state between two steps is whole.
+                if (cancellationToken.IsCancellationRequested) { stop = TrainingStopReason.Cancelled; break; }
                 long batchEpoch = loader.Position.Epoch;   // the epoch of the batch about to be drawn
-                var batch = loader.Next();
-                bool last = loader.Position.Epoch >= targetEpoch;
-
-                float loss = last
-                    ? (checkpoint = run.StepToCheckpoint(batch)).Loss!.Value
-                    : run.Step(batch);
+                float loss = run.Step(loader.Next());
 
                 // Group per-epoch mean loss by the epoch the batch belonged to.
                 if (batchEpoch != runningEpoch)
@@ -3866,11 +3942,34 @@ namespace Shorokoo
                 }
                 epochLossSum += loss;
                 epochBatchCount++;
+                if (Reported(run, onStep, began)) { stop = TrainingStopReason.StopRequested; break; }
             }
             if (epochBatchCount > 0)
                 epochLosses.Add(epochLossSum / epochBatchCount);
 
-            return new TrainingResult(checkpoint, epochLosses.ToArray());
+            return new TrainingResult(run.TakeCheckpoint(), epochLosses.ToArray(), stop);
+        }
+
+        /// <summary>
+        /// Hands the step <paramref name="run"/> just took to <paramref name="onStep"/>, and says
+        /// whether it asked to stop there. Nothing is built for a run without a callback. The report
+        /// is valid only for the length of the call.
+        /// </summary>
+        private static bool Reported(ResidentTrainingRun run, Action<TrainingStepReport>? onStep, long began)
+        {
+            if (onStep is null) return false;
+            var history = run.History;
+            var report = new TrainingStepReport(
+                run, history[history.Count - 1], System.Diagnostics.Stopwatch.GetElapsedTime(began));
+            try
+            {
+                onStep(report);
+            }
+            finally
+            {
+                report.Expire();
+            }
+            return report.StopRequested;
         }
 
         /// <summary>

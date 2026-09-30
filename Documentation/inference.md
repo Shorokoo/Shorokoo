@@ -347,8 +347,10 @@ using var ctx = new ComputeContext(backend)
 var outputs = ctx.Execute(graph, inputs);   // stops when cts does
 ```
 
-Giving a training rig's `runtimeContext` one is how a long `Fit` is stopped — see
-[Compute contexts](training.md#compute-contexts-mergecontext-and-runtimecontext).
+Giving a training rig's `runtimeContext` one abandons the training step running, which consumes
+the run's state. To stop a `Fit` or `Train` between steps and keep what it trained, pass the
+`cancellationToken` parameter of `Fit` / `Train` instead — see
+[Stopping and watching a run](training.md#stopping-and-watching-a-run).
 
 ## Backend selection
 

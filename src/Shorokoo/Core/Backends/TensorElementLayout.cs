@@ -47,6 +47,15 @@ public static class TensorElementLayout
     /// <exception cref="OverflowException">The tensor covers more bytes than an <see cref="int"/>
     /// holds, which is more than any buffer here can address.</exception>
     public static int ByteCount(ShorokooTensorElementType elementType, long[] shape)
+        => checked((int)ByteLength(elementType, shape));
+
+    /// <summary><see cref="ByteCount"/> without its <see cref="int"/> ceiling: the bytes a tensor
+    /// covers as a <see cref="long"/>, for a path that moves them in pieces rather than into one
+    /// buffer, and so is not bounded by what one buffer can address.</summary>
+    /// <exception cref="ArgumentNullException"><paramref name="shape"/> is null.</exception>
+    /// <exception cref="NotSupportedException">The element type has no fixed byte stride, or
+    /// <paramref name="shape"/> has no known element count.</exception>
+    public static long ByteLength(ShorokooTensorElementType elementType, long[] shape)
     {
         ArgumentNullException.ThrowIfNull(shape);
         var elements = 1L;
@@ -64,6 +73,6 @@ public static class TensorElementLayout
                     + "run resolved.");
             elements *= dim;
         }
-        return checked((int)(elements * ElementSizeInBytes(elementType)));
+        return checked(elements * ElementSizeInBytes(elementType));
     }
 }

@@ -242,15 +242,17 @@ public class SideBySideBackendHardwareTests
         Assert.Equal(MemorySpace.Host, home.Space);
         Assert.All(Floats(home), v => Assert.True(float.IsFinite(v)));
 
-        // And the loop built on all this still trains, publishing state the host can read.
+        // And the loop built on all this still trains, publishing its state where it is.
         using var run = rig.BeginResidentRun(checkpoint);
         run.Step(input.Shared(), target.Shared());
         var published = run.StepToCheckpoint(input, target);
 
         Assert.Equal(2, published.Step);
         Assert.All(published.TrainableParams.Fields.Values,
+            f => Assert.Equal(onCard, ((TensorData)f).Space));
+        Assert.All(published.ToHost().TrainableParams.Fields.Values,
             f => Assert.Equal(MemorySpace.Host, ((TensorData)f).Space));
-        Assert.NotEmpty(TrainingRigHelpers.FlattenStruct(published.TrainableParams));
+        Assert.NotEmpty(TrainingRigHelpers.FlattenStruct(published.ToHost().TrainableParams));
     }
 
     [SideBySideCudaFact]

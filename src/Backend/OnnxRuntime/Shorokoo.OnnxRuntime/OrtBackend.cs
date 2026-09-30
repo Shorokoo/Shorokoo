@@ -947,6 +947,42 @@ public abstract class OrtBackend : IShorokooBackend
     }
 
     /// <summary>
+    /// A range of <paramref name="value"/>'s contents, copied into <paramref name="destination"/>
+    /// — through the CUDA runtime from the device address plus <paramref name="byteOffset"/> where
+    /// the value is on the card, so a tensor streams off it through one reused buffer instead of
+    /// arriving whole. False only where the CUDA runtime is absent, for the caller to fall back to
+    /// <see cref="CopyTensorToHost"/>, which then reports that.
+    /// </summary>
+    public bool TryCopyTensorRangeToHost(IShorokooTensorValue value, long byteOffset, Span<byte> destination)
+    {
+        ArgumentNullException.ThrowIfNull(value);
+
+        if (value.IsHostAccessible)
+        {
+            var source = value.GetTensorDataAsSpan<byte>();
+            if (byteOffset < 0 || byteOffset > source.Length - destination.Length)
+                throw RangeOutside(byteOffset, destination.Length, source.Length);
+            source.Slice((int)byteOffset, destination.Length).CopyTo(destination);
+            GC.KeepAlive(value);
+            return true;
+        }
+
+        if (value.ValueType != ShorokooOnnxValueType.Tensor)
+            throw new InvalidOperationException(
+                $"Only a tensor can be read back from device memory; this is a {value.ValueType}.");
+
+        var length = TensorElementLayout.ByteLength(value.ElementType, value.Shape);
+        if (byteOffset < 0 || byteOffset > length - destination.Length)
+            throw RangeOutside(byteOffset, destination.Length, length);
+        var copied = CudaInterop.CopyDeviceToHost(DevicePointer(value) + (nint)byteOffset, destination);
+        GC.KeepAlive(value);
+        return copied;
+    }
+
+    private static ArgumentOutOfRangeException RangeOutside(long byteOffset, int count, long length)
+        => new(nameof(byteOffset), $"{count} bytes from offset {byteOffset} run past the value's {length}.");
+
+    /// <summary>
     /// The address the value's buffer is at, without reading it — which for a device allocation is
     /// the one thing that may be done with it here.
     ///

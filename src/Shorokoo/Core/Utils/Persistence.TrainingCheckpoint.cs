@@ -724,9 +724,11 @@ namespace Shorokoo
             // by canonical identity. Sourcing it from the rig (not a re-supplied model graph +
             // example input) means the container's self-describing model and ToInferenceModel() can
             // never diverge. Each parameter is mapped below to its own per-kind data entry, so no
-            // weight bytes are duplicated.
+            // weight bytes are duplicated. The model written carries no weights, so it is bound from
+            // the weights' descriptions: no parameter is copied to the host to be stripped again,
+            // which for a checkpoint still on the training device would be the whole model.
             const string operation = "Persistence.SaveTrainingCheckpointToSkpt";
-            var source = _checkpoint.Rig!.BindInferenceWeights(_checkpoint);
+            var source = _checkpoint.Rig!.BindInferenceWeightDescriptions(_checkpoint);
             var weightNodes = CheckpointBuilder.CollectWeightNodes(source, operation);
 
             // Default weight mapping: each model parameter (keyed by its full identifier) points at

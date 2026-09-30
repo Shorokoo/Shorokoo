@@ -149,8 +149,8 @@ namespace Shorokoo.Onnx
                 var shape = st.Shape;
                 var dtype = st.DataType.ToUpperInvariant();
 
-                // The tensor's storage as raw bytes — measured, not copied.
-                int blobLength = st.RawBytes.Length;
+                // The tensor's storage as raw bytes — measured, not read, wherever it is.
+                long blobLength = st.ByteLength;
 
                 long startOffset = currentOffset;
                 long endOffset = startOffset + blobLength;
@@ -185,21 +185,22 @@ namespace Shorokoo.Onnx
             stream.Write(lengthBytes, 0, lengthBytes.Length);
             stream.Write(headerBytes, 0, headerBytes.Length);
 
+            // A stream that only counts what is written through it has no use for the payload, and
+            // reading a device-resident tensor to count it would bring the whole state off the card
+            // for nothing: it is told the payload's length instead.
+            if (stream is ILengthOnlyStream { IsLengthOnly: true } counter)
+            {
+                counter.Advance(currentOffset);
+                return;
+            }
+
             // Second pass: each tensor's payload goes from its own storage into the stream, in the
             // order the header's offsets were accumulated. Re-reading the storage is sound because a
             // tensor's byte length is fixed by the value it wraps and SafeTensor.Data is get-only, so
-            // the payload cannot disagree with the offsets already written.
-            //
-            // The span is a window onto storage the tensor owns and roots nothing itself, so the
-            // tensor is kept alive across the write: a local is retired at its LAST READ, which
-            // without the KeepAlive would be the call that produced the span, leaving the write
-            // reading memory a collection could already have freed (Shorokoo/Shorokoo#178).
+            // the payload cannot disagree with the offsets already written. A tensor in a device's
+            // memory is streamed through one bounded host buffer rather than copied whole.
             for (int i = 0; i < tensors.Count; i++)
-            {
-                var record = tensors[i];
-                stream.Write(record.RawBytes);
-                GC.KeepAlive(record);
-            }
+                tensors[i].WriteTo(stream);
         }
 
         /// <summary>

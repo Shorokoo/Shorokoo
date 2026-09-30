@@ -828,6 +828,28 @@ namespace Shorokoo
                     + "in host memory.");
 
         /// <inheritdoc/>
+        internal override long ContentByteLength
+            => this.Value.IsHostAccessible
+                ? this.Value.GetTensorDataAsSpan<byte>().Length
+                : TensorElementLayout.ByteLength(backing.ElementType, backing.Shape);
+
+        /// <summary>
+        /// The storage's own bytes where the host can read them, and otherwise the value streamed
+        /// out of the provider's memory through one bounded buffer by the backend that made it.
+        /// </summary>
+        private protected override void WriteContentBytes(Stream destination)
+        {
+            if (backing.IsHostAccessible)
+            {
+                destination.Write(backing.GetTensorDataAsSpan<byte>());
+                GC.KeepAlive(backing);
+                return;
+            }
+            StagedReadBack.Write(AllocatingBackend, backing, ContentByteLength, destination);
+            GC.KeepAlive(backing);
+        }
+
+        /// <inheritdoc/>
         public override bool IsHostResident => this.Value.IsHostAccessible;
 
         /// <summary>
@@ -840,9 +862,8 @@ namespace Shorokoo
             : throw new InvalidOperationException(
                 $"This tensor ({this.Shape}:{this.DType}) lives in the execution provider's own " +
                 "memory, not host memory, so its contents cannot be read here. ToHost() takes a " +
-                "copy in host memory; a ResidentTrainingRun, which keeps training state on the " +
-                "device between steps, brings its state home with StepToCheckpoint(...) on the " +
-                "step you want to read or save.");
+                "copy in host memory; a TrainingCheckpoint's ToHost() does so for the whole state. " +
+                "Saving needs no copy: a checkpoint's saves write it straight out of device memory.");
 
         /// <summary>
         /// A writable span over the elements. Taking it retires every copy a run made of this

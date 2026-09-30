@@ -371,8 +371,8 @@ kept with `CompiledGraph.Execute(inputs, retainOnDevice)`, the state of a
 [resident training run](training.md#keeping-training-state-on-the-device), and
 anything placed by `To`, `CopyTo` or `AllocateUninitialized` on a device context.
 `IsHostResident` tells you which; the accessors throw `InvalidOperationException`,
-pointing to `ToHost()` (copy to host) or, for resident training state,
-`StepToCheckpoint`. Tensors built from C# arrays, and run outputs not kept on the
+pointing to `ToHost()` (copy to host); for a training checkpoint, that is
+`checkpoint.ToHost()`. Tensors built from C# arrays, and run outputs not kept on the
 device, are host-resident.
 
 ## Anti-patterns

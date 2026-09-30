@@ -333,13 +333,12 @@ public class GpuExecutionTests
     }
 
     /// <summary>
-    /// A checkpoint a resident run hands out is host memory the run goes on from: the next step
-    /// reads it through a card copy of its whole state, and then trains from state of its own. The
-    /// copies go with that step rather than staying with the caller's checkpoint, which would keep
-    /// a second copy of the state on the card for as long as the checkpoint lives.
+    /// A checkpoint a resident run hands out stays on the card, where the run goes on from it: the
+    /// next step reads it in place, so no copy of it is made, on the card or anywhere else, and
+    /// the caller's checkpoint holds the state once.
     /// </summary>
     [CudaFact]
-    public void CudaProvider_AResidentRunLetsGoOfTheCardCopiesOfACheckpointItHandedOutOnceItHasMovedOn()
+    public void CudaProvider_ACheckpointAResidentRunHandsOutStaysOnTheCardAndIsReadThereWithoutACopy()
     {
         var (input, target) = (TrainingRigHelpers.InBatch(1f, 2f, 3f, 4f),
                                TrainingRigHelpers.TargetBatch(2f, 4f, 6f, 8f));
@@ -352,6 +351,7 @@ public class GpuExecutionTests
         TensorData[] state = [.. ((TensorDataStruct[])[published.TrainableParams, published.ModelState, published.OptimizerState])
             .SelectMany(fields => fields.Fields.Values.OfType<TensorData>())];
         Assert.NotEmpty(state);
+        Assert.All(state, t => Assert.False(t.IsHostResident));
         Assert.All(state, t => Assert.True(t.CopiesAreEmpty));
     }
 
@@ -423,7 +423,7 @@ public class GpuExecutionTests
     /// one that writes it anywhere else — the same bits, not merely close — with and without a
     /// budget on the context, which counts that state outside the arena. Every step writes all 56
     /// of the stack's state outputs over their inputs, the first one over the copies of the initial
-    /// checkpoint it took; the checkpoint step brings its state home and writes none.
+    /// checkpoint it took, and the checkpoint step too, since its state stays on the card.
     /// </summary>
     [CudaFact]
     public void CudaProvider_AResidentRunWritingItsStateOverTheStateItConsumedTrainsExactlyAsWithout()
@@ -442,7 +442,7 @@ public class GpuExecutionTests
                 using var run = rig.BeginResidentRun();
                 for (int i = 0; i < 4; i++) run.Step(input.Shared(), target.Shared());
                 var final = run.StepToCheckpoint(input.Shared(), target.Shared());
-                return ([.. Weights(final), .. TrainingRigHelpers.FlattenStruct(final.OptimizerState)], context.AliasedOutputs);
+                return ([.. Weights(final), .. TrainingRigHelpers.FlattenStruct(final.ToHost().OptimizerState)], context.AliasedOutputs);
             }
         }
 
@@ -456,8 +456,8 @@ public class GpuExecutionTests
         Assert.Equal(plain, aliased);
         Assert.Equal(plain, budgeted);
         Assert.Equal(0L, none);
-        Assert.Equal(4 * 56L, written);
-        Assert.Equal(4 * 56L, budgetWritten);
+        Assert.Equal(5 * 56L, written);
+        Assert.Equal(5 * 56L, budgetWritten);
     }
 
     /// <summary>
@@ -799,7 +799,7 @@ public class GpuExecutionTests
     }
 
     private static float[] Weights(TrainingCheckpoint checkpoint) =>
-        TrainingRigHelpers.FlattenStruct(checkpoint.TrainableParams);
+        TrainingRigHelpers.FlattenStruct(checkpoint.ToHost().TrainableParams);
 
     private static float AddTwoScalars(ComputeContext ctx, float left, float right)
     {

@@ -166,7 +166,7 @@ internal sealed class OrtTensorValue : IShorokooTensorValue
         throw new InvalidOperationException(
             "This value's storage is the execution provider's own memory, not host memory, so "
             + "it cannot be read directly. A resident training run leaves its state there "
-            + "deliberately; ResidentTrainingRun.StepToCheckpoint is what brings it home.");
+            + "deliberately; TensorData.ToHost() or TrainingCheckpoint.ToHost() brings it home.");
     }
 
     public ReadOnlySpan<T> GetTensorDataAsSpan<T>() where T : unmanaged

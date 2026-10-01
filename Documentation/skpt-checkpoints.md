@@ -221,7 +221,7 @@ are the model's plus the target; the output is the scalar loss:
 
 ```csharp
 var eval = Persistence.LoadEvaluationModel("run.skpt");    // [model inputs…, targets] → loss
-var loss = ComputeContext.Default.Execute(eval, batch, targets)[0].ToTensorData().ToHost().ValueAt<float>(0);
+var loss = ComputeContext.Default.Execute(eval, batch, targets)[0].ToTensorData().ValueAt<float>(0);
 ```
 
 This splices two graphs and binds the trained weights; no trainstep, autodiff,

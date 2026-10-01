@@ -11,8 +11,8 @@ Related: [defining-models.md](defining-models.md) · [nn-library.md](nn-library.
   `trainingBackend: TrainingBackend.Native` leaves the gradient to the backend that runs the step —
   see [training-backends.md](training-backends.md).
 - A step leaves the training state where it ran — on a GPU, the card's memory — so nothing
-  crosses the bus between steps; `checkpoint.ToHost()` brings a checkpoint to the host to read its
-  elements. `rig.BeginResidentRun()` (which `Fit` / `Train` use) also owns the state between
+  crosses the bus between steps; reading a state tensor's values copies them to the host and
+  leaves it there. `rig.BeginResidentRun()` (which `Fit` / `Train` use) also owns the state between
   steps — see [Keeping training state on the device](#keeping-training-state-on-the-device).
 - A step **consumes** what it is fed as it is (the checkpoint's state and the batch), so
   `cp = rig.TrainStep(cp, x, y)` releases superseded state as it runs. Feed `cp.Shared()` /
@@ -538,7 +538,7 @@ for (int step = 0; step < 50_000; step++)
   for (int i = 0; i < steps && !satisfied; i++) run.Step(loader);
   TrainingCheckpoint checkpoint = run.TakeCheckpoint();  // no step, no copy: on a GPU, on the card
   checkpoint.Save("ckpt.safetensors");                    // written straight out of device memory
-  TrainingCheckpoint onHost = checkpoint.ToHost();        // only reading elements needs the host
+  TrainingCheckpoint onHost = checkpoint.ToHost();        // a copy of the whole state in host memory
   ```
 - **A checkpoint handed out is yours.** The run goes on training from it but only reads it, and
   `Dispose` leaves it alone. A later step therefore writes its new state beside it rather than over
@@ -561,10 +561,11 @@ step left it — on a GPU, device memory. A manual `TrainStep` loop leaves its s
 backend with no device memory, a resident run gives the same losses and checkpoints, to the bit, as
 a step loop.
 
-> Saving, resuming and training from a checkpoint work wherever its state is. Reading its elements
-> (`AccessMemory` and the other accessors) needs host memory: on a device-resident tensor they throw,
-> saying to call `ToHost()`. `checkpoint.ToHost()` copies each tensor the host cannot read, and is the
-> same checkpoint where every tensor already is host-readable (always on a CPU backend).
+> Saving, resuming, training from and reading a checkpoint work wherever its state is. Reading a
+> tensor's values (`CopyMemory`, `ValueAt`, `AccessMemory` and the other accessors) copies them to
+> the host and leaves the tensor where it is. `checkpoint.ToHost()` copies each tensor the host
+> cannot read into host memory of its own, and is the same checkpoint where every tensor already is
+> host-readable (always on a CPU backend).
 
 ### Stopping and watching a run
 
@@ -1262,7 +1263,7 @@ declared rank is refused with `FW056`, naming the offenders and listing the mode
 5. Read `outcome.EpochLosses` for the loss curve and `outcome.FinalCheckpoint.TrainableParams`
    (a `TensorDataStruct`) for the weights, via `.Fields`:
    ```csharp
-   foreach (var (name, value) in outcome.FinalCheckpoint.ToHost().TrainableParams.Fields)
+   foreach (var (name, value) in outcome.FinalCheckpoint.TrainableParams.Fields)
    {
        var data = (TensorData)value;   // shape via data.Shape.Dims; values via data.CopyMemory<float>()
    }

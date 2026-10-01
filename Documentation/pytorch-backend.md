@@ -91,7 +91,8 @@ Console.WriteLine(environment);             // "/home/me/.cache/shorokoo/python-
 
 On CUDA, a tensor moved to the context (`TensorData.To(context)`) is on the card and read
 there. Every input is placed on the card before a run, and every tensor output stays there
-(`TensorData.IsHostResident` is false) until it is moved — `ToHost()` brings it home. String
+(`TensorData.IsHostResident` is false): reading its values copies them to the host and leaves it
+there, and `ToHost()` makes a copy of it in host memory. String
 tensors and sequences are read and left in host memory.
 
 **One environment per process.** The process gets whichever environment the first torch

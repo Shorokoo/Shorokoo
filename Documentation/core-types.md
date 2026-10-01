@@ -209,15 +209,18 @@ var activated = y.Relu();
 ## Reading concrete values out of a result
 
 Execution, run outputs and checkpoint parameters are `TensorData` (see
-[inference.md](inference.md)). A run's outputs are in the memory of the backend that ran it, so
-on a GPU backend bring one to the host with `ToHost()` first (on a CPU backend it is the tensor
-itself). Read values by naming the CLR storage type:
+[inference.md](inference.md)). Read values by naming the CLR storage type, wherever the tensor
+is:
 
 ```csharp
-TensorData result = OnnxEngine.Eval(y).ToHost();
+TensorData result = OnnxEngine.Eval(y);
 float[] values = result.CopyMemory<float>();   // the whole buffer, in an array you own
 float first    = result.ValueAt<float>(0);     // one element
 ```
+
+A run's outputs are in the memory of the backend that ran it — on a GPU backend, the card's.
+Reading a tensor on a card copies its values to the host and returns them; the tensor stays where
+it is, alive and unchanged.
 
 Storage types: `float32`→`float`, `float64`→`double`, `int64`→`long`, `int32`→`int`,
 `bit`→`bool`, `float16`→`Float16`, `bfloat16`→`BFloat16`, etc. Any other type throws
@@ -227,9 +230,13 @@ copies the bytes, for any dtype.
 On a typed `TensorData<T>` (from `As<T>()`) the type is implied:
 `result.As<float32>().CopyMemory()` is a `float[]`, `ValueAt(i)` a `float`.
 `AccessMemory<V>()` / `AccessMemory()` return a `ReadOnlySpan` instead of a copy (see
-below for keeping the tensor alive). `TensorData.Data` (`object[]`) is for
-diagnostics: each storage byte boxed (the strings for a `utf8` tensor), not the
-element values.
+[below](#accessmemory-in-place-on-the-host-through-a-copy-on-a-card)). `TensorData.Data`
+(`object[]`) is for diagnostics: each storage byte boxed (the strings for a `utf8` tensor), not
+the element values.
+
+**Every accessor reads; none writes.** A tensor's contents are fixed when it is built — from a C#
+array or bytes, by a load, or as a run's output. A tensor with other values is the output of a
+run: build a graph that computes them and run it.
 
 ## Two kinds of concrete tensor: `TensorData` and `TensorAttribute`
 
@@ -344,11 +351,21 @@ is already on the host, return the same tensor, so consuming or deleting the res
 (including via `using`) affects the original. `CopyTo` always returns an independent
 tensor; see [Moving data between contexts](inference.md#moving-data-between-contexts).
 
-**A span is a window, not a copy.** `AccessMemory()` and `AccessRawMemory()` point
-into the tensor's memory, and the span does not keep the tensor alive. If the tensor
-is deleted, or becomes unreachable while you read, the span points at freed memory.
-Taking the span can be the tensor's last use, after which it is collectable even
-while still in scope, so this is **not** safe:
+### `AccessMemory()`: in place on the host, through a copy on a card
+
+`AccessMemory()` and `AccessRawMemory()` return a `ReadOnlySpan`, so nothing can be written
+through them, and do the fastest thing for where the tensor is.
+
+**On a card**, the tensor's values are first copied into a managed array in host memory, and the
+span is over that array, which it keeps alive while you use it. The tensor holds the copy weakly
+and every later call reuses it while it lives: a loop reading `t.AccessMemory()[i]` copies the
+tensor once, not once per element. Once nothing uses the copy it goes at the next garbage
+collection, and a call after that copies again.
+
+**On the host**, the span is a window onto the tensor's own memory, not a copy, and it does not
+keep the tensor alive. If the tensor is deleted, or becomes unreachable while you read, the span
+points at freed memory. Taking the span can be the tensor's last use, after which it is
+collectable even while still in scope, so this is **not** safe:
 
 ```csharp
 TensorData result = OnnxEngine.Eval(y);
@@ -366,18 +383,19 @@ GC.KeepAlive(result);                                     // safe
 Or use `CopyMemory<V>()`, `CopyRawMemory()` or `ValueAt<V>(int)`, which keep the
 tensor alive for you.
 
-### A tensor whose values are not on the host
+### A tensor whose values are on a card
 
-A tensor in device memory cannot be read from the host. That includes every output
-of a run on a GPU backend (`Eval`, `Execute`, `Run`, a compiled graph's runs), the
-state a [training step](training.md#keeping-training-state-on-the-device) on a GPU
-hands back, and anything placed by `To`, `CopyTo` or `AllocateUninitialized` on a
-device context. `IsHostResident` tells you which; the accessors throw
-`InvalidOperationException`, pointing to `ToHost()` (copy to host); for a training
-checkpoint, that is `checkpoint.ToHost()`. Tensors built from C# arrays, and the
-outputs of a run on a CPU backend, are host-resident. Nothing moves a run's output to
-the host but `ToHost()`, `To` or `CopyTo`, or a run on a host backend it is fed to —
-see [Where a run's inputs and outputs are](inference.md#where-a-runs-inputs-and-outputs-are).
+Every output of a run on a GPU backend (`Eval`, `Execute`, `Run`, a compiled graph's
+runs), the state a [training step](training.md#keeping-training-state-on-the-device)
+on a GPU hands back, and anything placed by `To` or `CopyTo` on a device context is
+in the card's memory; `IsHostResident` is false. It is read like any other tensor:
+`CopyMemory`, `ValueAt`, `AccessMemory` and the rest copy its values to the host and
+return them, and the tensor stays on the card. Tensors built from C# arrays, and the
+outputs of a run on a CPU backend, are host-resident. `ToHost()` makes a tensor of
+its own in host memory — `checkpoint.ToHost()` does so for a whole training
+checkpoint. Nothing moves a run's output to the host but `ToHost()`, `To` or
+`CopyTo`, or a run on a host backend it is fed to — see
+[Where a run's inputs and outputs are](inference.md#where-a-runs-inputs-and-outputs-are).
 
 ## Anti-patterns
 

@@ -204,7 +204,7 @@ attached to it on the card, plus the arena limit of its executing run; see
 That count is exact, but the card also holds:
 
 - **The allocator tensors are placed from.** Tensors put on a card (by `To`,
-  `CopyTo`, `AllocateUninitialized`, or a run copying a host input there) come from
+  `CopyTo`, or a run copying a host input there) come from
   one allocator per card and runtime, shared by every context over that runtime
   and kept for the life of the process. It never shrinks: it keeps the most ever
   allocated through it at once.
@@ -238,9 +238,9 @@ does not matter for a training step (its peak is intermediates, its output a
 scalar loss), but for a pipeline over a very large input with an input-shaped
 output, the unrecyclable buffer is the largest in the run.
 
-[Feeding the input as it is](inference.md#feeding-a-large-input-without-a-second-copy)
-instead of `.Shared()` releases it when the run returns, and allocating on the
-context removes the managed copy; neither frees it for intermediates. A training
+[Feeding the input as it is](inference.md#feeding-a-run-consumed-shared-or-tried)
+instead of `.Shared()` releases it when the run returns; that does not free it for
+intermediates. A training
 step writes outputs into the state it replaces through ONNX Runtime's I/O binding
 ([A run that writes an output into what it consumed](inference.md#a-run-that-writes-an-output-into-what-it-consumed)),
 saving one input-sized buffer per output that matches an input's dtype and

@@ -20,13 +20,12 @@ Related: [core-types.md](core-types.md) · [defining-models.md](defining-models.
 - **A tensor fed to a run as it is is consumed by that run.** Pass `.Shared()` to have the run
   only read it, or `.TryConsume()` to consume it only when nothing else is reading it —
   [Feeding a run: consumed, shared or tried](#feeding-a-run-consumed-shared-or-tried),
-  [A tensor's lifetime](#a-tensors-lifetime-locks-and-deletion),
-  [Feeding a large input without a second copy](#feeding-a-large-input-without-a-second-copy).
+  [A tensor's lifetime](#a-tensors-lifetime-locks-and-deletion).
 - A compute context keeps books on tensors and owns none; disposing it leaves every tensor
   alive — [Moving data between contexts](#moving-data-between-contexts).
 - **A run's outputs are in the memory of the backend that ran it** — on a GPU backend, the
-  card's — and nothing moves them afterwards. `ToHost()` brings one to the host to be read;
-  fed to a run on another context, it is placed there by that run —
+  card's — and nothing moves them afterwards. Reading one's values copies them to the host and
+  leaves it there; fed to a run on another context, it is placed there by that run —
   [Where a run's inputs and outputs are](#where-a-runs-inputs-and-outputs-are).
 - On a GPU backend a context's `DeviceMemory` settings are a budget on what it holds on the card
   and the arena settings of the sessions it compiles —
@@ -54,8 +53,8 @@ var features = Conv(input, w, b, AutoPad.NotSet,
 TensorData result = OnnxEngine.Eval(features);
 
 // Read the numbers out (see core-types.md). On a GPU backend the result is on the card, and
-// ToHost() brings it to the host; on a CPU backend it is the result itself.
-float[] values = result.ToHost().CopyMemory<float>();
+// reading it copies its values to the host.
+float[] values = result.CopyMemory<float>();
 ```
 
 What `Eval` accepts:
@@ -119,7 +118,7 @@ var concrete = graph
     .ToConcreteModel();
 
 var results = ComputeContext.Default.Execute(concrete, input);   // params IData[]
-float[] values = results[0].ToTensorData().ToHost().CopyMemory<float>();
+float[] values = results[0].ToTensorData().CopyMemory<float>();
 ```
 
 For a graph loaded from a `.srk`/`.zsrk` file,
@@ -307,8 +306,8 @@ var r2 = compiled.Execute(inputData2);             // reuses the session
 `Run(ComputationGraph graph, params NamedModelParam[] inputs)`, and `ExecuteWithState(...)`
 (for stateful models). `TensorData` implements `IData`. `Execute`, `Run` and
 `CompiledGraph.Execute` return `NamedModelParam[]`, each in the memory of the context's backend;
-read each with `ToTensorData().ToHost()` then `CopyMemory<V>()`, or `ValueAt<V>(i)`, V being the
-CLR storage type (`float` for `float32`).
+read each with `ToTensorData()` then `CopyMemory<V>()`, or `ValueAt<V>(i)`, V being the CLR
+storage type (`float` for `float32`), wherever it is.
 `ExecuteWithState` returns `(NamedModelParam[] regularOutputs, ComputationGraph updatedGraph)`
 — feed the updated graph to the next call. `Eval` returns `TensorData` (or `TensorData[]`).
 
@@ -614,8 +613,8 @@ before the run with the backend's own move there
   counts it ([A context's device-memory budget](#a-contexts-device-memory-budget)).
 - **Read**: the copy is made on first read and kept — a `TensorData` held by the source,
   attached to the reading context (visible in `context.Tensors`), and reused by later shared
-  reads. Writing the source (`AccessModifiableMemory` and the like) retires it; so does
-  deleting or consuming the source.
+  reads for as long as the source lives. Deleting or consuming the source retires it, and so
+  does a training step letting go of the copies of the batch it read.
 
 ### Where a run's inputs and outputs are
 
@@ -632,13 +631,14 @@ where they share a runtime.
   with an `InvalidOperationException` rather than copying it.
 - **Outputs.** Every output comes back in the run memory, as a new `TensorData` attached to the
   context that ran it — on a GPU backend, on the card, `IsHostResident` false. Nothing moves it
-  afterwards. `ToHost()` brings it to the host, `To(context)` puts it on another context, and a
-  run on another context that is fed it places it there as one of its inputs.
+  afterwards. Reading its values copies them to the host and leaves it on the card; `ToHost()`
+  makes a copy of it in host memory, `To(context)` puts it on another context, and a run on
+  another context that is fed it places it there as one of its inputs.
 
 ```csharp
 var compiled = cuda.Compile(graph);
 var y = compiled.Execute(x)[0].ToTensorData();     // on the card
-float[] values = y.ToHost().CopyMemory<float>();   // one copy across the bus, to read it
+float[] values = y.CopyMemory<float>();            // one copy across the bus; y stays on the card
 var onCpu = cpu.Execute(graph, y.Shared());        // copied to the host as cpu's input
 var next = compiled.Execute(y);                    // read where it is, and consumed: nothing crosses
 ```
@@ -682,7 +682,7 @@ to — see [Moving data between contexts](#moving-data-between-contexts).
 | **Moved into an attribute** | `MoveToAttribute()`, which takes its contents — see [core-types.md](core-types.md#the-two-conversions-and-which-one-spends-its-source). |
 
 A run's read-copy of a tensor ([above](#feeding-a-run-consumed-shared-or-tried)) ends when its
-source is written or ends, or releases its copies (as a training step does for its batch).
+source ends, or releases its copies (as a training step does for its batch).
 Elements a sequence owns end with the sequence, except one a run is reading on its own
 account; a sequence whose owned element a run is reading cannot be disposed.
 
@@ -693,16 +693,16 @@ consumed one, which run took it). `Shape`, `DType`, `ToString()`, `IsDisposed`,
 no-op, so double disposal is harmless.
 
 An unreferenced tensor is reclaimed by the GC through its backend; deleting only chooses
-*when*. Runtime-allocated buffers (run outputs, card copies, `AllocateUninitialized` on a real
-context) are native and freed at once; a tensor built from a C# array frees its native
-read-copies at once and leaves the array to the GC.
+*when*. Runtime-allocated buffers (run outputs, card copies) are native and freed at once; a
+tensor built from a C# array frees its native read-copies at once and leaves the array to the GC.
 
 **What a run holds.** A run holds a reader lock on every tensor it reads until it returns; any
 number of runs may read one tensor. While locked, `Delete()` and `Dispose()` throw
 `InvalidOperationException` and `TryDelete()` declines. `ToHost()`, `CopyTo(...)`,
-`CopyMemory()`, `ValueAt()`, `CopyRawMemory()` and `MoveToAttribute()`'s copy take the same
-lock while copying. A span from `AccessMemory()` is not covered: keep the tensor alive and
-unfed while you hold one.
+`CopyMemory()`, `ValueAt()`, `CopyRawMemory()`, `MoveToAttribute()`'s copy, and the copy
+`AccessMemory()` makes of a tensor on a card take the same lock while copying. A span
+`AccessMemory()` hands out over host memory is not covered: keep the tensor alive and unfed while
+you hold one. One over a card tensor's host copy is valid on its own.
 
 Locks are taken inside the run, one feed at a time. A feed deleted from another thread while a
 run is starting makes `Execute` throw `ObjectDisposedException`, with any feeds already taken
@@ -762,54 +762,14 @@ and `using var h = t.ToHost();` deletes `t`. Use `CopyTo` for an independent ten
 `.Shared()` to keep `t` past a run.
 
 **Attachment is bookkeeping, not ownership.** `context.Tensors` is a weak list of the context's
-run outputs, what its runs read, and what `To`, `CopyTo` and `AllocateUninitialized` placed. It
-never keeps a tensor alive or ends one. `context.Detach(t)` removes a tensor (refused while a
+run outputs, what its runs read, and what `To` and `CopyTo` placed. It never keeps a tensor alive
+or ends one. `context.Detach(t)` removes a tensor (refused while a
 run of that context reads it) without deleting it. Disposing a context releases its sessions
 and leaves every tensor. A budgeted context counts this list — see
 [A context's device-memory budget](#a-contexts-device-memory-budget).
 
 `TensorDataStruct` and `TensorDataSequence` take the same three operations. A struct comes back
 as itself where nothing was copied; a sequence is copied whole if any element must be.
-
-### Feeding a large input without a second copy
-
-Normally a feed exists twice: your managed array and the runtime's copy.
-`ComputeContext.AllocateUninitialized` gives you the runtime's buffer to fill in place:
-
-```csharp
-using var cpu = new ComputeContext(new LinuxCpuBackend());
-
-var batch = cpu.AllocateUninitialized<float32>(new Shape(64L, 3L, 224L, 224L));
-batch.WriteMemory<float>(ReadImagesInto);   // no managed array in between
-```
-
-`Shape` is a class, so write `new Shape(…)` or a `long[]`, not a `[…]` collection literal.
-
-**Fill it through `WriteMemory`, not a bare span.** The tensor alone keeps the runtime buffer
-alive, and taking a span is its last read, so
-
-```csharp
-ReadImagesInto(batch.AccessModifiableMemory<float>());   // wrong: nothing roots `batch`
-```
-
-lets the finalizer free the buffer while you write. `WriteMemory` keeps the tensor alive across
-the call.
-
-The buffer is uninitialized — fill all of it. The tensor is attached to the context like a
-`CopyTo` result. A `(shape, dtype)` overload takes a runtime element type. On a CUDA context the
-buffer is card memory the host cannot write (`TensorData.IsHostResident` is false); use
-`CopyTo` there.
-
-Then feed it **as it is**: the run uses the buffer in place and frees it as it returns:
-
-```csharp
-var loss = compiled.Execute(batch)[0].ToTensorData();
-// batch is consumed: reading it throws, and its buffer went back to the allocator with the run
-```
-
-A `.Shared()` feed is instead freed when you let go of it (for a per-step batch, at the next
-collection). Consuming does not let the run reuse the input for intermediates — ONNX Runtime
-never does that — only for [aliased outputs](#a-run-that-writes-an-output-into-what-it-consumed).
 
 ### One model, two devices
 
@@ -833,10 +793,11 @@ Both run the same model, one C# build; each context compiles its own session. `C
 the backend. Tensors you build (allocating backend `HostBackend.Instance`) are tied to no
 runtime, so building and exporting needs none and either context accepts them. A tensor not
 readable in place is copied per run when consumed, or once per (tensor, runtime) when fed
-`.Shared()`, until written ([Feeding a run](#feeding-a-run-consumed-shared-or-tried)). A
-tensor on the card (`TensorData.IsHostResident` false) — every output of a run there, and the
+`.Shared()`, for as long as it lives ([Feeding a run](#feeding-a-run-consumed-shared-or-tried)).
+A tensor on the card (`TensorData.IsHostResident` false) — every output of a run there, and the
 state a [training step](training.md#keeping-training-state-on-the-device) hands back — crosses
-via the host when it is fed to the CPU context or moved with `ToHost()`.
+via the host when it is fed to the CPU context or moved with `ToHost()`; reading its values
+copies them to the host and leaves it on the card.
 
 #### Deploying two backends
 
@@ -1071,15 +1032,15 @@ var use = ctx.ReadDeviceMemoryUse();
 Console.WriteLine($"{use.AttachedBytes} of {use.LimitBytes} bytes attached, {use.AvailableBytes} left");
 ```
 
-**What it counts.** Tensors placed by `To`, `CopyTo` or `AllocateUninitialized`, read or
+**What it counts.** Tensors placed by `To` or `CopyTo`, read or
 copied there by the context's runs, or left there as its runs' outputs — every output of a run
 on the card, until it is deleted, collected or detached.
 `ReadDeviceMemoryUse()` reports `AttachedBytes`, `AttachedTensors` and `LimitBytes` (`null`
 with no budget, or for a host context). A tensor on two contexts counts on both; dead,
 collected or `Detach`ed tensors drop out.
 
-**A transfer it cannot take is refused before allocating** — `To`, `CopyTo`,
-`AllocateUninitialized`, a run's card copy of a tensor it cannot read in place, and a `To` that
+**A transfer it cannot take is refused before allocating** — `To`, `CopyTo`, a run's card copy
+of a tensor it cannot read in place, and a `To` that
 merely attaches a tensor already on the card. Structs and sequences are checked whole (a
 run-produced sequence per element as copied), and a failure undoes what was placed. The refusal
 is an `InvalidOperationException`:

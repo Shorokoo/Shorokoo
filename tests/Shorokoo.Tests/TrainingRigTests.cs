@@ -2783,6 +2783,7 @@ public class TrainingRigTrainingLoopCoverageTests
         Assert.Equal([0.1f, -13.4f], ParamsAfterOneStep(RootedGainReadByItsOwnConditionInAnArmModel.ComputationGraph, -1f, -4f));
         Assert.Equal([0.1f, -13.4f], ParamsAfterOneStep(RootedGainReadByAConditionAndOneArmModel.ComputationGraph, -1f, -4f));
         Assert.Equal([1f, 1f], ParamsAfterOneStep(SafelyNormalizedGainModel.ComputationGraph, 0f, 0f));
+        Assert.Equal([0.1f, -13.4f], ParamsAfterOneStep(RootedGainReadByAnArmAndARunningStatisticModel.ComputationGraph, -1f, -4f));
         Assert.Equal([0.9f, -0.6f], [.. TrainedParams(RootedGainInAnIfElseNestedInAnArmModel.ComputationGraph, false, -1f, -4f)
                                          .Select(v => MathF.Round(v, 4))]);
     }

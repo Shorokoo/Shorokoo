@@ -795,6 +795,29 @@ public class GpuExecutionTests
     }
 
     /// <summary>
+    /// An output whose shape only the run learns — 256 MiB of indices of a 128 MiB tensor on the
+    /// card — is the block its session's run wrote it into, on the card once: the session's
+    /// allocator holds exactly its bytes more while it is kept and nothing more once it is let go,
+    /// and the card holds less than the output twice over for the run's every block.
+    /// </summary>
+    [CudaFact]
+    public void CudaProvider_AnOutputWhoseShapeTheRunLearnsIsOnTheCardOnceAsTheBlockItsSessionWroteItInto()
+    {
+        using var ctx = new ComputeContext();
+        var learned = ArenaProbeModels.Learned(ctx);
+        long Requested() => Assert.IsType<ArenaStatistics>(learned.ReadArenaStatistics()).RequestedInUseBytes;
+        var ones = ArenaProbeModels.Ones(32 << 20).CopyTo(ctx);
+        var (before, requestedBefore) = (HeldOnTheCard(), Requested());
+
+        var indices = learned.Execute(ones.Shared())[0].ToTensorData();
+        var (bytes, held, requested) = (indices.ByteCount, HeldOnTheCard() - before, Requested() - requestedBefore);
+        indices.Delete();
+
+        Assert.Equal((bytes, requestedBefore), (requested, Requested()));
+        Assert.True(held < 2 * bytes);
+    }
+
+    /// <summary>
     /// The card's own allocator — the one tensors placed on the card and every run's outputs there
     /// come from — keeps the blocks of tensors that are gone, through a run that leaves its arena as
     /// it is, and hands them back to the card as a run that hands its arena's unused blocks back

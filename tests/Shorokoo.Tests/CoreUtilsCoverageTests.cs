@@ -1123,6 +1123,26 @@ public class CoreUtilsCoverageTests
         Assert.Equal([1 << 20, 0f, -(1 << 20)], [sum.ValueAt<float>(0), negated.ValueAt<float>(4095), spreadSum.ValueAt<float>(999)]);
     }
 
+    /// <summary>
+    /// An output whose shape only the run learns is the block its session's run wrote it into: its
+    /// session's allocator holds exactly the output's bytes more while the caller keeps it, and
+    /// nothing more once the caller lets it go.
+    /// </summary>
+    [Fact]
+    public void TestAnOutputWhoseShapeTheRunLearnsIsTheBlockItsSessionWroteItInto()
+    {
+        using var context = new ComputeContext();
+        var learned = ArenaProbeModels.Learned(context);
+        long Requested() => Assert.IsType<ArenaStatistics>(learned.ReadArenaStatistics()).RequestedInUseBytes;
+        var before = Requested();
+
+        var indices = learned.Execute(ArenaProbeModels.Ones(1 << 20))[0].ToTensorData();
+        var (bytes, held) = (indices.ByteCount, Requested() - before);
+        indices.Delete();
+
+        Assert.Equal((bytes, before), (held, Requested()));
+    }
+
     [Fact]
     public void TestTheFilledProbeSumsAsManyOnesAsTheShapeItIsFedAsksFor()
     {
@@ -2797,6 +2817,16 @@ internal static class ArenaProbeModels
 
     /// <inheritdoc cref="Spread"/>
     internal static TensorData<float32> Ones(int elements) => TensorData([(long)elements], [.. Enumerable.Repeat(1f, elements)]);
+
+    /// <summary>
+    /// A graph whose output's shape only the run learns: the indices of what it is fed that is not
+    /// zero once negated, <c>[1, n]</c> of 64-bit integers for <see cref="Ones"/> of <c>n</c>.
+    /// </summary>
+    internal static CompiledGraph Learned(ComputeContext context)
+    {
+        var x = InputTensor<float32>("x", rank: 1);
+        return context.Compile(new InternalComputationGraph([x], [OnnxOp.NonZero(OnnxOp.Neg(x))]));
+    }
 
     /// <summary>
     /// <see cref="Filled"/>'s sum spread over a thousand elements: the output is made after the fill

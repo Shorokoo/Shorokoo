@@ -16,10 +16,12 @@ namespace Shorokoo.Runtime
     /// <param name="AttachedTensors">How many tensors those are.</param>
     /// <param name="Added">The bytes the run adds to them: what it reads there in place that the
     /// context has not counted, and the copies it makes there.</param>
-    internal readonly record struct DevicePlan(long Attached, int AttachedTensors, long Added)
+    /// <param name="Outputs">The bytes of the outputs the run is handed memory for there before it
+    /// starts (<see cref="IShorokooSession.SettledOutputs"/>).</param>
+    internal readonly record struct DevicePlan(long Attached, int AttachedTensors, long Added, long Outputs)
     {
         /// <summary>All of it: the discount the session's arena limit is cut from the budget by.</summary>
-        internal long Outside => Attached + Added;
+        internal long Outside => Attached + Added + Outputs;
     }
 
     /// <summary>
@@ -187,9 +189,8 @@ namespace Shorokoo.Runtime
         private readonly List<ILifetimeOwner> _taken = [];
 
         // What the backend is handed, by value: the tensors and sequences consumed where they are, and
-        // the copies consumed in the place of the ones that could not be -- each once, and each the one
-        // its value was, so an output the backend wrote into a value can be told whose memory it now
-        // lives in.
+        // the copies consumed in the place of the ones that could not be -- each once, with the one
+        // its value was, which is marked as the backend's once the call is made.
         private readonly Dictionary<IShorokooTensorValue, ILifetimeOwner> _handed = new(ReferenceEqualityComparer.Instance);
 
         // What marking the handed-over memory as the backend's threw -- retiring a copy of it that a
@@ -326,18 +327,18 @@ namespace Shorokoo.Runtime
         /// or the copy already held, where one is. A copy a consumption makes is one copy however
         /// many inputs the tensor feeds, and is counted once. A sequence is read in the host memory
         /// of the run's runtime and adds nothing, and so do the elements it is built from, which the
-        /// run holds without putting them on the books. What is in
-        /// <paramref name="excludingArena"/> — the arena of the session about to run, where its own
-        /// earlier runs left their outputs — is inside that session's limit already, and is left
-        /// out.</para>
+        /// run holds without putting them on the books. And, where the session is known —
+        /// <paramref name="session"/>, whose input names <paramref name="sessionNameOf"/> gives — the
+        /// memory it is handed for its outputs there before it starts (<see cref="PlacedOutputs"/>).
+        /// No tensor is in a session's arena: a run's outputs are memory of their own.</para>
         ///
         /// <para>The route each feed takes is decided here, and <see cref="Feed"/> follows it: the
         /// copy held, or a fresh copy.</para>
         /// </summary>
-        internal DevicePlan Plan(object? excludingArena)
+        internal DevicePlan Plan(IShorokooSession? session, Func<string, string>? sessionNameOf)
         {
             var targets = _targets ?? throw new InvalidOperationException("A run was planned before it was prepared.");
-            var (attached, attachedTensors) = _context.AttachedIn(excludingArena);
+            var (attached, attachedTensors) = _context.AttachedIn();
 
             // What the run adds is what is not on the books already, each once however many inputs
             // it is read through.
@@ -345,7 +346,6 @@ namespace Shorokoo.Runtime
             HashSet<TensorData>? adding = null;
             bool Adds(TensorData tensor)
                 => tensor.Space == _space
-                   && !(excludingArena is not null && ReferenceEquals(tensor.Arena, excludingArena))
                    && !_context.Attaches(tensor)
                    && (adding ??= new(ReferenceEqualityComparer.Instance)).Add(tensor);
             foreach (var target in targets)
@@ -375,21 +375,91 @@ namespace Shorokoo.Runtime
                 }
                 if (Adds(resident)) added += resident.ByteCount;
             }
-            return new DevicePlan(attached, attachedTensors, added);
+            var outputs = session is null ? 0 : PlacedOutputs(session, sessionNameOf!);
+            return new DevicePlan(attached, attachedTensors, added, outputs);
+        }
+
+        /// <summary>
+        /// The bytes of the memory a run of <paramref name="session"/> is handed for its outputs in
+        /// the context's memory before it starts: one block for each output the session settled
+        /// (<see cref="IShorokooSession.SettledOutputs"/>) whose run memory is the context's, of the
+        /// shape the tensors this run is fed give it, but for one the run writes into a tensor it
+        /// consumes, which takes no memory of its own. That is an output the session may write into
+        /// an input (<see cref="IShorokooSession.BindableAliases"/>) whose tensor this run consumes,
+        /// feeds to that input alone, and holds in the output's element type and shape — as the
+        /// session decides it. A tried feed may yet be read, so the output it would take is counted.
+        /// An output whose shape takes a dimension from an input fed no tensor is made by the run in
+        /// its arena, which the arena's limit covers.
+        /// </summary>
+        private long PlacedOutputs(IShorokooSession session, Func<string, string> sessionNameOf)
+        {
+            var settled = session.SettledOutputs;
+            if (settled.Count == 0) return 0;
+            var inputs = _inputs!;
+            var targetOf = _targetOf!;
+            Dictionary<string, string>? intoInput = null;
+            foreach (var alias in session.BindableAliases)
+                (intoInput ??= new Dictionary<string, string>(StringComparer.Ordinal))[alias.Output] = alias.Input;
+
+            // Each input by the session's name for it, with the target it feeds, and whether any other
+            // input feeds that target: an output can be written only into a target fed alone.
+            var feeds = new Dictionary<Target, int>(ReferenceEqualityComparer.Instance);
+            foreach (var target in targetOf) feeds[target] = feeds.GetValueOrDefault(target) + 1;
+            var fed = new Dictionary<string, Target>(StringComparer.Ordinal);
+            for (int i = 0; i < inputs.Count; i++) fed[sessionNameOf(inputs[i].ParamName)] = targetOf[i];
+            long[]? FedShape(string input)
+                => fed.TryGetValue(input, out var target) && target.Subject is TensorData tensor ? (long[])tensor.Shape : null;
+
+            bool WrittenIntoConsumed(SettledOutput output, long[] shape)
+                => intoInput is not null && intoInput.TryGetValue(output.Name, out var input)
+                   && fed.TryGetValue(input, out var target) && feeds[target] == 1
+                   && target is { Mode: FeedMode.Consume, Subject: TensorData tensor }
+                   && (ShorokooTensorElementType)(int)tensor.DType == output.ElementType
+                   && ((long[])tensor.Shape).AsSpan().SequenceEqual(shape);
+
+            long bytes = 0;
+            foreach (var output in settled)
+                if (_backend.RunMemoryOf(output.ElementType).Space == _space
+                    && output.ShapeFor(FedShape) is { } shape && !WrittenIntoConsumed(output, shape))
+                    bytes += TensorElementLayout.ByteLength(output.ElementType, shape);
+            return bytes;
         }
 
         /// <summary>
         /// The arena limit a new session gets for this run under a budget of <paramref name="limit"/>
-        /// bytes — what everything the run will hold outside that session's arena, which starts
-        /// empty, leaves of the budget, rounded as <see cref="ComputeContext.ArenaLimitWithin"/>
-        /// rounds it — with the run admitted against it.
+        /// bytes — what everything the run will hold outside that session's arena, as
+        /// <paramref name="plan"/> counts it, leaves of the budget, rounded as
+        /// <see cref="ComputeContext.ArenaLimitWithin"/> rounds it — with the run admitted against it.
         /// </summary>
         /// <exception cref="InvalidOperationException">What the run would hold leaves the arena
         /// nothing. Nothing has been taken.</exception>
-        internal long AdmitFresh(long limit)
+        internal long AdmitFresh(long limit, DevicePlan plan)
         {
-            var plan = Plan(excludingArena: null);
             var arena = ComputeContext.ArenaLimitWithin(limit, plan.Outside) ?? throw NoRoom(limit, plan);
+            Admit(arena, plan);
+            return arena;
+        }
+
+        /// <summary>
+        /// Admits this run, under a budget of <paramref name="limit"/> bytes, to the one-shot
+        /// <paramref name="session"/> built for it with the arena limit <see cref="AdmitFresh"/> chose
+        /// before the session could say what memory it is handed for its outputs: the same limit where
+        /// that memory still leaves the session's arena room for it, and otherwise the lower limit
+        /// it leaves, which the caller builds the session again with.
+        /// </summary>
+        /// <returns>The lower limit to build the session again with, or null to keep it.</returns>
+        /// <exception cref="InvalidOperationException">What the run would hold leaves the arena
+        /// nothing. Nothing has been taken.</exception>
+        internal long? AdmitOneShot(long limit, IShorokooSession session, Func<string, string> sessionNameOf)
+        {
+            var plan = Plan(session, sessionNameOf);
+            if (plan.Outputs == 0) return null;
+            var arena = ComputeContext.ArenaLimitWithin(limit, plan.Outside) ?? throw NoRoom(limit, plan);
+            if (arena >= _arenaLimit)
+            {
+                Admit(_arenaLimit, plan);
+                return null;
+            }
             Admit(arena, plan);
             return arena;
         }
@@ -413,8 +483,12 @@ namespace Shorokoo.Runtime
             => new(
                 $"{_run} would hold {Figure(plan.Outside)} bytes of {_space} outside its own arena — "
                 + $"{Figure(plan.Attached)} bytes of the {Figure(plan.AttachedTensors)} tensor(s) "
-                + $"attached to its compute context there, and {Figure(plan.Added)} bytes more that it "
-                + "reads there or copies there for the run — which leaves nothing of the context's "
+                + "attached to its compute context there, " + (plan.Outputs == 0 ? "and " : "")
+                + $"{Figure(plan.Added)} bytes more that it reads there or copies there for the run"
+                + (plan.Outputs == 0
+                    ? ""
+                    : $", and {Figure(plan.Outputs)} bytes for the outputs it is handed memory for there before it starts")
+                + " — which leaves nothing of the context's "
                 + $"{Figure(limit)}-byte device-memory budget (DeviceMemorySettings.LimitBytes) for the "
                 + "arena the run computes in. Nothing it was fed has been taken. Delete what the "
                 + "context no longer needs, feed less at once, or give the context a larger budget.");
@@ -643,15 +717,6 @@ namespace Shorokoo.Runtime
             _handed.Add(value, owner);
             return value;
         }
-
-        /// <summary>
-        /// The arena the memory behind <paramref name="value"/> was in, where it is a value this run
-        /// handed to the backend — the record of the tensor it was, consumed where it stood or copied
-        /// for the run — or null where it was in no arena, or is not one this run handed over.
-        /// What an output the backend wrote into that memory is in.
-        /// </summary>
-        internal object? ArenaOfHanded(IShorokooTensorValue value)
-            => _handed.TryGetValue(value, out var owner) && owner is TensorData tensor ? tensor.Arena : null;
 
         private IShorokooTensorValue Read(Target target, TensorData tensor)
         {

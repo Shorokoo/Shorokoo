@@ -634,6 +634,13 @@ where they share a runtime.
   afterwards. Reading its values copies them to the host and leaves it on the card; `ToHost()`
   makes a copy of it in host memory, `To(context)` puts it on another context, and a run on
   another context that is fed it places it there as one of its inputs.
+- **An output holds only its own bytes.** It is memory of its own, not a block of the arena the
+  run computed in, so keeping it keeps nothing of the session alive — the session may run on,
+  sit idle or be disposed. On ONNX Runtime, an output whose shape the runtime settled when it
+  built the session is written straight into memory handed to the run before it starts, and any
+  other is made in the arena and copied out as the run returns; both come from an allocator the
+  runtime keeps outside every session, one per device, which keeps the blocks of outputs that are
+  gone until a run asks to hand its arena's unused blocks back (`RunSettings.ShrinkArenaAfterRun`).
 
 ```csharp
 var compiled = cuda.Compile(graph);
@@ -961,8 +968,11 @@ Console.WriteLine(compiled.DeviceMemory.LimitBytes);               // the arena 
   already holds: size a context budget as what the step uses plus what the rig keeps on the
   card.
 - `ShrinkArenaAfterRun` costs a synchronizing allocation every step; outside a budget, use it
-  only when the card is shared. On the CPU backend it shrinks the host arena the run's
-  intermediates live in, and the next run takes those blocks from the host again. ORT rejects it where the device has no arena (e.g.
+  only when the card is shared. It also has the allocator the run's outputs come from — on a card,
+  the one tensors placed there come from too — hand back the blocks no tensor is using, as the run
+  starts, before any of its outputs is placed there. On the CPU
+  backend it shrinks the host arena the run's intermediates live in, and the next run takes those
+  blocks from the host again. ORT rejects it where the device has no arena (e.g.
   `ORT_DISABLE_ARENA`), failing the run, so try it on a short run first.
 - `LimitBytes` is hard: exceeding work is refused or fails with ORT's `BFCArena ... Failed to
   allocate memory for requested buffer`, so a figure set too low fails work that would fit.
@@ -974,8 +984,9 @@ Console.WriteLine(compiled.DeviceMemory.LimitBytes);               // the arena 
 - **Scope is the context, never the process.** Each session keeps its arena settings for life;
   two contexts may differ and never affect each other's sessions. To use different settings,
   compile on another context — e.g. one for a training loop, one for variable-shape inference.
-  Tensors a context places on the card come from a separate per-card, per-runtime allocator
-  held for the process's life; the budget counts them by attachment.
+  Tensors a context places on the card, and its runs' outputs there, come from a separate
+  per-card, per-runtime allocator held for the process's life; the budget counts them by
+  attachment.
 
 The static `DeviceMemory` class reports what the card is doing:
 
@@ -1055,10 +1066,12 @@ the context a larger budget.
 
 **A run's arena gets what the context leaves it.** A session's `gpu_mem_limit` is the budget
 less the *discount*: what the context holds on the card outside the arena during the run —
-attached tensors, and those the run reads or copies there (for a tensor another runtime holds
-on the same card, both it and its copy). A tensor already on the card is read in place and
-never enters the arena. A host tensor fed to a card run is copied onto the card before the run,
-outside the arena, and counted in the discount:
+attached tensors, those the run reads or copies there (for a tensor another runtime holds
+on the same card, both it and its copy), and the memory the run is handed for its outputs
+before it starts (each output whose shape the session settled, unless the run
+[writes it into consumed memory](#a-run-that-writes-an-output-into-what-it-consumed)). A tensor
+already on the card is read in place and never enters the arena. A host tensor fed to a card run
+is copied onto the card before the run, outside the arena, and counted in the discount:
 
 - `.Shared()`: the copy is kept for later reads;
 - consumed: the copy is the run's, and goes when the run no longer reads it. A tensor fed to
@@ -1080,11 +1093,10 @@ discount grows past that. So:
   `ReadNodePlacement()` restart for a rebuilt session;
 - a rig's step can rebuild in its first steps as state arrives on the card.
 
-An output left in a session's own arena and fed back to the same graph is inside its limit,
-not discounted; delete outputs you no longer need, since every one on the card counts until it
-goes. An output [written into consumed memory](#a-run-that-writes-an-output-into-what-it-consumed)
-is counted once, where that memory is: in later discounts if it was outside the arena, inside
-the arena if it was that session's own earlier output.
+No output is in an arena: every output on the card is memory of its own, counted in the
+discount of every later run until it goes, so delete each output once you are done with it. An
+output [written into consumed memory](#a-run-that-writes-an-output-into-what-it-consumed) is
+counted once, where that memory is.
 
 **One at a time.** Under a budget the context's runs, transfers onto it and compiles on it are
 serialized, and every run returns its arena's unused blocks as it ends, whatever
@@ -1124,6 +1136,9 @@ no budget), `AllocationCount`, `ArenaExtensionCount`, `ArenaShrinkageCount` and
 - A session's weights live in this arena, so it is non-zero before the first run, and the first
   run's peak includes them. `ReserveCount` and `ArenaExtensionCount` do not compare across
   devices.
+- A run's outputs do not stay in it: `InUseBytes` after a run is the weights alone. An output
+  whose shape the session settled is never in it; one made in it as the run goes counts in the
+  run's peak, and its block is free once the run returns.
 
 ### What crossed the bus
 

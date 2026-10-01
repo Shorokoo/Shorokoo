@@ -982,22 +982,68 @@ public class CoreUtilsCoverageTests
     }
 
     /// <summary>
+    /// The shapes a session settles for its outputs are read through reflection as well, and what
+    /// they are read for is telling a scalar from an output ONNX Runtime has no shape for, which its
+    /// managed surface reports alike, with no dimensions: a sum over a vector is a scalar, and a sum
+    /// over a fill whose rank its runtime shape input decides has no shape at all. A dimension the
+    /// runtime leaves open but names after an input's is settled as that input's, so the session
+    /// settles every output here but the fill's sum.
+    /// </summary>
+    [Fact]
+    public void TestTheOrtOutputShapesBindingStillResolvesAndTellsAScalarFromAnUnknownShape()
+    {
+        var api = typeof(OrtAllocator).Assembly.GetType(OrtArenaStats.ApiHolderTypeName)!
+            .GetField(OrtArenaStats.ApiFieldName, BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public)!
+            .GetValue(null)!;
+        foreach (var entry in OrtOutputShapes.ApiEntryPointNames)
+            Assert.Equal(typeof(IntPtr), api.GetType().GetField(entry)!.FieldType);
+        var handle = typeof(InferenceSession).GetProperty(
+            OrtOutputShapes.HandlePropertyName, BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+        Assert.Equal(typeof(IntPtr), handle!.PropertyType);
+        Assert.True(OrtOutputShapes.IsBound);
+
+        var x = InputTensor<float32>("x", rank: 1);
+        var shape = InputVector<int64>("shape");
+        var sum = OnnxOp.ReduceSum(x, keepdims: false);
+        var proto = FastOnnxModelBuilder.BuildInternalOnnxModel(new InternalComputationGraph([x, shape],
+        [
+            sum, x + x, Tensor([2L, 3L], new float[6]) + sum,
+            OnnxOp.ReduceSum(OnnxOp.Expand(Vector(1f), shape), keepdims: false),
+        ]), prepForOnnx: true);
+        var model = new MemoryStream();
+        ProtoBuf.Serializer.Serialize(model, proto);
+        using var session = new InferenceSession(model.ToArray());
+
+        Assert.Equal([[], [-1L], [2L, 3L], null], OrtOutputShapes.Read(session)!);
+        Assert.Empty(session.OutputMetadata[session.OutputNames[0]].Dimensions);
+        Assert.Empty(session.OutputMetadata[session.OutputNames[3]].Dimensions);
+
+        using var settling = DefaultBackend.Instance.CreateSession(
+            model.ToArray(), ShorokooGraphOptimization.EnableAll, ShorokooLogSeverity.Fatal, DeviceMemorySettings.Default.Resolve(reusedAcrossShapes: false));
+        Assert.Equal(
+            ["", $"{settling.InputNames[0]}:0", "2 3"],
+            settling.SettledOutputs.Select(o => string.Join(' ', o.Dimensions.Select(d => d.Input is { } input ? $"{input}:{d.Axis}" : $"{d.Count}"))));
+        Assert.Equal([5L], settling.SettledOutputs[1].ShapeFor(input => input == settling.InputNames[0] ? [5L] : null));
+    }
+
+    /// <summary>
     /// A session's own arena, read back through the public surface: zeroed before it has run, and
-    /// carrying what the run took afterwards. A backend answering the interface's default reports
-    /// nothing rather than zeroes, which is the difference between "no figures" and "no memory".
+    /// carrying what the run took afterwards — the product the run negates, its output being memory
+    /// of its own. A backend answering the interface's default reports nothing rather than zeroes,
+    /// which is the difference between "no figures" and "no memory".
     /// </summary>
     [Fact]
     public void TestAHostSessionReportsItsOwnArenaButNoPinnedOneAndABackendWithoutOneReportsNothing()
     {
         using var context = new ComputeContext();
-        var compiled = Doubling(context);
+        var compiled = ArenaProbeModels.MatMul(context);
 
         var before = Assert.IsType<ArenaStatistics>(compiled.ReadArenaStatistics());
         Assert.Equal(0L, before.MaxInUseBytes);
         Assert.Equal(0L, before.AllocationCount);
         Assert.Equal(-1L, before.LimitBytes);
 
-        compiled.Execute(ThreeFloats());
+        compiled.Execute(ArenaProbeModels.MatMulOperand(8), ArenaProbeModels.MatMulOperand(8));
         var after = Assert.IsType<ArenaStatistics>(compiled.ReadArenaStatistics());
         Assert.True(after.MaxInUseBytes > 0);
         Assert.True(after.AllocationCount > 0);
@@ -1052,31 +1098,29 @@ public class CoreUtilsCoverageTests
 
     /// <summary>
     /// A run's outputs are memory of their own rather than blocks of its session's arena: with every
-    /// output kept, a run that hands its arena's unused blocks back as it ends leaves the arena
-    /// holding nothing — an output whose shape the session settled when it was built, one it learns
-    /// only as it runs, and a scalar carved out of the block a 4 MiB fill was freed from alike.
+    /// output kept, the arena holds no more in use than its weights once the run is over — an output
+    /// whose shape the session learns only as it runs, and one whose shape it settled when it was
+    /// built though it is made after the run's 4 MiB intermediate is freed, alike.
     /// </summary>
     [Fact]
     public void TestAKeptOutputHoldsNothingOfItsSessionsArena()
     {
-        using var context = new ComputeContext { RunSettings = new RunSettings { ShrinkArenaAfterRun = true } };
+        using var context = new ComputeContext();
         var filled = ArenaProbeModels.Filled(context);
-        var widened = context.Compile(ArenaProbeModels.Widened());
         var product = ArenaProbeModels.MatMul(context);
-        static (long InUse, long Reserved) Held(CompiledGraph graph)
-        {
-            var arena = Assert.IsType<ArenaStatistics>(graph.ReadArenaStatistics());
-            return (arena.InUseBytes, arena.TotalAllocatedBytes);
-        }
+        var spread = ArenaProbeModels.Spread(context);
+        (long, long, long) InUse() => (
+            Assert.IsType<ArenaStatistics>(filled.ReadArenaStatistics()).InUseBytes,
+            Assert.IsType<ArenaStatistics>(product.ReadArenaStatistics()).InUseBytes,
+            Assert.IsType<ArenaStatistics>(spread.ReadArenaStatistics()).InUseBytes);
+        var weights = InUse();
 
         var sum = filled.Execute(ArenaProbeModels.FilledShape(1 << 20))[0].ToTensorData();
-        var spread = widened.Execute(ArenaProbeModels.FilledShape(1 << 20))[0].ToTensorData();
         var negated = product.Execute(ArenaProbeModels.MatMulOperand(64), ArenaProbeModels.MatMulOperand(64))[0].ToTensorData();
+        var spreadSum = spread.Execute(ArenaProbeModels.Ones(1 << 20))[0].ToTensorData();
 
-        Assert.Equal((0L, 0L), Held(filled));
-        Assert.Equal((0L, 0L), Held(widened));
-        Assert.Equal((0L, 0L), Held(product));
-        Assert.Equal([1 << 20, 1 << 20, 0f], [sum.ValueAt<float>(0), spread.ValueAt<float>(999), negated.ValueAt<float>(4095)]);
+        Assert.Equal(weights, InUse());
+        Assert.Equal([1 << 20, 0f, -(1 << 20)], [sum.ValueAt<float>(0), negated.ValueAt<float>(4095), spreadSum.ValueAt<float>(999)]);
     }
 
     [Fact]
@@ -1109,8 +1153,9 @@ public class CoreUtilsCoverageTests
         {
             Diagnostics = new DiagnosticSettings { CollectRunStatistics = true },
         };
-        var compiled = Doubling(counting);
-        for (int run = 0; run < 3; run++) compiled.Execute(ThreeFloats());
+        var compiled = ArenaProbeModels.MatMul(counting);
+        IData[] Operands() => [ArenaProbeModels.MatMulOperand(8), ArenaProbeModels.MatMulOperand(8)];
+        for (int run = 0; run < 3; run++) compiled.Execute(Operands());
 
         var stats = counting.RunStats;
         Assert.Equal(3L, stats.RunCount);
@@ -1130,7 +1175,7 @@ public class CoreUtilsCoverageTests
             stats.RecentRuns.Select(run => run.PeakBytes));
 
         // The snapshot is one moment, not a live view of a context that keeps running.
-        compiled.Execute(ThreeFloats());
+        compiled.Execute(Operands());
         Assert.Equal(3L, stats.RunCount);
         Assert.Equal(4L, counting.RunStats.RunCount);
 
@@ -1345,10 +1390,11 @@ public class CoreUtilsCoverageTests
         Assert.Matches(@"ArenaShrinkageRunConfig\s*\(\s*_cudaDeviceId\s*,\s*runSettings\.ShrinkArenaAfterRun\s*\)", session);
         Assert.Matches(@"AddRunConfigEntry\s*\(", session);
 
-        // Every path that runs the session has to apply it, not just one: the bound path is every
-        // CUDA run's, and it is where an unbounded arena costs most.
+        // Every path that runs the session has to apply it, not just one: each runs inside the one
+        // member that sets the run's options up.
         var runPaths = Regex.Matches(session, @"_session\s*\.\s*Run\w*\s*\(").Count;
-        Assert.Equal(runPaths, Regex.Matches(session, @"ConfigureRun\s*\(\s*runOptions\s*,\s*runSettings\s*\)").Count);
+        Assert.Equal(runPaths, Regex.Matches(session, @"Invoke\s*\(\s*runSettings\s*,").Count);
+        Assert.Single(Regex.Matches(session, @"ConfigureRun\s*\(\s*runOptions\s*,\s*runSettings\s*\)"));
     }
 
     /// <summary>Two shapes the guard's exemptions once let through: a span consumed by a call
@@ -2662,7 +2708,8 @@ internal static class ArenaProbeModels
 {
     /// <summary>The weight's side, so that <see cref="Weighted"/> carries four mebibytes of
     /// parameter and nothing else of any size and an arena figure either side of construction is
-    /// unambiguous.</summary>
+    /// unambiguous. The product is negated so that a run puts something in the arena: the output
+    /// itself is memory of its own.</summary>
     internal const int WeightSide = 1024;
 
     /// <inheritdoc cref="WeightSide"/>
@@ -2674,7 +2721,7 @@ internal static class ArenaProbeModels
         var x = InputTensor<float32>("x", rank: 2);
         var w = Tensor([(long)WeightSide, WeightSide], new float[WeightSide * WeightSide]);
         return context.Compile(
-            new InternalComputationGraph([x], [(Tensor<float32>)OnnxOp.MatMul(x, w)]));
+            new InternalComputationGraph([x], [(Tensor<float32>)OnnxOp.Neg(OnnxOp.MatMul(x, w))]));
     }
 
     /// <inheritdoc cref="WeightSide"/>
@@ -2734,6 +2781,22 @@ internal static class ArenaProbeModels
 
     /// <inheritdoc cref="Filled"/>
     internal static TensorData<int64> FilledShape(long elements) => TensorData([1L], elements);
+
+    /// <summary>
+    /// A graph whose output's shape its session settles when it is built and whose one large block
+    /// is an intermediate: what it is fed, negated and summed, the sum spread over a thousand
+    /// elements. The output is made after the negation is released, so an arena that serves it
+    /// carves it out of the block the negation was freed from.
+    /// </summary>
+    internal static CompiledGraph Spread(ComputeContext context)
+    {
+        var x = InputTensor<float32>("x", rank: 1);
+        var sum = OnnxOp.ReduceSum(OnnxOp.Neg(x), keepdims: false);
+        return context.Compile(new InternalComputationGraph([x], [OnnxOp.Expand(sum, Vector(1000L))]));
+    }
+
+    /// <inheritdoc cref="Spread"/>
+    internal static TensorData<float32> Ones(int elements) => TensorData([(long)elements], [.. Enumerable.Repeat(1f, elements)]);
 
     /// <summary>
     /// <see cref="Filled"/>'s sum spread over a thousand elements: the output is made after the fill

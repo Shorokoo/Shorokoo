@@ -36,7 +36,9 @@ public sealed record RunSettings
     /// need stays available to the rest of the machine.
     ///
     /// <para>The arena is the one the run's intermediates live in: the card's on a CUDA backend,
-    /// the host's on a CPU one.</para>
+    /// the host's on a CPU one. On ONNX Runtime the allocator the run's outputs come from — on a
+    /// card, the one every tensor placed there comes from too — hands back the blocks no tensor is
+    /// using as well, as the run starts: an output placed in such a block would keep all of it.</para>
     /// </summary>
     public bool ShrinkArenaAfterRun { get; init; }
 

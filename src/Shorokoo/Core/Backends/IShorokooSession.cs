@@ -8,6 +8,10 @@ namespace Shorokoo.Core.Backends;
 // memory by throwing, before it runs anything: it never copies one in, so a value in the wrong
 // place surfaces as an error rather than as a copy nobody asked for. Every output it returns is in
 // that memory too, wherever the runtime computed it, and goes to the caller as it is.
+//
+// And every output it returns is memory of its own: it holds its own bytes and nothing of the
+// session's -- no block of an arena the run computed in, no workspace -- so a caller that keeps an
+// output keeps nothing else alive, whether the session goes on running, sits idle, or is disposed.
 public interface IShorokooSession : IDisposable
 {
     IReadOnlyList<string> InputNames { get; }
@@ -97,6 +101,15 @@ public interface IShorokooSession : IDisposable
     //
     // The default is none: a session that aliases nothing binds no pair.
     IReadOnlyList<OutputAlias> BindableAliases => [];
+
+    // The outputs whose element type and shape this session settled when it was built, by this
+    // session's names, each of which a run is handed memory of its own for before it starts, outside
+    // the session's arena -- unless the run writes it into an input it consumes (RunConsuming), which
+    // takes no memory of its own. That memory is held for the length of the run beside the arena, so a
+    // device-memory budget leaves room for it outside the arena when it chooses the arena's limit.
+    //
+    // The default is none: a session whose runs make every output as they go places none before.
+    IReadOnlyList<SettledOutput> SettledOutputs => [];
 
     // This session's own memory arena as its runtime reports it, or null when the backend has no
     // such figures to give. Cheap enough to call either side of a run, which is how a run's peak

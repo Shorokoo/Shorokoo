@@ -320,20 +320,6 @@ namespace Shorokoo
             catch (UnsupportedDTypeException) { return 0; }
         }
 
-        // The arena this tensor was allocated out of, where it is an output a run left in device
-        // memory: a token standing for the session that ran it (see CompiledGraph), and null for
-        // everything else. A run on that same session counts it inside the session's arena limit,
-        // where it is, rather than against the room the limit is cut from.
-        private object? _arena;
-
-        /// <summary>The arena of the session whose run left this tensor in device memory, or
-        /// null.</summary>
-        internal object? Arena => Volatile.Read(ref _arena);
-
-        /// <summary>Records the arena a run's output was allocated out of. Once, as the output is
-        /// adopted and before anything else can see it.</summary>
-        internal void RecordArena(object arena) => Volatile.Write(ref _arena, arena);
-
         /// <summary>"shape:dtype" diagnostic string.</summary>
         public override string ToString()
         {

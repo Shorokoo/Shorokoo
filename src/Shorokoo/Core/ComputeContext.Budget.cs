@@ -23,10 +23,12 @@ namespace Shorokoo.Runtime
     /// past what it left room for; see <see cref="ArenaLimitWithin"/>. A tensor a run reads or
     /// consumes outside the context's memory — a host tensor fed to a run on a card — is placed there
     /// through a copy the framework makes before the run, outside the arena, and counted with the
-    /// rest of the discount. A run's outputs are in the arena of the session that ran it. An output a
-    /// run wrote into memory it consumed (<see cref="OutputAlias"/>) is where that memory was —
-    /// outside the arena, or inside it where the consumed tensor was the session's own earlier
-    /// output — and is counted there, once.</item>
+    /// rest of the discount. So is the memory a run is handed for each output whose shape its session
+    /// settled (<see cref="IShorokooSession.SettledOutputs"/>), unless the run writes it into memory
+    /// it consumed (<see cref="OutputAlias"/>), which the discount counts already. Every output is
+    /// memory of its own, outside every arena, and counted with the attached tensors from then on;
+    /// one whose shape is known only once the run is under way is made in the arena and copied out
+    /// of it as the run returns, for that moment in both.</item>
     /// <item><b>One at a time.</b> Under a budget, the context's runs, the sessions it builds and what
     /// is placed in its memory are serialized, and every run shrinks its arena when it ends.</item>
     /// </list>
@@ -78,11 +80,10 @@ namespace Shorokoo.Runtime
         internal long? BudgetIn() => _isHost || MemorySpace.IsHost ? null : DeviceMemory.LimitBytes;
 
         /// <summary>
-        /// The bytes of the live tensors attached to this context in its own memory, and
-        /// how many they are — leaving out those in <paramref name="excludingArena"/>, the arena of
-        /// the session about to run, whose limit already covers them.
+        /// The bytes of the live tensors attached to this context in its own memory, and how many
+        /// they are. None of them is in a session's arena: a run's outputs are memory of their own.
         /// </summary>
-        internal (long Bytes, int Tensors) AttachedIn(object? excludingArena = null)
+        internal (long Bytes, int Tensors) AttachedIn()
         {
             var space = MemorySpace;
             long bytes = 0;
@@ -90,7 +91,6 @@ namespace Shorokoo.Runtime
             foreach (var tensor in _attached.Snapshot())
             {
                 if (tensor.IsDisposed || tensor.Space != space) continue;
-                if (excludingArena is not null && ReferenceEquals(tensor.Arena, excludingArena)) continue;
                 bytes += tensor.ByteCount;
                 tensors++;
             }

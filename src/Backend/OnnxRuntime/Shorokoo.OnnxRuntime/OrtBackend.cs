@@ -128,7 +128,7 @@ public abstract class OrtBackend : IShorokooBackend
     /// on a CUDA backend the card's own memory, for every tensor but a string one, which ONNX
     /// Runtime keeps in host memory whatever its provider; on any other, host memory. That is
     /// where a session of a provider a subclass appends finds its inputs too: everything this
-    /// backend builds is in host memory, and so is every output of a session it runs unbound, the
+    /// backend builds is in host memory, and so is every output of such a session's runs, the
     /// provider copying what it reads to where it computes as it runs.
     /// </summary>
     public MemoryLocation RunMemoryOf(ShorokooTensorElementType elementType)
@@ -803,7 +803,7 @@ public abstract class OrtBackend : IShorokooBackend
     /// and the bytes cross the bus once, here.</para>
     ///
     /// <para>The card's memory comes out of one allocator per device, shared by every compute
-    /// context on it (<see cref="CudaDeviceAllocator"/>), so nothing here bounds it: a context's
+    /// context on it (<see cref="RuntimeAllocators"/>), so nothing here bounds it: a context's
     /// device-memory budget is kept by the context, which refuses a copy that would take it past
     /// its budget before asking for the memory at all.</para>
     /// </summary>
@@ -1158,30 +1158,41 @@ public abstract class OrtBackend : IShorokooBackend
     /// device address as a host one. Taking the address is not dereferencing it, and this is the
     /// backend that made the allocation.</para>
     /// </summary>
-    private static unsafe IntPtr DevicePointer(IShorokooTensorValue value)
+    private static IntPtr DevicePointer(IShorokooTensorValue value)
     {
         if (value is not OrtTensorValue ort)
             throw new InvalidOperationException(
                 $"A {value.GetType().Name} did not come from this backend, so its device memory "
                 + "cannot be read here.");
+        var address = AddressOf(ort.Inner);
+        // The value's last read here, so without this the JIT may retire the local and a collection
+        // on any thread free the allocation before the address is used. The caller keeps it alive
+        // across the copy itself (Shorokoo/Shorokoo#178).
+        GC.KeepAlive(ort);
+        return address;
+    }
 
+    /// <summary>
+    /// The address of <paramref name="value"/>'s buffer, without reading it: <see cref="DevicePointer"/>
+    /// for an ORT value. The caller keeps <paramref name="value"/> alive for as long as it uses the
+    /// address.
+    /// </summary>
+    internal static unsafe IntPtr AddressOf(OrtValue value)
+    {
         // A Span's length is an int, so ORT cannot make one over an allocation larger than 2 GiB;
         // above that the address comes from its C API directly.
         IntPtr address;
-        if (ort.Inner.GetTensorSizeInBytes() <= int.MaxValue)
+        if (value.GetTensorSizeInBytes() <= int.MaxValue)
         {
-            var span = ort.Inner.GetTensorMutableRawData();
+            var span = value.GetTensorMutableRawData();
             fixed (byte* p = span) address = (IntPtr)p;
         }
         else
         {
-            address = OrtTensorAddress.Read(ort.Inner) ?? throw new InvalidOperationException(
+            address = OrtTensorAddress.Read(value) ?? throw new InvalidOperationException(
                 "The address of a tensor larger than 2 GiB could not be read from ONNX Runtime.");
         }
-        // Taking the span is the value's last read here, so without this the JIT may retire the
-        // local and a collection on any thread free the allocation before the address is used.
-        // The caller keeps it alive across the copy itself (Shorokoo/Shorokoo#178).
-        GC.KeepAlive(ort);
+        GC.KeepAlive(value);
         return address;
     }
 
@@ -1191,15 +1202,25 @@ public abstract class OrtBackend : IShorokooBackend
     /// CUDA one.
     /// </summary>
     private OrtTensorValue AllocateInBackendMemory(TensorElementType elementType, long[] shape)
+        // The one place the host-or-card decision is made for a tensor placed in this backend's
+        // memory, so the two constructors that build there cannot come to differ on it. A CUDA
+        // backend allocating from the default allocator would hand back host memory wearing the
+        // card's name, which the execution provider then copies over on every run.
         => new(OrtValue.CreateAllocatedTensorValue(
-            // The one place the host-or-card decision is made, so the two constructors that build
-            // in this backend's own memory cannot come to differ on it. A CUDA backend allocating
-            // from the default allocator would hand back host memory wearing the card's name, which
-            // the execution provider then copies over on every run.
             _cudaDeviceId is { } deviceId
-                ? CudaDeviceAllocator.For(deviceId, _configureExecutionProvider)
+                ? RuntimeAllocators.ForCard(deviceId, _configureExecutionProvider)
                 : OrtAllocator.DefaultInstance,
             elementType, shape));
+
+    /// <summary>
+    /// The allocator a session's run makes an output in, outside every session: on the card, this
+    /// runtime's own allocator for this backend's device, which every tensor placed there comes from
+    /// too; in host memory, this runtime's own arena for the host (<see cref="RuntimeAllocators"/>).
+    /// </summary>
+    internal OrtAllocator OutputAllocator(bool onCard)
+        => onCard && _cudaDeviceId is { } deviceId
+            ? RuntimeAllocators.ForCard(deviceId, _configureExecutionProvider)
+            : RuntimeAllocators.ForHost();
 
     /// <summary>
     /// Builds an ORT tensor on a buffer ORT itself allocates, in host memory, and copies

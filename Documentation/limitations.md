@@ -204,17 +204,25 @@ attached to it on the card, plus the arena limit of its executing run; see
 That count is exact, but the card also holds:
 
 - **The allocator tensors are placed from.** Tensors put on a card (by `To`,
-  `CopyTo`, or a run copying a host input there) come from
-  one allocator per card and runtime, shared by every context over that runtime
-  and kept for the life of the process. It never shrinks: it keeps the most ever
-  allocated through it at once.
+  `CopyTo`, or a run copying a host input there) and every run's outputs there
+  come from one allocator per card and runtime, shared by every context over that
+  runtime and kept for the life of the process. It keeps the most ever allocated
+  through it at once until a run that hands its arena's unused blocks back
+  (`ShrinkArenaAfterRun`, always on under a budget) has it hand back the blocks
+  no tensor is using as it starts; a block that still holds one tensor stays
+  whole.
 - **What an arena keeps spare.** An arena holds blocks, and a partly used block
   cannot be returned, so a session's arena can hold more than is in use.
 - **A session's weights between its runs.** Each compiled graph's weights stay in
   its session's arena and count only against that session's runs, so several
   compiled graphs hold all their weights at once while the budget sees one at a
-  time. A session rebuilt for a lower limit keeps its old arena alive while
-  outputs its runs left there are alive.
+  time.
+- **An output while it is copied out of its arena.** An output whose shape is
+  known only once its run is under way is made in the run's arena and copied
+  into memory of its own as the run returns, so for that moment it is on the card
+  twice. Its block in the arena is free from then on, and goes back to the card
+  when the session's next run hands its unused blocks back, or when the session
+  is disposed.
 - **Memory a dead tensor still holds.** A tensor leaves the books when it dies,
   possibly before its memory returns: one deleted with `DeleteAsync` while a run
   reads it, or consumed by another context's run, holds its memory until that run

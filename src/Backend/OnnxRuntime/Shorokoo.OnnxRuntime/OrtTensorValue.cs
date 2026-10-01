@@ -56,6 +56,14 @@ internal sealed class OrtTensorValue : IShorokooTensorValue
         }
     }
 
+    // The shape, read from ORT once: a value's shape never changes. One array for every caller,
+    // so only for one that reads it -- a run sizing an output from what it is fed every time.
+    private long[]? _readShape;
+
+    /// <summary><see cref="Shape"/>, read from ONNX Runtime the first time and the same array from
+    /// then on: nothing may write into it.</summary>
+    internal long[] ReadShape => Volatile.Read(ref _readShape) ?? (_readShape = Shape);
+
     // ORT names the allocator a value was made by on its memory info, and "Cpu" is the one
     // that names host memory -- every other name ("Cuda", "Hip", ...) is the provider's own.
     // Pinned host memory ("CudaPinned") is readable too, but nothing here ever asks for it,

@@ -3,14 +3,15 @@ using System.Runtime.InteropServices;
 namespace Shorokoo.OnnxRuntime;
 
 /// <summary>
-/// The one CUDA entry point this backend calls itself: a copy between host memory and the card,
-/// in either direction. ONNX Runtime's managed surface has no such call, and a value living on
-/// the card hands out a pointer with no way to read or fill it.
+/// The one CUDA entry point this backend calls itself: a copy to, from or within the card. ONNX
+/// Runtime's managed surface has no such call, and a value living on the card hands out a pointer
+/// with no way to read or fill it.
 ///
-/// <para>Both directions serve one promise apiece. Device-to-host reads back a tensor on the
-/// card — an output a run left there, or a tensor put there; host-to-device is what puts a tensor
-/// into the card's memory in the first place, which is where a CUDA session reads every tensor it
-/// is fed.</para>
+/// <para>Each direction serves one promise. Device-to-host reads back a tensor on the card — an
+/// output a run left there, or a tensor put there; host-to-device is what puts a tensor into the
+/// card's memory in the first place, which is where a CUDA session reads every tensor it is fed;
+/// and device-to-device takes a run's output out of the arena it was made in, into memory of its
+/// own.</para>
 ///
 /// <para>Bound lazily and by name, so nothing here requires a CUDA machine to load — the copy
 /// simply reports failure when the runtime is absent, which is the right answer on a host-only
@@ -33,10 +34,38 @@ internal static class CudaInterop
 
     private const int HostToDevice = 1;
     private const int DeviceToHost = 2;
+    private const int DeviceToDevice = 3;
 
     private static readonly object _gate = new();
     private static Memcpy? _memcpy;
+    private static Func<int>? _synchronize;
     private static bool _bound;
+
+    /// <summary>
+    /// Copies <paramref name="count"/> bytes from the device allocation at <paramref name="source"/>
+    /// to the one at <paramref name="destination"/>, on the card and on the CUDA runtime's own stream
+    /// (the legacy default one), without waiting for it: <see cref="Synchronize"/> is what does, and
+    /// the source is not to be let go of before it has. Answers as
+    /// <see cref="CopyDeviceToHost(IntPtr, Span{byte})"/> does.
+    /// </summary>
+    public static int? CopyDeviceToDevice(IntPtr destination, IntPtr source, long count)
+    {
+        var memcpy = Bind();
+        if (memcpy is null) return null;
+        if (count == 0) return 0;
+        return memcpy(destination, source, (nuint)count, DeviceToDevice);
+    }
+
+    /// <summary>
+    /// Waits for everything made on the CUDA runtime's own stream so far — the copies
+    /// <see cref="CopyDeviceToDevice"/> made — to be done. Answers as
+    /// <see cref="CopyDeviceToHost(IntPtr, Span{byte})"/> does.
+    /// </summary>
+    public static int? Synchronize()
+    {
+        Bind();
+        return _synchronize?.Invoke();
+    }
 
     public static bool CopyDeviceToHost(IntPtr source, byte[] destination)
         => CopyDeviceToHost(source, destination.AsSpan()) == 0;
@@ -133,6 +162,12 @@ internal static class CudaInterop
                     // one) before it counts as done, and one that does not complete is a failed
                     // copy.
                     if (status == 0 && kind == HostToDevice) status = synchronize(IntPtr.Zero);
+                    if (status != 0) clear();
+                    return status;
+                };
+                _synchronize = () =>
+                {
+                    var status = synchronize(IntPtr.Zero);
                     if (status != 0) clear();
                     return status;
                 };

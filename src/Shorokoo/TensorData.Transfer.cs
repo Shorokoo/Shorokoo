@@ -127,18 +127,6 @@ namespace Shorokoo
         }
 
         /// <summary>
-        /// This tensor moved into host memory, for a caller that owns it and wants nothing of it but
-        /// its contents there: itself where the host can read it already, and otherwise a copy in the
-        /// framework's own host memory, this tensor released as soon as the copy is made.
-        /// </summary>
-        internal TensorData MovedToHost()
-        {
-            var host = ToHost();
-            if (!ReferenceEquals(host, this)) Dispose();
-            return host;
-        }
-
-        /// <summary>
         /// This tensor to be <b>read</b> by the run it is fed to, rather than consumed by it. Fed as
         /// it is, a tensor is given to the run, which takes it when it starts; fed as this, it is lent
         /// instead — the run takes a reader lock on it for as long as it runs, the running context is

@@ -921,12 +921,13 @@ A process's private bytes (its commit charge) are more than what it holds:
   most they have held (see above).
 
 What a rig itself holds is the model's state once over at most. A rig built from scratch keeps its
-initial values — parameters, model state and optimizer state — for `CreateInitialCheckpoint`. A
-rig from `TrainingRig.Load` keeps none, where every parameter declares a concrete shape (the
-case for a model built by Shorokoo): it computes them the first time something asks, since the
-checkpoint it loads replaces them. A resident run holds the state on its device; each checkpoint it
-hands out is that state where it is, which the run then only reads, so its next step writes beside
-it: a second copy of the state on the device for as long as you hold the checkpoint.
+initial values — parameters, model state and optimizer state — for `CreateInitialCheckpoint`, where
+the runs that computed them left them: on the card when its merge context runs on one, attached to
+that context. A rig from `TrainingRig.Load` keeps none, where every parameter declares a concrete
+shape (the case for a model built by Shorokoo): it computes them the first time something asks,
+since the checkpoint it loads replaces them. A resident run holds the state on its device; each
+checkpoint it hands out is that state where it is, which the run then only reads, so its next step
+writes beside it: a second copy of the state on the device for as long as you hold the checkpoint.
 
 ## Feeding data: the data loader
 

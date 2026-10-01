@@ -140,18 +140,12 @@ namespace Shorokoo.Runtime
                 session.InputNames.ToList().IndexOf(alias.Input)))];
         }
 
-        /// <summary>
-        /// A session and the settings it was built with, and the arena it allocates in as the
-        /// tensors a run leaves there record it: a token of its own rather than the session, so an
-        /// output that outlives a rebuilt session does not keep the managed wrapper of it alive.
-        /// </summary>
+        /// <summary>A session and the settings it was built with.</summary>
         private sealed class BuiltSession(IShorokooSession session, DeviceMemorySettings deviceMemory)
         {
             internal IShorokooSession Session { get; } = session;
 
             internal DeviceMemorySettings DeviceMemory { get; } = deviceMemory;
-
-            internal object Arena { get; } = new();
         }
 
         // What a message about a run of this graph calls it, where the compiler knew better than a
@@ -352,8 +346,7 @@ namespace Shorokoo.Runtime
                 // Under a budget, the session this run can use -- kept, or built again with the
                 // arena limit what the context now holds leaves -- decided before anything is
                 // taken, so a run the budget cannot fit is refused having consumed nothing.
-                var built = feeds.Budget is { } limit ? Within(limit, feeds) : _built;
-                var session = built.Session;
+                var session = (feeds.Budget is { } limit ? Within(limit, feeds) : _built).Session;
 
                 // On this graph's own backend, because that is the runtime about to read the values,
                 // and only in the memory it reads them in: what is there already it is handed as it
@@ -361,15 +354,14 @@ namespace Shorokoo.Runtime
                 // and a tensor of another device or runtime -- through a copy that backend builds
                 // there. Each input is held first -- read-locked, or consumed -- and its value built
                 // after.
-                var sessionInputs = feeds.Feed(name =>
-                    _onnxInputNameByOriginal.TryGetValue(name, out var mapped) ? mapped : name);
+                var sessionInputs = feeds.Feed(SessionNameOf);
 
                 // Per output, the input whose consumed memory the session wrote it into, or null.
                 var results = _owner.CallSession(
                     session, feeds, sessionInputs, _outputNames, runSettings, out var aliasedInputs);
+                _owner.CountAliasedOutputs(aliasedInputs.Count(input => input is not null));
 
-                return _owner.AdoptOutputs(
-                    results, _outputNames, _backend, ArenasOf(results.Count, aliasedInputs, sessionInputs, feeds, built));
+                return _owner.AdoptOutputs(results, _outputNames, _backend);
             }
             catch (Exception e) when ((failed = e) is null)
             {
@@ -413,42 +405,9 @@ namespace Shorokoo.Runtime
                 description ?? ComputeContext.DescribeGraph(inputs, outputs), backend));
         }
 
-        /// <summary>
-        /// The arena each output of a run is in, as a device-memory budget counts it: the arena of
-        /// the session that ran — <paramref name="built"/>'s — for an output it allocated there, and
-        /// for one it wrote into the memory of a tensor the run consumed (output aliasing), the arena
-        /// that memory was in: the consumed tensor's own record, which is none where it was never an
-        /// arena's. The session's arena limit covers only what the arena itself allocates, so an
-        /// output living where the consumed tensor lived is counted where that tensor was — in the
-        /// discount of every later run of this session, unless that memory is this session's arena
-        /// already.
-        /// </summary>
-        private Func<int, object?> ArenasOf(
-            int outputs, IReadOnlyList<string?>? aliasedInputs,
-            IReadOnlyDictionary<string, IShorokooTensorValue> sessionInputs, RunFeeds feeds, BuiltSession built)
-        {
-            // Built only once an output turns out to have been written into consumed memory: a run
-            // that aliased nothing -- which answers with no entries, or none but nulls -- allocates
-            // nothing here.
-            object?[]? arenas = null;
-            var aliased = 0;
-            for (int i = 0; aliasedInputs is not null && i < outputs && i < aliasedInputs.Count; i++)
-            {
-                if (aliasedInputs[i] is not { } input) continue;
-                if (arenas is null)
-                {
-                    arenas = new object?[outputs];
-                    Array.Fill(arenas, built.Arena);
-                }
-                aliased++;
-                // A value the run did not hand over has no record here, and none is the answer that
-                // never under-counts: the output is then counted outside every arena.
-                arenas[i] = sessionInputs.TryGetValue(input, out var value) ? feeds.ArenaOfHanded(value) : null;
-            }
-            if (arenas is null) return _ => built.Arena;
-            _owner.CountAliasedOutputs(aliased);
-            return i => arenas[i];
-        }
+        /// <summary>The session's name for the graph input <paramref name="name"/>.</summary>
+        private string SessionNameOf(string name)
+            => _onnxInputNameByOriginal.TryGetValue(name, out var mapped) ? mapped : name;
 
         /// <summary>
         /// The session a run under a device-memory budget of <paramref name="limit"/> bytes can use,
@@ -458,39 +417,35 @@ namespace Shorokoo.Runtime
         ///
         /// <para>What the budget allows a session is the budget less the <i>discount</i>: the bytes
         /// the context holds in its memory outside that session's arena for the length of the run —
-        /// every tensor attached to it there, and what the run itself reads there or copies there to
-        /// read or consume, a copy of a tensor it consumes included. A tensor the session's own
-        /// earlier runs left in its arena is inside the limit already, where it is, and is not
-        /// discounted again — and so is one a run wrote into such a tensor's memory, where one written
-        /// into memory outside the arena is discounted with the rest (see <see cref="ArenasOf"/>).
-        /// ONNX Runtime fixes an arena's limit when the session is built, and building one costs
-        /// about as much as the graph is large, so a session is kept for as long as its limit fits
-        /// and built again only when the discount has grown past the room it left — never merely
-        /// because it has fallen. See <see cref="ComputeContext.ArenaLimitWithin"/> for the limit a
-        /// new one gets.</para>
+        /// every tensor attached to it there, what the run itself reads there or copies there to read
+        /// or consume, a copy of a tensor it consumes included, and the memory the run is handed for
+        /// its outputs there before it starts (see <see cref="RunFeeds.Plan"/>). No tensor is in the
+        /// arena: a run's outputs are memory of their own. ONNX Runtime fixes an arena's limit when
+        /// the session is built, and building one costs about as much as the graph is large, so a
+        /// session is kept for as long as its limit fits and built again only when the discount has
+        /// grown past the room it left — never merely because it has fallen. See
+        /// <see cref="ComputeContext.ArenaLimitWithin"/> for the limit a new one gets.</para>
         /// </summary>
         /// <exception cref="InvalidOperationException">What the context holds leaves no room for the
         /// run's arena. Nothing has been taken.</exception>
         private BuiltSession Within(long limit, RunFeeds feeds)
         {
             var built = _built;
-            var plan = feeds.Plan(built.Arena);
+            // Every session this graph is built on is the same model's, so the one it has now answers
+            // for the outputs of the one it may be built again as.
+            var plan = feeds.Plan(built.Session, SessionNameOf);
             if (built.DeviceMemory.LimitBytes is { } current && current <= limit - plan.Outside)
             {
                 feeds.Admit(current, plan);
                 return built;
             }
-
-            // A new session's arena starts empty, so what this one's runs left in its arena is
-            // outside the new one, and is discounted with everything else.
-            return Rebuild(feeds.AdmitFresh(limit));
+            return Rebuild(feeds.AdmitFresh(limit, plan));
         }
 
         /// <summary>
         /// Builds this graph's session again with an arena limit of <paramref name="arenaLimit"/>,
-        /// and releases the one it replaces. What the old session's runs left in its arena survives
-        /// the release — each output keeps the arena it came from alive — so nothing a caller holds
-        /// is touched.
+        /// and releases the one it replaces. What the old session's runs handed back is memory of its
+        /// own, which the release leaves as it is, so nothing a caller holds is touched.
         /// </summary>
         private BuiltSession Rebuild(long arenaLimit)
         {
@@ -1374,32 +1329,19 @@ namespace Shorokoo.Runtime
         /// <summary>
         /// A run's outputs as the tensors and sequences the caller gets back, each allocated by
         /// <paramref name="backend"/> — the backend the run ran on, and so the one that releases
-        /// it — and every tensor among them attached to this context. For a session run once and
-        /// released, whose arena goes with it, so no output records one.
+        /// it — and every tensor among them attached to this context. Each is memory of its own,
+        /// outside the arena of the session that ran, so this context's budget counts it with the
+        /// rest of what is attached to it from here on.
         /// </summary>
         internal NamedModelParam[] AdoptOutputs(
             IReadOnlyList<IShorokooTensorValue> results, IReadOnlyList<string> names, IShorokooBackend backend)
-            => AdoptOutputs(results, names, backend, static _ => null);
-
-        /// <summary>
-        /// <see cref="AdoptOutputs(IReadOnlyList{IShorokooTensorValue}, IReadOnlyList{string}, IShorokooBackend)"/>
-        /// with each output's arena answered by <paramref name="arenaOf"/>, given its position: an
-        /// output a run wrote into consumed memory is in whatever arena that memory was, if any, not
-        /// in the running session's.
-        /// </summary>
-        internal NamedModelParam[] AdoptOutputs(
-            IReadOnlyList<IShorokooTensorValue> results, IReadOnlyList<string> names,
-            IShorokooBackend backend, Func<int, object?> arenaOf)
         {
             var outputs = new NamedModelParam[results.Count];
             for (int i = 0; i < outputs.Length; i++)
             {
                 outputs[i] = OnnxUtils.CreateNamedModelParam(
                     results[i], ModelParamType.OutputParam, names[i], backend);
-                if (outputs[i] is not TensorDataModelParam named) continue;
-                var tensor = named.ToTensorData();
-                if (arenaOf(i) is { } arena && !tensor.Space.IsHost) tensor.RecordArena(arena);
-                Attach(tensor);
+                if (outputs[i] is TensorDataModelParam named) Attach(named.ToTensorData());
             }
             return outputs;
         }
@@ -2132,21 +2074,31 @@ namespace Shorokoo.Runtime
                 var deviceMemory = DeviceMemory.Resolve(reusedAcrossShapes: false);
                 if (feeds.Budget is { } limit)
                 {
-                    deviceMemory = deviceMemory with { LimitBytes = feeds.AdmitFresh(limit) };
+                    deviceMemory = deviceMemory with { LimitBytes = feeds.AdmitFresh(limit, feeds.Plan(null, null)) };
                 }
-                session = BuildSession(
-                    backend, modelData,
-                    SessionOptimization(
-                        HasOptionalOps(model.Graph) || IsFullyConstant(model.Graph), trainingStep: false),
-                    deviceMemory);
+                var optimization = SessionOptimization(
+                    HasOptionalOps(model.Graph) || IsFullyConstant(model.Graph), trainingStep: false);
+                session = BuildSession(backend, modelData, optimization, deviceMemory);
                 outputNames.Value = [.. session.OutputNames];
                 var onnxInputNameByOriginal = SessionNamesOf(originalInputNames, session);
+                string SessionNameOf(string name)
+                    => onnxInputNameByOriginal.TryGetValue(name, out var mapped) ? mapped : name;
+
+                // The memory the run is handed for its outputs before it starts is known only once
+                // the session is: under a budget it is counted with the rest of what the run holds
+                // outside the arena, and where it leaves the arena less room than the session was built
+                // with, the session is built again with that room -- before anything is taken.
+                if (feeds.Budget is { } budgeted && feeds.AdmitOneShot(budgeted, session, SessionNameOf) is { } lower)
+                {
+                    session.Dispose();
+                    session = null;
+                    session = BuildSession(backend, modelData, optimization, deviceMemory with { LimitBytes = lower });
+                }
 
                 // Held first, then the values -- see CompiledGraph.Run -- on this context's
                 // backend: the one that just built the session above, and so the runtime that is
                 // about to read what it is fed.
-                var sessionInputs = feeds.Feed(name =>
-                    onnxInputNameByOriginal.TryGetValue(name, out var mapped) ? mapped : name);
+                var sessionInputs = feeds.Feed(SessionNameOf);
 
                 // A session built for one run was marked to alias nothing.
                 var results = CallSession(
@@ -2176,12 +2128,9 @@ namespace Shorokoo.Runtime
                     {
                         // Dispose the session to free native memory — on the throwing path too,
                         // where the memory it holds is the memory the caller has just been told it
-                        // lacks. The returned tensor values stay valid across it, and the finally
-                        // also keeps the session rooted across the native calls above. They are
-                        // not, however, free of it: a result keeps its session's ALLOCATOR alive, so
-                        // a caller that retains one retains that session's arena — see
-                        // `FastProcessorHelper.RehostOffSession` for what a caller that must not
-                        // does, and Shorokoo/Shorokoo#180 for the general question.
+                        // lacks. The returned tensor values stay valid across it: each is memory of
+                        // its own, which keeps nothing of the session alive. The finally also keeps
+                        // the session rooted across the native calls above.
                         session?.Dispose();
                     }
                     finally

@@ -28,7 +28,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// runs the resulting graph through
     /// a session compiled for the slice of the graph feeding one initializer's output — one run
     /// per parameter, one session per distinct slice (see <see cref="ChunkFor"/>) — each result
-    /// copied off its session (see <see cref="FastProcessorHelper.RehostOffSession"/>).
+    /// left where its run left it, in memory of its own in the context's memory.
     /// The decoded results are returned as a
     /// <see cref="ModelId"/> → <see cref="TensorData"/> dictionary.
     /// </summary>
@@ -360,8 +360,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// <summary>
         /// Every parameter's initial value, one group at a time: a group's session is disposed
         /// before the next one's is built, so only one session's arena is ever alive; each result
-        /// is copied off it as it is produced, and each run hands the arena's unused blocks back as
-        /// it ends (see ChunkFor).
+        /// is memory of its own, outside it, and each run hands the arena's unused blocks back as it
+        /// ends (see ChunkFor).
         /// </summary>
         private static TensorData[] RunInTurn(
             ComputeContext compute, List<InitGroup> groups,
@@ -381,8 +381,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     foreach (var (param, keys) in group.Members)
                     {
                         current = param;
-                        results[param] = FastProcessorHelper.RehostOffSession(
-                            compiled.Execute(KeyFeeds(keys), shrinking)[0].ToTensorData());
+                        results[param] = compiled.Execute(KeyFeeds(keys), shrinking)[0].ToTensorData();
                     }
                 }
                 catch (System.Exception ex) when (IsAllocationFailure(ex))
@@ -395,8 +394,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
         /// <summary>
         /// What one parameter's run is modelled to hold while it is in flight: its value a few times
-        /// over — the drawn tensor, what the initializer computes from it, the copy taken off the
-        /// session — and one chunk's working memory of the draw.
+        /// over — the drawn tensor, what the initializer computes from it, the copy taken out of the
+        /// session's arena where the session could not size it before the run — and one chunk's
+        /// working memory of the draw.
         /// </summary>
         private static long InFlightBytes(long elements)
             => elements > (long.MaxValue - ChunkWorkingBytes) / InFlightBytesPerElement
@@ -484,9 +484,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                         try
                         {
                             var compiled = sessions[groupOf[i]]!;
-                            results[i] = FastProcessorHelper.RehostOffSession(compiled.Execute(
+                            results[i] = compiled.Execute(
                                 KeyFeeds(keysOf[i]),
-                                compiled.DefaultRunSettings with { ShrinkArenaAfterRun = true })[0].ToTensorData());
+                                compiled.DefaultRunSettings with { ShrinkArenaAfterRun = true })[0].ToTensorData();
                         }
                         catch (System.Exception ex)
                         {
@@ -586,9 +586,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// <para>Memory is bounded by three things. Each keyed draw is computed a chunk of stream
         /// positions at a time (see <see cref="FastInitKeyedDraws"/>), so a run's working memory is
         /// a chunk's — hundreds of integer passes over it — rather than hundreds of bytes per element
-        /// of the parameter. Each result is copied off its session
-        /// (<see cref="FastProcessorHelper.RehostOffSession"/>): a result keeps its session's arena
-        /// alive, so N retained results would otherwise hold N arenas. And each run hands its
+        /// of the parameter. Each result is memory of its own that keeps nothing of its session
+        /// alive, so N retained results hold their own bytes and no arena. And each run hands its
         /// arena's unused blocks back as it ends (<see cref="RunSettings.ShrinkArenaAfterRun"/>): a
         /// session run a second time on the same shapes lays its intermediates out in one block
         /// sized to the first run's peak, which an arena still holding the first run's blocks

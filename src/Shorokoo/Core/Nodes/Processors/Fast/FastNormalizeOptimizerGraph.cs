@@ -428,10 +428,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// from <paramref name="paramValue"/> one at a time: a session
         /// build per parameter would make rig construction cost a constant per parameter
         /// (Shorokoo/Shorokoo#404). The session runs unoptimized, as parameter initialization's
-        /// does, since each run computes its values once; each run hands its arena's unused blocks
-        /// back as it ends, and each result is copied off the session — the rig retains every value
-        /// this produces for its lifetime, the shape that makes a session-backed result cost its
-        /// session's whole arena (see <see cref="FastProcessorHelper.RehostOffSession"/>).</para>
+        /// does, since each run computes its values once, and each run hands its arena's unused
+        /// blocks back as it ends. The rig retains every value this produces for its lifetime, each
+        /// where its run left it: memory of its own, which keeps nothing of the session alive.</para>
         /// </summary>
         internal static TensorData[][] RunStateInitGraph(
             InternalComputationGraph stateInitGraph,
@@ -466,7 +465,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     // them ever holds a copy of itself in a runtime's memory.
                     IData[] feeds = [.. hyperSeeds.Select(CopyOf), CopyOf(paramData), zeroGrad];
                     results[i] = [.. compiled.Execute(feeds, compiled.DefaultRunSettings with { ShrinkArenaAfterRun = true })
-                        .Select(r => FastProcessorHelper.RehostOffSession(r.ToTensorData()))];
+                        .Select(r => r.ToTensorData())];
                 }
             }
             finally

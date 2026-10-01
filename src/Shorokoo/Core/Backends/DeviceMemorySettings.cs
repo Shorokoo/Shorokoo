@@ -119,14 +119,16 @@ public sealed record DeviceMemorySettings
     ///
     /// <para><b>Runs.</b> A session's arena gets ORT's <c>gpu_mem_limit</c> of the budget less the
     /// <i>discount</i>: what the context holds in its memory outside that arena for the length of
-    /// the run — the tensors attached to it there, and those the run reads there or copies there to
-    /// read. A tensor already on the card is read where it is and never enters the arena, so it
-    /// stays in the discount for the whole run; one the session's own earlier runs left in its arena
-    /// is inside the limit already. A host tensor the run consumes is copied onto the card before
-    /// the run, outside the arena, like one the run reads, and discounted — once, however many
-    /// inputs it feeds. What the run consumed is released as it returns, and drops out. A run that
-    /// needs more arena than it was left fails with ORT's <c>BFCArena</c> error; one whose discount
-    /// leaves no arena at all is refused before it takes anything it was fed.</para>
+    /// the run — the tensors attached to it there, those the run reads there or copies there to
+    /// read, and the memory it is handed for each output whose shape its session settled before it
+    /// starts. A tensor already on the card is read where it is and never enters the arena, so it
+    /// stays in the discount for the whole run, and so does every earlier run's output: an output
+    /// is memory of its own, never a block of an arena. A host tensor the run consumes is copied
+    /// onto the card before the run, outside the arena, like one the run reads, and discounted —
+    /// once, however many inputs it feeds. What the run consumed is released as it returns, and
+    /// drops out. A run that needs more arena than it was left fails with ORT's <c>BFCArena</c>
+    /// error; one whose discount leaves no arena at all is refused before it takes anything it was
+    /// fed.</para>
     ///
     /// <para><b>Sessions.</b> ORT fixes a session's <c>gpu_mem_limit</c> when the session is built,
     /// and building one costs about as much as the graph is large, so a session is built with the
@@ -145,11 +147,12 @@ public sealed record DeviceMemorySettings
     /// <see cref="RunSettings.ShrinkArenaAfterRun"/> says.</para>
     ///
     /// <para><b>What it does not count.</b> The budget counts tensors, not arenas. The blocks an
-    /// arena keeps spare, the one allocator per card and runtime that tensors are placed from — which holds the
-    /// most it was ever asked for at once — and the weights a session keeps in its arena for as long
-    /// as it lives are not in it: a session's weights count only against its own runs, so a context
-    /// that has compiled several graphs with large weights is holding every one of them at once, and
-    /// can be holding more than its budget between them.</para>
+    /// arena keeps spare, the one allocator per card and runtime that tensors and outputs are placed
+    /// from — which holds the most it was ever asked for at once until a run that hands its arena's
+    /// unused blocks back has it hand back its own — and the weights a session keeps in its arena
+    /// for as long as it lives are not in it: a session's weights count only against its own runs,
+    /// so a context that has compiled several graphs with large weights is holding every one of
+    /// them at once, and can be holding more than its budget between them.</para>
     /// </summary>
     /// <exception cref="ArgumentOutOfRangeException">A limit of zero or less.</exception>
     public long? LimitBytes

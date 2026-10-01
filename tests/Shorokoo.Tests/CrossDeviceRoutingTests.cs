@@ -279,7 +279,7 @@ public class CrossDeviceRoutingCoverageTests
     }
 
     [Fact]
-    public void TestWhatASessionsOwnRunsLeftInItsArenaIsInsideItsLimitUntilTheSessionIsBuiltAgain()
+    public void TestEveryOutputARunHandsBackIsCountedOutsideTheArenaOfEveryLaterRun()
     {
         var card = new StubBackend(ComputeDevice.Cuda, 0);
         using var context = new ComputeContext(card) { DeviceMemory = Budget(6400) };
@@ -288,14 +288,10 @@ public class CrossDeviceRoutingCoverageTests
 
         var (first, second, third) = (Kept(), Kept(), Kept());
         Assert.False(first.IsHostResident);
-        Assert.Single(card.Sessions);
-
-        var placed = Floats(100).CopyTo(context);
-        var fourth = Kept();
-        Assert.Equal([6300L, 5600L], card.Sessions.Select(s => s.LimitBytes));
+        Assert.Equal([6300L, 6200L, 6100L], card.Sessions.Select(s => s.LimitBytes));
         compiled.Execute(second.Shared());
-        Assert.Equal(2, card.Sessions.Count);
-        GC.KeepAlive((object[])[first, third, placed, fourth]);
+        Assert.Equal([6300L, 6200L, 6100L], card.Sessions.Select(s => s.LimitBytes));
+        GC.KeepAlive((object[])[first, third]);
     }
 
     [Fact]
@@ -472,40 +468,37 @@ public class CrossDeviceRoutingCoverageTests
     }
 
     [Fact]
-    public void TestAnOutputWrittenIntoConsumedMemoryIsCountedInTheArenaThatMemoryWasInAndNoOther()
+    public void TestAnOutputARunIsHandedMemoryForIsCountedBeforeItStartsUnlessItIsWrittenIntoWhatTheRunConsumes()
     {
-        var (aliasedLimits, aliased) = KeepingTwo(aliases: true);
-        Assert.Equal([6300L, 6200L], aliasedLimits);
-        Assert.Equal(2L, aliased);
-        var (plainLimits, plain) = KeepingTwo(aliases: false);
-        Assert.Equal([6300L], plainLimits);
-        Assert.Equal(0L, plain);
+        Assert.Equal(("6300 6200", 2L), KeepingTwo(aliases: true, settles: true, fed: a => a));
+        Assert.Equal(("6300 6200 6100", 0L), KeepingTwo(aliases: false, settles: true, fed: a => a));
+        Assert.Equal(("6300 6200 6100", 2L), KeepingTwo(aliases: true, settles: true, fed: a => a.TryConsume()));
+        Assert.Equal(("6300 6200", 2L), KeepingTwo(aliases: true, settles: false, fed: a => a));
+        Assert.Equal(("6300 6200", 0L), KeepingTwo(aliases: false, settles: false, fed: a => a));
 
-        var card = new StubBackend(ComputeDevice.Cuda, 0) { ReleasesWhatItConsumes = true, Aliases = true };
-        using var context = new ComputeContext(card) { DeviceMemory = Budget(6400) };
-        var compiled = context.Compile(Doubled(), inputDims: null, trainingStep: false, aliasCandidates: [(0, 0)]);
-        TensorData Kept(IData a) => compiled.Execute(a)[0].ToTensorData();
-        var onCard = Floats(20).To(context);
-        var written = Kept(Kept(onCard.Shared()));
-        Kept(Floats(1).Shared());
-        Assert.Single(card.Sessions);
-        Assert.Equal(1L, context.AliasedOutputs);
-        GC.KeepAlive((object[])[onCard, written]);
+        var card = new StubBackend(ComputeDevice.Cuda, 0) { Settles = [16] };
+        using var context = new ComputeContext(card) { DeviceMemory = Budget(64) };
+        Assert.Contains(
+            "0 bytes of the 0 tensor(s) attached to its compute context there, 4 bytes more that it reads "
+            + "there or copies there for the run, and 64 bytes for the outputs it is handed memory for there "
+            + "before it starts",
+            Assert.Throws<InvalidOperationException>(() => context.Compile(Echo()).Execute(Floats(1))).Message);
     }
 
     /// <summary>The arena limits a budgeted context's session went through, and how many outputs
-    /// were written into consumed memory, over two runs each consuming a host tensor, which is
-    /// copied onto the card first: an output the session may write into that copy goes there, and
-    /// is counted outside the arena, where the copy is.</summary>
-    private static (long?[] Limits, long Aliased) KeepingTwo(bool aliases)
+    /// were written into consumed memory, over two runs each fed a host tensor through
+    /// <paramref name="fed"/>, which is copied onto the card first, by a session that may write its
+    /// output into that copy and, where it <paramref name="settles"/> the output's shape, is handed
+    /// the output's memory before the run starts.</summary>
+    private static (string Limits, long Aliased) KeepingTwo(bool aliases, bool settles, Func<TensorData, IData> fed)
     {
-        var card = new StubBackend(ComputeDevice.Cuda, 0) { ReleasesWhatItConsumes = true, Aliases = aliases };
+        var card = new StubBackend(ComputeDevice.Cuda, 0) { ReleasesWhatItConsumes = true, Aliases = aliases, Settles = settles ? [20] : null };
         using var context = new ComputeContext(card) { DeviceMemory = Budget(6400) };
         var compiled = context.Compile(Doubled(), inputDims: null, trainingStep: false, aliasCandidates: [(0, 0)]);
         TensorData Kept(IData a) => compiled.Execute(a)[0].ToTensorData();
-        var (first, second) = (Kept(Floats(20)), Kept(Floats(20)));
+        var (first, second) = (Kept(fed(Floats(20))), Kept(fed(Floats(20))));
         GC.KeepAlive((object[])[first, second]);
-        return ([.. card.Sessions.Select(s => s.LimitBytes)], context.AliasedOutputs);
+        return (string.Join(' ', card.Sessions.Select(s => s.LimitBytes)), context.AliasedOutputs);
     }
 
     [Fact]
@@ -1279,13 +1272,25 @@ public class CrossDeviceRoutingCoverageTests
         {
             Persistence.From(model).WithModel().WithWeights().WithWeights("ema", onHost).Save(hostPath);
             Persistence.From(model).WithModel().WithWeights().WithWeights("ema", onCard).Save(cardPath);
-            Assert.Equal(File.ReadAllBytes(hostPath), File.ReadAllBytes(cardPath));
+            Assert.Equal(Unstamped(hostPath), Unstamped(cardPath));
             Assert.All(onCard.Values, t => Assert.False(t.IsHostResident));
         }
         finally
         {
             foreach (var path in (string[])[hostPath, cardPath]) File.Delete(path);
         }
+    }
+
+    /// <summary>Every entry of the archive at <paramref name="path"/>, by name, with the second it
+    /// was saved at blanked out: two saves of the same thing differ in nothing else.</summary>
+    private static Dictionary<string, string> Unstamped(string path)
+    {
+        using var archive = System.IO.Compression.ZipFile.OpenRead(path);
+        return archive.Entries.ToDictionary(entry => entry.FullName, entry =>
+        {
+            using var reader = new StreamReader(entry.Open(), System.Text.Encoding.Latin1);
+            return System.Text.RegularExpressions.Regex.Replace(reader.ReadToEnd(), @"""createdUtc""\s*:\s*""[^""]*""", "");
+        });
     }
 
     [Fact]
@@ -1427,6 +1432,10 @@ public class CrossDeviceRoutingCoverageTests
 
         /// <summary>Whether its sessions' runs throw.</summary>
         internal bool FailsRuns { get; set; }
+
+        /// <summary>The shape its sessions say they settled for every output, of float elements, so
+        /// that a run is handed the memory for each before it starts; none where null.</summary>
+        internal long[]? Settles { get; init; }
 
         /// <summary>How many of its next releases throw after recording what they were given.</summary>
         internal int FailingReleases { get; set; }
@@ -1630,6 +1639,10 @@ public class CrossDeviceRoutingCoverageTests
         public IReadOnlyList<string> InputNames => inputNames;
 
         public IReadOnlyList<string> OutputNames => outputNames;
+
+        public IReadOnlyList<SettledOutput> SettledOutputs => backend.Settles is { } shape
+            ? [.. outputNames.Select(name => new SettledOutput(name, ShorokooTensorElementType.Float, shape))]
+            : [];
 
         public IReadOnlyList<IShorokooTensorValue> Run(
             IReadOnlyDictionary<string, IShorokooTensorValue> inputs,

@@ -651,15 +651,16 @@ public class GpuExecutionTests
     /// <summary>
     /// What writing a step's state over the state it consumed saves: a resident run of
     /// <see cref="WideLinearModel"/> under AdamW, with shrinkage on as a budget would force it. A
-    /// step that writes its state elsewhere holds the state it consumed and the state it makes in
-    /// its arena together — measured, 704 MiB at the step's peak against 320 MiB for one that writes
-    /// the new state over the old, which keeps both out of the arena — and the card's own peak falls
-    /// with it. The arena falls by twice the state; the card, read across every process on it, by at
-    /// least the state. A first run grows the card's transfer allocator, which never shrinks, so
-    /// neither measured run pays for that.
+    /// step that writes its state elsewhere holds the state it consumed and the state it makes on the
+    /// card together, each in memory of its own outside the arena — measured, 594 MiB of this
+    /// process's card at the step's peak against 402 MiB for one that writes the new state over the
+    /// old, for 192 MiB of state — so this process's peak on the card falls by at least the state,
+    /// while the arena, which holds neither, peaks the same either way. Each measured run starts with
+    /// the garbage of the one before it collected and handed back to the card, so neither finds
+    /// blocks the other freed waiting to be reused.
     /// </summary>
     [CudaFact]
-    public void CudaProvider_WritingAStepsStateOverWhatItConsumedTakesTwiceTheStateOffItsArenaPeak()
+    public void CudaProvider_WritingAStepsStateOverWhatItConsumedTakesTheStateOffTheCardsPeak()
     {
         (long Arena, long Card, long State) Peaks(bool aliasing)
         {
@@ -680,8 +681,11 @@ public class GpuExecutionTests
             var state = ((TensorDataStruct[])[initial.TrainableParams, initial.ModelState, initial.OptimizerState])
                 .SelectMany(s => s.Fields.Values.OfType<TensorData>()).Sum(t => t.ByteCount);
 
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            context.Execute(PlusOne(), TensorData([1L], 0f)).Single().ToTensorData().Delete();
             DeviceMemory.ResetPeak();
-            var idle = DeviceMemory.Sample()!.Value.UsedBytes;
+            var idle = DeviceMemory.Sample()!.Value.ProcessBytes!.Value;
             using var stop = new CancellationTokenSource();
             var sampler = Task.Run(() => { while (!stop.IsCancellationRequested) DeviceMemory.Sample(); });
             try
@@ -694,7 +698,12 @@ public class GpuExecutionTests
                 stop.Cancel();
                 sampler.Wait();
             }
-            return (context.RunStats.PeakBytes, DeviceMemory.PeakUsedBytes - idle, state);
+            return (context.RunStats.PeakBytes, DeviceMemory.PeakProcessBytes - idle, state);
+        }
+        static InternalComputationGraph PlusOne()
+        {
+            var x = InputVector<float32>("x");
+            return new InternalComputationGraph([x], [x + 1f]);
         }
 
         DeviceMemory.ResetPeak();
@@ -704,8 +713,8 @@ public class GpuExecutionTests
             var plain = Peaks(aliasing: false);
             var aliased = Peaks(aliasing: true);
 
-            Assert.True(plain.Arena - aliased.Arena >= 2 * aliased.State - (1L << 20));
-            Assert.True(plain.Card - aliased.Card >= aliased.State);
+            Assert.True(Math.Abs(plain.Arena - aliased.Arena) < 1L << 20);
+            Assert.True(plain.Card - aliased.Card >= aliased.State - (1L << 20));
         }
         finally
         {
@@ -753,43 +762,86 @@ public class GpuExecutionTests
     /// <summary>
     /// A one-shot run whose intermediates fill 256 MiB of the card and whose output is four
     /// kilobytes, carved out of the block the fill was freed from, leaves the card holding the
-    /// output and nothing more once it returns, though the output is kept; and a compiled graph
-    /// that hands its arena's unused blocks back after the same run, or after one whose output is a
-    /// scalar, is left holding nothing in its arena.
+    /// output and nothing more once it returns, though the output is kept. Compiled, with the
+    /// outputs kept, the arena holds no more in use than its weights once a run is over, and a run
+    /// that hands its unused blocks back leaves it as it was built where the output's shape was
+    /// settled, though the output is made after the run's 256 MiB intermediate is freed.
     /// </summary>
     [CudaFact]
     public void CudaProvider_AKeptOutputHoldsOnlyItsOwnBytesOnTheCardAndNothingOfItsSessionsArena()
     {
         const long MiB = 1024 * 1024;
         using var ctx = new ComputeContext { RunSettings = new RunSettings { ShrinkArenaAfterRun = true } };
-        static long Card()
+
+        ctx.Execute(ArenaProbeModels.Widened(), ArenaProbeModels.FilledShape(1024))[0].ToTensorData().Delete();
+        var before = HeldOnTheCard();
+        var widened = ctx.Execute(ArenaProbeModels.Widened(), ArenaProbeModels.FilledShape(64L << 20))[0].ToTensorData();
+        Assert.True(HeldOnTheCard() - before < 16 * MiB);
+
+        var filled = ArenaProbeModels.Filled(ctx);
+        var spread = ArenaProbeModels.Spread(ctx);
+        (long, long, long) Held()
+        {
+            var learned = Assert.IsType<ArenaStatistics>(filled.ReadArenaStatistics());
+            var settled = Assert.IsType<ArenaStatistics>(spread.ReadArenaStatistics());
+            return (learned.InUseBytes, settled.InUseBytes, settled.TotalAllocatedBytes);
+        }
+        var built = Held();
+        var sum = filled.Execute(ArenaProbeModels.FilledShape(64L << 20))[0].ToTensorData();
+        var spreadSum = spread.Execute(ArenaProbeModels.Ones(64 << 20))[0].ToTensorData();
+
+        Assert.Equal(built, Held());
+        Assert.Equal([64 << 20, 64 << 20, -(64 << 20)], [widened.ValueAt<float>(999), sum.ValueAt<float>(0), spreadSum.ValueAt<float>(999)]);
+    }
+
+    /// <summary>
+    /// The card's own allocator — the one tensors placed on the card and every run's outputs there
+    /// come from — keeps the blocks of tensors that are gone, through a run that leaves its arena as
+    /// it is, and hands them back to the card as a run that hands its arena's unused blocks back
+    /// starts.
+    /// </summary>
+    [CudaFact]
+    public void CudaProvider_TheCardsOwnAllocatorHandsBackWhatNoTensorUsesAsARunThatShrinksStarts()
+    {
+        const long MiB = 1024 * 1024;
+        using var ctx = new ComputeContext();
+        var product = ArenaProbeModels.MatMul(ctx);
+        void Run(bool shrink) => product.Execute(
+            [ArenaProbeModels.MatMulOperand(8), ArenaProbeModels.MatMulOperand(8)],
+            new RunSettings { ShrinkArenaAfterRun = shrink })[0].ToTensorData().Delete();
+
+        HeldOnTheCard();
+        Run(shrink: true);
+        var before = HeldOnTheCard();
+        foreach (var placed in Enumerable.Range(0, 8).Select(_ => TensorData([8L << 20], new float[8 << 20]).CopyTo(ctx)).ToList())
+            placed.Delete();
+        Run(shrink: false);
+        var kept = HeldOnTheCard() - before;
+        Run(shrink: true);
+
+        Assert.True(kept >= 256 * MiB);
+        Assert.True(HeldOnTheCard() - before < 16 * MiB);
+    }
+
+    /// <summary>What this process holds on the card once every tensor nothing reaches any more is
+    /// released: a released tensor's finalizer can leave another to the next collection.</summary>
+    private static long HeldOnTheCard()
+    {
+        for (int i = 0; i < 3; i++)
         {
             GC.Collect();
             GC.WaitForPendingFinalizers();
-            return DeviceMemory.Read()!.Value.ProcessBytes!.Value;
         }
-
-        ctx.Execute(ArenaProbeModels.Widened(), ArenaProbeModels.FilledShape(1024))[0].ToTensorData().Delete();
-        var before = Card();
-        var spread = ctx.Execute(ArenaProbeModels.Widened(), ArenaProbeModels.FilledShape(64L << 20))[0].ToTensorData();
-        Assert.True(Card() - before < 16 * MiB);
-
-        var widened = ctx.Compile(ArenaProbeModels.Widened());
-        var filled = ArenaProbeModels.Filled(ctx);
-        var again = widened.Execute(ArenaProbeModels.FilledShape(64L << 20))[0].ToTensorData();
-        var sum = filled.Execute(ArenaProbeModels.FilledShape(64L << 20))[0].ToTensorData();
-        Assert.Equal(0L, Assert.IsType<ArenaStatistics>(widened.ReadArenaStatistics()).TotalAllocatedBytes);
-        Assert.Equal(0L, Assert.IsType<ArenaStatistics>(filled.ReadArenaStatistics()).TotalAllocatedBytes);
-        Assert.Equal([64 << 20, 64 << 20, 64 << 20], [spread.ValueAt<float>(999), again.ValueAt<float>(0), sum.ValueAt<float>(0)]);
+        return DeviceMemory.Read()!.Value.ProcessBytes!.Value;
     }
 
     /// <summary>
     /// A graph the provider cannot run whole: one output is computed on the card and one on the
     /// host, which is what <see cref="SessionOutputPlacement.Mixed"/ > is for, and the crossing
     /// is charged to the pinned host arena rather than to the device one. A graph with no node the
-    /// provider can run is <see cref="SessionOutputPlacement.Host"/>, its device arena holding only
-    /// the output it copies onto the card, and one it runs whole is
-    /// <see cref="SessionOutputPlacement.Device"/>. Every output comes back on the card.
+    /// provider can run is <see cref="SessionOutputPlacement.Host"/>, its device arena holding
+    /// nothing — the output it copies onto the card goes into memory of its own — and one it runs
+    /// whole is <see cref="SessionOutputPlacement.Device"/>. Every output comes back on the card.
     /// </summary>
     [CudaFact]
     public void CudaProvider_OutputPlacementSeparatesADeviceGraphAPartitionedOneAndOneThatFellBack()
@@ -812,7 +864,7 @@ public class GpuExecutionTests
         var host = ArenaProbeModels.HostOnly(ctx);
         Assert.All(host.Execute(ArenaProbeModels.Square()), o => Assert.False(o.ToTensorData().IsHostResident));
         Assert.Equal(SessionOutputPlacement.Host, host.OutputPlacement);
-        Assert.Equal(1L, Assert.IsType<ArenaStatistics>(host.ReadArenaStatistics()).AllocationCount);
+        Assert.Equal(0L, Assert.IsType<ArenaStatistics>(host.ReadArenaStatistics()).AllocationCount);
 
         var onCard = ArenaProbeModels.MatMul(ctx);
         Assert.All(onCard.Execute(ArenaProbeModels.MatMulOperand(8), ArenaProbeModels.MatMulOperand(8)), o => Assert.False(o.ToTensorData().IsHostResident));

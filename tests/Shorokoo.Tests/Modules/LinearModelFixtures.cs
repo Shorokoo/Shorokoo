@@ -1653,6 +1653,22 @@ public partial class RootedGainReadByAConditionAndOneArmModel
     }
 }
 
+/// <summary>A gain under a square root that one <c>IfElse</c> arm returns and a running statistic
+/// averages, whichever arm runs.</summary>
+[Module]
+public partial class RootedGainReadByAnArmAndARunningStatisticModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var w = Ones.Init([Scalar(2L)]);
+        var y = t * w;
+        var q = y.Sqrt();
+        var seen = InitRunningMean.Init(t.ShapeTensor());
+        Globals.StateUpdate(seen, seen * Scalar(0.9f) + q * Scalar(0.1f));
+        return (t.Reduce(ReduceKind.Max, keepDims: false).Scalar() > Scalar(0f)).IfElse(q * Scalar(2f), y * Scalar(3f));
+    }
+}
+
 /// <summary>A gained vector divided by its norm where the norm is not zero.</summary>
 [Module]
 public partial class SafelyNormalizedGainModel

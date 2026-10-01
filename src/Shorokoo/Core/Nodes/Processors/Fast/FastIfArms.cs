@@ -120,7 +120,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// <summary>The nodes reading each node's outputs, graph outputs included, leaving out the
         /// state dependencies a <c>WITH_STATE_DEPS</c> names only to keep them — and, where asked,
         /// every read no gradient flows back through: by an op whose output is a boolean, an index
-        /// or a shape, or by a node nothing differentiated depends on.</summary>
+        /// or a shape, by a node nothing the loss depends on reads, or by a graph output.</summary>
         private static Dictionary<FastNodeKey, List<FastNodeKey?>> ReadersOf(
             InternalComputationGraph graph, Dictionary<FastTensorKey, FastNode> producerOf, bool gradientReadsOnly)
         {
@@ -132,14 +132,16 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 list.Add(reader);
             }
 
-            // A node passes a gradient back to what it reads when a gradient reaches it: it is an
-            // output, or a node that passes one reads it. Readers come after what they read, so
-            // one walk from the back settles every node.
+            // A node passes a gradient back to what it reads when a gradient reaches it: it is the
+            // AUTO_GRAD differentiating the loss, or a node that passes one reads it. The graph's
+            // other outputs — the state a step carries out, say — take no gradient, so reading a
+            // value for them leaves it in its arm. Readers come after what they read, so one walk
+            // from the back settles every node.
             HashSet<FastNodeKey>? passesGradient = null;
             if (gradientReadsOnly)
             {
                 passesGradient = [];
-                var reachesAGradient = new HashSet<FastTensorKey>(graph.Outputs);
+                var reachesAGradient = new HashSet<FastTensorKey>();
                 for (int n = graph.Nodes.Count - 1; n >= 0; n--)
                 {
                     var node = graph.Nodes[n];
@@ -162,8 +164,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                         if (i == 0 || node.OpCode != InternalOpCodes.WITH_STATE_DEPS)
                             Read(ins[i], node.Key);
             }
-            foreach (var output in graph.Outputs)
-                Read(output, null);
+            if (!gradientReadsOnly)
+                foreach (var output in graph.Outputs)
+                    Read(output, null);
             return readersOf;
         }
 

@@ -1,8 +1,10 @@
+using System.Diagnostics;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using Shorokoo.Core.Backends;
 using Shorokoo.Modules.Losses;
 using Shorokoo.Modules.Optimizers;
+using Shorokoo.PyTorch.Cuda;
 using Shorokoo.Runtime;
 
 namespace Shorokoo.Tests;
@@ -418,6 +420,50 @@ public class SideBySideBackendHardwareTests
         using var element = sequence.GetValue(0);
         Assert.Equal([1f, 2f], element.GetTensorDataAsSpan<float>().ToArray());
     }
+
+    [SideBySideCudaFact]
+    public void TestTheOnnxRuntimeAndPyTorchCudaBackendsShareOneProcessWhicheverStartsFirst()
+    {
+        Assert.Equal(0, InAChildProcess("cuda-backends", "onnxruntime-first"));
+        Assert.Equal(0, InAChildProcess("cuda-backends", "pytorch-first"));
+    }
+
+    /// <summary>What <c>dotnet Shorokoo.Tests.dll</c> runs: one case of a test that needs a process of
+    /// its own, because what it covers is the order a process loads its native libraries in.</summary>
+    public static int Main(string[] args)
+        => args is ["cuda-backends", var first] && BothCudaBackendsRun(pytorchFirst: first == "pytorch-first") ? 0 : 1;
+
+    private static int InAChildProcess(params string[] args)
+    {
+        var dotnet = Path.Combine(RuntimeEnvironment.GetRuntimeDirectory(), "..", "..", "..", Windows ? "dotnet.exe" : "dotnet");
+        using var child = Process.Start(new ProcessStartInfo(dotnet, [typeof(SideBySideBackendHardwareTests).Assembly.Location, .. args])
+            { RedirectStandardOutput = true, RedirectStandardError = true })!;
+        child.BeginOutputReadLine();
+        child.BeginErrorReadLine();
+        child.WaitForExit();
+        return child.ExitCode;
+    }
+
+    private static bool BothCudaBackendsRun(bool pytorchFirst)
+    {
+        var x = InputTensor<float32>("x", rank: 4);
+        var w = InputTensor<float32>("w", rank: 4);
+        var conv = new InternalComputationGraph([x, w], [OnnxOp.Conv(x, w, null!, AutoPad.NotSet,
+            dilations: [1L, 1L], group: 1, kernelShape: [3L, 3L], pads: [0L, 0L, 0L, 0L], strides: [1L, 1L])]);
+        float[] image = [.. Enumerable.Range(0, 16).Select(i => (float)i)];
+        bool Runs(IShorokooBackend backend) => Floats(new ComputeContext(backend).Execute(conv,
+                TensorData([1L, 1L, 4L, 4L], image), TensorData([1L, 1L, 3L, 3L], Enumerable.Repeat(1f, 9).ToArray()))[0])
+            .Zip((float[])[45f, 54f, 81f, 90f]).All(p => Math.Abs(p.First - p.Second) < 1e-3f);
+        IShorokooBackend[] inOrder = pytorchFirst ? [new TorchCudaBackend(), LoadCuda()] : [LoadCuda(), new TorchCudaBackend()];
+        return inOrder.All(Runs) && (!Windows || OneCopyOfEachCudaLibrary());
+    }
+
+    private static bool OneCopyOfEachCudaLibrary()
+        => Process.GetCurrentProcess().Modules.Cast<ProcessModule>()
+            .Where(m => ((string[])["cudart", "cublas", "cudnn", "cufft", "curand", "nvrtc", "nvjitlink"])
+                .Any(family => m.ModuleName.StartsWith(family, StringComparison.OrdinalIgnoreCase)))
+            .GroupBy(m => m.ModuleName, StringComparer.OrdinalIgnoreCase)
+            .All(copies => copies.Count() == 1);
 
     /// <summary>The allocator ONNX Runtime made this value's buffer from, and the device it is on.
     /// Through the backend's own types, which an isolated backend loads privately, so the route to

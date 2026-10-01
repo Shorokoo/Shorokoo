@@ -150,7 +150,7 @@ session binds no output aliases.
 | | CPU | CUDA |
 |---|---|---|
 | **Output aliasing** | none: nothing is written in place | none |
-| **Resident runs** (`RunRetainingOutputs`) | nothing to retain: outputs are on the host | a kept output stays on the card; inputs already there are read in place |
+| **Where inputs and outputs are** | host memory | the card: every input is placed there before the run, and every output stays there |
 | **Cancellation** (`RunSettings.CancellationToken`) | a run cancelled before it starts is refused; a run is one XLA program and is not stopped part way | same |
 | **`DeviceMemory.LimitBytes`** | ignored | ignored: JAX's allocator is the process's and takes no per-run limit |
 | **`RunSettings.ShrinkArenaAfterRun`** | ignored | ignored |

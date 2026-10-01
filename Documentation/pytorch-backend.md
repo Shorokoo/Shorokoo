@@ -90,8 +90,9 @@ Console.WriteLine(environment);             // "/home/me/.cache/shorokoo/python-
 | `Description.Device` / `MemorySpace` | `Cpu` / host | `Cuda` / `MemorySpace.Cuda(N)` |
 
 On CUDA, a tensor moved to the context (`TensorData.To(context)`) is on the card and read
-there. Outputs come back in host memory, except those a resident run keeps on the card
-(`TensorData.IsHostResident` is false) until copied home.
+there. Every input is placed on the card before a run, and every tensor output stays there
+(`TensorData.IsHostResident` is false) until it is moved — `ToHost()` brings it home. String
+tensors and sequences are read and left in host memory.
 
 **One environment per process.** The process gets whichever environment the first torch
 backend started. The CUDA build of PyTorch also runs on the CPU; the CPU build cannot run on
@@ -203,8 +204,8 @@ What a run does with the settings every backend is handed, on each device:
 
 | | CPU | CUDA |
 |---|---|---|
-| **Output aliasing** (a run writing an output into a consumed input) | yes, for an output produced by `Add`/`Sub`/`Mul`/`Div` | the same on the card for an output kept there; any output fetched home is copied into a consumed host input |
-| **Resident runs** (`RunRetainingOutputs`) | nothing to retain: outputs are on the host | a kept tensor output stays on the card; inputs already there are read in place |
+| **Output aliasing** (a run writing an output into a consumed input) | yes, for an output produced by `Add`/`Sub`/`Mul`/`Div` | the same, on the card |
+| **Where inputs and outputs are** | host memory | the card for every tensor, the host for strings and sequences: every input is placed there before the run, and every output stays there |
 | **Cancellation** (`RunSettings.CancellationToken`) | stops before the next node | stops before the next node |
 | **`DeviceMemory.LimitBytes`** | ignored, as on every CPU backend | caps each run's allocations (see below) |
 | **`RunSettings.ShrinkArenaAfterRun`** | ignored | `torch.cuda.empty_cache()` after the run |
@@ -216,9 +217,8 @@ What a run does with the settings every backend is handed, on each device:
 **Output aliasing.** An output paired with a consumed input (as the training rig pairs each
 updated parameter with the parameter) is written into the input's memory when it comes from
 `Add`, `Sub`, `Mul` or `Div`, so the optimizer's `p - lr * g` costs no memory. Other operators'
-pairs are not bound on the CPU; on CUDA an output fetched home is copied into the consumed host
-tensor. A write is declined where the input's memory may still be read through a view
-(`Transpose`, `Expand`, `Slice`, a same-type `Cast`).
+pairs are not bound. A write is declined where the input's memory may still be read through a
+view (`Transpose`, `Expand`, `Slice`, a same-type `Cast`).
 
 **Intermediate values.** A run releases each value after its last reader (in function, branch
 and loop bodies too), so its peak is what is live at once. In a training step whose gradient

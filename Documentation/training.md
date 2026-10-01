@@ -10,9 +10,10 @@ Related: [defining-models.md](defining-models.md) · [nn-library.md](nn-library.
   trainable step. You never write backward passes. A rig built with
   `trainingBackend: TrainingBackend.Native` leaves the gradient to the backend that runs the step —
   see [training-backends.md](training-backends.md).
-- `TrainStep` moves the whole training state through host memory every step, which dominates on a
-  GPU; run long loops with `rig.BeginResidentRun()` (or `Fit` / `Train`, which use one) — see
-  [Keeping training state on the device](#keeping-training-state-on-the-device).
+- A step leaves the training state where it ran — on a GPU, the card's memory — so nothing
+  crosses the bus between steps; `checkpoint.ToHost()` brings a checkpoint to the host to read its
+  elements. `rig.BeginResidentRun()` (which `Fit` / `Train` use) also owns the state between
+  steps — see [Keeping training state on the device](#keeping-training-state-on-the-device).
 - A step **consumes** what it is fed as it is (the checkpoint's state and the batch), so
   `cp = rig.TrainStep(cp, x, y)` releases superseded state as it runs. Feed `cp.Shared()` /
   `x.Shared()` to keep something past the step. `CreateInitialCheckpoint()` returns fresh copies
@@ -507,10 +508,11 @@ read by one step only, which releases its copies.
 
 ### Keeping training state on the device
 
-`TrainStep` returns a host copy of every parameter, model state and optimizer state and takes them
-back next call. On CPU that is free; on a GPU the whole state crosses the bus twice per step, so
-step time tracks parameter count rather than FLOPs. `BeginResidentRun` keeps the state where the
-execution provider produced it, and its checkpoints keep it there too:
+A step's outputs stay where the step ran, so `TrainStep` returns a checkpoint whose state is in
+the run's memory — on a GPU, the card's — and the next step reads it there: the state does not
+cross the bus between steps. `BeginResidentRun` keeps the state there too, and also owns it between
+steps, releasing each step's state as the next one supersedes it; its checkpoints keep the state
+where it is:
 
 ```csharp
 using var run = rig.BeginResidentRun();
@@ -555,9 +557,9 @@ for (int step = 0; step < 50_000; step++)
 
 `Train` and every `Fit` overload drive a resident run internally and take the result with
 `TakeCheckpoint` after the loop, so `TrainingResult.FinalCheckpoint` holds its state where the last
-step left it — on a GPU, device memory. A manual `TrainStep` loop transfers every step. On a backend
-with no device memory, a resident run gives the same losses and checkpoints, to the bit, as a step
-loop.
+step left it — on a GPU, device memory. A manual `TrainStep` loop leaves its state there too. On a
+backend with no device memory, a resident run gives the same losses and checkpoints, to the bit, as
+a step loop.
 
 > Saving, resuming and training from a checkpoint work wherever its state is. Reading its elements
 > (`AccessMemory` and the other accessors) needs host memory: on a device-resident tensor they throw,
@@ -623,10 +625,11 @@ It applies:
 
 - **To consumed state** — a checkpoint fed as it is, and a resident run's own state. A `.Shared()`
   checkpoint is left untouched.
-- **Where new state lands in the old state's memory** — every step on a CPU backend, and a resident
-  run's `Step` on a GPU. `TrainStep` on a GPU returns state to the host, so it overwrites nothing on
-  the card; nor does a resident step while you hold a checkpoint the run handed out, since that
-  state is only read.
+- **Where the old state is consumed** — every step on either backend: the new state is written
+  into the consumed state's memory where it is, on the card on a GPU. A host checkpoint consumed by
+  a step on a GPU is copied onto the card first, and the new state is written into that copy. A
+  resident step overwrites nothing while you hold a checkpoint the run handed out, since that state
+  is only read.
 - **Where the graph proves it.** Optimizer state read only by its own update qualifies (e.g. AdamW's
   moments and step counter). A weight the backward pass also reads — to propagate a gradient to the
   layer below, or at each place a tied weight is used — qualifies once its update is ordered after
@@ -718,9 +721,9 @@ its own `cancellationToken` instead ([Stopping and watching a run](#stopping-and
 `FromScratch`. To watch a run near the card's limit, read the static `DeviceMemory` class and the
 context's `ReadDeviceMemoryUse()` inside your loop.
 
-**Host vs device memory.** The rig's collection governs *host* memory (a `TrainStep` loop's
-checkpoints); `DeviceMemory` settings govern only device memory. A resident run keeps state on the
-card and frees it deterministically.
+**Host vs device memory.** The rig's collection governs the memory behind a `TrainStep` loop's
+dropped checkpoints, on the host or on the card; `DeviceMemory` settings govern only device memory.
+A resident run keeps state on the card and frees it deterministically.
 
 Result types:
 - `TrainingCheckpoint`:
@@ -1259,7 +1262,7 @@ declared rank is refused with `FW056`, naming the offenders and listing the mode
 5. Read `outcome.EpochLosses` for the loss curve and `outcome.FinalCheckpoint.TrainableParams`
    (a `TensorDataStruct`) for the weights, via `.Fields`:
    ```csharp
-   foreach (var (name, value) in outcome.FinalCheckpoint.TrainableParams.Fields)
+   foreach (var (name, value) in outcome.FinalCheckpoint.ToHost().TrainableParams.Fields)
    {
        var data = (TensorData)value;   // shape via data.Shape.Dims; values via data.CopyMemory<float>()
    }

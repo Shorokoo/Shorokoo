@@ -145,7 +145,7 @@ the trained model. Both run through `ComputeContext`. See
 ```csharp
 var eval = Persistence.LoadEvaluationModel("run.skpt");
 var (vx, vy) = MakeBatch(1000);
-float evalLoss = ComputeContext.Default.Execute(eval, vx.Shared(), vy)[0].ToTensorData().CopyMemory<float>()[0];
+float evalLoss = ComputeContext.Default.Execute(eval, vx.Shared(), vy)[0].ToTensorData().ToHost().CopyMemory<float>()[0];
 
 var inference = Persistence.Load("run.skpt");
 var logits = ComputeContext.Default.Execute(inference, vx)[0].ToTensorData();   // [32, 4]

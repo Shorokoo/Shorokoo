@@ -453,7 +453,7 @@ ComputationGraph concrete = arch.ToConcreteModel(weights);  // concrete.Kind == 
 
 // Execute takes IData[] and returns NamedModelParam[].
 var outputs = new ComputeContext().Execute(concrete, input);
-float[] values = outputs[0].ToTensorData().CopyMemory<float>();
+float[] values = outputs[0].ToTensorData().ToHost().CopyMemory<float>();
 ```
 
 Notes:

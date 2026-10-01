@@ -24,6 +24,10 @@ Related: [core-types.md](core-types.md) · [defining-models.md](defining-models.
   [Feeding a large input without a second copy](#feeding-a-large-input-without-a-second-copy).
 - A compute context keeps books on tensors and owns none; disposing it leaves every tensor
   alive — [Moving data between contexts](#moving-data-between-contexts).
+- **A run's outputs are in the memory of the backend that ran it** — on a GPU backend, the
+  card's — and nothing moves them afterwards. `ToHost()` brings one to the host to be read;
+  fed to a run on another context, it is placed there by that run —
+  [Where a run's inputs and outputs are](#where-a-runs-inputs-and-outputs-are).
 - On a GPU backend a context's `DeviceMemory` settings are a budget on what it holds on the card
   and the arena settings of the sessions it compiles —
   [Device memory](#device-memory-gpu-backends). Diagnostics start at
@@ -49,8 +53,9 @@ var features = Conv(input, w, b, AutoPad.NotSet,
 
 TensorData result = OnnxEngine.Eval(features);
 
-// Read the numbers out (see core-types.md):
-float[] values = result.CopyMemory<float>();
+// Read the numbers out (see core-types.md). On a GPU backend the result is on the card, and
+// ToHost() brings it to the host; on a CPU backend it is the result itself.
+float[] values = result.ToHost().CopyMemory<float>();
 ```
 
 What `Eval` accepts:
@@ -114,7 +119,7 @@ var concrete = graph
     .ToConcreteModel();
 
 var results = ComputeContext.Default.Execute(concrete, input);   // params IData[]
-float[] values = results[0].ToTensorData().CopyMemory<float>();
+float[] values = results[0].ToTensorData().ToHost().CopyMemory<float>();
 ```
 
 For a graph loaded from a `.srk`/`.zsrk` file,
@@ -301,8 +306,9 @@ var r2 = compiled.Execute(inputData2);             // reuses the session
 `Eval<T>(Tensor<T>)` returning `TensorData<T>`), `Execute(ComputationGraph graph, params IData[] inputs)`,
 `Run(ComputationGraph graph, params NamedModelParam[] inputs)`, and `ExecuteWithState(...)`
 (for stateful models). `TensorData` implements `IData`. `Execute`, `Run` and
-`CompiledGraph.Execute` return `NamedModelParam[]`; read each with `ToTensorData()` then
-`CopyMemory<V>()`, or `ValueAt<V>(i)`, V being the CLR storage type (`float` for `float32`).
+`CompiledGraph.Execute` return `NamedModelParam[]`, each in the memory of the context's backend;
+read each with `ToTensorData().ToHost()` then `CopyMemory<V>()`, or `ValueAt<V>(i)`, V being the
+CLR storage type (`float` for `float32`).
 `ExecuteWithState` returns `(NamedModelParam[] regularOutputs, ComputationGraph updatedGraph)`
 — feed the updated graph to the next call. `Eval` returns `TensorData` (or `TensorData[]`).
 
@@ -410,6 +416,26 @@ the run's state. To stop a `Fit` or `Train` between steps and keep what it train
   discovered — name one per context, `new ComputeContext(new TorchCpuBackend())` — so they
   never make discovery ambiguous. See [pytorch-backend.md](pytorch-backend.md) and
   [jax-backend.md](jax-backend.md).
+
+### What a backend provides
+
+`IShorokooBackend` is the interface every backend implements; its comments are the full
+contract. In short, a backend provides:
+
+- **Its run memory** — `RunMemoryOf(elementType)` for a tensor and `SequenceRunMemory` for a
+  sequence: where its sessions read their inputs and leave their outputs. The defaults are the
+  backend's own memory (`MemorySpace`) in its own runtime (`RuntimeIdentity`), and host memory
+  for strings and sequences.
+- **Sessions** (`CreateSession`) that read every input in the run memory, refuse any value
+  outside it with an exception, and leave every output there (`IShorokooSession`). A session
+  never moves a value.
+- **The moves**, as operations of their own, which Shorokoo calls to place an input before a run
+  and to bring a tensor home: into the backend's memory, `CreateTensorInBackendMemory`,
+  `CreateUninitializedTensorInBackendMemory` and `TryCopyHostToTensorRange`; out of it,
+  `CopyTensorToHost` and `TryCopyTensorRangeToHost`. Their defaults serve a backend whose memory
+  the host reads; a backend that computes in memory of its own overrides each of them.
+- **Values in its runtime's host memory** — `CreateTensor`, `CreateTensorFromRawBytes`,
+  `CreateStringTensor`, `CreateSequence` — and `Release`, the one path its memory goes back by.
 
 ### The backend types
 
@@ -579,15 +605,47 @@ A tensor fed as it is while another run reads it makes the call throw
   `graph.Run(p.Shared())` leaves `p` unchanged.
 
 **Memory the run cannot read in place** — every tensor built from a C# array, and one from
-another device or runtime — is fed through a copy in the run's memory:
+another device or runtime — is fed through a copy in the run's memory, which Shorokoo makes
+before the run with the backend's own move there
+([Where a run's inputs and outputs are](#where-a-runs-inputs-and-outputs-are)):
 
 - **Consumed**: the tensor is dead and its memory released at the feed; the run consumes the
-  copy. On a card, the contents go into the session's arena (except an input an output may be
-  written into, which is copied onto the card first).
+  copy. On a card, the copy is made on the card, outside the session's arena, and a budget
+  counts it ([A context's device-memory budget](#a-contexts-device-memory-budget)).
 - **Read**: the copy is made on first read and kept — a `TensorData` held by the source,
   attached to the reading context (visible in `context.Tensors`), and reused by later shared
   reads. Writing the source (`AccessModifiableMemory` and the like) retires it; so does
   deleting or consuming the source.
+
+### Where a run's inputs and outputs are
+
+Every backend has a **run memory**: the memory its sessions read their inputs in and leave
+their outputs in. On a CUDA backend it is that card's memory for every tensor but a string one;
+a string tensor and a sequence are in the host memory of the backend's runtime. On a CPU backend
+it is host memory. That memory belongs to the backend: two backends on one card share it only
+where they share a runtime.
+
+- **Inputs.** Shorokoo places every input in the run memory before the run: a tensor there
+  already is handed over as it is, and any other — a C# array, a tensor of another device or
+  runtime, a card's output fed to a run on the host — through a copy made with the backend's own
+  moves. A session is handed nothing else; one handed a value outside its run memory refuses it
+  with an `InvalidOperationException` rather than copying it.
+- **Outputs.** Every output comes back in the run memory, as a new `TensorData` attached to the
+  context that ran it — on a GPU backend, on the card, `IsHostResident` false. Nothing moves it
+  afterwards. `ToHost()` brings it to the host, `To(context)` puts it on another context, and a
+  run on another context that is fed it places it there as one of its inputs.
+
+```csharp
+var compiled = cuda.Compile(graph);
+var y = compiled.Execute(x)[0].ToTensorData();     // on the card
+float[] values = y.ToHost().CopyMemory<float>();   // one copy across the bus, to read it
+var onCpu = cpu.Execute(graph, y.Shared());        // copied to the host as cpu's input
+var next = compiled.Execute(y);                    // read where it is, and consumed: nothing crosses
+```
+
+On a CUDA backend an operator the provider runs on the host reads its inputs from the card and
+writes its outputs back there ([Shorokoo/Shorokoo#493](https://github.com/Shorokoo/Shorokoo/issues/493)).
+On a CPU backend nothing of this is visible: its run memory is the host's.
 
 ### A run that writes an output into what it consumed
 
@@ -600,8 +658,10 @@ Graphs you compile yourself never alias. A marked output is written into an inpu
 
 - **the run consumed that input** — `.Shared()` memory is left as it was;
 - **it was fed as no other input**;
-- **the output is produced in that memory**, with the input's element type and the shape the
-  session settled at build time. On a GPU backend, an output fetched back to the host is not.
+- **the input has the output's element type**, and the shape the session settled at build time.
+
+Both are in the backend's run memory, so where they are never stands in the way: a host tensor
+consumed by a card run is copied onto the card first, and the output written into that copy.
 
 Otherwise nothing differs: outputs are new `TensorData` attached to the running context, and
 values are the same.
@@ -687,11 +747,11 @@ A tensor's memory never moves. None of these changes the tensor it is called on:
 A backend reads memory in place only on **the same device and the same runtime**. Host memory
 from a C# array counts as every host backend's. Two backends over one ONNX Runtime share card
 allocations; a CPU backend reads them through a copy; two isolated runtimes on one card copy
-through the host. Run outputs come back on the host unless retained
-(`CompiledGraph.Execute(inputs, retainOnDevice)`).
+through the host. A run's outputs are in its backend's memory
+([Where a run's inputs and outputs are](#where-a-runs-inputs-and-outputs-are)).
 
 ```csharp
-var onCard = cuda.Compile(model).Execute([input], [true])[0].ToTensorData();  // device memory
+var onCard = cuda.Compile(model).Execute(input)[0].ToTensorData();  // device memory
 var onHost = onCard.To(cpu);        // one copy across the bus; onCard is untouched
 var same   = onHost.To(otherCpu);   // no copy: the very same object
 var mine   = onHost.CopyTo(cpu);    // always a copy
@@ -765,7 +825,8 @@ var cpu  = new ComputeContext(new LinuxCpuBackend());
 var cuda = new ComputeContext(new LinuxGpuBackend());
 
 var onHost = cpu.Execute(graph, input.Shared());   // the host, reading input and leaving it
-var onCard = cuda.Execute(graph, input);           // the same graph, the same input, the card
+var onCard = cuda.Execute(graph, input);           // the same graph, the same input, the card;
+                                                   // its outputs are on the card
 ```
 
 Both run the same model, one C# build; each context compiles its own session. `ComputeContext.Backend` and `CompiledGraph.Backend` name
@@ -773,9 +834,9 @@ the backend. Tensors you build (allocating backend `HostBackend.Instance`) are t
 runtime, so building and exporting needs none and either context accepts them. A tensor not
 readable in place is copied per run when consumed, or once per (tensor, runtime) when fed
 `.Shared()`, until written ([Feeding a run](#feeding-a-run-consumed-shared-or-tried)). A
-tensor left on the card (`TensorData.IsHostResident` false, e.g. by a
-[resident training run](training.md#keeping-training-state-on-the-device)) crosses via the
-host.
+tensor on the card (`TensorData.IsHostResident` false) — every output of a run there, and the
+state a [training step](training.md#keeping-training-state-on-the-device) hands back — crosses
+via the host when it is fed to the CPU context or moved with `ToHost()`.
 
 #### Deploying two backends
 
@@ -1011,7 +1072,8 @@ Console.WriteLine($"{use.AttachedBytes} of {use.LimitBytes} bytes attached, {use
 ```
 
 **What it counts.** Tensors placed by `To`, `CopyTo` or `AllocateUninitialized`, read or
-copied there by the context's runs, or left there as outputs (`Execute(inputs, retainOnDevice)`).
+copied there by the context's runs, or left there as its runs' outputs — every output of a run
+on the card, until it is deleted, collected or detached.
 `ReadDeviceMemoryUse()` reports `AttachedBytes`, `AttachedTensors` and `LimitBytes` (`null`
 with no budget, or for a host context). A tensor on two contexts counts on both; dead,
 collected or `Detach`ed tensors drop out.
@@ -1034,15 +1096,14 @@ the context a larger budget.
 less the *discount*: what the context holds on the card outside the arena during the run —
 attached tensors, and those the run reads or copies there (for a tensor another runtime holds
 on the same card, both it and its copy). A tensor already on the card is read in place and
-never enters the arena. A host tensor fed to a card run:
+never enters the arena. A host tensor fed to a card run is copied onto the card before the run,
+outside the arena, and counted in the discount:
 
-- `.Shared()`: copied onto the card before the run, kept for later reads, counted in the
-  discount;
-- consumed: copied into the arena, counting against the session's limit instead, so a loop
-  feeding fresh host batches keeps its session (except an input an output may be written into,
-  copied like a shared one).
+- `.Shared()`: the copy is kept for later reads;
+- consumed: the copy is the run's, and goes when the run no longer reads it. A tensor fed to
+  several inputs is copied once, and counted once.
 
-A run whose discount leaves its arena nothing, or less than the consumed inputs it must copy in, is refused before taking anything; one whose arena
+A run whose discount leaves its arena nothing is refused before taking anything; one whose arena
 needs more than it was left fails with ORT's `BFCArena` error.
 
 **When a session is rebuilt.** The limit is fixed when a session is built, and building is
@@ -1058,8 +1119,9 @@ discount grows past that. So:
   `ReadNodePlacement()` restart for a rebuilt session;
 - a rig's step can rebuild in its first steps as state arrives on the card.
 
-An output retained in a session's own arena and fed back to the same graph is inside its limit,
-not discounted. An output [written into consumed memory](#a-run-that-writes-an-output-into-what-it-consumed)
+An output left in a session's own arena and fed back to the same graph is inside its limit,
+not discounted; delete outputs you no longer need, since every one on the card counts until it
+goes. An output [written into consumed memory](#a-run-that-writes-an-output-into-what-it-consumed)
 is counted once, where that memory is: in later discounts if it was outside the arena, inside
 the arena if it was that session's own earlier output.
 
@@ -1170,10 +1232,11 @@ switch (compiled.OutputPlacement)
 }
 ```
 
-`OutputPlacement` is free. A CPU session reports `Host`. On a card, a graph run wholly by CUDA
+`OutputPlacement` is free, and says where the outputs are **computed**; every tensor output but
+a string one comes back on the card whatever it says. A CPU session reports `Host`. On a card, a graph run wholly by CUDA
 reports `Device`; one with an unsupported operator (e.g. `Det`) reports `Mixed` or `Host`
-depending on where its outputs end up. An output the host consumed after the card computed it
-counts as host memory, in the pinned arena.
+depending on where its outputs are computed. An output the host consumed after the card computed
+it counts as host memory, in the pinned arena.
 
 For **which** nodes fell back, trace them. This turns on ONNX Runtime's profiler for every run
 of the session, so keep it to diagnosis:

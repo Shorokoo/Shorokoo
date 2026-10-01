@@ -268,11 +268,11 @@ value it was given; the source tensor is untouched, so bring it home with
 `TensorData.ToHost()` and build the sequence again.
 
 Models whose *outputs* are sequences (`SequenceAt`, `SplitToSequence`, anything
-producing an ONNX sequence type) are unaffected: ONNX Runtime returns sequence
-outputs in host memory on every execution provider, including ones flagged in
-`Execute(inputs, retainOnDevice)`. They run on CUDA backends, including ones
-loaded through `IsolatedBackend.Load` or `BackendPackage.TryLoad`, and a sequence
-moves to another context element by element.
+producing an ONNX sequence type) are unaffected: a run leaves a sequence output in
+host memory on every execution provider, which is where a backend reads and leaves
+sequences. They run on CUDA backends, including ones loaded through
+`IsolatedBackend.Load` or `BackendPackage.TryLoad`, and a sequence moves to another
+context element by element.
 
 ### Device-memory readings are process-wide, and device 0's
 

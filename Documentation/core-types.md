@@ -209,10 +209,12 @@ var activated = y.Relu();
 ## Reading concrete values out of a result
 
 Execution, run outputs and checkpoint parameters are `TensorData` (see
-[inference.md](inference.md)). Read values by naming the CLR storage type:
+[inference.md](inference.md)). A run's outputs are in the memory of the backend that ran it, so
+on a GPU backend bring one to the host with `ToHost()` first (on a CPU backend it is the tensor
+itself). Read values by naming the CLR storage type:
 
 ```csharp
-TensorData result = OnnxEngine.Eval(y);
+TensorData result = OnnxEngine.Eval(y).ToHost();
 float[] values = result.CopyMemory<float>();   // the whole buffer, in an array you own
 float first    = result.ValueAt<float>(0);     // one element
 ```
@@ -366,14 +368,16 @@ tensor alive for you.
 
 ### A tensor whose values are not on the host
 
-A tensor in device memory cannot be read from the host. That includes an output
-kept with `CompiledGraph.Execute(inputs, retainOnDevice)`, the state of a
-[resident training run](training.md#keeping-training-state-on-the-device), and
-anything placed by `To`, `CopyTo` or `AllocateUninitialized` on a device context.
-`IsHostResident` tells you which; the accessors throw `InvalidOperationException`,
-pointing to `ToHost()` (copy to host); for a training checkpoint, that is
-`checkpoint.ToHost()`. Tensors built from C# arrays, and run outputs not kept on the
-device, are host-resident.
+A tensor in device memory cannot be read from the host. That includes every output
+of a run on a GPU backend (`Eval`, `Execute`, `Run`, a compiled graph's runs), the
+state a [training step](training.md#keeping-training-state-on-the-device) on a GPU
+hands back, and anything placed by `To`, `CopyTo` or `AllocateUninitialized` on a
+device context. `IsHostResident` tells you which; the accessors throw
+`InvalidOperationException`, pointing to `ToHost()` (copy to host); for a training
+checkpoint, that is `checkpoint.ToHost()`. Tensors built from C# arrays, and the
+outputs of a run on a CPU backend, are host-resident. Nothing moves a run's output to
+the host but `ToHost()`, `To` or `CopyTo`, or a run on a host backend it is fed to —
+see [Where a run's inputs and outputs are](inference.md#where-a-runs-inputs-and-outputs-are).
 
 ## Anti-patterns
 

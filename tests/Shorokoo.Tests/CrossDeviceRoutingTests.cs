@@ -766,7 +766,7 @@ public class CrossDeviceRoutingCoverageTests
     }
 
     [Fact]
-    public void TestATensorOnACardFedToARunOnTheHostIsMovedThereThroughTheCardsOwnMoveOut()
+    public void TestARunOnTheHostIsFedACardsTensorAndAManagedArrayOnlyThroughCopiesItsOwnBackendBuilds()
     {
         var card = new StubBackend(ComputeDevice.Cuda, 0);
         var host = new StubBackend(ComputeDevice.Cpu, null);
@@ -777,7 +777,8 @@ public class CrossDeviceRoutingCoverageTests
 
         Assert.Equal(MemorySpace.Cuda(0), produced.Space);
         Assert.Equal([1f, 2f], Run(onHost.Compile(Echo()), produced.Shared()));
-        Assert.Single(host.Built);
+        Assert.Equal([1f, 2f], Run(onHost.Compile(Echo()), Pair()));
+        Assert.Equal(2, host.Built.Count);
         Assert.True(onHost.Compile(Echo()).Execute(produced.Shared())[0].ToTensorData().IsHostResident);
         Assert.Equal([1f, 2f], Read(cpu, cpu.Execute(Echo(), produced)));
         Assert.Equal(2, card.HostCopies);

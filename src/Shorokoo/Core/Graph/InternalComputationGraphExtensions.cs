@@ -333,6 +333,10 @@ namespace Shorokoo.Graph
 
             FastSimplify.Process(fastGraph);
 
+            // A baked trip count can unroll a loop that stayed rolled when the graph was built,
+            // and the stateful calls in and around it are ordered only now it is.
+            FastChainStateUpdatesAcrossCallSites.Process(fastGraph, onlyLoopsUnrolledSince: true);
+
             // A baked value can decide an output's shape — a flag choosing a branch — so a concrete
             // graph's outputs have their recorded shapes settled again against it (see
             // RecordedOutputShapes.Rerecord). A module graph records none to settle.

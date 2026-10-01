@@ -28,6 +28,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             if (graph is null) throw new ArgumentNullException(nameof(graph));
 
             var identityAttrDefs = Definitions.NodeDefinitions[OpCodes.IDENTITY].AttributeDefs;
+            bool lowered = false;
             foreach (var node in graph.Nodes)
             {
                 // STATE_UPDATE_LINK(original, updated) -> Identity(original): consumers see the
@@ -40,6 +41,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
                 var forwarded = node.Inputs[0]
                     ?? throw new InvalidOperationException(node.OpCode + " has null primary input.");
+                lowered = true;
                 node.OpCode = OpCodes.IDENTITY;
                 node.Attributes = OnnxCSharpAttributes.FromCSharpVals(
                     new Dictionary<string, object?>(), identityAttrDefs);
@@ -48,6 +50,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     [""] = new List<FastTensorKey?> { forwarded }
                 };
             }
+
+            // The updates are dead now. One computed inside a loop an IfElse arm holds would
+            // otherwise be placed by what it reads, inside the loop, and by what reads it, nothing
+            // in the arm, which contradict each other.
+            if (lowered) FastProcessorHelper.RemoveUnreachableNodes(graph);
         }
     }
 }

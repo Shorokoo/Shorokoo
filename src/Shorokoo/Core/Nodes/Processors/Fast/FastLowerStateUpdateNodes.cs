@@ -51,6 +51,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 .Select(link => link.Outputs[0]
                     ?? throw new InvalidOperationException("STATE_UPDATE_LINK has no output."))
                 .ToList();
+            ThrowIfAFinalLinkIsInsideAScope(graph, newStateOutputs);
 
             foreach (var node in graph.Nodes)
             {
@@ -88,6 +89,29 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
             foreach (var key in newStateOutputs)
                 graph.AddOutput(key);
+        }
+
+        /// <summary>
+        /// A step's state has to come out at module scope. <see cref="FastChainStateUpdatesAcrossCallSites"/>
+        /// carries it out of rolled loops, but not out of an IfElse in a rolled loop's body, so a
+        /// call there leaves it inside the loop.
+        /// </summary>
+        private static void ThrowIfAFinalLinkIsInsideAScope(InternalComputationGraph graph, List<FastTensorKey> finals)
+        {
+            var inside = new HashSet<FastNodeKey>();
+            int depth = 0;
+            foreach (var node in graph.Nodes)
+            {
+                if (node.IsCloseNode() && depth > 0) depth--;
+                if (depth > 0) inside.Add(node.Key);
+                if (node.IsOpenNode()) depth++;
+            }
+            if (finals.Any(k => inside.Contains(k.FastNodeKey)))
+                throw new InvalidOperationException(
+                    "This model updates its state in a call inside an IfElse in the body of a loop "
+                    + "whose trip count is not a compile-time constant, and the update cannot be "
+                    + "carried out of the loop from there. Call the model outside the IfElse, or give "
+                    + "the loop a literal or [Hyper] trip count.");
         }
 
         /// <summary>

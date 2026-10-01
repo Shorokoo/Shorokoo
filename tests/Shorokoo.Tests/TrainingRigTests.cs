@@ -2460,12 +2460,119 @@ public class TrainingRigTrainingLoopCoverageTests
     public void TestAStatefulCallWhoseOutputIsDiscardedStillUpdatesItsState()
         => Assert.Equal([2f], StateFieldsAfterOneStep(StatefulCallDiscardedModel.ComputationGraph));
 
-    // A second call site in a loop body registers no update of its own:
-    // https://github.com/Shorokoo/Shorokoo/issues/465
-    [Fact(Skip = "Shorokoo/Shorokoo#465: a stateful model called twice in one loop body applies one update")]
+    [Fact]
     public void TestAStatefulModelCalledTwiceInALoopBodyAppliesBothUpdatesEvenWhenOneIsDiscarded()
         => Assert.Equal([2f, 2f], [.. StateFieldsAfterOneStep(StatefulCalledTwiceInALoopModel.ComputationGraph),
                                    .. StateFieldsAfterOneStep(StatefulCallDiscardedInALoopModel.ComputationGraph)]);
+
+    [Fact]
+    public void TestALoopBodyIsOneCallSiteThatComposesWithTheCallsAroundIt()
+        => Assert.Equal([1f, 1f, 2f, 2f, 2f, 2f],
+            [.. StateFieldsAfterOneStep(StatefulCallDiscardedAloneModel.ComputationGraph),
+             .. StateFieldsAfterOneStep(StatefulCallDiscardedAloneInALoopModel.ComputationGraph),
+             .. StateFieldsAfterOneStep(StatefulCalledBeforeAndInALoopModel.ComputationGraph),
+             .. StateFieldsAfterOneStep(StatefulCalledInALoopAndAfterModel.ComputationGraph),
+             .. StateFieldsAfterOneStep(StatefulCalledTwiceInANestedLoopModel.ComputationGraph),
+             .. StateFieldsAfterOneStep(StatefulCalledInAnOuterAndAnInnerLoopModel.ComputationGraph)]);
+
+    [Fact]
+    public void TestEveryTripOfALoopStartsFromTheStepsStateAndTheLastTripThatRanIsTheUpdate()
+        => Assert.Equal([1f, 8f, 1f],
+            [.. StateFieldsAfterOneStep(InputAccumulatingCalledOnceInALoopModel.ComputationGraph),
+             .. StateFieldsAfterOneStep(InputAccumulatingCalledTwiceInALoopModel.ComputationGraph),
+             .. StateFieldsAfterOneStep(InputAccumulatingInALoopThatStopsEarlyModel.ComputationGraph)]);
+
+    [Fact]
+    public void TestEachTripOfALoopComposesItsCallsAcrossNestingAndBranchesAndTheCallAfterReadsTheLastTrip()
+        => Assert.Equal([3f, 4f, 4f],
+            [.. StateFieldsAfterOneStep(StatefulCalledTwiceInALoopAndAfterModel.ComputationGraph),
+             .. StateFieldsAfterOneStep(InputAccumulatingCalledInAnOuterAndAnInnerLoopModel.ComputationGraph),
+             .. StateFieldsAfterOneStep(InputAccumulatingCalledBeforeAnIfElseInALoopModel.ComputationGraph)]);
+
+    [Fact]
+    public void TestALoopThatStopsEarlyKeepsItsLastRunTripsUpdateThroughBranchesAndNestedLoops()
+        => Assert.Equal([1f, 1f],
+            [.. StateFieldsAfterOneStep(StatefulCalledInAnIfElseInALoopThatStopsEarlyModel.ComputationGraph),
+             .. StateFieldsAfterOneStep(StatefulCalledInALoopNestedInOneWithARuntimeConditionModel.ComputationGraph)]);
+
+    [Fact]
+    public void TestAStatefulLoopUnrolledOnlyForTrainingComposesItsCallsWithTheCallBeforeIt()
+        => Assert.Equal([3f], StateFieldsAfterOneStep(StatefulCalledAroundALoopUnrolledOnlyForTrainingModel.ComputationGraph));
+
+    [Fact]
+    public void TestAStatefulCallInAnIfElseArmAConstantConditionDoesNotTakeMakesNoUpdate()
+    {
+        Assert.Empty(StatefulCallInAnIfElseArmOnAFalseConstantModel.ComputationGraph
+            .ToConcreteArchitecture([TensorData([2L], 1f, 2f)]).ToInternal().GetStateParamDataNodes());
+        Assert.Equal([0f], StateFieldsAfterOneStep(StatefulCallInAnIfElseArmTakenOnTheFirstTripOnlyModel.ComputationGraph));
+    }
+
+    [Fact]
+    public void TestAnUnrolledLoopInAnIfElseArmStartsEachTripFromTheStepsState()
+    {
+        Assert.Equal([1f, 1f],
+            [.. StateFieldsAfterOneStep(StatefulLoopInATakenIfElseArmModel.ComputationGraph),
+             .. StateFieldsAfterOneStep(StatefulLoopInADiscardedTakenIfElseArmModel.ComputationGraph)]);
+        Assert.Equal(2.5f, LossAfterOneStep(StatefulLoopInATakenIfElseArmModel.ComputationGraph), 1e-4f);
+    }
+
+    [Fact]
+    public void TestAStatefulCallAnIfElsesConditionReadsUpdatesWhicheverArmRuns()
+        => Assert.Equal([1f], StateFieldsAfterOneStep(StatefulCallReadByAnIfElsesConditionAndArmModel.ComputationGraph));
+
+    [Fact]
+    public void TestADiscardedIfElseChangesNoOtherBranchsUpdate()
+        => Assert.Equal([0f], StateFieldsAfterOneStep(StatefulCallReadByAnUntakenArmAndADiscardedIfElseModel.ComputationGraph));
+
+    [Fact]
+    public void TestAStatefulCallInNestedDiscardedIfElsesIsRefusedAsInNestedUsedOnes()
+    {
+        Assert.Contains("nested IfElse", Assert.Throws<InvalidOperationException>(
+            () => StateFieldsAfterOneStep(StatefulCallInAnUntakenArmOfADiscardedIfElseReadByAnotherModel.ComputationGraph)).Message);
+        Assert.Contains("nested IfElse", Assert.Throws<InvalidOperationException>(
+            () => StateFieldsAfterOneStep(StatefulCallInADiscardedIfElseNestedInAnotherModel.ComputationGraph)).Message);
+    }
+
+    [Fact]
+    public void TestALoopWithARuntimeConditionWhoseLaterTripsMakeNoCallIsRefused()
+        => Assert.Contains("continue condition", Assert.Throws<InvalidOperationException>(
+            () => StateFieldsAfterOneStep(StatefulCallOnTheFirstTripOfALoopWithARuntimeConditionModel.ComputationGraph)).Message);
+
+    [Fact]
+    public void TestAnIfElseReadByOneArmOfAnotherStaysInsideItAfterAStatefulCall()
+    {
+        var f = IfElseNestedInAnArmAfterAStatefulCallModel.ComputationGraph
+            .ToConcreteArchitecture([TensorData([2L], 1f, 2f)]).ToConcreteModel().ToInternal();
+        int depth = 0, topLevelIfs = 0;
+        foreach (var n in f.Nodes)
+        {
+            if (n.OpCode == OpCodes.IF_CLOSE || n.OpCode == OpCodes.LOOP_CLOSE) depth--;
+            if (n.OpCode == OpCodes.IF_OPEN && depth == 0) topLevelIfs++;
+            if (n.OpCode == OpCodes.IF_OPEN || n.OpCode == OpCodes.LOOP_OPEN) depth++;
+        }
+        Assert.Equal(1, topLevelIfs);
+    }
+
+    // Shorokoo/Shorokoo#492: the backward of the untaken arm's Gather, a ScatterND, runs
+    // unconditionally with indices only the taken arm would have made valid.
+    [Fact(Skip = "Shorokoo/Shorokoo#492")]
+    public void TestAGatherInAnUntakenIfElseArmTrains()
+        => Assert.Equal(2.5f, LossAfterOneStep(GainGatheredInAnUntakenIfElseArmModel.ComputationGraph), 1e-4f);
+
+    [Fact]
+    public void TestAStatefulCallInALoopThatCarriesNothingOutIsRefused()
+        => Assert.Contains("carries nothing out", Assert.Throws<InvalidOperationException>(
+            () => StatefulCallInALoopCarryingNothingModel.ComputationGraph).Message);
+
+    [Fact]
+    public void TestAStatefulCallInADiscardedIfElseArmUpdatesOnlyWhenThatArmRuns()
+        => Assert.Equal([0f, 0f], [.. StateFieldsAfterOneStep(StatefulCallInADiscardedIfElseArmModel.ComputationGraph),
+            .. StateFieldsAfterOneStep(StatefulCallInADiscardedIfElseArmInALoopModel.ComputationGraph)]);
+
+    [Fact]
+    public void TestAStatefulCallMadeBeforeAnIfElseAndReadInOneArmUpdatesWhicheverArmRuns()
+        => Assert.Equal([1f, 1f], [.. StateFieldsAfterOneStep(StatefulCalledBeforeAnIfElseAndReadInOneArmModel.ComputationGraph),
+            .. StateFieldsAfterOneStep(StatefulCalledBeforeADiscardedIfElseAndReadInOneArmModel.ComputationGraph)]);
 
     /// <summary>The ops an inference model computes inside its <c>If</c>, rather than before it.</summary>
     private static string[] IfBodyOps(ComputationGraph modelGraph)
@@ -2486,6 +2593,29 @@ public class TrainingRigTrainingLoopCoverageTests
         Assert.Equal(2.5f, LossAfterOneStep(GainInBothIfArmsOnARuntimeConditionModel.ComputationGraph), 1e-4f);
         Assert.Equal(2.5f, LossAfterOneStep(SharedGainInBothIfArmsModel.ComputationGraph), 1e-4f);
         Assert.NotEmpty(IfBodyOps(SharedGainInBothIfArmsModel.ComputationGraph));
+    }
+
+    [Fact]
+    public void TestAnUntakenIfElseArmLeaksNoNonFiniteGradientThroughWhatItsConditionReads()
+    {
+        Assert.Equal([0.1f, -13.4f], ParamsAfterOneStep(RootedGainReadByItsOwnConditionInAnArmModel.ComputationGraph, -1f, -4f));
+        Assert.Equal([0.1f, -13.4f], ParamsAfterOneStep(RootedGainReadByAConditionAndOneArmModel.ComputationGraph, -1f, -4f));
+        Assert.Equal([1f, 1f], ParamsAfterOneStep(SafelyNormalizedGainModel.ComputationGraph, 0f, 0f));
+        Assert.Equal([0.1f, -13.4f], ParamsAfterOneStep(RootedGainReadByAnArmAndARunningStatisticModel.ComputationGraph, -1f, -4f));
+        Assert.Equal([0.9f, -0.6f], [.. TrainedParams(RootedGainInAnIfElseNestedInAnArmModel.ComputationGraph, false, -1f, -4f)
+                                         .Select(v => MathF.Round(v, 4))]);
+    }
+
+    private static float[] ParamsAfterOneStep(ComputationGraph modelGraph, params float[] xs)
+    {
+        object[] values = [.. xs.Select(v => (object)v)];
+        var x = TensorData(DType.Float32, [(long)xs.Length], values);
+        var rig = TrainingRig.FromScratch(modelGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            [new TensorDataModelParam(modelGraph.InputNames[0]!, ModelParamType.InputParam, x)], 0.1f);
+        var step = rig.TrainStep(rig.CreateInitialCheckpoint(), rig.InputDef.FromOrderedData(x),
+            rig.TargetDef.FromOrderedData(TensorData([(long)xs.Length], new float[xs.Length])));
+        return [.. NNLibraryTrainingFixtures.Floats(step.TrainableParams.Fields[rig.TrainableParamStructDef.Fields[0].Name])
+                   .Select(v => MathF.Round(v, 4))];
     }
 
     private static float[] TrainedParams(ComputationGraph modelGraph, bool cond, params float[] xs)
@@ -2511,6 +2641,10 @@ public class TrainingRigTrainingLoopCoverageTests
         Assert.Equal<float>([0.9f, -0.6f], TrainedParams(SqrtInOneIfArmModel.ComputationGraph, false, 1f, 4f));
         Assert.Equal<float>([0.95f, 0.8f], TrainedParams(SqrtInOneIfArmModel.ComputationGraph, true, 1f, 4f));
     }
+
+    [Fact]
+    public void TestAValueReadInOneIfElseArmAndAfterTheBranchKeepsItsGradientWhicheverArmRuns()
+        => Assert.Equal<float>([0.6f, -0.6f], TrainedParams(GainReadInOneIfArmAndAfterTheBranchModel.ComputationGraph, false, 1f, 2f));
 
     private static TrainingRig OptionalBiasRig(OptionalTensorData bias, TensorData x)
         => TrainingRig.FromScratch(NullableTrainableBiasLayer.ComputationGraph,

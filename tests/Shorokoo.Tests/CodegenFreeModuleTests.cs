@@ -421,6 +421,77 @@ public class CodegenFreeModuleTests
         Assert.Equal(2f, StateValue(updated2));
     }
 
+    [Fact]
+    public void TestAStatefulLoopUnrolledByBakingItsTripCountComposesItsCalls()
+    {
+        Assert.Equal(2f, StateAfterBakingTheTripCount(StatefulCalledTwiceInALoopOfAnInputTripCountModel.ComputationGraph));
+        Assert.Equal(8f, StateAfterBakingTheTripCount(InputAccumulatingInALoopOfAnInputTripCountThatStopsEarlyModel.ComputationGraph));
+    }
+
+    private static float StateAfterBakingTheTripCount(ComputationGraph cg)
+    {
+        var input = TensorData([2L], 1f, 2f);
+        var concrete = cg.ToConcreteArchitecture([input, TensorData([], 3L)]);
+        var specialized = concrete.Specialize(new ModelParamList(
+            [new KeyValuePair<string, TensorData>(concrete.InputNames[1]!, TensorData([], 3L))], ModelParamType.InputParam)).ToConcreteModel();
+        return StateValue(ComputeContext.Default.ExecuteWithState(specialized, input.Shared()).updatedGraph);
+    }
+
+    [Fact]
+    public void TestAStatefulCallInALoopWithARuntimeTripCountRunsWithItsState()
+    {
+        var input = TensorData([2L], 1f, 2f);
+        var concrete = StatefulGainInRolledLoopModel.ComputationGraph.ToConcreteArchitecture([input]).ToConcreteModel();
+        var (_, updated) = ComputeContext.Default.ExecuteWithState(concrete, input.Shared());
+        Assert.Equal(1f, StateValue(updated));
+    }
+
+    private static float StateAfterOneExecution(ComputationGraph cg)
+    {
+        var input = TensorData([2L], 1f, 2f);
+        var concrete = cg.ToConcreteArchitecture([input]).ToConcreteModel();
+        return StateValue(ComputeContext.Default.ExecuteWithState(concrete, input.Shared()).updatedGraph);
+    }
+
+    [Fact]
+    public void TestAStatefulCallInALoopNestedWithARolledLoopRunsWithItsState()
+    {
+        Assert.Equal(1f, StateAfterOneExecution(StatefulCalledInALiteralLoopInsideARolledLoopModel.ComputationGraph));
+        Assert.Equal(1f, StateAfterOneExecution(StatefulCalledInARolledLoopInsideALiteralLoopModel.ComputationGraph));
+    }
+
+    [Fact]
+    public void TestALiteralLoopWhoseLastTripSkipsTheCallHandsBackInsideARolledLoop()
+    {
+        Assert.Equal(1f, StateAfterOneExecution(StatefulCalledAroundALiteralLoopWhoseLastTripSkipsTheCallInARolledLoopModel.ComputationGraph));
+        Assert.Equal(2f, StateAfterOneExecution(StatefulCalledAroundAndAfterALiteralLoopWhoseLastTripSkipsTheCallInARolledLoopModel.ComputationGraph));
+    }
+
+    [Fact]
+    public void TestARolledStatefulLoopInAnUntakenIfElseArmRunsAndMakesNoUpdate()
+    {
+        var input = TensorData([2L], 1f, 2f);
+        var concrete = InputAccumulatingInARolledLoopInAnUntakenIfElseArmModel.ComputationGraph
+            .ToConcreteArchitecture([input]).ToConcreteModel();
+        Assert.Equal<float>([3f, 6f], Floats(ComputeContext.Default.Execute(concrete, (IData[])[input])[0]
+            .ToTensorData().AccessRawMemory().ToArray()));
+        Assert.Equal(0f, StateAfterOneExecution(InputAccumulatingInARolledLoopInAnUntakenIfElseArmModel.ComputationGraph));
+    }
+
+    [Fact]
+    public void TestStatefulCallsInAndAroundARolledLoopComposeWithIt()
+    {
+        Assert.Equal(2f, StateAfterOneExecution(StatefulCalledTwiceInARolledLoopModel.ComputationGraph));
+        Assert.Equal(2f, StateAfterOneExecution(StatefulCalledBeforeAndInARolledLoopModel.ComputationGraph));
+        Assert.Equal(2f, StateAfterOneExecution(StatefulCalledInARolledLoopAndAfterModel.ComputationGraph));
+        Assert.Equal(3f, StateAfterOneExecution(StatefulCalledAroundANestedRolledLoopModel.ComputationGraph));
+    }
+
+    [Fact]
+    public void TestAStatefulCallInAnIfElseInARolledLoopIsRefusedWhenRunWithState()
+        => Assert.Contains("IfElse", Assert.Throws<InvalidOperationException>(
+            () => StateAfterOneExecution(StatefulCalledInAnIfElseInARolledLoopModel.ComputationGraph)).Message);
+
     /// <summary>
     /// One model handle called twice updates its state once per call, and the executor still takes
     /// one value per state parameter. The same architecture executed without state — the pure

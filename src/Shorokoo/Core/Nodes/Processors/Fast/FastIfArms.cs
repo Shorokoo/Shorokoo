@@ -4,6 +4,7 @@ using Shorokoo.Core.Factory;
 using Shorokoo.Core.Nodes.NodeDefinitions;
 using System;
 using System.Collections.Generic;
+using System.Linq;
 
 namespace Shorokoo.Core.Nodes.Processors.Fast
 {
@@ -23,8 +24,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// time (see <see cref="FastIfBranchScoper"/>). Membership is therefore read off what each
     /// branch's own <c>IF_CLOSE</c> inputs reach, never off where a node sits.</para>
     ///
-    /// <para>A node both arms reach runs whatever the condition says and is nobody's arm; so are
-    /// the inputs and parameters a branch merely reads. That exclusion is what makes a value
+    /// <para>A node both arms reach runs whatever the condition says and is nobody's arm; so is a
+    /// node something outside the branch reads, and all it is computed from, and so are the inputs
+    /// and parameters a branch merely reads. A <c>WITH_STATE_DEPS</c> naming a value only to keep
+    /// it does not read it: a call made in an arm is named that way from outside the branch. That exclusion is what makes a value
     /// heading for one a value <em>leaving</em> the arm — the property both callers turn on, one
     /// to thread a state update through the branch that decides it
     /// (<see cref="FastChainStateUpdatesAcrossCallSites"/>), the other to stop a gradient from an
@@ -39,7 +42,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         public static string BranchAttribute(bool isThen)
             => isThen ? OnnxOpAttributeNames.AttrThenBranch : OnnxOpAttributeNames.AttrElseBranch;
 
-        public static Dictionary<FastNodeKey, List<IfArm>> Classify(InternalComputationGraph graph)
+        /// <param name="graph">The graph to classify.</param>
+        /// <param name="gradientReadsOnly">Count only the reads a gradient flows through: a
+        /// condition, a comparison or an index reads a value without differentiating it, so for
+        /// where an arm's gradient has to stop such a read leaves the value in the arm.</param>
+        public static Dictionary<FastNodeKey, List<IfArm>> Classify(InternalComputationGraph graph, bool gradientReadsOnly = false)
         {
             if (graph is null) throw new ArgumentNullException(nameof(graph));
 
@@ -56,6 +63,12 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     foreach (var ok in outs)
                         if (ok is not null && !ok.Value.IsEmpty) producerOf[ok.Value] = node;
 
+            var readersOf = ReadersOf(graph, producerOf, gradientReadsOnly);
+            var closeOf = new Dictionary<FastNodeKey, FastNodeKey>();
+            foreach (var node in graph.Nodes)
+                if (node.OpCode == OpCodes.IF_CLOSE && node.GraphOpenNodeKey is FastNodeKey openNode)
+                    closeOf[openNode] = node.Key;
+
             foreach (var close in graph.Nodes)
             {
                 if (close.OpCode != OpCodes.IF_CLOSE) continue;
@@ -71,10 +84,12 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                         ? ReachedFrom(roots, producerOf) : [];
                 }
 
+                var readOutside = ReadOutsideTheBranch(close.Key, reached, readersOf, closeOf, nodeByKey, producerOf);
+
                 foreach (var isThen in (bool[])[true, false])
                     foreach (var nodeKey in reached[isThen])
                     {
-                        if (reached[!isThen].Contains(nodeKey)) continue;
+                        if (reached[!isThen].Contains(nodeKey) || readOutside.Contains(nodeKey)) continue;
                         if (nodeByKey.TryGetValue(nodeKey, out var owner) && IsNobodysArm(owner)) continue;
                         if (!armsOf.TryGetValue(nodeKey, out var list)) armsOf[nodeKey] = list = [];
                         list.Add(new IfArm(close.Key, condition, isThen));
@@ -101,6 +116,104 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                             worklist.Push(producer);
             return seen;
         }
+
+        /// <summary>The nodes reading each node's outputs, graph outputs included, leaving out the
+        /// state dependencies a <c>WITH_STATE_DEPS</c> names only to keep them — and, where asked,
+        /// every read no gradient flows back through: by an op whose output is a boolean, an index
+        /// or a shape, by a node nothing the loss depends on reads, or by a graph output.</summary>
+        private static Dictionary<FastNodeKey, List<FastNodeKey?>> ReadersOf(
+            InternalComputationGraph graph, Dictionary<FastTensorKey, FastNode> producerOf, bool gradientReadsOnly)
+        {
+            var readersOf = new Dictionary<FastNodeKey, List<FastNodeKey?>>();
+            void Read(FastTensorKey? key, FastNodeKey? reader)
+            {
+                if (key is not FastTensorKey k || !producerOf.TryGetValue(k, out var producer)) return;
+                if (!readersOf.TryGetValue(producer.Key, out var list)) readersOf[producer.Key] = list = [];
+                list.Add(reader);
+            }
+
+            // A node passes a gradient back to what it reads when a gradient reaches it: it is the
+            // AUTO_GRAD differentiating the loss, or a node that passes one reads it. The graph's
+            // other outputs — the state a step carries out, say — take no gradient, so reading a
+            // value for them leaves it in its arm. Readers come after what they read, so one walk
+            // from the back settles every node.
+            HashSet<FastNodeKey>? passesGradient = null;
+            if (gradientReadsOnly)
+            {
+                passesGradient = [];
+                var reachesAGradient = new HashSet<FastTensorKey>();
+                for (int n = graph.Nodes.Count - 1; n >= 0; n--)
+                {
+                    var node = graph.Nodes[n];
+                    if (ReadsWithoutGradient.Contains(node.OpCode)) continue;
+                    if (node.OpCode != InternalOpCodes.AUTO_GRAD
+                        && !node.FullOutputs.Values.Any(outs => outs.Any(o => o is FastTensorKey k && reachesAGradient.Contains(k))))
+                        continue;
+                    passesGradient.Add(node.Key);
+                    foreach (var (_, ins) in node.FullInputs)
+                        foreach (var ik in ins)
+                            if (ik is FastTensorKey k) reachesAGradient.Add(k);
+                }
+            }
+
+            foreach (var node in graph.Nodes)
+            {
+                if (passesGradient is not null && !passesGradient.Contains(node.Key)) continue;
+                foreach (var (_, ins) in node.FullInputs)
+                    for (int i = 0; i < ins.Count; i++)
+                        if (i == 0 || node.OpCode != InternalOpCodes.WITH_STATE_DEPS)
+                            Read(ins[i], node.Key);
+            }
+            if (!gradientReadsOnly)
+                foreach (var output in graph.Outputs)
+                    Read(output, null);
+            return readersOf;
+        }
+
+        /// <summary>The nodes of an <c>IfElse</c>'s arms that run whichever arm is taken because
+        /// something other than the branch reads them, together with all they are computed from.
+        /// The branch's own condition is read before either arm runs, so its <c>IF_OPEN</c> reads
+        /// from outside; a nested <c>IfElse</c>'s <c>IF_OPEN</c> reads from wherever its
+        /// <c>IF_CLOSE</c> sits.</summary>
+        private static HashSet<FastNodeKey> ReadOutsideTheBranch(
+            FastNodeKey close,
+            Dictionary<bool, HashSet<FastNodeKey>> reached,
+            Dictionary<FastNodeKey, List<FastNodeKey?>> readersOf,
+            Dictionary<FastNodeKey, FastNodeKey> closeOf,
+            Dictionary<FastNodeKey, FastNode> nodeByKey,
+            Dictionary<FastTensorKey, FastNode> producerOf)
+        {
+            bool Reached(FastNodeKey k) => reached[true].Contains(k) || reached[false].Contains(k);
+            bool InBranch(FastNodeKey? key)
+                => key is FastNodeKey k
+                   && (k.Equals(close) || Reached(k)
+                       || closeOf.TryGetValue(k, out var nestedClose) && !nestedClose.Equals(close) && Reached(nestedClose));
+
+            var readOutside = new HashSet<FastNodeKey>();
+            var worklist = new Stack<FastNodeKey>();
+            foreach (var nodeKey in reached[true].Concat(reached[false]))
+                if (readersOf.TryGetValue(nodeKey, out var readers) && !readers.All(InBranch)
+                    && readOutside.Add(nodeKey))
+                    worklist.Push(nodeKey);
+
+            while (worklist.Count > 0)
+                if (nodeByKey.TryGetValue(worklist.Pop(), out var node))
+                    foreach (var (_, ins) in node.FullInputs)
+                        foreach (var ik in ins)
+                            if (ik is FastTensorKey k && producerOf.TryGetValue(k, out var producer)
+                                && InBranch(producer.Key) && readOutside.Add(producer.Key))
+                                worklist.Push(producer.Key);
+            return readOutside;
+        }
+
+        /// <summary>Ops whose outputs are booleans, indices or shapes, through which no gradient
+        /// reaches what they read — an <c>IF_OPEN</c>'s condition among them.</summary>
+        private static readonly HashSet<string> ReadsWithoutGradient =
+        [
+            OpCodes.IF_OPEN, OpCodes.GREATER, OpCodes.GREATER_OR_EQUAL, OpCodes.LESS, OpCodes.LESS_OR_EQUAL,
+            OpCodes.EQUAL, OpCodes.AND, OpCodes.OR, OpCodes.XOR, OpCodes.NOT, OpCodes.IS_NAN, OpCodes.IS_INF,
+            OpCodes.SHAPE, OpCodes.SIZE, OpCodes.ARG_MAX, OpCodes.ARG_MIN, OpCodes.NON_ZERO,
+        ];
 
         /// <summary>An input or a parameter is read by a branch, never owned by it.</summary>
         private static bool IsNobodysArm(FastNode node)

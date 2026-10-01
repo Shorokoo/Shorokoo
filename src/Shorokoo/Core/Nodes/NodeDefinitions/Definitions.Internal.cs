@@ -252,12 +252,17 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
             // State management operators
 
             // STATE_UPDATE_LINK: Creates a traceable link between original and updated state in the graph.
-            // Inputs: original state tensor, updated state tensor (both must be same type)
+            // Inputs: original state tensor, updated state tensor (both must be same type), and on a
+            // link an unrolled loop cloned, whether each trip it belongs to ran (see ShrkAttrLoopTrips)
             // Outputs: the updated state tensor (pass-through)
             Op(STATE_UPDATE_LINK)
                 .Tensor<AnyLike>("T")
                 .Input("originalState", "T", rank: "R")
+                .Tensor<bit>("B", minVariadicCount: 0)
                 .Input("updatedState", "T", rank: "R")
+                .Input("tripsRan", "B")
+                .AttributeLongs(ShrkAttrLoopTrips)
+                .AttributeBool(ShrkAttrStateOrdered)
                 .Output("linkedUpdatedState", "T", rank: "R"),
 
             // WITH_STATE_DEPS: Creates graph dependencies from updated state tensors to module output.

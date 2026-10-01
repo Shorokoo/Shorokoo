@@ -206,7 +206,13 @@ namespace Shorokoo.Core
             // this its updates are built and then dropped with it (Shorokoo/Shorokoo#310). Naming
             // a call whose result is used costs nothing: the dep is redundant and the wrapper
             // around an already-live tensor prunes away.
-            Variable[] deps = [.. stateUpdates, .. GraphTrace.TakeCallEffects()];
+            // An IfElse whose arm makes such a call is kept too where nothing else keeps it, so the
+            // call stays its arm's.
+            var callEffects = GraphTrace.TakeCallEffects();
+            var ifElses = GraphTrace.IfElses ?? [];
+            Variable[] deps = [.. stateUpdates, .. callEffects,
+                               .. InternalGlobals.IfElsesKeptForTheirArms(callEffects, ifElses, [.. fnOutputs, .. stateUpdates])];
+            ifElses.Clear();
 
             // Check for registered state updates and wrap outputs with WithStateDeps if any exist
             // This ensures state update tensors are included in the graph when outputs are used

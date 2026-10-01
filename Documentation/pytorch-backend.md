@@ -114,26 +114,17 @@ or one that sees no device, saying which. Starting the backend on such a machine
 downloads the CUDA libraries for a card that is not there.
 
 **Beside an ONNX Runtime CUDA backend.** A process can run `TorchCudaBackend` together with
-`WinGpuBackend` (or a CUDA backend loaded through `IsolatedBackend`), whichever starts first. On
-Windows, PyTorch loads every library in its `torch\lib` by path, and those libraries bind the
-ones they import by name to whatever copy the process already holds under that name. cuDNN is a
-family of such libraries, and two releases of it do not mix. So the process holds one copy of
-the CUDA runtime, cuBLAS, cuDNN, cuFFT and the compilers they load, and every backend binds to
-it:
-
-- Where this package is deployed and its environment is already there, that copy is the
-  environment's `torch\lib`. Shorokoo loads it before any of its CUDA backends loads a CUDA
-  library, and the ONNX Runtime backend runs on it rather than on the cuDNN and cuBLAS the
-  system's `PATH` offers. cuDNN 9 and the CUDA 13 libraries are backward compatible across minor
-  releases. `CudaLibraries.Directory` (in `Shorokoo.Core.Backends`) names the folder, or is null
-  while nothing is shared.
-- An ONNX Runtime CUDA backend that started before the environment could be found — in the run
-  that provisions it, or where only the torch backend's own options name it — has loaded the
-  system's copies. Starting PyTorch in that process fails with
-  `PythonEnvironmentFailure.CudaLibraryConflict`, naming them. Start the PyTorch backend first
-  there; a process that starts with the environment in place shares PyTorch's copies.
-- On Linux nothing is shared: each library loads as the system's loader finds it, and the loader
-  binds a library's name to the first copy loaded under it.
+`WinGpuBackend`, `LinuxGpuBackend` or a CUDA backend loaded through `IsolatedBackend`, whichever
+starts first: every CUDA backend runs on one pinned copy of cuDNN and cuBLAS, which is the release
+the CUDA environment's PyTorch carries — see
+[The NVIDIA libraries the CUDA backends run on](inference.md#the-nvidia-libraries-the-cuda-backends-run-on).
+When the CUDA environment is provisioned, or first used, its copies of those libraries become
+hard links to the shared cache's, filling the cache from them if it is empty, so nothing more is
+downloaded and PyTorch loads the very same files as the other backends. An environment you name
+is never modified: one whose PyTorch bundles the pinned release runs beside another CUDA backend
+on its own copy of that release; one whose PyTorch bundles another release cannot load it into a
+process that already holds the pinned one, and starting it there fails with
+`PythonEnvironmentFailure.CudaLibraryConflict`, naming the copies held.
 
 ## The Python environment
 
@@ -190,7 +181,7 @@ whose message names what is missing:
 | `InterpreterFailed` | CPython itself would not start |
 | `DeviceUnavailable` | a CUDA backend, and no NVIDIA driver fit for CUDA 13, or PyTorch sees no such device |
 | `UnsupportedPlatform` | the machine is not Linux or Windows on x64, the platforms there are lock files for |
-| `CudaLibraryConflict` | PyTorch cannot load the CUDA libraries its environment ships, because a CUDA backend that started first holds other copies of them; the message names them |
+| `CudaLibraryConflict` | PyTorch cannot load the CUDA libraries its environment ships, because the process already holds another release of them; the message names the copies held |
 
 ## Training
 

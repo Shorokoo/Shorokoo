@@ -1,0 +1,21 @@
+# The NVIDIA libraries every CUDA backend of a process shares on linux-x64, one release each, built
+# for CUDA 13: the PyPI wheel each comes from, then the files of it a backend loads, in the order
+# they are loaded, each with the SHA-256 (unpadded base64url) and size the wheel's RECORD gives it.
+# Written by tools/cuda-library-pins.py from that lock: run it again whenever the lock changes.
+#
+# library <name> <version> <cuda major> <package> <wheel url> <wheel sha256> <wheel size>
+# file <library> <path in the wheel> <sha256> <size>
+library cudnn 9.24.0.43 13 nvidia-cudnn-cu13 https://files.pythonhosted.org/packages/5c/ba/791cffd048fe5b044e620df55267e3e95c0e6e07d50b41e377c03dfc910f/nvidia_cudnn_cu13-9.24.0.43-py3-none-manylinux_2_27_x86_64.whl 71f181cd810e90f9b6023b01186fe82d13d65f0ec098581ee201d39fad769e4b 553099438
+file cudnn nvidia/cudnn/lib/libcudnn_graph.so.9 LooOTmbAyPncJzxIZphhTAVhgyYm-t92qKN7lNDi-JU 128148560
+file cudnn nvidia/cudnn/lib/libcudnn_ops.so.9 Jn0DKlAMpPdzKEdwh6zlO-LmlYjc-BpAL_Ev66aQRBI 39855824
+file cudnn nvidia/cudnn/lib/libcudnn_adv.so.9 9FyqvmxKhd2xCwo8NwgKk1oc_dQznbRjdGc9kNaDYhw 109169040
+file cudnn nvidia/cudnn/lib/libcudnn_cnn.so.9 vZ06-0ZhFPScw_66zXLnkRSKZX47dDaQQrHcm3yVkfo 4203896
+file cudnn nvidia/cudnn/lib/libcudnn_engines_precompiled.so.9 ByP_by5hHHO2IDWw-eeY9CyRvTpnG8SUE5NEtgUJfPE 260072464
+file cudnn nvidia/cudnn/lib/libcudnn_engines_runtime_compiled.so.9 U-G1g73-z4cUJA-ZPqK1JOzKhHbg1REc3gql4G8nT1k 33586832
+file cudnn nvidia/cudnn/lib/libcudnn_engines_tensor_ir.so.9 PTPqBDbCPf-8AObuXxBtZnNC0vuQvz5G683zjcpF0OU 201345448
+file cudnn nvidia/cudnn/lib/libcudnn_ext.so.9 jL61DqC5yAhJr6CBYXTT1Jr04UAdrG1__i66km4Ai2k 127944928
+file cudnn nvidia/cudnn/lib/libcudnn_heuristic.so.9 Yjnlze-LoNlhO_93bRSHuKWaEBxM30tOWaYfo0DrJTk 60822216
+file cudnn nvidia/cudnn/lib/libcudnn.so.9 D0MRPsaxcfkyNlYFQfO5UQT-0lFrGQAKDnBHpcwS-O4 129240
+library cublas 13.1.1.3 13 nvidia-cublas https://files.pythonhosted.org/packages/3b/cd/154ca20c38269e05eff77c1464e6c1da89f50a6390b565e9d82e06bc11e1/nvidia_cublas-13.1.1.3-py3-none-manylinux_2_27_x86_64.whl 37936a16db8fe4ac1f065c2139360608a543a09275cb1a1af612e08cfa065436 423138758
+file cublas nvidia/cu13/lib/libcublasLt.so.13 FImut11V7lV4J5g0OsZvV3cdVhzB_h4EkVaN7voOZRU 541607888
+file cublas nvidia/cu13/lib/libcublas.so.13 Jc3kMhCFQ2Jt-F2IfHML8sq5aAPKFvllTkq8jStFgz4 54177976

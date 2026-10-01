@@ -274,17 +274,6 @@ outputs in host memory on every execution provider, including ones flagged in
 loaded through `IsolatedBackend.Load` or `BackendPackage.TryLoad`, and a sequence
 moves to another context element by element.
 
-### The ONNX Runtime CUDA backend runs on the cuDNN the system offers
-
-On Windows the ONNX Runtime CUDA backend imports cuBLAS and loads `cudnn64_9.dll` by name, so it
-runs on whichever copies the DLL search finds (the folders on `PATH`), unless the PyTorch CUDA
-backend's environment is in reach, whose copies it then shares (see
-[Beside an ONNX Runtime CUDA backend](pytorch-backend.md#cpu-and-cuda)). Nothing checks that the
-cuDNN it finds is built for CUDA 13. A cuDNN 9 built for CUDA 12 loads and serves the backend
-while a CUDA 12 toolkit is on `PATH` as well; without one, the first convolution ends the process
-inside cuDNN (`Could not locate cublasLt64_12.dll`) rather than failing the run. Install the
-CUDA 13 build of cuDNN 9.
-
 ### Device-memory readings are process-wide, and device 0's
 
 Device-memory configuration is per context, session and run

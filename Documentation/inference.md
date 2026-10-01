@@ -826,17 +826,11 @@ the core assembly and your model are shared, so contexts can exchange data.
 Sequence outputs work on any provider; ONNX Runtime materializes them in host memory — see
 [A sequence's elements live in host memory](limitations.md#a-sequences-elements-live-in-host-memory).
 
-#### Two CUDA backends share the NVIDIA libraries
+#### Two CUDA backends in one process
 
-Every CUDA backend in a Windows process binds to one copy of each NVIDIA library it loads by
-name: the CUDA runtime, cuBLAS, cuDNN, cuFFT and the compilers they load. Where the PyTorch CUDA
-backend is deployed and its Python environment exists, that copy is the environment's, loaded
-before any backend loads its own, so an ONNX Runtime CUDA backend and a PyTorch one run in one
-process in either order — see
-[Beside an ONNX Runtime CUDA backend](pytorch-backend.md#cpu-and-cuda).
-`CudaLibraries.Directory` names the folder. Otherwise each backend loads what the system's DLL
-search finds; see
-[The ONNX Runtime CUDA backend runs on the cuDNN the system offers](limitations.md#the-onnx-runtime-cuda-backend-runs-on-the-cudnn-the-system-offers).
+CUDA backends of different frameworks run side by side in one process, whichever starts first,
+because they run on one copy of cuDNN and cuBLAS — see
+[The NVIDIA libraries the CUDA backends run on](#the-nvidia-libraries-the-cuda-backends-run-on).
 
 #### Or keep it to two processes
 
@@ -870,6 +864,58 @@ A backend reference in the shared library — a `PackageReference`, or a `Projec
 an executable carrying one — flows into both outputs and makes
 [auto-discovery](#auto-discovery) refuse. Keep backends in executables, and reference no
 executable.
+
+### The NVIDIA libraries the CUDA backends run on
+
+Every CUDA backend runs on the same release of cuDNN and cuBLAS (with cuBLASLt), CUDA 13 builds,
+pinned per platform beside the lock of the CUDA Python environment: the releases that
+environment's PyTorch carries.
+
+| | cuDNN | cuBLAS |
+|---|---|---|
+| Windows x64 | 9.24.0.43 — 393 MiB download, 542 MiB on disk | 13.0.0.19 — 382 MiB download, 504 MiB on disk |
+| Linux x64 | 9.24.0.43 — 528 MiB download, 921 MiB on disk | 13.1.1.3 — 404 MiB download, 568 MiB on disk |
+
+They live in a per-user cache, one folder per release: `%LOCALAPPDATA%\shorokoo\cuda\` on
+Windows, `$XDG_CACHE_HOME/shorokoo/cuda/` (or `~/.cache/shorokoo/cuda/`) on Linux, beside the
+Python environments — `cudnn-9.24.0.43-cu13\`, `cublas-13.0.0.19-cu13\`. A folder is filled once,
+the first time a CUDA backend needs it, under a lock file beside it, and marked complete only once
+every file is in place and checked; one left half-filled is filled again. It is filled from:
+
+1. **An installed copy, where one matches exactly**: every file of the release present, each with
+   the SHA-256 its PyPI wheel records. On Windows cuDNN is looked for on `PATH`, in `%CUDNN_PATH%`
+   and under `%ProgramFiles%\NVIDIA\CUDNN`, and cuBLAS on `PATH`, in `%CUDA_PATH%` and in the
+   CUDA 13 toolkits under `%ProgramFiles%\NVIDIA GPU Computing Toolkit\CUDA`; on Linux, on
+   `LD_LIBRARY_PATH`, in `$CUDNN_PATH`, `$CUDA_PATH` and `$CUDA_HOME`, in the CUDA 13 toolkits
+   under `/usr/local` and in the system's library folders. Its files are hard-linked into the
+   cache where the volume allows, and copied otherwise. Any other copy — another release, a build
+   for another CUDA major, a file that differs — is ignored, never mixed in.
+2. **A provisioned PyTorch CUDA environment's own copies**, which are that same release byte for
+   byte (see below), when PyTorch is the backend that gets there first.
+3. **Otherwise the release's wheel from PyPI**, checked against the SHA-256 the pin records.
+
+With none of them available — offline, nothing installed that matches — the first CUDA session
+fails with an `InvalidOperationException` naming the library, where it looked and the size of
+the download. To run offline, fill the cache once while online, copy the folders from a machine
+that has them, or install exactly the pinned release. `CudaLibraries.Prepare()` (in
+`Shorokoo.Core.Backends`) fills the cache and loads the libraries at a moment of your choosing,
+at startup rather than on the first CUDA run; it is also what a backend of your own that loads
+CUDA libraries calls first.
+
+Within a process every CUDA backend binds to that one copy. The ONNX Runtime CUDA backend loads
+the cache's files by full path before its provider loads anything by name, so it never runs on
+the cuDNN or cuBLAS that `PATH` happens to offer. A provisioned
+[PyTorch CUDA environment](pytorch-backend.md#cpu-and-cuda)'s own copies — `torch\lib` on Windows,
+the `nvidia` wheels' folders on Linux — are made hard links to the cache's files when the
+environment is provisioned, or first used, so PyTorch loads the very same files. This is what
+lets an ONNX Runtime CUDA backend and a PyTorch one share a process in either order: a process
+holding two releases of cuDNN cannot run both, since cuDNN's libraries import one another's
+internal entry points by name and bind to whichever copy of a name was loaded first.
+
+The other NVIDIA libraries both stacks load — the CUDA runtime, cuFFT, nvrtc, nvJitLink — are
+each backend's own: the ONNX Runtime backend's come from the machine's CUDA 13 runtime, PyTorch's
+from its environment. Two copies of these run side by side: they call one another only through
+public, versioned entry points.
 
 ### Device memory (GPU backends)
 

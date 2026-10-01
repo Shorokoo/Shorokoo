@@ -27,7 +27,17 @@
     <ProjectReference Include="..\Shorokoo.CodeGen\Shorokoo.CodeGen.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" PrivateAssets="all" />
   </ItemGroup>
 
+  <!-- The NVIDIA libraries every CUDA backend shares are pinned beside the lock of the CUDA Python
+       environment, whose PyTorch carries the same releases, and read from here: one file, so the two
+       cannot drift apart. The logical name is "CudaLibraries/cu13/<rid>/cuda-libraries.txt". -->
+  <ItemGroup>
+    <EmbeddedResource Include="..\Backend\Python\Shorokoo.PythonHost\Environments\cu13\**\cuda-libraries.txt"
+                      LogicalName="CudaLibraries/cu13/$([System.String]::Copy('%(RecursiveDir)').Replace('\', '/'))%(Filename)%(Extension)" />
+  </ItemGroup>
+
   <ItemGroup>
     <InternalsVisibleTo Include="Shorokoo.Tests" />
+    <InternalsVisibleTo Include="Shorokoo.PythonHost" />
+    <InternalsVisibleTo Include="Shorokoo.PyTorch" />
   </ItemGroup>
 </Project>

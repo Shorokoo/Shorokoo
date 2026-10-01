@@ -88,8 +88,6 @@ internal static class CudaRuntime
             if (_bound) return _memGetInfo;
             try
             {
-                // By name, so the copy the process's CUDA backends share where they share one.
-                CudaLibraries.Prepare();
                 if (!NativeLibrary.TryLoad(LibraryName, out var library)) return null;
                 if (NativeLibrary.TryGetExport(library, "cudaMemGetInfo", out var export))
                     // The library stays loaded on purpose: the delegate points into it.

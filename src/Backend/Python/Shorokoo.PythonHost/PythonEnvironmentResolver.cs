@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
+using Shorokoo.Core.Backends;
 
 namespace Shorokoo.PythonHost;
 
@@ -50,41 +51,6 @@ public static class PythonEnvironmentResolver
         return Provision(lockFile, options, variables);
     }
 
-    /// <summary>
-    /// The <see cref="PythonEnvironment.CudaLibraryDirectory"/> of the environment a Python-based
-    /// CUDA backend of this process would run in, where that environment is there already: the one
-    /// the interpreter runs over, else the one <c>SHOROKOO_PYTHON_ENV</c> names, else the provisioned
-    /// CUDA 13 environment. Null where none of them is, or holds no such folder. It never provisions
-    /// and never starts Python: it answers <c>Shorokoo.Core.Backends.CudaLibraries</c>, which
-    /// asks before a backend of another framework loads its CUDA libraries, by reflection, since the
-    /// core assembly does not reference this one.
-    /// </summary>
-    internal static string? ExistingCudaLibraryDirectory()
-    {
-        try
-        {
-            var environment = PythonRuntime.Environment
-                ?? (Environment.GetEnvironmentVariable(EnvironmentVariable) is { Length: > 0 } named
-                    ? PythonEnvironment.Open(named, PythonEnvironmentLock.Cu13.PythonVersion, PythonEnvironmentSource.EnvironmentVariable)
-                    : Provisioned(PythonEnvironmentLock.Cu13));
-            return environment?.CudaLibraryDirectory;
-        }
-        // Every way of there being no such environment here is an answer of none.
-        catch (Exception ex) when (ex is PythonEnvironmentException or PlatformNotSupportedException
-                                       or IOException or UnauthorizedAccessException)
-        {
-            return null;
-        }
-    }
-
-    private static PythonEnvironment? Provisioned(PythonEnvironmentLock lockFile)
-    {
-        var directory = Path.Combine(CacheRoot(new PythonEnvironmentOptions(), Environment.GetEnvironmentVariable), lockFile.CacheKey);
-        return IsComplete(directory, lockFile)
-            ? PythonEnvironment.Open(directory, lockFile.PythonVersion, PythonEnvironmentSource.Provisioned)
-            : null;
-    }
-
     /// <summary>Where <paramref name="lockFile"/>'s environment is cached, provisioned or not.</summary>
     public static string CachedEnvironmentPath(PythonEnvironmentLock lockFile, PythonEnvironmentOptions? options = null)
         => Path.Combine(CacheRoot(options ?? new PythonEnvironmentOptions(), Environment.GetEnvironmentVariable), lockFile.CacheKey);
@@ -119,7 +85,7 @@ public static class PythonEnvironmentResolver
     {
         var root = CacheRoot(options, variables);
         var directory = Path.Combine(root, lockFile.CacheKey);
-        if (IsComplete(directory, lockFile))
+        if (IsComplete(directory, lockFile) && CudaLibrariesLinked(directory))
             return PythonEnvironment.Open(directory, lockFile.PythonVersion, PythonEnvironmentSource.Provisioned);
 
         try
@@ -144,12 +110,56 @@ public static class PythonEnvironmentResolver
             // environment built by the process it waited for needs none.
             if (!IsComplete(directory, lockFile))
                 Build(FindUv(options, variables), lockFile, directory, options.ProvisioningTimeout, deadline);
+            LinkCudaLibraries(directory, lockFile, options.ProvisioningTimeout);
         }
         finally
         {
             gate.Release();
         }
         return PythonEnvironment.Open(directory, lockFile.PythonVersion, PythonEnvironmentSource.Provisioned);
+    }
+
+    /// <summary>Whether the environment's copies of the NVIDIA libraries every CUDA backend shares
+    /// are links into the shared cache already, or there are none to link.</summary>
+    private static bool CudaLibrariesLinked(string directory)
+    {
+        if (CudaLibraryPins.Current is not { } pins) return true;
+        var marker = Path.Combine(directory, CudaLibraryCache.LinkedMarker);
+        try
+        {
+            return File.Exists(marker) && File.ReadAllText(marker) == pins.Identity;
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Makes the environment's copies of the pinned cuDNN and cuBLAS — PyTorch's <c>torch\lib</c> on
+    /// Windows, the <c>nvidia</c> wheels' folders on Linux — hard links to the shared cache's, so a
+    /// process that runs PyTorch beside another CUDA backend loads one copy of each, whichever starts
+    /// first. The cache is filled from these very copies where it is empty, which downloads nothing.
+    /// Called holding the environment's lock; a copy another process has loaded stays a copy of the
+    /// same release, and is linked by a later call.
+    /// </summary>
+    private static void LinkCudaLibraries(string directory, PythonEnvironmentLock lockFile, TimeSpan timeout)
+    {
+        if (CudaLibraryPins.Current is not { } pins) return;
+        var windows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
+        var sitePackages = PythonEnvironment.SitePackagesOf(directory, Version.Parse(lockFile.PythonVersion), windows);
+        try
+        {
+            CudaLibraryCache.LinkEnvironment(directory, sitePackages, pins, CudaLibraryCache.DefaultRoot,
+                pin => CudaLibraryCache.InstalledCandidates(pin, Environment.GetEnvironmentVariable, windows), timeout);
+        }
+        // Linking only saves the second copy: the environment's own are the pinned release, byte for
+        // byte, and serve as they are. So a cache that cannot be filled or written leaves them be,
+        // and a later start tries again.
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException
+                                       or InvalidDataException or TimeoutException)
+        {
+        }
     }
 
     private static bool IsComplete(string directory, PythonEnvironmentLock lockFile)

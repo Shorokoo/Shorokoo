@@ -1,0 +1,37 @@
+# The NVIDIA libraries every CUDA backend of a process shares on win-x64, one release each, built
+# for CUDA 13: the PyPI wheel each comes from, then the files of it a backend loads, in the order
+# they are loaded, each with the SHA-256 (unpadded base64url) and size the wheel's RECORD gives it.
+# Last, the PyTorch wheel the lock beside this file pins, and its copies of those files.
+# Written by tools/cuda-library-pins.py from that lock: run it again whenever the lock changes.
+#
+# library <name> <version> <cuda major> <package> <wheel url> <wheel sha256> <wheel size>
+# file <library> <path in the wheel> <sha256> <size>
+# bundled <package>==<version> <wheel sha256>
+# bundles <path in the wheel> <sha256> <size>
+library cudnn 9.24.0.43 13 nvidia-cudnn-cu13 https://files.pythonhosted.org/packages/31/23/1dd3aa15cc4ab62c8fc88f8049ef137bc44c17892f5577bc80d994941f77/nvidia_cudnn_cu13-9.24.0.43-py3-none-win_amd64.whl 67a7273b5cf062f9446fd76cf464351a1c0f66501e6cd78f6675c0d604d8ac87 412314771
+file cudnn nvidia/cudnn/bin/cudnn_graph64_9.dll UVPq6uETPB7tgEkrJInSSHsEXIeYXj1e44VepXdF8fk 110908016
+file cudnn nvidia/cudnn/bin/cudnn_ops64_9.dll 3Eu5Ad25qrIE-YzNfN-VVrOvIOQwXHENTRCoj6PX_2E 36770416
+file cudnn nvidia/cudnn/bin/cudnn_adv64_9.dll 8xFyLjMhfQizcEyBYx5geyw_wita3-ewlJ3shl7abow 106547312
+file cudnn nvidia/cudnn/bin/cudnn_cnn64_9.dll ilMY_218qoUGgh8gaebSX8EfmkyyenWgC6DOPUvqfrg 1532528
+file cudnn nvidia/cudnn/bin/cudnn_engines_precompiled64_9.dll YseEoxzzZVuOybpC7CwTz5e6C-F8VRpuYuZ4fW9sqBw 221832304
+file cudnn nvidia/cudnn/bin/cudnn_engines_runtime_compiled64_9.dll eso9zvVQZmCVbSMy0eDPOwxPwRTo3PFHzX6FderQLE8 31745136
+file cudnn nvidia/cudnn/bin/cudnn_engines_tensor_ir64_9.dll XmLdPQH5YxWyDj2UBSWWT0S-ZpYQR4hQ8dvhdLvjDMA 155248
+file cudnn nvidia/cudnn/bin/cudnn_ext64_9.dll BejaXNyXYXEf1dNnNt1IhP-nBO8wR9fRNASoF-KmSmM 130160
+file cudnn nvidia/cudnn/bin/cudnn_heuristic64_9.dll t0-Cf8a3jnoxRjdZ4Dxp_g6ic_SWUxNzpz8VO4hY3eo 58741360
+file cudnn nvidia/cudnn/bin/cudnn64_9.dll UGvgsPCw-IVsmyFxqFkJf6OD1_KCQ-v_OFnYUCrLDpU 267888
+library cublas 13.0.0.19 13 nvidia-cublas https://files.pythonhosted.org/packages/52/e3/347dfb7dcea98730efb34428534452ace9350173b21db88bbe7031542ff0/nvidia_cublas-13.0.0.19-py3-none-win_amd64.whl e6ecde441aaf0bb74ed538cfb3b18aa374f452aebf0162088bcb10942f7bbc33 400515981
+file cublas nvidia/cu13/bin/x86_64/cublasLt64_13.dll 4cJmcYAezUNbr5fG6c_igZbPVQBcIDk1a0gDCwnOXdU 477896816
+file cublas nvidia/cu13/bin/x86_64/cublas64_13.dll XQgwg83WE1d0lnkd2W0A_jp4yVVoS1PKRqj_o-Cx4XA 50288240
+bundled torch==2.14.0+cu130 6a20371bf5af2af933a6149e5ec13f7ea7ad506276137dae9386f98d236c02ff
+bundles torch/lib/cudnn_graph64_9.dll UVPq6uETPB7tgEkrJInSSHsEXIeYXj1e44VepXdF8fk 110908016
+bundles torch/lib/cudnn_ops64_9.dll 3Eu5Ad25qrIE-YzNfN-VVrOvIOQwXHENTRCoj6PX_2E 36770416
+bundles torch/lib/cudnn_adv64_9.dll 8xFyLjMhfQizcEyBYx5geyw_wita3-ewlJ3shl7abow 106547312
+bundles torch/lib/cudnn_cnn64_9.dll ilMY_218qoUGgh8gaebSX8EfmkyyenWgC6DOPUvqfrg 1532528
+bundles torch/lib/cudnn_engines_precompiled64_9.dll YseEoxzzZVuOybpC7CwTz5e6C-F8VRpuYuZ4fW9sqBw 221832304
+bundles torch/lib/cudnn_engines_runtime_compiled64_9.dll eso9zvVQZmCVbSMy0eDPOwxPwRTo3PFHzX6FderQLE8 31745136
+bundles torch/lib/cudnn_engines_tensor_ir64_9.dll XmLdPQH5YxWyDj2UBSWWT0S-ZpYQR4hQ8dvhdLvjDMA 155248
+bundles torch/lib/cudnn_ext64_9.dll BejaXNyXYXEf1dNnNt1IhP-nBO8wR9fRNASoF-KmSmM 130160
+bundles torch/lib/cudnn_heuristic64_9.dll t0-Cf8a3jnoxRjdZ4Dxp_g6ic_SWUxNzpz8VO4hY3eo 58741360
+bundles torch/lib/cudnn64_9.dll UGvgsPCw-IVsmyFxqFkJf6OD1_KCQ-v_OFnYUCrLDpU 267888
+bundles torch/lib/cublasLt64_13.dll 4cJmcYAezUNbr5fG6c_igZbPVQBcIDk1a0gDCwnOXdU 477896816
+bundles torch/lib/cublas64_13.dll XQgwg83WE1d0lnkd2W0A_jp4yVVoS1PKRqj_o-Cx4XA 50288240

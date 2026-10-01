@@ -728,11 +728,12 @@ public class GpuExecutionTests
     }
 
     /// <summary>
-    /// A graph the provider cannot run whole: one output stays on the card and one comes back from
-    /// the host, which is what <see cref="SessionOutputPlacement.Mixed"/ > is for, and the crossing
+    /// A graph the provider cannot run whole: one output is computed on the card and one on the
+    /// host, which is what <see cref="SessionOutputPlacement.Mixed"/ > is for, and the crossing
     /// is charged to the pinned host arena rather than to the device one. A graph with no node the
-    /// provider can run is <see cref="SessionOutputPlacement.Host"/>, and one it runs whole is
-    /// <see cref="SessionOutputPlacement.Device"/>.
+    /// provider can run is <see cref="SessionOutputPlacement.Host"/>, its device arena holding only
+    /// the output it copies onto the card, and one it runs whole is
+    /// <see cref="SessionOutputPlacement.Device"/>. Every output comes back on the card.
     /// </summary>
     [CudaFact]
     public void CudaProvider_OutputPlacementSeparatesADeviceGraphAPartitionedOneAndOneThatFellBack()
@@ -755,7 +756,7 @@ public class GpuExecutionTests
         var host = ArenaProbeModels.HostOnly(ctx);
         Assert.All(host.Execute(ArenaProbeModels.Square()), o => Assert.False(o.ToTensorData().IsHostResident));
         Assert.Equal(SessionOutputPlacement.Host, host.OutputPlacement);
-        Assert.Equal(0L, Assert.IsType<ArenaStatistics>(host.ReadArenaStatistics()).AllocationCount);
+        Assert.Equal(1L, Assert.IsType<ArenaStatistics>(host.ReadArenaStatistics()).AllocationCount);
 
         var onCard = ArenaProbeModels.MatMul(ctx);
         Assert.All(onCard.Execute(ArenaProbeModels.MatMulOperand(8), ArenaProbeModels.MatMulOperand(8)), o => Assert.False(o.ToTensorData().IsHostResident));
@@ -815,7 +816,7 @@ public class GpuExecutionTests
             };
             var compiled = ArenaProbeModels.MatMul(ctx);
             var operand = ArenaProbeModels.MatMulOperand(512);
-            for (int run = 0; run < 3; run++) compiled.Execute(operand.Shared(), operand.Shared());
+            for (int run = 0; run < 3; run++) ComputeContext.ReleaseOutputs(compiled.Execute(operand.Shared(), operand.Shared()));
             return ctx.RunStats;
         }
 

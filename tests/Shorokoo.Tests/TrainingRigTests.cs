@@ -571,7 +571,7 @@ internal static class TrainingRigHelpers
                 expected = Step(reference, expected, input, target, runtimeHypers, step);
                 actual = Step(native, actual, input, target, runtimeHypers, step);
                 AssertClose(expected.Loss!.Value, actual.Loss!.Value, tol);
-                AssertClose(expected, actual, tol);
+                AssertClose(expected, actual.ToHost(), tol);
                 Assert.Equal(expected.AppliedHyperparameters!.Keys, actual.AppliedHyperparameters!.Keys);
                 foreach (var (name, value) in expected.AppliedHyperparameters)
                     AssertClose(value, actual.AppliedHyperparameters[name], tol);

@@ -2676,13 +2676,14 @@ internal static class ArenaProbeModels
     /// <inheritdoc cref="Partitioned"/>
     internal static TensorData<float32> Square() => TensorData([2L, 2L], 4f, 1f, 2f, 3f);
 
-    /// <summary>Both operands fed rather than one held as a weight, so nothing of the arena stays
-    /// in use between runs and a shrinking run has blocks to hand back.</summary>
+    /// <summary>Both operands fed rather than one held as a weight, and the product negated, so a
+    /// run leaves nothing of the arena in use but the output it hands back, and a shrinking run has
+    /// the product's blocks to hand back.</summary>
     internal static CompiledGraph MatMul(ComputeContext context)
     {
         var x = InputTensor<float32>("x", rank: 2);
         var w = InputTensor<float32>("w", rank: 2);
-        return context.Compile(new InternalComputationGraph([x, w], [OnnxOp.MatMul(x, w)]));
+        return context.Compile(new InternalComputationGraph([x, w], [OnnxOp.Neg(OnnxOp.MatMul(x, w))]));
     }
 
     /// <inheritdoc cref="MatMul"/>

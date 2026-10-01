@@ -25,9 +25,12 @@ public sealed class JaxTensorValue : IShorokooTensorValue
     private readonly IntPtr _address;
     private readonly long _byteCount;
     private readonly bool _isHost;
+    private readonly int _device;
     private int _released;
 
-    private JaxTensorValue(PyObject value, ShorokooTensorElementType elementType, long[] shape, bool isHost, IntPtr address, long byteCount)
+    private JaxTensorValue(
+        PyObject value, ShorokooTensorElementType elementType, long[] shape, bool isHost, IntPtr address, long byteCount,
+        int device)
     {
         _value = value;
         ElementType = elementType;
@@ -35,6 +38,7 @@ public sealed class JaxTensorValue : IShorokooTensorValue
         _isHost = isHost;
         _address = address;
         _byteCount = byteCount;
+        _device = device;
     }
 
     /// <summary>Wraps <paramref name="value"/>, taking over the reference, and reads what it is.
@@ -54,7 +58,8 @@ public sealed class JaxTensorValue : IShorokooTensorValue
         var shape = new long[(int)dims.Length()];
         for (int i = 0; i < shape.Length; i++) shape[i] = Item<long>(dims, i);
         return new JaxTensorValue(value, (ShorokooTensorElementType)code, shape,
-            Item<bool>(description, 3), new IntPtr(Item<long>(description, 4)), Item<long>(description, 5));
+            Item<bool>(description, 3), new IntPtr(Item<long>(description, 4)), Item<long>(description, 5),
+            Item<int>(description, 6));
     }
 
     private static T Item<T>(PyObject sequence, int index)
@@ -83,6 +88,17 @@ public sealed class JaxTensorValue : IShorokooTensorValue
         {
             if (Volatile.Read(ref _released) != 0) throw Released();
             return _isHost;
+        }
+    }
+
+    /// <summary>The id of the device this value's memory is on, or -1 for a value in host
+    /// memory.</summary>
+    internal int Device
+    {
+        get
+        {
+            if (Volatile.Read(ref _released) != 0) throw Released();
+            return _device;
         }
     }
 

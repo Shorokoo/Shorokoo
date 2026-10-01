@@ -283,7 +283,6 @@ public class ComputeContextLifetimeCoverageTests
 
         Assert.True(compiled.IsDisposed);
         Assert.Throws<ObjectDisposedException>(() => context.Compile(graph));
-        Assert.Throws<ObjectDisposedException>(() => compiled.HasDeviceMemory);
         Assert.Throws<ObjectDisposedException>(() => compiled.OutputPlacement);
     }
 
@@ -989,7 +988,7 @@ public class ComputeContextLifetimeCoverageTests
         using var x = Square(Diagonal(1f));
         using var y = Square(Diagonal(2f));
         var outputs = session.RunConsuming(new Dictionary<string, IShorokooTensorValue> { ["a"] = consumed, ["x"] = x, ["y"] = y },
-            [consumed], ["O", "Z"], ComputeContext.NoOutputsRetained, RunSettings.Default, out var aliased);
+            [consumed], ["O", "Z"], RunSettings.Default, out var aliased);
 
         Assert.True(Proves(graph));
         Assert.Empty(session.BindableAliases);
@@ -1008,7 +1007,7 @@ public class ComputeContextLifetimeCoverageTests
         ref var consumedMemory = ref MemoryMarshal.GetReference(a.GetTensorDataAsSpan<float>());
 
         using var o = session.RunConsuming(new Dictionary<string, IShorokooTensorValue> { ["a"] = a, ["b"] = b }, [a], ["O"],
-            ComputeContext.NoOutputsRetained, RunSettings.Default)[0];
+            RunSettings.Default)[0];
 
         Assert.Equal([9f, 18f, 27f, 36f], o.GetTensorDataAsSpan<float>().ToArray());
         Assert.True(Unsafe.AreSame(ref consumedMemory, ref MemoryMarshal.GetReference(o.GetTensorDataAsSpan<float>())));
@@ -1041,7 +1040,7 @@ public class ComputeContextLifetimeCoverageTests
             var a = backend.CreateTensor<float>([5f], [1L]);
             using var i = backend.CreateTensor<long>([0L], [1L]);
             using var o = session.RunConsuming(new Dictionary<string, IShorokooTensorValue> { ["a"] = a, ["i"] = i }, [a], ["O"],
-                ComputeContext.NoOutputsRetained, RunSettings.Default, out var aliased)[0];
+                RunSettings.Default, out var aliased)[0];
             return (backend.Builds, o.GetTensorDataAsSpan<float>()[0], aliased[0]);
         }
 

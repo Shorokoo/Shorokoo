@@ -517,6 +517,10 @@ internal class ShapeInferenceInterpreter
                 StoreTensorInfo(tensorStore, srcOut.Value, resultData);
             }
         }
+        // What was kept is a copy of its own (Retained), so the outputs, which on a card hold the
+        // memory of the session that ran, go now.
+        try { Shorokoo.Runtime.ComputeContext.ReleaseOutputs(results); }
+        catch (Exception) when (CatchShapeInferenceErrors()) { }
     }
 
     /// <summary>Filter for shape-inference error catch blocks. Returns true for recoverable errors.</summary>

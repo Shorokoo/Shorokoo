@@ -124,6 +124,19 @@ public abstract class OrtBackend : IShorokooBackend
     public object RuntimeIdentity => LoadedRuntime;
 
     /// <summary>
+    /// Where this backend's runs read a tensor of <paramref name="elementType"/> and leave one:
+    /// on a CUDA backend the card's own memory, for every tensor but a string one, which ONNX
+    /// Runtime keeps in host memory whatever its provider; on any other, host memory. That is
+    /// where a session of a provider a subclass appends finds its inputs too: everything this
+    /// backend builds is in host memory, and so is every output of a session it runs unbound, the
+    /// provider copying what it reads to where it computes as it runs.
+    /// </summary>
+    public MemoryLocation RunMemoryOf(ShorokooTensorElementType elementType)
+        => new(_cudaDeviceId is { } device && elementType != ShorokooTensorElementType.String
+            ? MemorySpace.Cuda(device)
+            : MemorySpace.Host, LoadedRuntime);
+
+    /// <summary>
     /// <see cref="KernelWorkaroundSets.OnnxRuntime"/>: the rewrites around ONNX Runtime's kernels,
     /// on every execution provider, since each rewrite computes what the operator it replaces
     /// computes; and on a CUDA backend <see cref="KernelWorkaroundSets.OnnxRuntimeCuda"/>, those
@@ -422,8 +435,8 @@ public abstract class OrtBackend : IShorokooBackend
         var (session, profileDirectory, views) = built;
         try
         {
-            // The session keeps this backend so it can rebuild a feed that came from another
-            // backend's native runtime -- see OrtSession.Unwrap.
+            // The session keeps this backend to release what its runs consume through it, and to
+            // name it in a refusal.
             return new OrtSession(session, _cudaDeviceId, this, profileDirectory, outputAliases) { SuppliedViews = views };
         }
         catch
@@ -785,10 +798,9 @@ public abstract class OrtBackend : IShorokooBackend
     /// tensors live in.
     ///
     /// <para>On a host backend that is where <see cref="CreateTensorFromRawBytes"/> already builds
-    /// it, so this defers to it. On a CUDA backend it is the card's own memory: the buffer comes
-    /// from that device's ORT allocator and the bytes cross the bus once, here — rather than being
-    /// left on the host for the execution provider to copy over on every run of every session they
-    /// are fed to.</para>
+    /// it, so this defers to it. On a CUDA backend it is the card's own memory, where this backend's
+    /// sessions read every tensor they are fed: the buffer comes from that device's ORT allocator
+    /// and the bytes cross the bus once, here.</para>
     ///
     /// <para>The card's memory comes out of one allocator per device, shared by every compute
     /// context on it (<see cref="CudaDeviceAllocator"/>), so nothing here bounds it: a context's

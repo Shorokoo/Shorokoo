@@ -609,8 +609,8 @@ public class CoreUtilsCoverageTests
             : base((_, mem) => seen.Add(mem), ComputeDevice.Cpu, cudaDeviceId: null) { }
     }
 
-    /// <summary>Records the settings each run was handed. No outputs, so both run paths return
-    /// nothing and every overload can be driven without a model.</summary>
+    /// <summary>Records the settings each run was handed. No outputs, so every run returns nothing
+    /// and every overload can be driven without a model.</summary>
     private sealed class RunSettingsRecorder : IShorokooSession
     {
         public List<RunSettings> Seen { get; } = [];
@@ -620,16 +620,6 @@ public class CoreUtilsCoverageTests
         public IReadOnlyList<IShorokooTensorValue> Run(
             IReadOnlyDictionary<string, IShorokooTensorValue> inputs,
             IReadOnlyList<string> outputNames,
-            RunSettings runSettings)
-        {
-            Seen.Add(runSettings);
-            return [];
-        }
-
-        public IReadOnlyList<IShorokooTensorValue> RunRetainingOutputs(
-            IReadOnlyDictionary<string, IShorokooTensorValue> inputs,
-            IReadOnlyList<string> outputNames,
-            IReadOnlySet<string> retainedOutputNames,
             RunSettings runSettings)
         {
             Seen.Add(runSettings);
@@ -839,10 +829,8 @@ public class CoreUtilsCoverageTests
         compiled.Execute([], RunSettings.Default);
         compiled.Run();
         compiled.Run([], RunSettings.Default);
-        compiled.Execute([], []);
-        compiled.Execute([], [], RunSettings.Default);
 
-        RunSettings[] expected = [shrinking, RunSettings.Default, shrinking, RunSettings.Default, shrinking, RunSettings.Default];
+        RunSettings[] expected = [shrinking, RunSettings.Default, shrinking, RunSettings.Default];
         Assert.Equal(expected, session.Seen);
         Assert.Equal(shrinking, compiled.DefaultRunSettings);
     }
@@ -878,7 +866,6 @@ public class CoreUtilsCoverageTests
         Assert.Equal(expected, Doubled(compiled.Execute([input.Shared()], RunSettings.Default)));
         Assert.Equal(expected, Doubled(compiled.Execute([input.Shared()], watched)));
         Assert.Equal(expected, Doubled(compiled.Execute([input.Shared()], watched)));
-        Assert.Equal(expected, Doubled(compiled.Execute([input.Shared()], [false], watched)));
         unfired.Cancel();
 
         using var cancelled = new CancellationTokenSource();
@@ -887,8 +874,6 @@ public class CoreUtilsCoverageTests
         var refused = Assert.Throws<OperationCanceledException>(() => compiled.Execute([input], stopped));
         Assert.Equal(cancelled.Token, refused.CancellationToken);
         Assert.Null(refused.InnerException);
-        Assert.Throws<OperationCanceledException>(() => compiled.Execute([input], [false], stopped));
-        Assert.Throws<OperationCanceledException>(() => compiled.Execute([input], [true], stopped));
         Assert.Throws<OperationCanceledException>(() => compiled.Execute([wrongRank], stopped));
         Assert.IsType<OnnxRuntimeException>(
             Record.Exception(() => compiled.Execute([wrongRank], RunSettings.Default)));
@@ -1185,7 +1170,6 @@ public class CoreUtilsCoverageTests
         var untraced = Doubling(plain);
         untraced.Execute(ThreeFloats());
         Assert.Equal(SessionOutputPlacement.Host, untraced.OutputPlacement);
-        Assert.False(untraced.HasDeviceMemory);
         Assert.Null(untraced.ReadNodePlacement());
 
         using var traced = new ComputeContext
@@ -1332,8 +1316,8 @@ public class CoreUtilsCoverageTests
         Assert.Matches(@"ArenaShrinkageRunConfig\s*\(\s*_cudaDeviceId\s*,\s*runSettings\.ShrinkArenaAfterRun\s*\)", session);
         Assert.Matches(@"AddRunConfigEntry\s*\(", session);
 
-        // Every path that runs the session has to apply it, not just one: the retaining path is
-        // the loop a GPU user is steered into, and it is where an unbounded arena costs most.
+        // Every path that runs the session has to apply it, not just one: the bound path is every
+        // CUDA run's, and it is where an unbounded arena costs most.
         var runPaths = Regex.Matches(session, @"_session\s*\.\s*Run\w*\s*\(").Count;
         Assert.Equal(runPaths, Regex.Matches(session, @"ConfigureRun\s*\(\s*runOptions\s*,\s*runSettings\s*\)").Count);
     }
@@ -2723,5 +2707,5 @@ internal static class ArenaProbeModels
 
     /// <summary>What a run of <see cref="Filled"/> summed.</summary>
     internal static float Sum(NamedModelParam[] outputs)
-        => outputs[0].ToTensorData().As<float32>().ValueAt<float>(0);
+        => outputs[0].ToTensorData().ToHost().As<float32>().ValueAt<float>(0);
 }

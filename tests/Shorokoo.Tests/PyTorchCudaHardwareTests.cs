@@ -1,7 +1,7 @@
-using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Shorokoo.Core.Backends;
 using Shorokoo.Core.Factory.IR;
+using Shorokoo.PyTorch;
 using Shorokoo.PyTorch.Cuda;
 using Shorokoo.Runtime;
 
@@ -46,19 +46,17 @@ public class PyTorchCudaHardwareTests
     }
 
     [TorchCudaFact]
-    public void TestARetainedOutputStaysOnTheCardAndTheRestComeHome()
+    public void TestEveryOutputStaysOnTheCardAndAnInputInHostMemoryIsRefused()
     {
         using var session = Cuda.Value.CreateSession(NegModel(), default, default, DeviceMemorySettings.Default);
-        using var x = Cuda.Value.CreateTensor([1f, -2f], [2]);
-        var inputs = new Dictionary<string, IShorokooTensorValue> { ["x"] = x };
-        using var kept = session.RunRetainingOutputs(inputs, ["y"], new HashSet<string> { "y" }, RunSettings.Default)[0];
-        using var fetched = session.Run(inputs, ["y"], RunSettings.Default)[0];
+        using var x = Cuda.Value.CreateTensorInBackendMemory(ShorokooTensorElementType.Float, [.. MemoryMarshal.AsBytes<float>([1f, -2f])], [2]);
+        using var onHost = Cuda.Value.CreateTensor([1f, -2f], [2]);
+        using var y = session.Run(new Dictionary<string, IShorokooTensorValue> { ["x"] = x }, ["y"], RunSettings.Default)[0];
 
-        Assert.True(session.HasDeviceMemory);
         Assert.Equal(SessionOutputPlacement.Device, session.OutputPlacement);
-        Assert.False(kept.IsHostAccessible);
-        Assert.Equal([-1f, 2f], fetched.GetTensorDataAsSpan<float>().ToArray());
-        Assert.Equal(Cuda.Value.CopyTensorToHost(fetched), Cuda.Value.CopyTensorToHost(kept));
+        Assert.False(y.IsHostAccessible);
+        Assert.Equal([.. MemoryMarshal.AsBytes<float>([-1f, 2f])], Cuda.Value.CopyTensorToHost(y));
+        Assert.Throws<InvalidOperationException>(() => session.Run(new Dictionary<string, IShorokooTensorValue> { ["x"] = onHost }, ["y"], RunSettings.Default));
     }
 
     [TorchCudaFact]
@@ -78,7 +76,7 @@ public class PyTorchCudaHardwareTests
         var before = free.ReadArenaStatistics()!.Value;
         using var x = Cuda.Value.CreateUninitializedTensorInBackendMemory(ShorokooTensorElementType.Float, [4 * mebibyte]);
         var feeds = new Dictionary<string, IShorokooTensorValue> { ["x"] = x };
-        IShorokooTensorValue Kept(IShorokooSession session) => session.RunRetainingOutputs(feeds, ["y"], new HashSet<string> { "y" }, RunSettings.Default)[0];
+        IShorokooTensorValue Kept(IShorokooSession session) => session.Run(feeds, ["y"], RunSettings.Default)[0];
         var after = free.ReadArenaStatistics()!.Value;
 
         Assert.Equal(-1, before.LimitBytes);
@@ -101,7 +99,7 @@ public class PyTorchCudaHardwareTests
         using var kept = smalls[^1];
         using var session = Cuda.Value.CreateSession(NegModel(), default, default, new DeviceMemorySettings { LimitBytes = 17 * mebibyte });
         using var x = Cuda.Value.CreateUninitializedTensorInBackendMemory(ShorokooTensorElementType.Float, [4 * mebibyte]);
-        using var y = session.RunRetainingOutputs(new Dictionary<string, IShorokooTensorValue> { ["x"] = x }, ["y"], new HashSet<string> { "y" }, RunSettings.Default)[0];
+        using var y = session.Run(new Dictionary<string, IShorokooTensorValue> { ["x"] = x }, ["y"], RunSettings.Default)[0];
 
         Assert.False(y.IsHostAccessible);
     }
@@ -115,7 +113,7 @@ public class PyTorchCudaHardwareTests
         using var large = Cuda.Value.CreateUninitializedTensorInBackendMemory(ShorokooTensorElementType.Float, [16L << 20]);
         var until = DateTime.UtcNow + TimeSpan.FromSeconds(2);
         void Run(IShorokooSession session, IShorokooTensorValue x)
-            => session.RunRetainingOutputs(new Dictionary<string, IShorokooTensorValue> { ["x"] = x }, ["y"], new HashSet<string> { "y" }, RunSettings.Default)[0].Dispose();
+            => session.Run(new Dictionary<string, IShorokooTensorValue> { ["x"] = x }, ["y"], RunSettings.Default)[0].Dispose();
         var cappedRuns = Task.Run(() => { while (DateTime.UtcNow < until) Run(capped, small); });
         var failures = 0;
         while (DateTime.UtcNow < until)
@@ -154,29 +152,37 @@ public class PyTorchCudaHardwareTests
         using var session = Cuda.Value.CreateSession(sub, default, default, DeviceMemorySettings.Default, DiagnosticSettings.Default, [new OutputAlias("O", "a")]);
         using var product = Cuda.Value.CreateSession(matmul, default, default, DeviceMemorySettings.Default, DiagnosticSettings.Default, [new OutputAlias("O", "a")]);
         byte[] Bytes(params float[] values) => [.. MemoryMarshal.AsBytes<float>(values)];
-        (string? Input, IShorokooTensorValue O) Run(IShorokooSession on, IShorokooTensorValue a, IShorokooTensorValue b, bool keep)
+        IShorokooTensorValue OnCard(long[] shape, params float[] values) => Cuda.Value.CreateTensorInBackendMemory(ShorokooTensorElementType.Float, Bytes(values), shape);
+        long Address(IShorokooTensorValue value)
+        {
+            using (Shorokoo.PythonHost.PythonRuntime.Gil())
+            using (var pointer = ((TorchTensorValue)value).Value.InvokeMethod("data_ptr"))
+                return pointer.As<long>();
+        }
+        (string? Input, IShorokooTensorValue O) Run(IShorokooSession on, IShorokooTensorValue a, IShorokooTensorValue b)
         {
             var o = on.RunConsuming(new Dictionary<string, IShorokooTensorValue> { ["a"] = a, ["b"] = b }, [a], ["O"],
-                keep ? new HashSet<string> { "O" } : ComputeContext.NoOutputsRetained, RunSettings.Default, out var aliased)[0];
+                RunSettings.Default, out var aliased)[0];
             return (aliased.Count == 0 ? null : aliased[0], o);
         }
-        using var b = Cuda.Value.CreateTensorInBackendMemory(ShorokooTensorElementType.Float, Bytes(1f, 2f, 3f, 4f), [4]);
-        var (onCard, kept) = Run(session, Cuda.Value.CreateTensorInBackendMemory(ShorokooTensorElementType.Float, Bytes(10f, 20f, 30f, 40f), [4]), b, keep: true);
-        var home = Cuda.Value.CreateTensor([10f, 20f, 30f, 40f], [4]);
-        ref var homeMemory = ref MemoryMarshal.GetReference(home.GetTensorDataAsSpan<float>());
-        var (onHost, fetched) = Run(session, home, b, keep: false);
-        using var identity = Cuda.Value.CreateTensor([1f, 0f, 0f, 1f], [2, 2]);
-        var (copied, square) = Run(product, Cuda.Value.CreateTensor([1f, 2f, 3f, 4f], [2, 2]), identity, keep: false);
+        using var b = OnCard([4], 1f, 2f, 3f, 4f);
+        var (onCard, kept) = Run(session, OnCard([4], 10f, 20f, 30f, 40f), b);
+        var consumed = OnCard([4], 10f, 20f, 30f, 40f);
+        var consumedMemory = Address(consumed);
+        var (inPlace, written) = Run(session, consumed, b);
+        using var identity = OnCard([2, 2], 1f, 0f, 0f, 1f);
+        var (copied, square) = Run(product, OnCard([2, 2], 1f, 2f, 3f, 4f), identity);
 
-        Assert.Equal(("a", "a", "a"), (onCard, onHost, copied));
+        Assert.Equal(("a", "a", "a"), (onCard, inPlace, copied));
         Assert.False(kept.IsHostAccessible);
         Assert.Equal(Bytes(9f, 18f, 27f, 36f), Cuda.Value.CopyTensorToHost(kept));
-        Assert.Equal([9f, 18f, 27f, 36f], fetched.GetTensorDataAsSpan<float>().ToArray());
-        Assert.True(Unsafe.AreSame(ref homeMemory, ref MemoryMarshal.GetReference(fetched.GetTensorDataAsSpan<float>())));
-        Assert.Equal([1f, 2f, 3f, 4f], square.GetTensorDataAsSpan<float>().ToArray());
+        Assert.False(written.IsHostAccessible);
+        Assert.Equal(Bytes(9f, 18f, 27f, 36f), Cuda.Value.CopyTensorToHost(written));
+        Assert.Equal(consumedMemory, Address(written));
+        Assert.Equal(Bytes(1f, 2f, 3f, 4f), Cuda.Value.CopyTensorToHost(square));
         Assert.Equal([new OutputAlias("O", "a")], product.BindableAliases);
         kept.Dispose();
-        fetched.Dispose();
+        written.Dispose();
         square.Dispose();
     }
 
@@ -185,8 +191,8 @@ public class PyTorchCudaHardwareTests
     {
         using var session = Cuda.Value.CreateSession(PyTorchBackendCoverageTests.Serialize(PyTorchBackendCoverageTests.CountingLoop()),
             default, default, DeviceMemorySettings.Default, new DiagnosticSettings { TraceNodePlacement = true });
-        using var m = Cuda.Value.CreateTensor([10_000_000L], []);
-        using var v = Cuda.Value.CreateTensor([0f], []);
+        using var m = Cuda.Value.CreateTensorInBackendMemory(ShorokooTensorElementType.Int64, [.. MemoryMarshal.AsBytes<long>([10_000_000L])], []);
+        using var v = Cuda.Value.CreateTensorInBackendMemory(ShorokooTensorElementType.Float, [.. MemoryMarshal.AsBytes<float>([0f])], []);
         using var later = new CancellationTokenSource(TimeSpan.FromMilliseconds(300));
 
         Assert.Equal(later.Token, Assert.Throws<OperationCanceledException>(() => session.Run(

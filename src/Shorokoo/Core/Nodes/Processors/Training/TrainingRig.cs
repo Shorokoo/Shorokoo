@@ -2710,10 +2710,14 @@ namespace Shorokoo
         /// schedule-less runtime hyperparameter (<see cref="Hyperparameter.Runtime()"/>), which has no value
         /// to apply automatically; use the explicit-override overload for those.
         ///
-        /// <para>Each call hands back a host-readable copy of the whole training state and takes it
-        /// all back on the next one — free on a CPU backend, and on a GPU the thing that sets the
-        /// pace of a long run. A loop that does not need every step's checkpoint should run through
-        /// <see cref="BeginResidentRun(TrainingCheckpoint?)"/> instead (Shorokoo/Shorokoo#325).</para>
+        /// <para>Each call hands back the whole training state where the step left it — host memory
+        /// on a CPU backend, the card's memory on a GPU one — and the next step reads it there, so
+        /// nothing crosses the bus between steps. <see cref="TrainingCheckpoint.ToHost"/> brings a
+        /// checkpoint into host memory where its elements are to be read; its loss is read on the
+        /// host already (<see cref="TrainingCheckpoint.Loss"/>). A loop that does not need every
+        /// step's checkpoint can run through <see cref="BeginResidentRun(TrainingCheckpoint?)"/>,
+        /// which owns the state between steps and releases each step's as the next supersedes
+        /// it.</para>
         ///
         /// <para><b>What the step consumes.</b> Its arguments are fed the way any run's inputs are:
         /// as they are, they are <b>consumed</b> — the checkpoint's state, the input and the target
@@ -2938,8 +2942,8 @@ namespace Shorokoo
         /// trainstep (<see cref="_compiledTrainSteps"/>). It draws the batch and hands it to
         /// <see cref="BatchStep"/>, the one place the loader-step-and-counter semantics live
         /// — the same one <see cref="Fit(IDataLoader, int, TrainingCheckpoint?, Action{TrainingStepReport}?, CancellationToken)"/> and
-        /// <see cref="ResidentTrainingRun"/> step through, so every loader-driven form agrees. It
-        /// retains nothing: the checkpoint this returns is the caller's to read.
+        /// <see cref="ResidentTrainingRun"/> step through, so every loader-driven form agrees. The
+        /// checkpoint this returns is the caller's.
         /// </summary>
         private TrainingCheckpoint TrainStepWith(
             TrainingCheckpoint checkpoint,
@@ -2947,7 +2951,7 @@ namespace Shorokoo
         {
             if (checkpoint is null) throw new ArgumentNullException(nameof(checkpoint));
             if (loader is null) throw new ArgumentNullException(nameof(loader));
-            return BatchStep(checkpoint, loader.Next(), retainStateOnDevice: false, TrainStepCall);
+            return BatchStep(checkpoint, loader.Next(), TrainStepCall);
         }
 
         /// <summary>The checkpoint's value for one reserved counter input ({step, epoch, batchIndex}).
@@ -3188,25 +3192,23 @@ namespace Shorokoo
         }
 
         /// <summary>
-        /// One training step. <paramref name="retainStateOnDevice"/> leaves the three state outputs
-        /// (params, model state, optimizer state) in the execution provider's own memory instead of
-        /// fetching them back to the host, so the next step feeds them without crossing the bus —
-        /// the returned checkpoint's tensors are then on the device, where only a
-        /// <see cref="ResidentTrainingRun"/>, which tracks who owns them, ever asks for them.
-        /// The loss is never retained: it is a scalar the host reads every step either way.
+        /// One training step. Its three state outputs (params, model state, optimizer state) come
+        /// back where the step ran — on a GPU backend, the card's memory — so the next step feeds
+        /// them without crossing the bus; the returned checkpoint's tensors are there.
+        /// The loss is read on the host, explicitly: it is a scalar every step reports.
         /// <paramref name="call"/> is how a message about the run names it, <c>TrainStep</c> where
         /// none is given. <paramref name="reclaimSuperseded"/> says whether the state this step
         /// supersedes is a checkpoint the caller holds, garbage only once the caller drops it
-        /// (<see cref="ReclaimSupersededState"/>); by default, whenever the state is not retained.
+        /// (<see cref="ReclaimSupersededState"/>): every step's but a resident run's, which owns its
+        /// state itself.
         /// </summary>
         private TrainingCheckpoint RunStep(
             TrainingCheckpoint checkpoint,
             IData? hyperparams,
             IData trainingInput,
             IData trainingOutput,
-            bool retainStateOnDevice = false,
             StepCall? call = null,
-            bool? reclaimSuperseded = null)
+            bool reclaimSuperseded = true)
         {
             call ??= TrainStepCall;
             if (checkpoint is null) throw new ArgumentNullException(nameof(checkpoint));
@@ -3283,22 +3285,7 @@ namespace Shorokoo
             try
             {
                 StepFaultInjection?.Invoke();
-                if (retainStateOnDevice && compiled.HasDeviceMemory)
-                {
-                    // The leading outputs are state the next step feeds straight back; the loss and
-                    // the scheduled hyperparameters' values after it are read on the host.
-                    // Sized from the session's own outputs, not from the field counts: the outputs
-                    // after the loss are the scheduled hyperparameters' values, and Execute refuses a
-                    // retention array of any other length -- so deriving it twice would fail the GPU
-                    // path on a graph the CPU path runs fine.
-                    var retain = new bool[compiled.OutputCount];
-                    for (int i = 0; i < stateOutputCount; i++) retain[i] = true;
-                    results = compiled.Execute(expandedInputs, labels, retain, call.Description);
-                }
-                else
-                {
-                    results = compiled.Execute(expandedInputs, labels, retainOnDevice: null, call.Description);
-                }
+                results = compiled.Execute(expandedInputs, labels, call.Description);
             }
             catch (Exception ex) when (AllocationFailureReport.IsAllocationFailure(ex))
             {
@@ -3314,15 +3301,15 @@ namespace Shorokoo
                 {
                     // DeviceMemory.Read() asks the card itself where a CUDA runtime is installed and
                     // answers null otherwise, so "the accelerator is full" stops being an inference
-                    // (Shorokoo/Shorokoo#332, Shorokoo/Shorokoo#347). HasDeviceMemory is the
-                    // session's own answer to whether there is device memory to exhaust, and one
+                    // (Shorokoo/Shorokoo#332, Shorokoo/Shorokoo#347). ComputesInDeviceMemory is the
+                    // graph's own answer to whether there is device memory to exhaust, and one
                     // value feeds both the classification and the wording built on it.
                     // The arena cap is the one this session was BUILT with: under a device-memory
                     // budget, what the budget left it once the tensors the context holds on the card
                     // were counted. Reading LimitBytes off the context would report the budget,
                     // which is a cap the failing session never had.
                     var device = new DeviceFacts(
-                        compiled.HasDeviceMemory, DeviceMemory.Read(), compiled.DeviceMemory.LimitBytes,
+                        compiled.ComputesInDeviceMemory, DeviceMemory.Read(), compiled.DeviceMemory.LimitBytes,
                         AllocationFailureReport.BackendAssemblyName());
                     report = AllocationFailureReport.Render(
                         $"{call.Step} at step {checkpoint.Step}",
@@ -3383,12 +3370,14 @@ namespace Shorokoo
                 updatedOptimizerState = new TensorDataStruct(OptimizerStateDef, updatedOptStateFields);
                 StepOutputFaultInjection?.Invoke(results);
 
-                // The loss follows the state outputs. Read it through the rooted accessor, not a bare
-                // span; everything past the state outputs is released below: the state is the
-                // resident run's to own or the checkpoint's to carry, the rest is a step's worth of
-                // outputs nobody keeps.
+                // The loss follows the state outputs, where the step left it: moved to the host to be
+                // read, and read through the rooted accessor, not a bare span. Everything past the
+                // state outputs is released below: the state is the resident run's to own or the
+                // checkpoint's to carry, the rest is a step's worth of outputs nobody keeps.
                 var lossTensor = results[stateOutputCount].ToTensorData<float32>();
-                lossValue = lossTensor.ValueAt<float>(0);
+                var lossOnHost = lossTensor.ToHost();
+                lossValue = lossOnHost.As<float32>().ValueAt<float>(0);
+                if (!ReferenceEquals(lossOnHost, lossTensor)) lossOnHost.Dispose();
                 // Graph outputs after the loss: one per scheduled hyperparameter, the value this step applied.
                 for (int j = 0; j < _scheduledHyperparameterOutputs.Length; j++)
                     applied[_scheduledHyperparameterOutputs[j]] =
@@ -3440,7 +3429,7 @@ namespace Shorokoo
             // collection per step -- on a model whose state crosses the budget every step, that is a
             // full-heap collection with nothing to collect, in the loop whose whole point is that
             // per-step overhead dominates.
-            if (reclaimSuperseded ?? !retainStateOnDevice)
+            if (reclaimSuperseded)
                 ReclaimSupersededState(
                     SupersededBytes(checkpoint.TrainableParams, checkpoint.ModelState, checkpoint.OptimizerState),
                     newCheckpoint);
@@ -3611,15 +3600,14 @@ namespace Shorokoo
             bool reclaimSuperseded)
         {
             if (hyperparams is null) RequireNoRuntimeHyperparameters();
-            return RunStep(checkpoint, hyperparams, trainingInput, trainingOutput, retainStateOnDevice: true,
-                ResidentStepCall, reclaimSuperseded);
+            return RunStep(checkpoint, hyperparams, trainingInput, trainingOutput, ResidentStepCall, reclaimSuperseded);
         }
 
         /// <summary>One step of a <see cref="ResidentTrainingRun"/> on an already-drawn batch; see
         /// <see cref="BatchStep"/>.</summary>
         internal TrainingCheckpoint ResidentBatchStep(
             TrainingCheckpoint checkpoint, DataBatch batch, bool reclaimSuperseded)
-            => BatchStep(checkpoint, batch, retainStateOnDevice: true, ResidentStepCall, reclaimSuperseded);
+            => BatchStep(checkpoint, batch, ResidentStepCall, reclaimSuperseded);
 
         /// <summary>
         /// One step on an already-drawn batch, and the one place the loader-step-and-counter
@@ -3630,8 +3618,7 @@ namespace Shorokoo
         /// the draw.
         /// </summary>
         private TrainingCheckpoint BatchStep(
-            TrainingCheckpoint checkpoint, DataBatch batch, bool retainStateOnDevice, StepCall call,
-            bool? reclaimSuperseded = null)
+            TrainingCheckpoint checkpoint, DataBatch batch, StepCall call, bool reclaimSuperseded = true)
         {
             if (checkpoint is null) throw new ArgumentNullException(nameof(checkpoint));
             RequireNoRuntimeHyperparameters();
@@ -3642,8 +3629,7 @@ namespace Shorokoo
             // step's loss — so a later Fit(loader) resumes past this batch via RestoreAfter.
             var stepInput = checkpoint.WithCounters(
                 epoch: batch.Position.Epoch, batchIndex: batch.Position.BatchIndex);
-            return RunStep(stepInput, hyperparams: null, batch.Input, batch.Target, retainStateOnDevice, call,
-                reclaimSuperseded);
+            return RunStep(stepInput, hyperparams: null, batch.Input, batch.Target, call, reclaimSuperseded);
         }
 
         /// <summary>The guard the schedule-driven step paths share: a schedule-less runtime

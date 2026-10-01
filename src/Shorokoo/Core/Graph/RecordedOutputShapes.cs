@@ -209,6 +209,7 @@ namespace Shorokoo.Core.Graph
             for (int i = 0; i < outputNodes.Count && i < outputs.Length; i++)
                 if (Get(outputNodes[i]) is null && ShapeOf(outputs[i]) is { } dims)
                     Set(outputNodes[i], dims);
+            ComputeContext.ReleaseOutputs(outputs);
         }
 
         /// <summary>

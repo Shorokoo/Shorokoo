@@ -3651,29 +3651,19 @@ public class TrainingRigTrainingLoopCoverageTests
             () => run.Step(input.Shared(), target.Shared())).Message);
     }
 
-    // Retention is a backend capability, and this one has no memory but the host's. A provider
-    // wrongly reported as having its own would leave every checkpoint tensor unreadable, so the
-    // discovery must not misfire — and asking to retain must stay a no-op when there is nowhere to
-    // retain to.
     [Fact]
-    public void TestOnAHostOnlyBackendNothingIsRetainedAndEveryOutputStaysReadable()
+    public void TestOnAHostOnlyBackendEveryOutputAndEveryCheckpointAStepHandsBackIsInHostMemory()
     {
         var rig = AdamWScalarRig();
         var (input, target) = (InBatch(1f, 2f, 3f, 4f), TargetBatch(2f, 4f, 6f, 8f));
         var ckpt = rig.CreateInitialCheckpoint();
         var compiled = rig.RuntimeContext.Compile(rig.TrainingStepPureGraph);
-        Assert.False(compiled.HasDeviceMemory);
-
-        // A retention array of any other length is refused rather than half-applied.
-        Assert.Throws<InvalidTensorOperationException>(() => compiled.Execute(
-            ComputeContext.ExpandStructInputs([ckpt.TrainableParams.Shared(), ckpt.ModelState.Shared(), ckpt.OptimizerState.Shared(), input.Shared(), target.Shared()]),
-            [.. Enumerable.Repeat(true, compiled.OutputCount + 1)]));
 
         IData[] inputs = [ckpt.TrainableParams.Shared(), ckpt.ModelState.Shared(), ckpt.OptimizerState.Shared(), input.Shared(), target.Shared()];
-        var outputs = compiled.Execute(
-            ComputeContext.ExpandStructInputs(inputs),
-            [.. Enumerable.Repeat(true, compiled.OutputCount)]);
+        var outputs = compiled.Execute(ComputeContext.ExpandStructInputs(inputs));
         Assert.All(outputs, o => Assert.True(o.ToTensorData().IsHostResident));
+        var trained = rig.TrainStep(ckpt.Shared(), input.Shared(), target.Shared());
+        Assert.All(trained.TrainableParams.Fields.Values, f => Assert.True(((TensorData)f).IsHostResident));
 
         using var run = rig.BeginResidentRun(ckpt);
         run.Step(input.Shared(), target.Shared());

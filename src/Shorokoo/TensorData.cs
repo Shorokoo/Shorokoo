@@ -772,9 +772,9 @@ namespace Shorokoo
         /// producer to ask.
         ///
         /// <para>That order matters. Letting the backend answer outright would label a genuinely
-        /// host-readable value — a device session's ordinary output, which ONNX Runtime fetches to
-        /// the host — as living on the card it came from, and every later hand-off of it would copy
-        /// bytes that were already where they were wanted.</para>
+        /// host-readable value — a string tensor a device session produced, which ONNX Runtime keeps
+        /// in host memory — as living on the card it came from, and every later hand-off of it would
+        /// copy bytes that were already where they were wanted.</para>
         /// </summary>
         private static MemorySpace SpaceOf(IShorokooTensorValue value, IShorokooBackend allocatingBackend)
         {

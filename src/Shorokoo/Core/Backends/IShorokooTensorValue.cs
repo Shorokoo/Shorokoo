@@ -14,15 +14,14 @@ public interface IShorokooTensorValue : IDisposable
     long[] Shape { get; }
 
     // Whether the buffer behind this value is host memory, so the span accessors below
-    // may be read. It is false for a value the execution provider produced in its OWN
-    // memory -- a CUDA device allocation, say -- which a resident training run keeps
-    // there deliberately (see IShorokooSession.RunRetainingOutputs). The span
-    // accessors hand out a pointer without checking where it points, so reading one of
-    // those spans is not an error but a wild read; callers must consult this first.
+    // may be read. It is false for a value in the execution provider's OWN memory -- a CUDA
+    // device allocation, say, which is where a CUDA backend's runs read their inputs and leave
+    // their outputs (see IShorokooSession). The span accessors hand out a pointer without
+    // checking where it points, so reading one of those spans is not an error but a wild read;
+    // callers must consult this first.
     //
-    // Defaulted for the same reason as IShorokooSession.HasDeviceMemory: a value from a
-    // backend that does not answer came off the host path, which is where every backend that does
-    // not retain produces its outputs.
+    // The default is host memory: a value that does not answer is one the host reads, which is
+    // what every value of a backend whose run memory is the host's is.
     bool IsHostAccessible => true;
 
     ReadOnlySpan<T> GetTensorDataAsSpan<T>() where T : unmanaged;

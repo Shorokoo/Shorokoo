@@ -28,11 +28,12 @@ public sealed class TorchTensorValue : IShorokooTensorValue
     private readonly long _byteCount;
     private readonly ShorokooTensorElementType _elementType;
     private readonly bool _isHost;
+    private readonly int _cudaDevice;
     private int _released;
 
     private TorchTensorValue(
         PyObject value, ShorokooOnnxValueType valueType, ShorokooTensorElementType elementType,
-        long[] shape, bool isHost, IntPtr address, long byteCount)
+        long[] shape, bool isHost, IntPtr address, long byteCount, int cudaDevice)
     {
         _value = value;
         ValueType = valueType;
@@ -41,6 +42,7 @@ public sealed class TorchTensorValue : IShorokooTensorValue
         _isHost = isHost;
         _address = address;
         _byteCount = byteCount;
+        _cudaDevice = cudaDevice;
     }
 
     /// <summary>
@@ -68,12 +70,13 @@ public sealed class TorchTensorValue : IShorokooTensorValue
         var isHost = Item<bool>(description, 3);
         var address = new IntPtr(Item<long>(description, 4));
         var byteCount = Item<long>(description, 5);
+        var cudaDevice = Item<int>(description, 6);
         return kind switch
         {
             0 => new TorchTensorValue(value, ShorokooOnnxValueType.Tensor, (ShorokooTensorElementType)code,
-                shape, isHost, address, byteCount),
+                shape, isHost, address, byteCount, cudaDevice),
             1 => new TorchTensorValue(value, ShorokooOnnxValueType.Sequence,
-                code == 0 ? emptySequenceElementType : (ShorokooTensorElementType)code, shape, true, IntPtr.Zero, 0),
+                code == 0 ? emptySequenceElementType : (ShorokooTensorElementType)code, shape, true, IntPtr.Zero, 0, -1),
             _ => throw new NotSupportedException(
                 "The PyTorch backend produced an absent optional value, which has no representation here yet."),
         };
@@ -109,6 +112,16 @@ public sealed class TorchTensorValue : IShorokooTensorValue
         {
             if (Volatile.Read(ref _released) != 0) throw Released();
             return _isHost;
+        }
+    }
+
+    /// <summary>The CUDA device this value's memory is on, or -1 for a value in host memory.</summary>
+    internal int CudaDevice
+    {
+        get
+        {
+            if (Volatile.Read(ref _released) != 0) throw Released();
+            return _cudaDevice;
         }
     }
 

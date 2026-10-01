@@ -398,7 +398,6 @@ public class SideBySideBackendCoverageTests
     {
         public IReadOnlyList<string> InputNames => inner.InputNames;
         public IReadOnlyList<string> OutputNames => inner.OutputNames;
-        public bool HasDeviceMemory => inner.HasDeviceMemory;
 
         public IReadOnlyList<IShorokooTensorValue> Run(
             IReadOnlyDictionary<string, IShorokooTensorValue> inputs, IReadOnlyList<string> outputNames,
@@ -406,16 +405,6 @@ public class SideBySideBackendCoverageTests
         {
             fed.AddRange(inputs.Values);
             return inner.Run(inputs, outputNames, runSettings);
-        }
-
-        public IReadOnlyList<IShorokooTensorValue> RunRetainingOutputs(
-            IReadOnlyDictionary<string, IShorokooTensorValue> inputs,
-            IReadOnlyList<string> outputNames, IReadOnlySet<string> retainedOutputNames,
-            RunSettings runSettings)
-        {
-            fed.AddRange(inputs.Values);
-            return inner.RunRetainingOutputs(
-                inputs, outputNames, retainedOutputNames, runSettings);
         }
 
         public void Dispose() => inner.Dispose();
@@ -567,7 +556,7 @@ internal static class SideBySideModel
     }
 
     internal static float[] Floats(NamedModelParam param)
-        => [.. param.ToTensorData().As<float32>().AccessMemory<float>()];
+        => param.ToTensorData().ToHost().As<float32>().CopyMemory<float>();
 
     /// <summary>
     /// What two runtimes running on the <i>same</i> device may differ by, which is very little:

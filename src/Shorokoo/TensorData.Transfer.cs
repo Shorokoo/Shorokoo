@@ -125,6 +125,20 @@ namespace Shorokoo
         }
 
         /// <summary>
+        /// This tensor moved into host memory, for a caller that owns it and wants nothing of it but
+        /// its contents there: itself where the host can read it already, and otherwise a copy in the
+        /// framework's own host memory, this tensor released as soon as the copy is made. How the
+        /// framework reads a run's output it needs on the host — a loss, a resolved key, a value a
+        /// pass folds — at the point it needs it.
+        /// </summary>
+        internal TensorData MovedToHost()
+        {
+            var host = ToHost();
+            if (!ReferenceEquals(host, this)) Dispose();
+            return host;
+        }
+
+        /// <summary>
         /// This tensor to be <b>read</b> by the run it is fed to, rather than consumed by it. Fed as
         /// it is, a tensor is given to the run, which takes it when it starts; fed as this, it is lent
         /// instead — the run takes a reader lock on it for as long as it runs, the running context is
@@ -183,12 +197,6 @@ namespace Shorokoo
             => Location == RunMemoryOf(backend, DType)
                && (Location.Space.IsKnown || ReferenceEquals(AllocatingBackend, backend));
 
-        /// <summary>Host memory of <paramref name="backend"/>'s runtime: where the values it builds
-        /// from host bytes are, and where it leaves an output it does not keep in memory of its
-        /// own.</summary>
-        internal static MemoryLocation HostMemoryOf(IShorokooBackend backend)
-            => new(MemorySpace.Host, backend.RuntimeIdentity);
-
         /// <summary>
         /// The copy of this tensor a run on <paramref name="backend"/> reads where it cannot be
         /// handed this tensor itself (<see cref="FeedsInPlace"/>): held by this tensor, keyed by the
@@ -229,23 +237,10 @@ namespace Shorokoo
         }
 
         /// <summary>
-        /// The copy a run on <paramref name="backend"/> that has taken this tensor consumes in its
-        /// place where the runtime is to copy it into its own arena: a value of that backend's runtime
-        /// in host memory, holding this tensor's contents, taken with <paramref name="death"/>. Reads
-        /// the contents without the liveness check: the run has taken this tensor.
-        /// </summary>
-        internal TensorData HostRunCopy(IShorokooBackend backend, TensorDeath death)
-        {
-            var copy = BuiltBy(backend, HostCopyOn(backend));
-            // Made for this run alone, so nothing else can hold it: the take cannot fail.
-            if (copy.TryTake(death) != TakeOutcome.Taken)
-                throw new InvalidOperationException("A copy made for one run was held by another.");
-            return copy;
-        }
-
-        /// <summary>
         /// A new tensor holding this one's contents in the memory a run on
-        /// <paramref name="backend"/> reads, allocated by that backend. Reads the contents
+        /// <paramref name="backend"/> reads, allocated by that backend: the contents read out of
+        /// wherever they are — through the backend that made them where the host cannot read them —
+        /// and moved into the run memory by <paramref name="backend"/>'s own move. Reads the contents
         /// without the liveness check: the caller holds this tensor's lock, or has taken it.
         /// </summary>
         private TensorData BuildRunCopy(IShorokooBackend backend)

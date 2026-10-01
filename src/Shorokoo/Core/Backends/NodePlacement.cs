@@ -1,27 +1,29 @@
 namespace Shorokoo.Core.Backends;
 
 /// <summary>
-/// Where a session produces its outputs — the cheap half of the placement question, answered by
-/// the session itself with no profiling and no extra run.
+/// Where a session's runtime computes its outputs — the cheap half of the placement question,
+/// answered by the session itself with no profiling and no extra run. Not where the outputs are
+/// handed back: a session leaves every output in its backend's run memory
+/// (<see cref="IShorokooBackend.RunMemoryOf"/>), wherever it was computed.
 ///
 /// <para>On a GPU backend it is the one signal that costs nothing: a provider that cannot run
-/// part of a graph leaves that part to the host, and an output the session reports in host memory
-/// is the tail of a graph that ran there. <see cref="Mixed"/> says so outright.</para>
+/// part of a graph leaves that part to the host, and an output the runtime computes in host
+/// memory is the tail of a graph that ran there. <see cref="Mixed"/> says so outright.</para>
 /// </summary>
 public enum SessionOutputPlacement
 {
-    /// <summary>The backend does not report where its outputs are produced.</summary>
+    /// <summary>The backend does not report where its outputs are computed.</summary>
     Unknown,
 
-    /// <summary>Every output is produced in host memory — a CPU session, or a device session
+    /// <summary>Every output is computed in host memory — a CPU session, or a device session
     /// whose whole graph fell back to the host.</summary>
     Host,
 
-    /// <summary>Every output is produced in the execution provider's own memory.</summary>
+    /// <summary>Every output is computed in the execution provider's own memory.</summary>
     Device,
 
-    /// <summary>Some outputs are produced on the device and some on the host, so part of this
-    /// graph ran on the host and its results crossed the bus to get back.</summary>
+    /// <summary>Some outputs are computed on the device and some on the host, so part of this
+    /// graph ran on the host.</summary>
     Mixed,
 }
 

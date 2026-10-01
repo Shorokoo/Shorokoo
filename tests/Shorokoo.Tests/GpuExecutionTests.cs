@@ -230,9 +230,9 @@ public class GpuExecutionTests
     /// <summary>
     /// What <c>gpu_mem_limit</c> caps, measured on a session of its own: only what its arena
     /// allocates. A 64 MiB input already on the card is read where it is by a session whose arena is
-    /// capped at 32 MiB, and the arena never holds it; the same bytes fed from host memory have to
-    /// be copied into the arena, and do not fit. That is why a context's budget discounts what it
-    /// holds on the card from the arena's limit for the length of the run.
+    /// capped at 32 MiB, and the arena never holds it; the same bytes in host memory are refused,
+    /// since a session takes its inputs only in its own memory. That is why a context's budget
+    /// discounts what it holds on the card from the arena's limit for the length of the run.
     /// </summary>
     [CudaFact]
     public void CudaProvider_AnArenaLimitCapsWhatTheArenaAllocatesAndNotAnInputReadWhereItIs()
@@ -261,7 +261,7 @@ public class GpuExecutionTests
 
         using var onHost = backend.CreateTensorFromRawBytes(ShorokooTensorElementType.Float, bytes, [16L << 20]);
         Assert.True(onHost.IsHostAccessible);
-        Assert.Contains("BFCArena", Assert.ThrowsAny<OnnxRuntimeException>(() => Run(onHost)).Message);
+        Assert.Contains("outside the memory its runs read it in", Assert.Throws<InvalidOperationException>(() => Run(onHost)).Message);
     }
 
     [CudaFact]
@@ -271,7 +271,7 @@ public class GpuExecutionTests
         using var ctx = new ComputeContext();
         var limit = InputScalar<int32>("l");
         var compiled = ctx.Compile(new InternalComputationGraph([limit], [OnnxOp.Range(Scalar(0), limit, Scalar(1))]));
-        var held = compiled.Execute([TensorData(DType.Int32, [], N)], [true])[0].ToTensorData();
+        var held = compiled.Execute(TensorData(DType.Int32, [], N))[0].ToTensorData();
         Assert.False(held.IsHostResident);
         long[] sampled = [0, (1L << 29) - 1, 1L << 29, (1L << 29) + 1, (9L << 26) + 12345, N - 1];
         var probe = new SamplingStream(sampled);
@@ -325,8 +325,8 @@ public class GpuExecutionTests
 
     /// <summary>
     /// A tensor fed to a run on the card as it is goes to that run: one in the card's memory is
-    /// handed over where it is, and one in host memory goes to the session from the host, or as the
-    /// card copy it already holds where it has one — dead afterwards either way. Fed
+    /// handed over where it is, and one in host memory as the card copy it already holds where it
+    /// has one, and a fresh card copy otherwise — dead afterwards either way. Fed
     /// <c>.Shared()</c>, a host tensor is copied onto the card once, attached to the context that
     /// read it, and read there by every run after until it is written.
     /// </summary>
@@ -337,7 +337,12 @@ public class GpuExecutionTests
         var a = InputVector<float32>();
         var b = InputVector<float32>();
         var compiled = ctx.Compile(new InternalComputationGraph([a, b], [a * b + a]));
-        float[] Run(IData x, IData y) => [.. compiled.Execute(x, y)[0].ToTensorData().As<float32>().AccessMemory<float>()];
+        float[] Run(IData x, IData y)
+        {
+            var output = compiled.Execute(x, y)[0].ToTensorData();
+            ctx.Detach(output);
+            return output.ToHost().As<float32>().CopyMemory<float>();
+        }
         var onHost = TensorData([2L], 10f, 20f);
         var onCard = TensorData([2L], 1f, 2f).To(ctx);
         Assert.False(onCard.IsHostResident);
@@ -736,12 +741,11 @@ public class GpuExecutionTests
 
         var partitioned = ArenaProbeModels.Partitioned(ctx);
         Assert.Equal(SessionOutputPlacement.Mixed, partitioned.OutputPlacement);
-        Assert.True(partitioned.HasDeviceMemory);
 
         var pinnedBefore = Assert.IsType<ArenaStatistics>(partitioned.ReadPinnedArenaStatistics());
         Assert.Equal(0L, pinnedBefore.AllocationCount);
 
-        partitioned.Execute(ArenaProbeModels.Square());
+        Assert.All(partitioned.Execute(ArenaProbeModels.Square()), o => Assert.False(o.ToTensorData().IsHostResident));
         var pinned = Assert.IsType<ArenaStatistics>(partitioned.ReadPinnedArenaStatistics());
         var device = Assert.IsType<ArenaStatistics>(partitioned.ReadArenaStatistics());
         Assert.True(pinned.AllocationCount > 0);
@@ -749,15 +753,13 @@ public class GpuExecutionTests
         Assert.NotEqual(device, pinned);
 
         var host = ArenaProbeModels.HostOnly(ctx);
-        host.Execute(ArenaProbeModels.Square());
+        Assert.All(host.Execute(ArenaProbeModels.Square()), o => Assert.False(o.ToTensorData().IsHostResident));
         Assert.Equal(SessionOutputPlacement.Host, host.OutputPlacement);
-        Assert.False(host.HasDeviceMemory);
         Assert.Equal(0L, Assert.IsType<ArenaStatistics>(host.ReadArenaStatistics()).AllocationCount);
 
         var onCard = ArenaProbeModels.MatMul(ctx);
-        onCard.Execute(ArenaProbeModels.MatMulOperand(8), ArenaProbeModels.MatMulOperand(8));
+        Assert.All(onCard.Execute(ArenaProbeModels.MatMulOperand(8), ArenaProbeModels.MatMulOperand(8)), o => Assert.False(o.ToTensorData().IsHostResident));
         Assert.Equal(SessionOutputPlacement.Device, onCard.OutputPlacement);
-        Assert.True(onCard.HasDeviceMemory);
     }
 
     /// <summary>
@@ -973,6 +975,6 @@ public class GpuExecutionTests
             TensorData([], left),
             TensorData([], right));
 
-        return results[0].ToTensorData().As<float32>().AccessMemory<float>()[0];
+        return results[0].ToTensorData().ToHost().As<float32>().ValueAt<float>(0);
     }
 }

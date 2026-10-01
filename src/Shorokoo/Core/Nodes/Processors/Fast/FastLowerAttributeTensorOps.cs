@@ -283,9 +283,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             var results = (compute ?? ComputeContext.Default).Execute(
                 resolver, [.. samples.Select(static sample =>
                     sample is SharedInput ? sample : (IData)new SharedInput(sample, SharedInputMode.Shared))]);
+            // Read on the host, so each is moved there from wherever the run's backend left it.
             for (int i = 0; i < keys.Count; i++)
                 if (resolved[i] is null)
-                    resolved[i] = results[i].ToTensorData();
+                    resolved[i] = results[i].ToTensorData().MovedToHost();
         }
 
         /// <summary>

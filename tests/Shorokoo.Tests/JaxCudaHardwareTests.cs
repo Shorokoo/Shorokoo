@@ -42,19 +42,17 @@ public class JaxCudaHardwareTests
     }
 
     [JaxCudaFact]
-    public void TestARetainedOutputStaysOnTheCardTheRestComeHomeAndTheSessionReadsTheAllocator()
+    public void TestEveryOutputStaysOnTheCardAnInputInHostMemoryIsRefusedAndTheSessionReadsTheAllocator()
     {
         using var session = Cuda.Value.CreateSession(PyTorchBackendCoverageTests.Onnx("Neg", 1), default, default, DeviceMemorySettings.Default);
-        using var x = Cuda.Value.CreateTensor([1f, -2f], [2]);
-        var inputs = new Dictionary<string, IShorokooTensorValue> { ["x0"] = x };
-        using var kept = session.RunRetainingOutputs(inputs, ["y"], new HashSet<string> { "y" }, RunSettings.Default)[0];
-        using var fetched = session.Run(inputs, ["y"], RunSettings.Default)[0];
+        using var x = Cuda.Value.CreateTensorInBackendMemory(ShorokooTensorElementType.Float, [.. MemoryMarshal.AsBytes<float>([1f, -2f])], [2]);
+        using var onHost = Cuda.Value.CreateTensor([1f, -2f], [2]);
+        using var y = session.Run(new Dictionary<string, IShorokooTensorValue> { ["x0"] = x }, ["y"], RunSettings.Default)[0];
 
-        Assert.True(session.HasDeviceMemory);
         Assert.Equal(SessionOutputPlacement.Device, session.OutputPlacement);
-        Assert.False(kept.IsHostAccessible);
-        Assert.Equal([-1f, 2f], fetched.GetTensorDataAsSpan<float>().ToArray());
-        Assert.Equal(Cuda.Value.CopyTensorToHost(fetched), Cuda.Value.CopyTensorToHost(kept));
+        Assert.False(y.IsHostAccessible);
+        Assert.Equal([.. MemoryMarshal.AsBytes<float>([-1f, 2f])], Cuda.Value.CopyTensorToHost(y));
+        Assert.Throws<InvalidOperationException>(() => session.Run(new Dictionary<string, IShorokooTensorValue> { ["x0"] = onHost }, ["y"], RunSettings.Default));
         Assert.True(session.ReadArenaStatistics()!.Value.InUseBytes > 0);
     }
 

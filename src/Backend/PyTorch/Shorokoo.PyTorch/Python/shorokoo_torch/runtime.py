@@ -112,26 +112,29 @@ def sequence_element(sequence, index):
 
 
 def describe(value):
-    """(kind, element type code, shape, is host, data address, byte count) of a value."""
+    """(kind, element type code, shape, is host, data address, byte count, CUDA device index) of a
+    value; the device index is -1 for a value in host memory."""
     if value is None:
-        return (KIND_NONE, 0, [], True, 0, 0)
+        return (KIND_NONE, 0, [], True, 0, 0, -1)
     if isinstance(value, list):
         code = dtype_code(value[0]) if value else 0
-        return (KIND_SEQUENCE, code, [len(value)], True, 0, 0)
+        return (KIND_SEQUENCE, code, [len(value)], True, 0, 0, -1)
     if is_strings(value):
-        return (KIND_TENSOR, STRING, list(value.shape), True, 0, 0)
+        return (KIND_TENSOR, STRING, list(value.shape), True, 0, 0, -1)
     if not value.is_contiguous():
         # The .NET side reads a host tensor as one dense buffer from its data pointer, so a
         # strided view handed to it would be read wrong; every path that wraps one makes it
         # contiguous first, and this keeps it that way.
         raise ValueError("only a contiguous tensor can be handed to .NET")
+    on_host = value.device.type == "cpu"
     return (
         KIND_TENSOR,
         _CODES[value.dtype],
         list(value.shape),
-        value.device.type == "cpu",
+        on_host,
         value.data_ptr(),
         value.numel() * value.element_size(),
+        -1 if on_host else (value.device.index if value.device.index is not None else torch.cuda.current_device()),
     )
 
 
@@ -156,30 +159,32 @@ def storages(values):
     return found
 
 
-def _to_run_device(value, run_device):
+def _read_on_run_device(value, run_device):
+    """An argument as the run computes on it. A tensor is fed on the run's device already; a
+    sequence is fed in host memory, where a run reads it, and its elements are read onto the run's
+    device as the run reads them."""
     if isinstance(value, list):
-        return [_to_run_device(item, run_device) for item in value]
-    if isinstance(value, torch.Tensor) and value.device != run_device:
-        return value.to(run_device)
+        return [item.to(run_device) if isinstance(item, torch.Tensor) else item for item in value]
     return value
 
 
-def _export(value, retain, taken, ids):
-    """An output made safe to hand over: contiguous, on the host unless it is retained on the
-    device, and in memory of its own -- never an input's, a constant's or another output's, since
-    the caller owns what it is handed and may write to it."""
+def _export(value, device, taken, ids):
+    """An output made safe to hand over: contiguous, on `device` -- the run's device for a tensor,
+    the host for a sequence's elements, which is where the .NET side leaves each -- and in memory of
+    its own -- never an input's, a constant's or another output's, since the caller owns what it is
+    handed and may write to it."""
     if value is None:
         return None
     if isinstance(value, list):
-        return [_export(item, False, taken, ids) for item in value]
+        return [_export(item, torch.device("cpu"), taken, ids) for item in value]
     if is_strings(value):
         if id(value) in ids:
             value = value.copy()
         ids.add(id(value))
         return value
     value = value.detach()
-    if not retain:
-        value = value.to("cpu")
+    if value.device != device:
+        value = value.to(device)
     value = value.contiguous()
     storage = _storage_of(value)
     if storage is not None and storage in taken:
@@ -190,18 +195,20 @@ def _export(value, retain, taken, ids):
     return value
 
 
-def run(main, args, wanted, retained, run_device, constant_storages, constant_ids,
+def run(main, args, wanted, run_device, constant_storages, constant_ids,
         stop_address=0, severity=None, aliases=(), limit_bytes=-1, shrink=False):
-    """Runs a translated model and exports the outputs at indices `wanted`, each retained on the
-    device where `retained` says so. Returns (value, description, aliased) per output.
+    """Runs a translated model and exports the outputs at indices `wanted`, each tensor on the run's
+    device and each sequence in host memory -- where the .NET side reads every input and leaves every
+    output. Returns (value, description, aliased) per output.
 
-    `stop_address` is the address of a 32-bit flag the .NET side sets to stop the run, or 0 for a
-    run nothing can stop; `severity` the least ONNX log severity a warning the run raises is shown
-    at; `aliases` one (output index, input index, retained) per slot of the translation's plan, in
-    the numbering its `_alias_write` calls use -- an index -1 where the run may not write that slot
-    into a consumed input -- see _Aliasing; `limit_bytes` what the run may allocate on a CUDA device
-    beyond what its allocator holds there already, or -1; `shrink` whether to hand the device's unused
-    cached blocks back once the run is over."""
+    `args` are where the run reads them already: a tensor on the run's device, a string tensor or a
+    sequence in host memory. `stop_address` is the address of a 32-bit flag the .NET side sets to
+    stop the run, or 0 for a run nothing can stop; `severity` the least ONNX log severity a warning
+    the run raises is shown at; `aliases` one (output index, input index) per slot of the
+    translation's plan, in the numbering its `_alias_write` calls use -- an index -1 where the run may
+    not write that slot into a consumed input -- see _Aliasing; `limit_bytes` what the run may
+    allocate on a CUDA device beyond what its allocator holds there already, or -1; `shrink` whether
+    to hand the device's unused cached blocks back once the run is over."""
     run_device = torch.device(run_device)
     outputs = moved = None
     try:
@@ -210,7 +217,7 @@ def run(main, args, wanted, retained, run_device, constant_storages, constant_id
         try:
             if stop_address:
                 tokens.append(_stop_flag.set(ctypes.c_int32.from_address(stop_address)))
-            moved = [_to_run_device(arg, run_device) for arg in args]
+            moved = [_read_on_run_device(arg, run_device) for arg in args]
             aliasing = _Aliasing(args, moved, aliases, run_device, constant_storages)
             tokens.append(_aliasing.set(aliasing))
             capped = _cap(run_device, limit_bytes)
@@ -220,7 +227,7 @@ def run(main, args, wanted, retained, run_device, constant_storages, constant_id
             for token in reversed(tokens):
                 token.var.reset(token)
             _uncap(capped)
-        return _export_all(outputs, args, moved, wanted, retained, aliasing, constant_storages, constant_ids)
+        return _export_all(outputs, args, moved, wanted, run_device, aliasing, constant_storages, constant_ids)
     finally:
         # After the outputs are exported and every intermediate is dropped, so that what the run
         # allocated and no longer holds is handed back too, and on a failed run as well.
@@ -229,26 +236,26 @@ def run(main, args, wanted, retained, run_device, constant_storages, constant_id
             torch.cuda.empty_cache()
 
 
-def _export_all(outputs, args, moved, wanted, retained, aliasing, constant_storages, constant_ids):
+def _export_all(outputs, args, moved, wanted, run_device, aliasing, constant_storages, constant_ids):
     """(value, description, aliased) per wanted output: see `run`."""
     taken = set(constant_storages) | storages(args) | storages(moved)
     ids = set(constant_ids) | {id(arg) for arg in args}
     results = [None] * len(wanted)
     into = {}
-    for position, (index, retain) in enumerate(zip(wanted, retained)):
+    for position, index in enumerate(wanted):
         slot = aliasing.slot_of(index, outputs[index])
         if slot is not None and slot not in into:
             into[slot] = position
             continue
-        value = _export(outputs[index], retain, taken, ids)
+        value = _export(outputs[index], run_device, taken, ids)
         results[position] = (value, describe(value), False)
     # Last, so that every other output has been read out of the consumed memory before one is
-    # copied into it: an output that is a view of a consumed input was cloned from it above.
+    # handed over in it: an output that is a view of a consumed input was cloned from it above.
     for slot, position in into.items():
         index = wanted[position]
         value = aliasing.export(slot, outputs[index])
         if value is None:
-            value = _export(outputs[index], retained[position], taken, ids)
+            value = _export(outputs[index], run_device, taken, ids)
             results[position] = (value, describe(value), False)
             continue
         storage = _storage_of(value)
@@ -354,16 +361,13 @@ class _Aliasing:
     """The consumed inputs a run may write outputs into, per output slot, and what it wrote.
 
     A slot's input is a target only where it is memory of its own: a torch tensor fed at that one
-    position, in no other argument's or constant's storage. Where the output ends up decides how it
-    is written there: by the node that produces it (`alias_write`) into a target on the run's device,
-    for an output that stays there; and, for one a CUDA run fetches home, by copying it home into a
-    host target (`export`) instead of into host memory of its own."""
+    position on the run's device, in no other argument's or constant's storage. The node that
+    produces the output writes it there (`alias_write`), and the output is handed over in it."""
 
     def __init__(self, args, moved, aliases, run_device, constant_storages):
         count = len(aliases)
-        self.output_index = [index for index, _, _ in aliases]
+        self.output_index = [index for index, _ in aliases]
         self.in_graph = [None] * count
-        self.at_export = [None] * count
         self.written = [None] * count
         if not count:
             return
@@ -374,29 +378,23 @@ class _Aliasing:
                 if storage is not None:
                     held[storage] = held.get(storage, 0) + 1
         constants = set(constant_storages)
-        cpu = torch.device("cpu")
-        for slot, (_, index, retain) in enumerate(aliases):
+        for slot, (_, index) in enumerate(aliases):
             if index < 0 or index >= len(args) or not isinstance(args[index], torch.Tensor):
                 continue
             arg, fed = args[index], moved[index]
             storage = _storage_of(arg)
-            if storage is None or storage in constants or held[storage] != (2 if fed is arg else 1):
+            if storage is None or storage in constants or fed is not arg or held[storage] != 2:
                 continue
-            end = run_device if retain and run_device.type != "cpu" else cpu
-            if fed is arg and arg.device == end:
+            if arg.device == run_device:
                 self.in_graph[slot] = arg
-            elif fed is not arg and arg.device == cpu and end == cpu:
-                self.at_export[slot] = arg
 
     def slot_of(self, index, value):
         """The slot output `value`, at output index `index`, is to be handed over in: one whose
-        target the graph wrote it into, or one with a host target to copy it into. Else None."""
+        target the graph wrote it into. Else None."""
         for slot, output in enumerate(self.output_index):
             if output != index:
                 continue
             if self.written[slot] is not None and value is self.written[slot]:
-                return slot
-            if self.at_export[slot] is not None:
                 return slot
         return None
 
@@ -404,13 +402,7 @@ class _Aliasing:
         """The output of `slot` as handed over, in its target's memory; None where it cannot be."""
         if self.written[slot] is not None:
             return value.detach()
-        target = self.at_export[slot]
-        if target is None or not isinstance(value, torch.Tensor):
-            return None
-        if value.dtype != target.dtype or value.shape != target.shape:
-            return None
-        target.copy_(value)
-        return target.detach()
+        return None
 
 
 def _same_layout(a, b):

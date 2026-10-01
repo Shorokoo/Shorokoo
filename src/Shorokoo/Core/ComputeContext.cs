@@ -83,6 +83,10 @@ namespace Shorokoo.Runtime
         /// <summary>The tensors this graph's session is handed as initializers, each once.</summary>
         internal IEnumerable<TensorData> SuppliedTensors => _supplied.Select(s => s.Tensor).Distinct();
 
+        /// <summary>The context that compiled this graph, whose books its runs' outputs go on (test
+        /// hook).</summary>
+        internal ComputeContext Owner => _owner;
+
         internal CompiledGraph(
             IShorokooSession session,
             IShorokooBackend backend,
@@ -115,7 +119,7 @@ namespace Shorokoo.Runtime
                 throw;
             }
             _onnxInputNameByOriginal = onnxInputNameByOriginal;
-            _built = new BuiltSession(session, deviceMemory, BindableOf(session));
+            _built = new BuiltSession(session, deviceMemory);
             _outputNames = [.. session.OutputNames];
             _backend = backend;
             _originalInputNames = originalInputNames;
@@ -141,46 +145,13 @@ namespace Shorokoo.Runtime
         /// tensors a run leaves there record it: a token of its own rather than the session, so an
         /// output that outlives a rebuilt session does not keep the managed wrapper of it alive.
         /// </summary>
-        private sealed class BuiltSession(
-            IShorokooSession session, DeviceMemorySettings deviceMemory,
-            IReadOnlyList<(string Output, string Input)> bindable)
+        private sealed class BuiltSession(IShorokooSession session, DeviceMemorySettings deviceMemory)
         {
             internal IShorokooSession Session { get; } = session;
 
             internal DeviceMemorySettings DeviceMemory { get; } = deviceMemory;
 
             internal object Arena { get; } = new();
-
-            /// <summary>
-            /// The inputs, by the names the graph was compiled with, whose consumed memory a run of
-            /// this session keeping <paramref name="retained"/> on the device may write an output into:
-            /// those paired with an output it keeps there. An output is produced where it is kept, and
-            /// can be written only into memory there; one the run fetches back can be written only
-            /// into host memory.
-            /// </summary>
-            internal IReadOnlySet<string> WrittenInto(IReadOnlySet<string> retained)
-            {
-                if (bindable.Count == 0 || retained.Count == 0) return System.Collections.Frozen.FrozenSet<string>.Empty;
-                HashSet<string>? inputs = null;
-                foreach (var (output, input) in bindable)
-                    if (retained.Contains(output)) (inputs ??= new(StringComparer.Ordinal)).Add(input);
-                return inputs is null ? System.Collections.Frozen.FrozenSet<string>.Empty : inputs;
-            }
-        }
-
-        /// <summary>
-        /// The pairs by which a run of <paramref name="session"/> may write an output into the consumed
-        /// memory of an input (<see cref="IShorokooSession.BindableAliases"/>), each input named as a
-        /// run's feeds name it: by the name the graph was compiled with.
-        /// </summary>
-        private IReadOnlyList<(string Output, string Input)> BindableOf(IShorokooSession session)
-        {
-            var aliases = session.BindableAliases;
-            if (aliases.Count == 0) return [];
-            // A feed whose name the graph did not rename is fed under that name as it is.
-            var originalOf = new Dictionary<string, string>(StringComparer.Ordinal);
-            foreach (var (original, own) in _onnxInputNameByOriginal) originalOf[own] = original;
-            return [.. aliases.Select(alias => (alias.Output, originalOf.GetValueOrDefault(alias.Input, alias.Input)))];
         }
 
         // What a message about a run of this graph calls it, where the compiler knew better than a
@@ -198,9 +169,10 @@ namespace Shorokoo.Runtime
 
         /// <summary>
         /// The backend this graph was compiled on and runs on — fixed when it was compiled, since
-        /// the session belongs to that backend and cannot move. Feeding it data another backend
-        /// built is allowed: what this backend cannot address where it is — another device's, or
-        /// another runtime's — is read through a copy in memory it can, made through the host.
+        /// the session belongs to that backend and cannot move. Its runs read their inputs in that
+        /// backend's memory and leave their outputs there. Feeding it data another backend built is
+        /// allowed: what this backend cannot address where it is — another device's, or another
+        /// runtime's — is read through a copy in memory it can, made through the host.
         /// </summary>
         public BackendDescription Backend => _backend.Description;
 
@@ -281,8 +253,10 @@ namespace Shorokoo.Runtime
         /// <para>A tensor fed as it is is <b>consumed</b>: the run takes it when it starts, and it
         /// is dead from then on, however the run ends. Feed <c>t.Shared()</c> to have it read and
         /// left alive, or <c>t.TryConsume()</c> to have it consumed only when nothing else is reading
-        /// it; the same goes for a sequence, a struct or an optional. Outputs are new tensors,
-        /// attached to the context that compiled this graph.</para>
+        /// it; the same goes for a sequence, a struct or an optional. Each input is placed in the
+        /// memory this graph's backend reads it in before the run, wherever it was. Outputs are new
+        /// tensors in that backend's memory — on a GPU backend, the card's — attached to the context
+        /// that compiled this graph; <see cref="TensorData.ToHost"/> brings one to the host.</para>
         /// </summary>
         /// <exception cref="InvalidOperationException">The compiling context is under a device-memory
         /// budget, and what the run would hold in the context's memory outside its session's arena
@@ -290,7 +264,7 @@ namespace Shorokoo.Runtime
         /// beside what the context holds (<see cref="DeviceMemorySettings.LimitBytes"/>). Nothing it
         /// was fed has been taken.</exception>
         public NamedModelParam[] Execute(params IData[] inputs)
-            => Run(NameInputs(inputs), retainedOutputNames: null, DefaultRunSettings);
+            => Run(NameInputs(inputs), DefaultRunSettings);
 
         /// <summary>
         /// <see cref="Execute(IData[])"/> under <paramref name="runSettings"/> instead of
@@ -298,63 +272,20 @@ namespace Shorokoo.Runtime
         /// changes nothing about the session and applies to this call alone.
         /// </summary>
         public NamedModelParam[] Execute(IData[] inputs, RunSettings runSettings)
-            => Run(NameInputs(inputs), retainedOutputNames: null, runSettings);
+            => Run(NameInputs(inputs), runSettings);
 
         /// <summary>
-        /// Executes the compiled graph, leaving the outputs whose index is <c>true</c> in
-        /// <paramref name="retainOnDevice"/> in the execution provider's own memory instead of
-        /// fetching them back to the host — so a value produced by one call can be fed straight
-        /// into the next without crossing the bus. A retained output is not host-readable
-        /// (<see cref="TensorData.IsHostResident"/>). Only a tensor is retained: a sequence output
-        /// comes back to the host however it is flagged, since its elements are read from there.
-        /// Every other output comes back exactly as
-        /// <see cref="Execute(IData[])"/>'s do, and on a session with no device memory
-        /// (<see cref="HasDeviceMemory"/>) nothing is retained and this <i>is</i>
-        /// <see cref="Execute(IData[])"/>.
+        /// <see cref="Execute(IData[])"/> with each input called <paramref name="labels"/>' entry in a
+        /// message about it — for a caller whose inputs the graph names by identifiers nobody would
+        /// recognise, the training step's among them — and the run called
+        /// <paramref name="description"/>, where the caller runs one graph as different things: a
+        /// training rig's own step and a resident run's.
         /// </summary>
-        /// <param name="inputs">The graph inputs, struct inputs expanded as in <see cref="Execute(IData[])"/>.
-        /// They may themselves be values a previous call retained.</param>
-        /// <param name="retainOnDevice">One flag per graph output, in output order.</param>
-        public NamedModelParam[] Execute(IData[] inputs, bool[] retainOnDevice)
-            => Execute(inputs, retainOnDevice, DefaultRunSettings);
-
-        /// <summary>
-        /// <see cref="Execute(IData[], bool[])"/> under <paramref name="runSettings"/> instead of
-        /// <see cref="DefaultRunSettings"/>, for this call alone.
-        /// </summary>
-        public NamedModelParam[] Execute(IData[] inputs, bool[] retainOnDevice, RunSettings runSettings)
-            => Run(NameInputs(inputs), Retained(retainOnDevice), runSettings);
-
-        /// <summary>
-        /// <see cref="Execute(IData[], bool[])"/>, or <see cref="Execute(IData[])"/> when
-        /// <paramref name="retainOnDevice"/> is null, with each input called
-        /// <paramref name="labels"/>' entry in a message about it — for a caller whose inputs the
-        /// graph names by identifiers nobody would recognise, the training step's among them — and
-        /// the run called <paramref name="description"/>, where the caller runs one graph as
-        /// different things: a training rig's own step and a resident run's.
-        /// </summary>
-        internal NamedModelParam[] Execute(
-            IData[] inputs, IReadOnlyList<string> labels, bool[]? retainOnDevice, string? description = null)
+        internal NamedModelParam[] Execute(IData[] inputs, IReadOnlyList<string> labels, string? description = null)
         {
             var named = NameInputs(inputs);
             for (int i = 0; i < named.Length && i < labels.Count; i++) named[i].Label = labels[i];
-            return Run(named, retainOnDevice is null ? null : Retained(retainOnDevice), DefaultRunSettings, description);
-        }
-
-        /// <summary>The names of the outputs <paramref name="retainOnDevice"/> flags, refusing an
-        /// array that is not one flag per output.</summary>
-        private HashSet<string> Retained(bool[] retainOnDevice)
-        {
-            if (retainOnDevice is null) throw new ArgumentNullException(nameof(retainOnDevice));
-            if (retainOnDevice.Length != _outputNames.Length)
-                throw new InvalidTensorOperationException(ErrorCodes.CR006, "CompiledGraph.Execute",
-                    $"retainOnDevice.Length={retainOnDevice.Length}, graph.Outputs.Count={_outputNames.Length}",
-                    "Retention flag count does not match the graph's output count");
-
-            var retained = new HashSet<string>();
-            for (int i = 0; i < retainOnDevice.Length; i++)
-                if (retainOnDevice[i]) retained.Add(_outputNames[i]);
-            return retained;
+            return Run(named, DefaultRunSettings, description);
         }
 
         /// <summary>
@@ -368,20 +299,18 @@ namespace Shorokoo.Runtime
         /// beside what the context holds (<see cref="DeviceMemorySettings.LimitBytes"/>). Nothing it
         /// was fed has been taken.</exception>
         public NamedModelParam[] Run(params NamedModelParam[] inputs)
-            => Run(inputs, retainedOutputNames: null, DefaultRunSettings);
+            => Run(inputs, DefaultRunSettings, description: null);
 
         /// <summary>
         /// <see cref="Run(NamedModelParam[])"/> under <paramref name="runSettings"/> instead of
         /// <see cref="DefaultRunSettings"/>, for this call alone.
         /// </summary>
         public NamedModelParam[] Run(NamedModelParam[] inputs, RunSettings runSettings)
-            => Run(inputs, retainedOutputNames: null, runSettings);
+            => Run(inputs, runSettings, description: null);
 
-        // Every Execute and Run overload funnels here, so one guard covers the lot -- and covers it
-        // before anything is fed, which a per-overload one would not for the retaining path.
-        private NamedModelParam[] Run(
-            NamedModelParam[] inputs, IReadOnlySet<string>? retainedOutputNames, RunSettings runSettings,
-            string? description = null)
+        // Every Execute and Run overload funnels here, so one guard covers the lot, before anything
+        // is fed.
+        private NamedModelParam[] Run(NamedModelParam[] inputs, RunSettings runSettings, string? description)
         {
             // Before the work, not after it. The outputs are attached to the compiling context as
             // they are wrapped, so a disposed one threw from inside the wrap of output 0 -- with the
@@ -422,22 +351,21 @@ namespace Shorokoo.Runtime
                 // Under a budget, the session this run can use -- kept, or built again with the
                 // arena limit what the context now holds leaves -- decided before anything is
                 // taken, so a run the budget cannot fit is refused having consumed nothing.
-                feeds.WrittenInto = _built.WrittenInto(retainedOutputNames ?? ComputeContext.NoOutputsRetained);
                 var built = feeds.Budget is { } limit ? Within(limit, feeds) : _built;
                 var session = built.Session;
 
-                // On this graph's own backend, because that is the runtime about to read the values:
-                // what it can address it is handed as it stands, and anything else -- every literal
-                // in the program, held in managed memory, and a tensor of another device or runtime
-                // -- through a copy that backend builds, or, where it is consumed and no output may
-                // be written into it, in host memory for the runtime to copy into its arena. Each
-                // input is held first -- read-locked, or consumed -- and its value built after.
+                // On this graph's own backend, because that is the runtime about to read the values,
+                // and only in the memory it reads them in: what is there already it is handed as it
+                // stands, and anything else -- every literal in the program, held in managed memory,
+                // and a tensor of another device or runtime -- through a copy that backend builds
+                // there. Each input is held first -- read-locked, or consumed -- and its value built
+                // after.
                 var sessionInputs = feeds.Feed(name =>
                     _onnxInputNameByOriginal.TryGetValue(name, out var mapped) ? mapped : name);
 
                 // Per output, the input whose consumed memory the session wrote it into, or null.
-                var results = _owner.CallSession(session, feeds, sessionInputs, _outputNames,
-                    retainedOutputNames ?? ComputeContext.NoOutputsRetained, runSettings, out var aliasedInputs);
+                var results = _owner.CallSession(
+                    session, feeds, sessionInputs, _outputNames, runSettings, out var aliasedInputs);
 
                 return _owner.AdoptOutputs(
                     results, _outputNames, _backend, ArenasOf(results.Count, aliasedInputs, sessionInputs, feeds, built));
@@ -530,27 +458,23 @@ namespace Shorokoo.Runtime
         /// <para>What the budget allows a session is the budget less the <i>discount</i>: the bytes
         /// the context holds in its memory outside that session's arena for the length of the run —
         /// every tensor attached to it there, and what the run itself reads there or copies there to
-        /// read; not a host tensor it consumes, which the runtime copies into the arena itself unless
-        /// an output may be written into it. A tensor the session's own earlier runs left in its arena is inside the limit
-        /// already, where it is, and is not discounted again — and so is one a run wrote into such a
-        /// tensor's memory, where one written into memory outside the arena is discounted with the
-        /// rest (see <see cref="ArenasOf"/>). ONNX Runtime fixes an arena's limit
-        /// when the session is built, and building one costs about as much as the graph is large,
-        /// so a session is kept for as long as its limit fits and built again only when the discount
-        /// has grown past the room it left — never merely because it has fallen — or when its limit
-        /// cannot take what the run would have the runtime copy into its arena, which a session
-        /// built with what the budget leaves now may. See
-        /// <see cref="ComputeContext.ArenaLimitWithin"/> for the limit a new one gets.</para>
+        /// read or consume, a copy of a tensor it consumes included. A tensor the session's own
+        /// earlier runs left in its arena is inside the limit already, where it is, and is not
+        /// discounted again — and so is one a run wrote into such a tensor's memory, where one written
+        /// into memory outside the arena is discounted with the rest (see <see cref="ArenasOf"/>).
+        /// ONNX Runtime fixes an arena's limit when the session is built, and building one costs
+        /// about as much as the graph is large, so a session is kept for as long as its limit fits
+        /// and built again only when the discount has grown past the room it left — never merely
+        /// because it has fallen. See <see cref="ComputeContext.ArenaLimitWithin"/> for the limit a
+        /// new one gets.</para>
         /// </summary>
         /// <exception cref="InvalidOperationException">What the context holds leaves no room for the
-        /// run's arena, or less than what the run would have the runtime copy into it. Nothing has
-        /// been taken.</exception>
+        /// run's arena. Nothing has been taken.</exception>
         private BuiltSession Within(long limit, RunFeeds feeds)
         {
             var built = _built;
             var plan = feeds.Plan(built.Arena);
-            if (built.DeviceMemory.LimitBytes is { } current && current <= limit - plan.Outside
-                && plan.InArena <= current)
+            if (built.DeviceMemory.LimitBytes is { } current && current <= limit - plan.Outside)
             {
                 feeds.Admit(current, plan);
                 return built;
@@ -575,7 +499,7 @@ namespace Shorokoo.Runtime
             var deviceMemory = _built.DeviceMemory with { LimitBytes = arenaLimit };
             var session = _owner.BuildSession(
                 _backend, model, Optimization, deviceMemory, _outputAliases, supplied: [.. _supplied.Select(s => s.Initializer)]);
-            var fresh = new BuiltSession(session, deviceMemory, BindableOf(session));
+            var fresh = new BuiltSession(session, deviceMemory);
             BuiltSession old;
             lock (_sessionGate)
             {
@@ -612,33 +536,20 @@ namespace Shorokoo.Runtime
                 .ToArray();
         }
 
-        /// <summary>
-        /// Whether this graph's session produces its outputs somewhere other than host memory, so
-        /// <see cref="Execute(IData[], bool[])"/> has somewhere to retain them.
-        /// </summary>
-        /// <exception cref="ObjectDisposedException">This graph has been disposed, and its session
-        /// with it.</exception>
-        public bool HasDeviceMemory
-        {
-            get
-            {
-                lock (_sessionGate)
-                {
-                    ObjectDisposedException.ThrowIf(IsDisposed, this);
-                    return _built.Session.HasDeviceMemory;
-                }
-            }
-        }
+        /// <summary>Whether this graph's backend computes in memory of its own rather than the
+        /// host's — a device it can run out of.</summary>
+        internal bool ComputesInDeviceMemory => !_backend.MemorySpace.IsHost;
 
         /// <summary>
-        /// Where this graph's session produces its outputs, which on a GPU backend is the one
+        /// Where this graph's session computes its outputs, which on a GPU backend is the one
         /// signal for "did part of this graph run on the host" that costs nothing: the session
-        /// already knows, so there is no profiling and no extra run behind this.
+        /// already knows, so there is no profiling and no extra run behind this. The outputs come
+        /// back in the backend's memory whatever this says.
         ///
         /// <para><see cref="SessionOutputPlacement.Mixed"/> on a GPU backend says outright that
-        /// some of this graph ran on the host and its results crossed the bus to get back;
-        /// <see cref="SessionOutputPlacement.Host"/> on one says all of it did. For <i>which</i>
-        /// nodes, and what they cost, see <see cref="ReadNodePlacement"/> — which is not free.</para>
+        /// some of this graph ran on the host; <see cref="SessionOutputPlacement.Host"/> on one says
+        /// all of it did. For <i>which</i> nodes, and what they cost, see
+        /// <see cref="ReadNodePlacement"/> — which is not free.</para>
         /// </summary>
         /// <exception cref="ObjectDisposedException">This graph has been disposed, and its session
         /// with it.</exception>
@@ -724,9 +635,8 @@ namespace Shorokoo.Runtime
             }
         }
 
-        /// <summary>How many outputs this graph's session produces — the length
-        /// <see cref="Execute(IData[], bool[])"/> requires of a retention array, so a caller can
-        /// size one without deriving the count a second way and disagreeing.</summary>
+        /// <summary>How many outputs this graph's session produces: as many as each of its runs
+        /// returns.</summary>
         public int OutputCount => _outputNames.Length;
     }
 
@@ -766,8 +676,14 @@ namespace Shorokoo.Runtime
     /// <para><b>Feeding.</b> A tensor fed to a run as it is is <b>consumed</b> by it: taken when the
     /// run starts, dead from then on however the run ends, and its memory the run's backend's to
     /// release. <c>t.Shared()</c> is read and left alive, and <c>t.TryConsume()</c> consumed only
-    /// if nothing else is reading it then — see <see cref="SharedInput"/>. A run's outputs are new
-    /// tensors, attached to the context that ran it.</para>
+    /// if nothing else is reading it then — see <see cref="SharedInput"/>. Each is placed in the
+    /// memory the run reads it in first, wherever it was — another device's, or host memory fed to
+    /// a run on a card, or a card's fed to a run on the host.</para>
+    ///
+    /// <para><b>Outputs.</b> A run's outputs are new tensors in its backend's memory — on a CUDA
+    /// backend, the card's — attached to the context that ran it. Nothing moves them after the run:
+    /// <see cref="TensorData.ToHost"/> brings one to the host to be read, <see cref="TensorData.To"/>
+    /// puts one on another context, and a run elsewhere that is fed one places it there itself.</para>
     ///
     /// <para><b>A context does not own tensors.</b> It keeps a weak list of the tensors attached to
     /// it — its runs' outputs and inputs, and what <see cref="TensorData.To"/> and
@@ -1374,9 +1290,6 @@ namespace Shorokoo.Runtime
             }
         }
 
-        /// <summary>What a run asks to retain on the device when it asks for nothing.</summary>
-        internal static IReadOnlySet<string> NoOutputsRetained { get; } = new HashSet<string>();
-
         /// <summary>
         /// One signal for every tensor this run has locked, plus whatever the caller asked to
         /// stop the run with. Null when there is nothing to link — the caller's settings then go
@@ -1552,6 +1465,22 @@ namespace Shorokoo.Runtime
                 Attach(tensor);
             }
             return outputs;
+        }
+
+        /// <summary>
+        /// Releases the outputs of a run the framework made for itself and has read what it needed
+        /// from: on a card they are in the memory of the session that ran, which they would otherwise
+        /// hold until a collection reached them.
+        /// </summary>
+        internal static void ReleaseOutputs(IEnumerable<NamedModelParam> outputs)
+        {
+            foreach (var output in outputs)
+                switch (output)
+                {
+                    case TensorDataModelParam tensor: tensor.ToTensorData().Dispose(); break;
+                    case TensorDataSequenceModelParam sequence: sequence.ToTensorDataSequence().Dispose(); break;
+                    case OptionalTensorDataModelParam { Data: { HasValue: true, Value: { } present } }: present.Dispose(); break;
+                }
         }
 
         /// <summary>
@@ -2078,8 +2007,10 @@ namespace Shorokoo.Runtime
 
         /// <summary>
         /// Evaluates the given output variables by building and executing a zero-input graph,
-        /// returning their concrete tensor data. Requires concretized outputs — a
-        /// <c>[Module]</c>'s output fails fast with the lowering hint.
+        /// returning their concrete tensor data, in this context's memory as every run's outputs
+        /// are — on a card, the card's; <see cref="TensorData.ToHost"/> brings one to the host.
+        /// Requires concretized outputs — a <c>[Module]</c>'s output fails fast with the lowering
+        /// hint.
         ///
         /// <para>The results outlive this context, as every run's outputs do, and can go straight
         /// back into a graph as literals through <see cref="TensorData.MoveToAttribute"/>.</para>
@@ -2279,11 +2210,9 @@ namespace Shorokoo.Runtime
                 var sessionInputs = feeds.Feed(name =>
                     onnxInputNameByOriginal.TryGetValue(name, out var mapped) ? mapped : name);
 
-                // Nothing retained: this is the one-shot path, which builds a session, feeds it
-                // once and disposes it, so there is no later run for a device-resident output to
-                // be fed into -- and a session built for one run was marked to alias nothing.
+                // A session built for one run was marked to alias nothing.
                 var results = CallSession(
-                    session, feeds, sessionInputs, session.OutputNames, NoOutputsRetained, RunSettings, out _);
+                    session, feeds, sessionInputs, session.OutputNames, RunSettings, out _);
                 return AdoptOutputs(results, session.OutputNames, backend);
             }
             catch (Exception e) when ((failed = e) is null)
@@ -2338,8 +2267,7 @@ namespace Shorokoo.Runtime
         /// </summary>
         internal IReadOnlyList<IShorokooTensorValue> CallSession(
             IShorokooSession session, RunFeeds feeds, IReadOnlyDictionary<string, IShorokooTensorValue> sessionInputs,
-            IReadOnlyList<string> outputNames, IReadOnlySet<string> retainedOutputNames, RunSettings runSettings,
-            out IReadOnlyList<string?> aliasedInputs)
+            IReadOnlyList<string> outputNames, RunSettings runSettings, out IReadOnlyList<string?> aliasedInputs)
         {
             using var eviction = LinkEvictions(feeds.Leases, runSettings.CancellationToken);
             var settings = feeds.Budget is null ? runSettings : runSettings with { ShrinkArenaAfterRun = true };
@@ -2350,7 +2278,7 @@ namespace Shorokoo.Runtime
             try
             {
                 var results = feeds.HandOver(consumed => session.RunConsuming(
-                    sessionInputs, consumed, outputNames, retainedOutputNames, settings, out aliased));
+                    sessionInputs, consumed, outputNames, settings, out aliased));
                 aliasedInputs = aliased;
                 return results;
             }
@@ -2568,10 +2496,10 @@ namespace Shorokoo.Runtime
         }
 
         /// <summary>
-        /// Executes the subgraph with <paramref name="inputData"/> and returns the output values.
-        /// Each input is fed as <see cref="ComputeContext.Execute(ComputationGraph, IData[])"/>
-        /// feeds it: a tensor given as it is is consumed, and <c>t.Shared()</c> is read and left
-        /// alive.
+        /// Executes the subgraph with <paramref name="inputData"/> and returns the output values, in
+        /// the default context's memory. Each input is fed as
+        /// <see cref="ComputeContext.Execute(ComputationGraph, IData[])"/> feeds it: a tensor given
+        /// as it is is consumed, and <c>t.Shared()</c> is read and left alive.
         /// </summary>
         public TensorData[] With(params IData[] inputData)
         {

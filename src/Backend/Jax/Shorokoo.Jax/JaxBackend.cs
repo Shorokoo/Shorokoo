@@ -69,6 +69,9 @@ public abstract class JaxBackend : IShorokooBackend
 
     internal bool OnCuda => _cudaDeviceId is not null;
 
+    /// <summary>The CUDA device this backend runs on, or -1 on the CPU.</summary>
+    internal int CudaDeviceId => _cudaDeviceId ?? -1;
+
     /// <summary>
     /// Resolves the Python environment and starts JAX in it now, rather than on the first call that
     /// needs it, and returns the environment it runs in.

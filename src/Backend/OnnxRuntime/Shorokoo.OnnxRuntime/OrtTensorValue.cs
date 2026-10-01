@@ -149,6 +149,47 @@ internal sealed class OrtTensorValue : IShorokooTensorValue
         }
     }
 
+    /// <summary>ORT's name for a CUDA device's allocator.</summary>
+    internal const string CudaAllocatorName = "Cuda";
+
+    // Where this tensor's buffer is, as ORT names it: the allocator and the device id. Probed once,
+    // on first ask -- a value never moves -- since a session asks it of every value it is fed on
+    // every run. A reference, so a reader sees both halves or neither.
+    private sealed record Place(string Name, int Id);
+
+    private Place? _place;
+
+    private Place PlaceOf()
+    {
+        if (Volatile.Read(ref _place) is { } known) return known;
+        using var info = Inner.GetTensorMemoryInfo();
+        // After the reads, for the reason ProbeHostAccessible gives: the info points into the native
+        // value rather than owning anything.
+        var place = new Place(info.Name, info.Id);
+        GC.KeepAlive(Inner);
+        Volatile.Write(ref _place, place);
+        return place;
+    }
+
+    /// <summary>Whether this is a tensor in the memory of CUDA device <paramref name="device"/>.</summary>
+    internal bool IsOnCudaDevice(int device)
+    {
+        if (!Inner.IsTensor) return false;
+        var place = PlaceOf();
+        return place.Name == CudaAllocatorName && place.Id == device;
+    }
+
+    /// <summary>Where this tensor's buffer is, in the words a message uses.</summary>
+    internal string MemoryName
+    {
+        get
+        {
+            if (!Inner.IsTensor) return "no buffer of its own";
+            var place = PlaceOf();
+            return IsHostAllocator(place.Name) ? "host memory" : $"{place.Name} device {place.Id}'s memory";
+        }
+    }
+
     /// <summary>Refuses a span over memory the host cannot read. The span accessors hand out a
     /// pointer without checking where it points, so this is the difference between an exception
     /// and a wild read of a device address — and it belongs here rather than only on the tensor

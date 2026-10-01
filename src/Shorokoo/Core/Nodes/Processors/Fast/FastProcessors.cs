@@ -48,9 +48,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         }
 
         /// <summary>
-        /// Copies a freshly computed result onto storage of its own, then releases the backend
-        /// tensor it came out of. For a caller that runs many sessions and RETAINS their
-        /// outputs; a caller that reads a result and drops it wants the zero-copy path instead.
+        /// Copies a freshly computed result onto storage of its own in host memory, then releases the
+        /// backend tensor it came out of — moving it there explicitly where the run left it in device
+        /// memory. For a caller that runs many sessions and keeps their outputs; a caller that reads a
+        /// result and drops it wants the zero-copy path instead.
         ///
         /// <para>A backend result tensor is allocated by ITS OWN session's allocator and keeps
         /// that allocator — and so that session's whole arena, sized to the largest thing the
@@ -76,6 +77,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         public static TensorData RehostOffSession(TensorData data)
         {
             if (data.DType.ProtoTypeNum == DType.Utf8.ProtoTypeNum) return data;
+            // Off a card the move is the copy: a tensor of its own in the framework's host memory.
+            if (!data.IsHostResident) return data.MovedToHost();
             // Read the bytes before disposing: that invalidates the buffer they came from.
             var copy = TensorData.CreateFromRawBytes(data.Shape, data.DType, data.CopyRawMemory());
             // Taking the span is data's last read, so keep it alive until the copy is out of the

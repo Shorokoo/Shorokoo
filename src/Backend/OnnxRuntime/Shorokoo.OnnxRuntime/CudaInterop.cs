@@ -7,10 +7,10 @@ namespace Shorokoo.OnnxRuntime;
 /// in either direction. ONNX Runtime's managed surface has no such call, and a value living on
 /// the card hands out a pointer with no way to read or fill it.
 ///
-/// <para>Both directions serve one promise apiece. Device-to-host reads back a tensor an
-/// execution provider left on the card; host-to-device is what puts a tensor into a CUDA
-/// context's memory in the first place, rather than leaving host bytes for the provider to copy
-/// over on every run.</para>
+/// <para>Both directions serve one promise apiece. Device-to-host reads back a tensor on the
+/// card — an output a run left there, or a tensor put there; host-to-device is what puts a tensor
+/// into the card's memory in the first place, which is where a CUDA session reads every tensor it
+/// is fed.</para>
 ///
 /// <para>Bound lazily and by name, so nothing here requires a CUDA machine to load — the copy
 /// simply reports failure when the runtime is absent, which is the right answer on a host-only

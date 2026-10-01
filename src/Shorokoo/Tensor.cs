@@ -106,7 +106,8 @@ namespace Shorokoo
 
         /// <summary>
         /// Builds a computation graph with this tensor as its sole output, executes it with a fresh
-        /// <see cref="ComputeContext"/>, and returns the materialized data.
+        /// <see cref="ComputeContext"/>, and returns the materialized data, in that context's
+        /// memory — on a card, the card's; <see cref="TensorData.ToHost"/> brings it to the host.
         /// </summary>
         public TensorData Eval()
         {

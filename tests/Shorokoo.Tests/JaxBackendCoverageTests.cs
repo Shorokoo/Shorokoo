@@ -223,7 +223,7 @@ public class JaxBackendCoverageTests
     }
 
     [Fact]
-    public void TestACpuSessionHasNoArenaFiguresBindsNoAliasRetainsNothingAndRunsEveryNodeOnTheHost()
+    public void TestACpuSessionHasNoArenaFiguresBindsNoAliasLeavesItsOutputsInHostMemoryAndRunsEveryNodeOnTheHost()
     {
         var graph = ComputeContextLifetimeCoverageTests.GraphOf("a:float[2] b:float[2]", "O:float[2]",
             ComputeContextLifetimeCoverageTests.Op("Sub", "a b", "t"), ComputeContextLifetimeCoverageTests.Op("Neg", "t", "O"));
@@ -232,9 +232,8 @@ public class JaxBackendCoverageTests
         using var b = Jax.CreateTensor([1f, 2f], [2]);
         var consumed = Jax.CreateTensor([5f, 7f], [2]);
         var feeds = new Dictionary<string, IShorokooTensorValue> { ["a"] = consumed, ["b"] = b };
-        using var kept = traced.RunConsuming(feeds, [consumed], ["O"], new HashSet<string> { "O" }, RunSettings.Default)[0];
+        using var kept = traced.RunConsuming(feeds, [consumed], ["O"], RunSettings.Default)[0];
 
-        Assert.False(traced.HasDeviceMemory);
         Assert.True(kept.IsHostAccessible);
         Assert.Equal([-4f, -5f], kept.GetTensorDataAsSpan<float>().ToArray());
         Assert.Throws<ObjectDisposedException>(() => consumed.IsHostAccessible);

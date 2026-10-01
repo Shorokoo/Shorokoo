@@ -172,10 +172,9 @@ public class SideBySideBackendHardwareTests
 
         var cuda = new ComputeContext(LoadCuda());
         var compiled = cuda.Compile(graph);
-        Assert.True(compiled.HasDeviceMemory);
 
-        // Left where the provider put it: this is the one kind of tensor the host cannot read.
-        var onCard = compiled.Execute([ta, tb.Shared()], [true])[0].ToTensorData();
+        // Left where the run put it: this is the one kind of tensor the host cannot read.
+        var onCard = compiled.Execute(ta, tb.Shared())[0].ToTensorData();
         Assert.Equal(MemoryKind.Cuda, onCard.Space.Kind);
         Assert.False(onCard.IsHostResident);
         Assert.Throws<InvalidOperationException>(() => onCard.As<float32>().AccessMemory<float>());
@@ -218,13 +217,11 @@ public class SideBySideBackendHardwareTests
                                TrainingRigHelpers.TargetBatch(2f, 4f, 6f, 8f));
 
         var compiled = rig.RuntimeContext.Compile(rig.TrainingStepPureGraph);
-        Assert.True(compiled.HasDeviceMemory);
 
         var retained = compiled.Execute(
             ComputeContext.ExpandStructInputs(
                 [checkpoint.TrainableParams.Shared(), checkpoint.ModelState.Shared(), checkpoint.OptimizerState.Shared(),
-                 input.Shared(), target.Shared()]),
-            [.. Enumerable.Repeat(true, compiled.OutputCount)]);
+                 input.Shared(), target.Shared()]));
 
         Assert.NotEmpty(retained);
         Assert.NotNull(cuda.Backend.CudaDeviceId);
@@ -380,14 +377,14 @@ public class SideBySideBackendHardwareTests
     }
 
     [SideBySideCudaFact]
-    public void TestASequenceOutputAskedToStayOnTheCardComesBackToTheHostWhereItsElementsAreRead()
+    public void TestASequenceOutputOfACardRunComesBackInHostMemoryWhereItsElementsAreRead()
     {
         var x = InputVector<float32>("x");
         var pair = new InternalComputationGraph([x], [OnnxOp.SequenceConstruct(x, x + x)]);
         using var cuda = new ComputeContext(LoadCuda());
 
         var sequence = cuda.Compile(pair)
-            .Execute([TensorData([2L], (float[])[1f, 2f])], [true])[0].ToTensorDataSequence();
+            .Execute(TensorData([2L], (float[])[1f, 2f]))[0].ToTensorDataSequence();
 
         Assert.Equal([1f, 2f], Floats(sequence[0]));
         Assert.Equal([2f, 4f], Floats(sequence[1]));
@@ -435,10 +432,9 @@ public class SideBySideBackendHardwareTests
     }
 
     private static float[] Floats(TensorData data)
-        => [.. data.As<float32>().AccessMemory<float>()];
+        => data.ToHost().As<float32>().CopyMemory<float>();
 
-    private static float[] Floats(NamedModelParam param)
-        => [.. param.ToTensorData().As<float32>().AccessMemory<float>()];
+    private static float[] Floats(NamedModelParam param) => Floats(param.ToTensorData());
 }
 
 /// <summary>

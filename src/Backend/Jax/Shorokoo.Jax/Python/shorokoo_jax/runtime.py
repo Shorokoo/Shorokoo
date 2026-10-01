@@ -201,14 +201,16 @@ def host_copy(value):
 
 
 def describe(value):
-    """(kind, element type code, shape, is host, data address, byte count) of a value."""
+    """(kind, element type code, shape, is host, data address, byte count, device id) of a value;
+    the device id is -1 for a value in host memory."""
     if isinstance(value, np.ndarray):
         if not value.flags.c_contiguous or not value.flags.writeable:
             # The .NET side reads and writes a host value as one dense buffer from its address.
             raise ValueError("only a contiguous, writable array can be handed to .NET")
-        return (KIND_TENSOR, dtype_code(value), list(value.shape), True, value.ctypes.data, value.nbytes)
+        return (KIND_TENSOR, dtype_code(value), list(value.shape), True, value.ctypes.data, value.nbytes, -1)
+    device = next(iter(value.devices()))
     return (KIND_TENSOR, dtype_code(value), list(value.shape), False, 0,
-            int(np.prod(value.shape, dtype=np.int64)) * np.dtype(value.dtype).itemsize)
+            int(np.prod(value.shape, dtype=np.int64)) * np.dtype(value.dtype).itemsize, device.id)
 
 
 # ---- models -----------------------------------------------------------------------------------
@@ -311,19 +313,21 @@ def prepare(model, inputs, severity=None):
         _warning_severity.reset(token)
 
 
-def run(model, args, wanted, retained, severity=None):
-    """Runs a model and hands over the outputs at indices `wanted`: each retained in the device's
-    memory where `retained` says so, else copied home. Returns (value, description) per output.
-    Every output is ready when this returns: nothing the run reads or writes is still in flight."""
+def run(model, args, wanted, severity=None):
+    """Runs a model and hands over the outputs at indices `wanted`, each where the .NET side reads
+    the model's inputs and leaves its outputs: in the device's memory on a card, and a host value of
+    its own on the CPU. Returns (value, description) per output. Every output is ready when this
+    returns: nothing the run reads or writes is still in flight."""
     token = _warning_severity.set(severity)
     try:
         outputs = model(args)
     finally:
         _warning_severity.reset(token)
+    on_device = model.device.platform != "cpu"
     results = []
-    for index, retain in zip(wanted, retained):
+    for index in wanted:
         value = outputs[index]
-        value = jax.block_until_ready(value) if retain else host_copy(value)
+        value = jax.block_until_ready(value) if on_device else host_copy(value)
         results.append((value, describe(value)))
     return results
 

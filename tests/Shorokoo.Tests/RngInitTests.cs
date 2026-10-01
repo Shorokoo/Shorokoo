@@ -363,18 +363,11 @@ internal sealed class SessionCountingBackend(IShorokooBackend inner) : IShorokoo
     {
         public IReadOnlyList<string> InputNames => inner.InputNames;
         public IReadOnlyList<string> OutputNames => inner.OutputNames;
-        public bool HasDeviceMemory => inner.HasDeviceMemory;
 
         public IReadOnlyList<IShorokooTensorValue> Run(
             IReadOnlyDictionary<string, IShorokooTensorValue> inputs, IReadOnlyList<string> outputNames,
             RunSettings runSettings)
             => inner.Run(inputs, outputNames, runSettings);
-
-        public IReadOnlyList<IShorokooTensorValue> RunRetainingOutputs(
-            IReadOnlyDictionary<string, IShorokooTensorValue> inputs,
-            IReadOnlyList<string> outputNames, IReadOnlySet<string> retainedOutputNames,
-            RunSettings runSettings)
-            => inner.RunRetainingOutputs(inputs, outputNames, retainedOutputNames, runSettings);
 
         public void Dispose()
         {

@@ -522,11 +522,11 @@ public class PyTorchBackendCoverageTests
         using var cancelled = new CancellationTokenSource();
         cancelled.Cancel();
 
-        Assert.Equal(1, ReleasesOf(feed => session.RunConsuming(Feeds(feed), [feed], ["y"], new HashSet<string>(), RunSettings.Default)));
-        Assert.Equal(1, ReleasesOf(feed => session.RunConsuming(Feeds(feed), [feed], ["nope"], new HashSet<string>(), RunSettings.Default)));
-        Assert.Equal(1, ReleasesOf(feed => session.RunConsuming(new Dictionary<string, IShorokooTensorValue>(), [feed], ["y"], new HashSet<string>(), RunSettings.Default)));
-        Assert.Equal(1, ReleasesOf(feed => session.RunConsuming(Feeds(feed), [feed], ["y"], new HashSet<string>(), new RunSettings { CancellationToken = cancelled.Token })));
-        Assert.Equal(1, ReleasesOf(feed => session.RunConsuming(Feeds(feed), [feed], ["y"], new HashSet<string>(), RunSettings.Default, out _)));
+        Assert.Equal(1, ReleasesOf(feed => session.RunConsuming(Feeds(feed), [feed], ["y"], RunSettings.Default)));
+        Assert.Equal(1, ReleasesOf(feed => session.RunConsuming(Feeds(feed), [feed], ["nope"], RunSettings.Default)));
+        Assert.Equal(1, ReleasesOf(feed => session.RunConsuming(new Dictionary<string, IShorokooTensorValue>(), [feed], ["y"], RunSettings.Default)));
+        Assert.Equal(1, ReleasesOf(feed => session.RunConsuming(Feeds(feed), [feed], ["y"], new RunSettings { CancellationToken = cancelled.Token })));
+        Assert.Equal(1, ReleasesOf(feed => session.RunConsuming(Feeds(feed), [feed], ["y"], RunSettings.Default, out _)));
     }
 
     [Fact]
@@ -891,7 +891,7 @@ public class PyTorchBackendCoverageTests
     }
 
     [Fact]
-    public void TestACpuSessionHasNoArenaFiguresRetainsNothingAndRunsEveryNodeOnTheHost()
+    public void TestACpuSessionHasNoArenaFiguresLeavesItsOutputsInHostMemoryAndRunsEveryNodeOnTheHost()
     {
         var graph = ComputeContextLifetimeCoverageTests.GraphOf("a:float[2] b:float[2]", "O:float[2]",
             ComputeContextLifetimeCoverageTests.Op("Sub", "a b", "t"), ComputeContextLifetimeCoverageTests.Op("Neg", "t", "O"));
@@ -900,9 +900,8 @@ public class PyTorchBackendCoverageTests
         using var a = Torch.CreateTensor([5f, 7f], [2]);
         using var b = Torch.CreateTensor([1f, 2f], [2]);
         var feeds = new Dictionary<string, IShorokooTensorValue> { ["a"] = a, ["b"] = b };
-        using var kept = traced.RunRetainingOutputs(feeds, ["O"], new HashSet<string> { "O" }, RunSettings.Default)[0];
+        using var kept = traced.Run(feeds, ["O"], RunSettings.Default)[0];
 
-        Assert.False(traced.HasDeviceMemory);
         Assert.True(kept.IsHostAccessible);
         Assert.Equal([-4f, -5f], kept.GetTensorDataAsSpan<float>().ToArray());
         Assert.Null(traced.ReadArenaStatistics());
@@ -954,7 +953,7 @@ public class PyTorchBackendCoverageTests
         using var b = Torch.CreateTensor([1f, 2f, 3f, 4f], [4]);
         ref var consumedMemory = ref MemoryMarshal.GetReference(a.GetTensorDataAsSpan<float>());
         var feeds = new Dictionary<string, IShorokooTensorValue> { ["a"] = a, ["b"] = b };
-        using var o = session.RunConsuming(feeds, [a], ["O"], ComputeContext.NoOutputsRetained, RunSettings.Default)[0];
+        using var o = session.RunConsuming(feeds, [a], ["O"], RunSettings.Default)[0];
 
         Assert.Equal([new OutputAlias("O", "a")], session.BindableAliases);
         Assert.Equal([9f, 18f, 27f, 36f], o.GetTensorDataAsSpan<float>().ToArray());
@@ -1178,7 +1177,7 @@ public class PyTorchBackendCoverageTests
         var a = Tensor([10f, 20f, 30f, 40f]);
         using var second = Tensor(b ?? [1f, 2f, 3f, 4f]);
         var feeds = new Dictionary<string, IShorokooTensorValue> { ["a"] = a, ["b"] = feedTwice ? a : second };
-        var results = session.RunConsuming(feeds, consume ? [a] : [], [.. graph.Outputs.Select(o => o.Name)], ComputeContext.NoOutputsRetained, RunSettings.Default, out var aliased);
+        var results = session.RunConsuming(feeds, consume ? [a] : [], [.. graph.Outputs.Select(o => o.Name)], RunSettings.Default, out var aliased);
         if (!consume) a.Dispose();
         float[] values = [.. results.SelectMany(r => integers ? r.GetTensorDataAsSpan<long>().ToArray().Select(v => (float)v) : r.GetTensorDataAsSpan<float>().ToArray())];
         foreach (var result in results) result.Dispose();
@@ -1190,7 +1189,7 @@ public class PyTorchBackendCoverageTests
         var feeds = graph.Inputs.ToDictionary(i => i.Name, i => Torch.CreateTensor(Enumerable.Repeat(i.Name switch { "a" => 1f, "b" => 10f, "c" => 100f, _ => 1f }, 3).ToArray(), [3]));
         using var kept = feeds["g"];
         var results = session.RunConsuming(feeds.ToDictionary(f => f.Key, f => (IShorokooTensorValue)f.Value), [.. feeds.Where(f => f.Key != "g").Select(f => f.Value)],
-            [.. graph.Outputs.Select(o => o.Name)], ComputeContext.NoOutputsRetained, RunSettings.Default, out var aliased);
+            [.. graph.Outputs.Select(o => o.Name)], RunSettings.Default, out var aliased);
         var values = string.Join(" ", results.SelectMany(r => r.GetTensorDataAsSpan<float>().ToArray()));
         foreach (var result in results) result.Dispose();
         return string.Join(",", results.Select((_, i) => aliased.Count == 0 ? "-" : aliased[i] ?? "-")) + " " + values;

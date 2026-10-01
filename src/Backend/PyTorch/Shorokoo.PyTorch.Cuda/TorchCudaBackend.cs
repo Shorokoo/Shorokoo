@@ -5,8 +5,7 @@ namespace Shorokoo.PyTorch.Cuda;
 /// <summary>
 /// The Shorokoo backend that runs on an NVIDIA GPU through PyTorch, built for CUDA 13. Each model
 /// is translated to Python and run in the process's embedded CPython; its tensors live on
-/// <c>cuda:N</c>, and a run hands outputs back in host memory unless it is asked to keep them on
-/// the card.
+/// <c>cuda:N</c>, where a run reads its inputs and leaves its outputs.
 ///
 /// <para>Name it explicitly; it is never discovered:</para>
 /// <code>

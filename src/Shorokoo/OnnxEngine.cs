@@ -20,9 +20,10 @@ namespace Shorokoo
     public static class OnnxEngine
     {
         /// <summary>
-        /// Evaluates the given output variables and returns their values, in order. The outputs
-        /// must come from a concretized graph: a <c>[Module]</c>'s output is refused with the
-        /// lowering hint rather than failing deep inside ONNX Runtime.
+        /// Evaluates the given output variables and returns their values, in order, in the memory of
+        /// the default backend — on a card, the card's; <see cref="TensorData.ToHost"/> brings one to
+        /// the host. The outputs must come from a concretized graph: a <c>[Module]</c>'s output is
+        /// refused with the lowering hint rather than failing deep inside ONNX Runtime.
         /// </summary>
         public static TensorData[] Eval(Variable[] outputs)
         {

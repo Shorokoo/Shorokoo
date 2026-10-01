@@ -5,18 +5,17 @@ using System.Collections.Generic;
 namespace Shorokoo
 {
     /// <summary>
-    /// A training run that keeps its state — trainable parameters, model state and optimizer state —
-    /// where the execution provider produced it, instead of moving it through host memory between
-    /// steps.
+    /// A training run that owns its state — trainable parameters, model state and optimizer state —
+    /// between steps, where the execution provider produced it.
     ///
-    /// <para><b>Why it exists.</b> The checkpoint-in / checkpoint-out
-    /// <see cref="TrainingRig.TrainStep(TrainingCheckpoint, IData, IData)"/>
-    /// hands the host a fresh copy of every parameter and both optimizer moments after every step,
-    /// and feeds them all back in on the next one. On a GPU that is the whole training state crossing
-    /// the bus twice per step, so throughput tracks <i>parameter count</i> rather than arithmetic: a
-    /// model with 3.3× the parameters and slightly fewer FLOPs trained 2.3× slower
-    /// (Shorokoo/Shorokoo#325). A resident run moves the state once in, once out, and
-    /// <see cref="Step(IData, IData)"/> in between costs the arithmetic only.</para>
+    /// <para><b>What it is for.</b> A step's state comes back where the step ran — on a GPU, the
+    /// card's memory — whether it is taken by
+    /// <see cref="TrainingRig.TrainStep(TrainingCheckpoint, IData, IData)"/> or by a run, so neither
+    /// moves the state through host memory between steps (Shorokoo/Shorokoo#325). A run also owns
+    /// that state: each step consumes the state the step before it produced, releasing it as it is
+    /// superseded rather than when a collection gets to it, and <see cref="Step(IData, IData)"/>
+    /// hands back only the loss, so a loop that does not need every step's checkpoint never holds
+    /// one.</para>
     ///
     /// <para><b>A checkpoint stays where the state is.</b> <see cref="Step(IData, IData)"/> returns
     /// the step's loss — a scalar, always host-readable — and nothing else;
@@ -64,8 +63,7 @@ namespace Shorokoo
 
         /// <summary>
         /// The state the next step trains from, fed as its <see cref="TrainingCheckpoint.FeedMode"/>
-        /// says. Its tensors are device-resident whenever the last step retained them, in which case
-        /// nothing outside this run may read them.
+        /// says. Its tensors are where the last step left them — on a GPU, the card's memory.
         /// </summary>
         private TrainingCheckpoint _current;
 

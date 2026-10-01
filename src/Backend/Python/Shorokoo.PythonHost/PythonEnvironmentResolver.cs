@@ -50,6 +50,41 @@ public static class PythonEnvironmentResolver
         return Provision(lockFile, options, variables);
     }
 
+    /// <summary>
+    /// The <see cref="PythonEnvironment.CudaLibraryDirectory"/> of the environment a Python-based
+    /// CUDA backend of this process would run in, where that environment is there already: the one
+    /// the interpreter runs over, else the one <c>SHOROKOO_PYTHON_ENV</c> names, else the provisioned
+    /// CUDA 13 environment. Null where none of them is, or holds no such folder. It never provisions
+    /// and never starts Python: it answers <c>Shorokoo.Core.Backends.CudaLibraries</c>, which
+    /// asks before a backend of another framework loads its CUDA libraries, by reflection, since the
+    /// core assembly does not reference this one.
+    /// </summary>
+    internal static string? ExistingCudaLibraryDirectory()
+    {
+        try
+        {
+            var environment = PythonRuntime.Environment
+                ?? (Environment.GetEnvironmentVariable(EnvironmentVariable) is { Length: > 0 } named
+                    ? PythonEnvironment.Open(named, PythonEnvironmentLock.Cu13.PythonVersion, PythonEnvironmentSource.EnvironmentVariable)
+                    : Provisioned(PythonEnvironmentLock.Cu13));
+            return environment?.CudaLibraryDirectory;
+        }
+        // Every way of there being no such environment here is an answer of none.
+        catch (Exception ex) when (ex is PythonEnvironmentException or PlatformNotSupportedException
+                                       or IOException or UnauthorizedAccessException)
+        {
+            return null;
+        }
+    }
+
+    private static PythonEnvironment? Provisioned(PythonEnvironmentLock lockFile)
+    {
+        var directory = Path.Combine(CacheRoot(new PythonEnvironmentOptions(), Environment.GetEnvironmentVariable), lockFile.CacheKey);
+        return IsComplete(directory, lockFile)
+            ? PythonEnvironment.Open(directory, lockFile.PythonVersion, PythonEnvironmentSource.Provisioned)
+            : null;
+    }
+
     /// <summary>Where <paramref name="lockFile"/>'s environment is cached, provisioned or not.</summary>
     public static string CachedEnvironmentPath(PythonEnvironmentLock lockFile, PythonEnvironmentOptions? options = null)
         => Path.Combine(CacheRoot(options ?? new PythonEnvironmentOptions(), Environment.GetEnvironmentVariable), lockFile.CacheKey);

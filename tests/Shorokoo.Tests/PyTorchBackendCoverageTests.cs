@@ -43,6 +43,8 @@ public class PyTorchBackendCoverageTests
         Assert.Equal(12, running.PythonVersion.Minor);
         Assert.True(File.Exists(running.LibPython));
         Assert.Equal(running.Directory, new TorchCpuBackend(new() { EnvironmentPath = running.Directory + Path.DirectorySeparatorChar }).Start().Directory);
+        Assert.Equal(OperatingSystem.IsWindows() ? Path.Combine(running.SitePackages, "torch", "lib") : null, running.CudaLibraryDirectory);
+        Assert.Equal(running.CudaLibraryDirectory, PythonEnvironmentResolver.ExistingCudaLibraryDirectory());
     }
 
     [Fact]

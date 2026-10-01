@@ -59,6 +59,18 @@ public sealed class PythonEnvironment
     /// <summary>Where this environment came from.</summary>
     public PythonEnvironmentSource Source { get; }
 
+    /// <summary>
+    /// The folder of NVIDIA CUDA libraries the environment's PyTorch ships and loads by path —
+    /// <c>torch\lib</c> — on Windows, where one is installed; null elsewhere, and where there is
+    /// none. It is the copy the CUDA backends of a process share (see
+    /// <c>Shorokoo.Core.Backends.CudaLibraries</c>).
+    /// </summary>
+    internal string? CudaLibraryDirectory
+        => OperatingSystem.IsWindows() && Path.Combine(SitePackages, "torch", "lib") is var torchLib
+           && System.IO.Directory.Exists(torchLib)
+            ? torchLib
+            : null;
+
     /// <summary>The same environment, recorded as having come from <paramref name="source"/>.</summary>
     internal PythonEnvironment As(PythonEnvironmentSource source)
         => new(Directory, PythonHome, LibPython, SitePackages, PythonVersion, source);

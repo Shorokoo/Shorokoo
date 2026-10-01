@@ -5,6 +5,7 @@ using Shorokoo.Core.Backends;
 using Shorokoo.Modules.Losses;
 using Shorokoo.Modules.Optimizers;
 using Shorokoo.PyTorch.Cuda;
+using Shorokoo.PythonHost;
 using Shorokoo.Runtime;
 
 namespace Shorokoo.Tests;
@@ -434,12 +435,20 @@ public class SideBySideBackendHardwareTests
         Assert.Equal(0, InAChildProcess(WithNoOtherCudaMajorOnThePathAndNoPythonEnvironment(), "onnxruntime-convolution"));
     }
 
+    [SideBySideCudaFact]
+    public void TestPyTorchStartedOverCudaLibrariesAnotherBackendLoadedFirstIsRefusedNamingThem()
+    {
+        var environment = PythonEnvironmentResolver.Resolve(PythonEnvironmentLock.Cu13).Directory;
+        Assert.Equal(0, InAChildProcess(WithNoPythonEnvironmentNamed(), "pytorch-over-other-cuda-libraries", environment));
+    }
+
     /// <summary>What <c>dotnet Shorokoo.Tests.dll</c> runs: one case of a test that needs a process of
     /// its own, because what it covers is which native libraries a process loads, and from where.</summary>
     public static int Main(string[] args) => args switch
     {
         ["cuda-backends", var first] => BothCudaBackendsRun(pytorchFirst: first == "pytorch-first") ? 0 : 1,
         ["onnxruntime-convolution"] => AConvolutionEndsInAResultOrAnException(),
+        ["pytorch-over-other-cuda-libraries", var environment] => PyTorchIsRefusedOverOtherCudaLibraries(environment) ? 0 : 1,
         _ => 1,
     };
 
@@ -456,13 +465,17 @@ public class SideBySideBackendHardwareTests
         return child.ExitCode;
     }
 
-    private static Dictionary<string, string?> WithNoOtherCudaMajorOnThePathAndNoPythonEnvironment() => new()
+    private static Dictionary<string, string?> WithNoPythonEnvironmentNamed() => new()
+    {
+        ["SHOROKOO_PYTHON_ENV"] = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString()),
+    };
+
+    private static Dictionary<string, string?> WithNoOtherCudaMajorOnThePathAndNoPythonEnvironment() => new(WithNoPythonEnvironmentNamed())
     {
         ["PATH"] = string.Join(Path.PathSeparator, (Environment.GetEnvironmentVariable("PATH") ?? "")
             .Split(Path.PathSeparator)
             .Where(folder => !Directory.Exists(folder)
                 || !Directory.EnumerateFiles(folder, "cublasLt64_*.dll").Any(f => !f.EndsWith("_13.dll")))),
-        ["SHOROKOO_PYTHON_ENV"] = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString()),
     };
 
     private static bool ConvolutionRuns(IShorokooBackend backend)
@@ -482,6 +495,12 @@ public class SideBySideBackendHardwareTests
         IShorokooBackend[] inOrder = pytorchFirst ? [new TorchCudaBackend(), LoadCuda()] : [LoadCuda(), new TorchCudaBackend()];
         return inOrder.All(ConvolutionRuns) && (!Windows || OneCopyOfEachCudaLibrary());
     }
+
+    private static bool PyTorchIsRefusedOverOtherCudaLibraries(string environment)
+        => !Windows || ConvolutionRuns(LoadCuda())
+            && Assert.Throws<PythonEnvironmentException>(() => new TorchCudaBackend(0, new() { EnvironmentPath = environment }).Start())
+                is { Failure: PythonEnvironmentFailure.CudaLibraryConflict, Message: var message }
+            && message.Contains("cudnn_graph64_9.dll");
 
     private static int AConvolutionEndsInAResultOrAnException()
     {

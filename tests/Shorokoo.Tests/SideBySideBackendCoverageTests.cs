@@ -535,6 +535,31 @@ public class SideBySideBackendCoverageTests
         Assert.NotEmpty(mergeBackend.Sessions);
         Assert.NotEmpty(runtimeBackend.Sessions);
     }
+
+    [Fact]
+    public void TestCudaBackendsShareTheRuntimeCublasCudnnCufftAndTheCompilersTheyLoadFamilyByFamily()
+    {
+        var withoutRuntime = Directory.CreateDirectory(Path.Combine(Path.GetTempPath(), "shorokoo-cuda-" + Guid.NewGuid().ToString("N"))).FullName;
+        File.WriteAllText(Path.Combine(withoutRuntime, "cudnn64_9.dll"), "");
+        try
+        {
+            Assert.Equal(
+                ["cudart64_13.dll", "cublas64_13.dll", "cublasLt64_13.dll", "cudnn64_9.dll", "cudnn_graph64_9.dll", "cufft64_12.dll",
+                 "nvrtc-builtins64_130.dll", "nvrtc64_130_0.dll", "nvJitLink_130_0.dll"],
+                CudaLibraries.SharedLibraries(
+                    ["torch_cuda.dll", "nvJitLink_130_0.dll", "cudnn_graph64_9.dll", "cufftw64_12.dll", "curand64_10.dll", "cudnn64_9.dll",
+                     "nvrtc64_130_0.dll", "cublasLt64_13.dll", "cudart64_13.dll", "cusparse64_12.dll", "nvrtc-builtins64_130.dll",
+                     "cufft64_12.dll", "cublas64_13.dll", "zlibwapi.dll", "cudnn64_9.lib"]));
+            Assert.Empty(CudaLibraries.SharedLibraries([]));
+            Assert.Equal(typeof(string), CudaLibraries.Locator?.ReturnType);
+            CudaLibraries.Share(withoutRuntime);
+            Assert.Throws<ArgumentException>(() => CudaLibraries.Share(" "));
+        }
+        finally
+        {
+            Directory.Delete(withoutRuntime, recursive: true);
+        }
+    }
 }
 
 /// <summary>

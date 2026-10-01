@@ -826,6 +826,18 @@ the core assembly and your model are shared, so contexts can exchange data.
 Sequence outputs work on any provider; ONNX Runtime materializes them in host memory — see
 [A sequence's elements live in host memory](limitations.md#a-sequences-elements-live-in-host-memory).
 
+#### Two CUDA backends share the NVIDIA libraries
+
+Every CUDA backend in a Windows process binds to one copy of each NVIDIA library it loads by
+name: the CUDA runtime, cuBLAS, cuDNN, cuFFT and the compilers they load. Where the PyTorch CUDA
+backend is deployed and its Python environment exists, that copy is the environment's, loaded
+before any backend loads its own, so an ONNX Runtime CUDA backend and a PyTorch one run in one
+process in either order — see
+[Beside an ONNX Runtime CUDA backend](pytorch-backend.md#cpu-and-cuda).
+`CudaLibraries.Directory` names the folder. Otherwise each backend loads what the system's DLL
+search finds; see
+[The ONNX Runtime CUDA backend runs on the cuDNN the system offers](limitations.md#the-onnx-runtime-cuda-backend-runs-on-the-cudnn-the-system-offers).
+
 #### Or keep it to two processes
 
 Two executables over a shared, backend-free model library suit separate jobs — a long training

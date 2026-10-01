@@ -1,4 +1,5 @@
 using Python.Runtime;
+using Shorokoo.Core.Backends;
 using Shorokoo.PythonHost;
 
 namespace Shorokoo.PyTorch;
@@ -101,6 +102,11 @@ internal sealed class TorchRuntime
 
     private static TorchRuntime Import(PythonEnvironment environment)
     {
+        // torch loads every library its CUDA build ships by path, so those are the copies every
+        // other CUDA backend in the process has to bind to: offered before the import, they are
+        // loaded now wherever no backend has loaded its own yet.
+        var cudaLibraries = environment.CudaLibraryDirectory;
+        if (cudaLibraries is not null) CudaLibraries.Share(cudaLibraries);
         using (PythonRuntime.Gil())
         {
             try
@@ -115,6 +121,17 @@ internal sealed class TorchRuntime
                     $"The Python environment at '{environment.Directory}' cannot import what the PyTorch "
                     + $"backend needs ({ex.Message}). Install torch and numpy into it, or leave "
                     + $"{PythonEnvironmentResolver.EnvironmentVariable} unset to have an environment provisioned.",
+                    ex);
+            }
+            catch (PythonException ex) when (cudaLibraries is not null && CudaLibraries.Conflict(cudaLibraries) is { } held)
+            {
+                throw new PythonEnvironmentException(PythonEnvironmentFailure.CudaLibraryConflict,
+                    $"PyTorch cannot load the CUDA libraries in '{cudaLibraries}' ({ex.Message}). This process "
+                    + $"already holds other copies of some of them ({held}), loaded by a CUDA backend that started "
+                    + "before PyTorch's environment was there. Those libraries load one another by name, so "
+                    + "PyTorch's copies bind to the ones held, and two releases do not mix. Start the process "
+                    + "again: with the environment there, every CUDA backend binds to PyTorch's copies. Or start "
+                    + "the PyTorch backend before the other CUDA backends.",
                     ex);
             }
         }

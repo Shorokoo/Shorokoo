@@ -9,7 +9,9 @@ dotnet add package Shorokoo.WinGPU
 ```
 
 Requires a CUDA-capable GPU and a CUDA 13.x runtime with cuDNN 9 for CUDA 13, the versions the
-bundled ONNX Runtime is built against. Referenced on its own, this backend is discovered at first use. Running on the card and
+bundled ONNX Runtime is built against. Beside the `Shorokoo.PyTorch.Cuda` backend, once its Python
+environment is provisioned, it runs on the CUDA libraries of that environment instead, which the
+two backends share. Referenced on its own, this backend is discovered at first use. Running on the card and
 the host in one process takes more than adding the CPU package too: both deliver their
 native ONNX Runtime at the same path, so two referenced the ordinary way are one of them
 deployed twice. See

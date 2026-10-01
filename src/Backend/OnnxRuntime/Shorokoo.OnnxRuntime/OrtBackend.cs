@@ -598,6 +598,9 @@ public abstract class OrtBackend : IShorokooBackend
     public static void AppendCuda(SessionOptions options, int deviceId, DeviceMemorySettings deviceMemory)
     {
         ArgumentNullException.ThrowIfNull(deviceMemory);
+        // Before the provider is loaded: it imports cuBLAS and loads cuDNN by name, so they bind to
+        // the copies the process's CUDA backends share, where they share any.
+        CudaLibraries.Prepare();
         // OrtCUDAProviderOptions is a SafeHandle that ORT takes as a bare IntPtr, exactly like
         // the SessionOptions above, so it needs the same `using`: the options are read during
         // AppendExecutionProvider_CUDA, well after the JIT has retired the local at its .Handle

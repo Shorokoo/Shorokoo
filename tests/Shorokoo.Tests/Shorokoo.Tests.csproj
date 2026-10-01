@@ -39,7 +39,7 @@
   </ItemGroup>
 
   <!--
-    Shorokoo no longer depends on ONNX Runtime directly. The platform-specific
+    Shorokoo does not depend on ONNX Runtime directly. The platform-specific
     backend is supplied by referencing exactly one Shorokoo.{Platform}
     project: Shorokoo.WinCPU, Shorokoo.WinGPU, or Shorokoo.LinuxCPU. Each ships
     its own ORT NuGet (with native libs) into bin; on first run,

@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using Shorokoo.Core.Backends;
 
 namespace Shorokoo.OnnxRuntime;
 
@@ -73,6 +74,9 @@ internal static class CudaInterop
         {
             if (_bound) return _memcpy;
             _bound = true;
+            // The runtime this resolves by name is the copy the process's CUDA backends share,
+            // where they share one.
+            CudaLibraries.Prepare();
             // Try rather than Load: both report a missing or unloadable CUDA runtime by returning
             // false, so there is nothing here to catch -- the caller reports the absence.
             if (NativeLibrary.TryLoad(LibraryName, out var handle)

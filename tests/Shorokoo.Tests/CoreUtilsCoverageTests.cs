@@ -1050,6 +1050,35 @@ public class CoreUtilsCoverageTests
         Assert.Equal(run.PeakBytes, context.RunStats.PeakBytes);
     }
 
+    /// <summary>
+    /// A run's outputs are memory of their own rather than blocks of its session's arena: with every
+    /// output kept, a run that hands its arena's unused blocks back as it ends leaves the arena
+    /// holding nothing — an output whose shape the session settled when it was built, one it learns
+    /// only as it runs, and a scalar carved out of the block a 4 MiB fill was freed from alike.
+    /// </summary>
+    [Fact]
+    public void TestAKeptOutputHoldsNothingOfItsSessionsArena()
+    {
+        using var context = new ComputeContext { RunSettings = new RunSettings { ShrinkArenaAfterRun = true } };
+        var filled = ArenaProbeModels.Filled(context);
+        var widened = context.Compile(ArenaProbeModels.Widened());
+        var product = ArenaProbeModels.MatMul(context);
+        static (long InUse, long Reserved) Held(CompiledGraph graph)
+        {
+            var arena = Assert.IsType<ArenaStatistics>(graph.ReadArenaStatistics());
+            return (arena.InUseBytes, arena.TotalAllocatedBytes);
+        }
+
+        var sum = filled.Execute(ArenaProbeModels.FilledShape(1 << 20))[0].ToTensorData();
+        var spread = widened.Execute(ArenaProbeModels.FilledShape(1 << 20))[0].ToTensorData();
+        var negated = product.Execute(ArenaProbeModels.MatMulOperand(64), ArenaProbeModels.MatMulOperand(64))[0].ToTensorData();
+
+        Assert.Equal((0L, 0L), Held(filled));
+        Assert.Equal((0L, 0L), Held(widened));
+        Assert.Equal((0L, 0L), Held(product));
+        Assert.Equal([1 << 20, 1 << 20, 0f], [sum.ValueAt<float>(0), spread.ValueAt<float>(999), negated.ValueAt<float>(4095)]);
+    }
+
     [Fact]
     public void TestTheFilledProbeSumsAsManyOnesAsTheShapeItIsFedAsksFor()
     {
@@ -2705,6 +2734,17 @@ internal static class ArenaProbeModels
 
     /// <inheritdoc cref="Filled"/>
     internal static TensorData<int64> FilledShape(long elements) => TensorData([1L], elements);
+
+    /// <summary>
+    /// <see cref="Filled"/>'s sum spread over a thousand elements: the output is made after the fill
+    /// is released, so an arena that serves it carves it out of the block the fill was freed from.
+    /// </summary>
+    internal static InternalComputationGraph Widened()
+    {
+        var shape = InputVector<int64>("shape");
+        var sum = OnnxOp.ReduceSum(OnnxOp.Expand(Vector(1f), shape), keepdims: false);
+        return new InternalComputationGraph([shape], [OnnxOp.Expand(sum, Vector(1000L))]);
+    }
 
     /// <summary>What a run of <see cref="Filled"/> summed.</summary>
     internal static float Sum(NamedModelParam[] outputs)

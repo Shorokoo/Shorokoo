@@ -751,6 +751,39 @@ public class GpuExecutionTests
     }
 
     /// <summary>
+    /// A one-shot run whose intermediates fill 256 MiB of the card and whose output is four
+    /// kilobytes, carved out of the block the fill was freed from, leaves the card holding the
+    /// output and nothing more once it returns, though the output is kept; and a compiled graph
+    /// that hands its arena's unused blocks back after the same run, or after one whose output is a
+    /// scalar, is left holding nothing in its arena.
+    /// </summary>
+    [CudaFact]
+    public void CudaProvider_AKeptOutputHoldsOnlyItsOwnBytesOnTheCardAndNothingOfItsSessionsArena()
+    {
+        const long MiB = 1024 * 1024;
+        using var ctx = new ComputeContext { RunSettings = new RunSettings { ShrinkArenaAfterRun = true } };
+        static long Card()
+        {
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            return DeviceMemory.Read()!.Value.ProcessBytes!.Value;
+        }
+
+        ctx.Execute(ArenaProbeModels.Widened(), ArenaProbeModels.FilledShape(1024))[0].ToTensorData().Delete();
+        var before = Card();
+        var spread = ctx.Execute(ArenaProbeModels.Widened(), ArenaProbeModels.FilledShape(64L << 20))[0].ToTensorData();
+        Assert.True(Card() - before < 16 * MiB);
+
+        var widened = ctx.Compile(ArenaProbeModels.Widened());
+        var filled = ArenaProbeModels.Filled(ctx);
+        var again = widened.Execute(ArenaProbeModels.FilledShape(64L << 20))[0].ToTensorData();
+        var sum = filled.Execute(ArenaProbeModels.FilledShape(64L << 20))[0].ToTensorData();
+        Assert.Equal(0L, Assert.IsType<ArenaStatistics>(widened.ReadArenaStatistics()).TotalAllocatedBytes);
+        Assert.Equal(0L, Assert.IsType<ArenaStatistics>(filled.ReadArenaStatistics()).TotalAllocatedBytes);
+        Assert.Equal([64 << 20, 64 << 20, 64 << 20], [spread.ValueAt<float>(999), again.ValueAt<float>(0), sum.ValueAt<float>(0)]);
+    }
+
+    /// <summary>
     /// A graph the provider cannot run whole: one output is computed on the card and one on the
     /// host, which is what <see cref="SessionOutputPlacement.Mixed"/ > is for, and the crossing
     /// is charged to the pinned host arena rather than to the device one. A graph with no node the

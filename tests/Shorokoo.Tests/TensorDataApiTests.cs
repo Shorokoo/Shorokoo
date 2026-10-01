@@ -66,25 +66,8 @@ public class TensorDataApiCoverageTests
         Assert.Equal(4, TensorDataWithSmallVals(DType.Float32, [4L]).As<float32>().AccessMemory().Length);
         Assert.Equal(4, TensorDataWithSmallVals(DType.Float64, [4L]).As<float64>().AccessMemory().Length);
 
-        Assert.Equal(4, TensorDataWithSmallVals(DType.Int8, [4L]).As<int8>().AccessModifiableMemory().Length);
-        Assert.Equal(4, TensorDataWithSmallVals(DType.Int16, [4L]).As<int16>().AccessModifiableMemory().Length);
-        Assert.Equal(4, TensorDataWithSmallVals(DType.Int32, [4L]).As<int32>().AccessModifiableMemory().Length);
-        Assert.Equal(4, TensorDataWithSmallVals(DType.Int64, [4L]).As<int64>().AccessModifiableMemory().Length);
-        Assert.Equal(4, TensorDataWithSmallVals(DType.UInt8, [4L]).As<uint8>().AccessModifiableMemory().Length);
-        Assert.Equal(4, TensorDataWithSmallVals(DType.UInt16, [4L]).As<uint16>().AccessModifiableMemory().Length);
-        Assert.Equal(4, TensorDataWithSmallVals(DType.UInt32, [4L]).As<uint32>().AccessModifiableMemory().Length);
-        Assert.Equal(4, TensorDataWithSmallVals(DType.UInt64, [4L]).As<uint64>().AccessModifiableMemory().Length);
-        Assert.Equal(4, TensorDataWithSmallVals(DType.Float16, [4L]).As<float16>().AccessModifiableMemory().Length);
-        Assert.Equal(4, TensorDataWithSmallVals(DType.BFloat16, [4L]).As<bfloat16>().AccessModifiableMemory().Length);
-        Assert.Equal(4, TensorDataWithSmallVals(DType.Float64, [4L]).As<float64>().AccessModifiableMemory().Length);
-
-        var f32 = TensorData(DType.Float32, [3L], 1f, 2f, 3f).As<float32>();
-        f32.AccessModifiableMemory()[1] = 9f;
-        Assert.Equal(9f, f32.AccessMemory()[1]);
-
         var raw = TensorData(DType.Float32, [2L], 1f, 2f);
         Assert.Equal(8, raw.AccessRawMemory().Length);
-        Assert.Equal(8, raw.AccessModifiableRawMemory().Length);
         raw.Dispose();
 
         var bytes = new byte[8];
@@ -109,13 +92,12 @@ public class TensorDataApiCoverageTests
         Assert.Throws<InvalidCastException>(() => f32.CopyMemory<double>());
         Assert.Throws<InvalidCastException>(() => f32.CopyMemory<int>());
         Assert.Throws<InvalidCastException>(() => f32.ValueAt<int>(0));
-        Assert.Throws<InvalidCastException>(() => f32.WriteMemory<long>(_ => { }));
-        Assert.Throws<InvalidCastException>(() => f32.AccessModifiableMemory<int>());
+        Assert.Throws<InvalidCastException>(() => f32.AccessMemory<long>());
         Assert.Equal(2.5f, f32.ValueAt<float>(1));
 
         var runtime = OnnxEngine.Eval(Scalar(2f) * Scalar(21f));
-        Assert.Throws<InvalidCastException>(() => runtime.AccessModifiableMemory<int>());
-        Assert.Throws<InvalidCastException>(() => runtime.WriteMemory<double>(_ => { }));
+        Assert.Throws<InvalidCastException>(() => runtime.AccessMemory<int>());
+        Assert.Throws<InvalidCastException>(() => runtime.CopyMemory<double>());
         Assert.Equal(42f, runtime.ValueAt<float>(0));
 
         var dead = TensorData([1L], 1f);
@@ -417,11 +399,8 @@ public class TensorDataApiCoverageTests
         Action[] reads =
         [
             () => td.AccessRawMemory(),
-            () => td.AccessModifiableRawMemory(),
             () => td.As<float32>().AccessMemory<float>(),
-            () => td.As<float32>().AccessModifiableMemory<float>(),
             () => td.As<float32>().AccessMemory(),
-            () => td.As<float32>().AccessModifiableMemory(),
             () => _ = td.Data,
             () => _ = td.As<float32>().DebugData,
             () => td.ToTensorValue(),
@@ -430,8 +409,7 @@ public class TensorDataApiCoverageTests
 
         // The backing-value read is a backend-backed tensor's alone: a host tensor holds managed
         // bytes and is not IOnnxData at all, so the cast would fail before the disposal check.
-        // Built from a runtime value on purpose -- CreateFromRawBytes makes a host tensor now,
-        // so the one constructor that still hands back a backend-backed tensor is this one.
+        // Built from a runtime value on purpose: CreateFromRawBytes makes a host tensor.
         var backendBacked = TensorData.Create(new Shape(2L), DType.Float32,
             OnnxUtils.CreateTensorValueFromRawData(new Shape(2L), DType.Float32, new byte[8]));
         backendBacked.Dispose();
@@ -444,7 +422,7 @@ public class TensorDataApiCoverageTests
     }
 
     /// <summary>A disposed sequence says so on every path to its elements, including the two that
-    /// used to defer: GetEnumerator validates before it hands back an iterator, and the empty
+    /// could defer: GetEnumerator validates before it hands back an iterator, and the empty
     /// sequence's indexer reports disposal ahead of the index it does not have.</summary>
     [Fact]
     public void TestEveryPathToADisposedSequencesElementsThrows()
@@ -519,22 +497,22 @@ public class TensorDataApiCoverageTests
             Assert.Throws<InvalidOperationException>(() => resident.ToHost()).Message);
     }
 
-    /// <summary>A tensor whose storage the provider kept refuses every read, naming the call that
-    /// brings it home rather than dereferencing a device address as a host one. Reachable on a
-    /// host-only machine only through a value that says it is not host-accessible.</summary>
     [Fact]
-    public void TestATensorLeftInProviderMemoryRefusesEveryReadAndSaysWhatBringsItHome()
+    public void TestATensorInProviderMemoryWhoseBackendWasNotRecordedIsReadByNothingAndStaysAlive()
     {
         var resident = new OnnxTensorData<float32>(new Shape(2L), new SpyTensorValue { IsHostAccessible = false });
         Assert.False(resident.IsHostResident);
 
-        var ex = Assert.Throws<InvalidOperationException>(() => resident.AccessMemory<float>().ToArray());
-        Assert.Contains("ToHost()", ex.Message);
-        Assert.Throws<InvalidOperationException>(() => resident.AccessRawMemory().ToArray());
-        Assert.Throws<InvalidOperationException>(() => resident.CopyRawMemory());
-        Assert.Throws<InvalidOperationException>(() => resident.ValueAt<float>(0));
-
-        // Metadata stays readable; it is the elements that are elsewhere.
+        Action[] reads =
+        [
+            () => resident.AccessMemory<float>().ToArray(),
+            () => resident.AccessRawMemory().ToArray(),
+            () => resident.CopyRawMemory(),
+            () => resident.CopyMemory<float>(),
+            () => resident.ValueAt<float>(0),
+            () => _ = resident.Data,
+        ];
+        Assert.All(reads, read => Assert.Contains("was not recorded", Assert.Throws<InvalidOperationException>(read).Message));
         Assert.Equal(2, resident.Shape.Dims[0]);
         Assert.False(resident.IsDisposed);
 
@@ -578,6 +556,20 @@ public class TensorDataApiCoverageTests
         Assert.Equal(1, numbers.ValueAt<int>(0));
         Assert.Equal(["a", "b"], built.Strings);
         Assert.Equal(["a", "b"], literal.Strings);
+        Assert.IsNotType<string[]>(built.Strings);
+    }
+
+    [Fact]
+    public void TestNoPublicMemberOfATensorHandsOutMemoryThatCanBeWritten()
+    {
+        Type[] writable = [typeof(Span<>), typeof(Memory<>)];
+        var members = typeof(TensorData).Assembly.GetExportedTypes()
+            .Where(t => typeof(TensorData).IsAssignableFrom(t) || t == typeof(TensorDataExtensions))
+            .SelectMany(t => t.GetMethods(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance
+                | System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.DeclaredOnly));
+
+        Assert.Empty(members.Where(m => m.ReturnType.IsGenericType && writable.Contains(m.ReturnType.GetGenericTypeDefinition())));
+        Assert.Contains(members, m => m.Name == nameof(TensorData.AccessMemory));
     }
 
     [Fact]
@@ -629,19 +621,6 @@ public class TensorDataApiCoverageTests
     {
         var a = InputVector<float32>("a");
         return new InternalComputationGraph([a], [a + a]);
-    }
-
-    [Fact]
-    public void TestWritingToALiteralIsSeenByTheNextRunAndNotTheOneBeforeIt()
-    {
-        var a = InputVector<float32>("a");
-        var graph = new InternalComputationGraph([a], [a + a]);
-        var t = TensorData([2L], (float[])[1f, 2f]);
-        var context = new ComputeContext();
-
-        Assert.Equal([2f, 4f], Floats(context.Execute(graph, t.Shared())[0]));
-        t.As<float32>().AccessModifiableMemory<float>()[0] = 99f;
-        Assert.Equal([198f, 4f], Floats(context.Execute(graph, t.Shared())[0]));
     }
 
     [Fact]
@@ -822,8 +801,4 @@ public class TensorDataApiCoverageTests
             .As<float32>().CopyMemory<float>());
         Assert.False(fill.IsDisposed);
     }
-
-    private static float[] Floats(NamedModelParam param)
-        => [.. param.ToTensorData().As<float32>().AccessMemory<float>()];
-
 }

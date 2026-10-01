@@ -154,8 +154,9 @@ namespace Shorokoo.Runtime
     /// </summary>
     internal sealed class RunFeeds : IDisposable
     {
-        // How many times a read goes back for a copy a concurrent write retired between its being
-        // found and its being locked. Each round needs another write landing in that window.
+        // How many times a read goes back for a copy retired between its being found and its being
+        // locked — its source letting its copies go on another thread, as a training step does of
+        // its batch's. Each round needs another release landing in that window.
         private const int CopyRetries = 8;
 
         private readonly ComputeContext _context;
@@ -425,7 +426,7 @@ namespace Shorokoo.Runtime
         /// memory, against the plan its session was chosen by.
         ///
         /// <para>A copy the plan counted always fits. So does one made in place of the copy the run
-        /// meant to use — retired by a write, or taken, before the run held it — whose memory has
+        /// meant to use — retired by its source, or taken, before the run held it — whose memory has
         /// gone back: the new one only takes its room. Where that memory is still held, because
         /// another run is reading the copy, both are on the card at once, which the plan did not
         /// count; that is refused where it would leave the session's arena less than its
@@ -669,7 +670,7 @@ namespace Shorokoo.Runtime
                 }
                 catch (ObjectDisposedException) when (copy.IsDisposed && attempt < CopyRetries)
                 {
-                    // Retired by a write between being found and being locked: make the next one.
+                    // Retired between being found and being locked: make the next one.
                 }
             }
         }

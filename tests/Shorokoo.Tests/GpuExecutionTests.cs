@@ -178,7 +178,6 @@ public class GpuExecutionTests
         Assert.Contains("asks this compute context for 33554432 bytes of CUDA device 0 memory", refused.Message);
         Assert.Contains("is 67108864 bytes, and 50331648 bytes of it are attached", refused.Message);
         Assert.Throws<InvalidOperationException>(() => tooBig.To(budgeted));
-        Assert.Throws<InvalidOperationException>(() => budgeted.AllocateUninitialized<float32>(new Shape(8L << 20)));
         var onTheCard = tooBig.CopyTo(uncapped);
         Assert.False(onTheCard.IsHostResident);
         Assert.Throws<InvalidOperationException>(() => onTheCard.To(budgeted));
@@ -328,10 +327,10 @@ public class GpuExecutionTests
     /// handed over where it is, and one in host memory as the card copy it already holds where it
     /// has one, and a fresh card copy otherwise — dead afterwards either way. Fed
     /// <c>.Shared()</c>, a host tensor is copied onto the card once, attached to the context that
-    /// read it, and read there by every run after until it is written.
+    /// read it, and read there by every run after until the tensor lets its copies go.
     /// </summary>
     [CudaFact]
-    public void CudaProvider_AFeedIsConsumedOnTheCardAndAHostOneIsReadThroughOneCopyUntilWritten()
+    public void CudaProvider_AFeedIsConsumedOnTheCardAndAHostOneIsReadThroughOneCopyUntilItLetsItGo()
     {
         using var ctx = new ComputeContext();
         var a = InputVector<float32>();
@@ -341,7 +340,7 @@ public class GpuExecutionTests
         {
             var output = compiled.Execute(x, y)[0].ToTensorData();
             ctx.Detach(output);
-            return output.ToHost().As<float32>().CopyMemory<float>();
+            return output.As<float32>().CopyMemory<float>();
         }
         var onHost = TensorData([2L], 10f, 20f);
         var onCard = TensorData([2L], 1f, 2f).To(ctx);
@@ -354,12 +353,36 @@ public class GpuExecutionTests
         Assert.Equal([11f, 42f], Run(TensorData([2L], 1f, 2f), onHost.Shared()));
         Assert.Same(copy, Assert.Single(ctx.Tensors, t => !t.IsHostResident));
 
-        onHost.As<float32>().AccessModifiableMemory<float>()[0] = 30f;
+        onHost.ReleaseRunCopies();
         Assert.True(copy.IsDisposed);
-        Assert.Equal([31f, 42f], Run(TensorData([2L], 1f, 2f), onHost.Shared()));
-        Assert.Equal([31f, 42f], Run(TensorData([2L], 1f, 2f), onHost));
+        Assert.Equal([11f, 42f], Run(TensorData([2L], 1f, 2f), onHost.Shared()));
+        Assert.Equal([11f, 42f], Run(TensorData([2L], 1f, 2f), onHost));
         Assert.True(onHost.IsDisposed);
         Assert.DoesNotContain(ctx.Tensors, t => !t.IsHostResident);
+    }
+
+    /// <summary>
+    /// Every read of a tensor on the card copies its values to the host and returns them; the
+    /// tensor stays where it is, alive, and the next run reads it there.
+    /// </summary>
+    [CudaFact]
+    public void CudaProvider_ReadingATensorOnTheCardCopiesItsValuesToTheHostAndLeavesItThere()
+    {
+        using var ctx = new ComputeContext();
+        var a = InputVector<float32>();
+        var doubled = ctx.Compile(new InternalComputationGraph([a], [a + a]));
+        var onCard = doubled.Execute(TensorData([3L], 1f, 2f, 3f))[0].ToTensorData().As<float32>();
+        float[] values = [2f, 4f, 6f];
+
+        Assert.Equal((MemorySpace.Cuda(0), false), (onCard.Space, onCard.IsHostResident));
+        Assert.Equal(values, onCard.AccessMemory().ToArray());
+        Assert.Equal(6f, onCard.AccessMemory()[2]);
+        Assert.Equal(values, onCard.CopyMemory());
+        Assert.Equal(4f, onCard.ValueAt(1));
+        Assert.Equal(System.Runtime.InteropServices.MemoryMarshal.AsBytes<float>(values).ToArray(), onCard.CopyRawMemory());
+        Assert.Equal<object>([2f, 4f, 6f], onCard.DebugData);
+        Assert.Equal((MemorySpace.Cuda(0), false, false), (onCard.Space, onCard.IsHostResident, onCard.IsDisposed));
+        Assert.Equal([4f, 8f, 12f], doubled.Execute(onCard)[0].ToTensorData().As<float32>().CopyMemory());
     }
 
     /// <summary>
@@ -886,7 +909,8 @@ public class GpuExecutionTests
         using var ctx = new ComputeContext();
         Assert.True(DeviceMemory.Read()!.Value.ProcessBytes > 0);
 
-        var held = ctx.AllocateUninitialized<float32>(new Shape(256L << 20));
+        var shape = InputVector<int64>("shape");
+        var held = ctx.Execute(new InternalComputationGraph([shape], [OnnxOp.Expand(Vector(1f), shape)]), TensorData([1L], 256L << 20))[0].ToTensorData();
         DeviceMemoryReading reading;
         try { reading = DeviceMemory.Read()!.Value; }
         finally { held.Delete(); }
@@ -976,6 +1000,6 @@ public class GpuExecutionTests
             TensorData([], left),
             TensorData([], right));
 
-        return results[0].ToTensorData().ToHost().As<float32>().ValueAt<float>(0);
+        return results[0].ToTensorData().As<float32>().ValueAt<float>(0);
     }
 }

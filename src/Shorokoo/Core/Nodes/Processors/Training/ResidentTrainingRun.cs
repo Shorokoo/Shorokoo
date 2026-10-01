@@ -25,8 +25,9 @@ namespace Shorokoo
     /// the training device's memory, exactly where the run left them. You can save it —
     /// <see cref="TrainingCheckpoint.Save(string, CheckpointComponents?)"/> and the <c>.skpt</c> saves
     /// write it straight out of device memory through one bounded host buffer — resume from it, or
-    /// feed it to another step; <see cref="TrainingCheckpoint.ToHost"/> is what brings it into host
-    /// memory, for reading its elements. State a run still holds is released by
+    /// feed it to another step, or read its tensors' values, which copies them to the host and
+    /// leaves them where they are; <see cref="TrainingCheckpoint.ToHost"/> makes a copy of the whole
+    /// state in host memory. State a run still holds is released by
     /// <see cref="Dispose"/>, so a run that never takes a checkpoint trains and discards.</para>
     ///
     /// <para><b>What each step consumes.</b> A step feeds its inputs the way

@@ -9,8 +9,7 @@ namespace Shorokoo
 {
     /// <summary>
     /// Who holds a reader lock taken outside any run, as a refusal of the tensor or sequence names
-    /// it: a copy being made out of its memory, or a write into it. Either way the memory may not
-    /// end while it is held.
+    /// it: a copy being made out of its memory, which may not end while it is held.
     /// </summary>
     internal sealed class OutsideARun
     {
@@ -19,8 +18,6 @@ namespace Shorokoo
         private OutsideARun(string what) => _what = what;
 
         internal static OutsideARun CopyingOut { get; } = new("a copy being made of its contents");
-
-        internal static OutsideARun Writing { get; } = new("a write into its contents");
 
         /// <inheritdoc/>
         public override string ToString() => _what;
@@ -184,7 +181,7 @@ namespace Shorokoo
         }
 
         /// <summary>
-        /// Ends a copy its source no longer wants — the source was written to, or died. It is marked
+        /// Ends a copy its source no longer wants — the source let its copies go, or died. It is marked
         /// dead with <paramref name="death"/> and its memory released now, or when the last reader
         /// returns; unlike a deletion it asks no run to stop, since a run reading the old contents
         /// is reading what it was fed. An allocation already dead is left as it is: whoever ended it

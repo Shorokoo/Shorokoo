@@ -21,8 +21,8 @@ namespace Shorokoo
     {
         /// <summary>
         /// Evaluates the given output variables and returns their values, in order, in the memory of
-        /// the default backend — on a card, the card's; <see cref="TensorData.ToHost"/> brings one to
-        /// the host. The outputs must come from a concretized graph: a <c>[Module]</c>'s output is
+        /// the default backend — on a card, the card's. Reading one's values copies them to the host
+        /// and leaves it where it is. The outputs must come from a concretized graph: a <c>[Module]</c>'s output is
         /// refused with the lowering hint rather than failing deep inside ONNX Runtime.
         /// </summary>
         public static TensorData[] Eval(Variable[] outputs)

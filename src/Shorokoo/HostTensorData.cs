@@ -21,14 +21,11 @@ namespace Shorokoo
     /// they are how a graph is <i>described</i>. Describing one therefore needs no execution
     /// provider, no native runtime, and no deployed backend at all.</para>
     ///
-    /// <para>It did before. Every literal went through
-    /// <c>DefaultBackend.Instance.CreateTensor</c>, so the node definition table's own tensors
-    /// resolved the process-wide backend the first time anything touched a graph — which meant a
-    /// program that only wanted to build a model and export it as ONNX still had to deploy a
-    /// runtime to do it. The tensor arrives on a backend when it is fed to a session, and not
-    /// before: a session is handed a runtime value, never a managed array, so a run reads this
-    /// tensor through a copy its backend builds — held by this tensor for the next run, a tensor in
-    /// its own right (<see cref="TensorData.CopyAt"/>).</para>
+    /// <para>Building one resolves no backend, so a program that only builds a model and exports
+    /// it as ONNX needs no runtime deployed. The tensor arrives on a backend when it is fed to a
+    /// session, and not before: a session is handed a runtime value, never a managed array, so a
+    /// run reads this tensor through a copy its backend builds — held by this tensor for the next
+    /// run, a tensor in its own right (<see cref="TensorData.CopyAt"/>).</para>
     ///
     /// <para>String tensors are not held here: their elements are variable-length and
     /// reference-typed, so they do not fit a flat byte buffer — see
@@ -45,8 +42,9 @@ namespace Shorokoo
         /// Creates a tensor of <paramref name="shape"/> holding a copy of <paramref name="bytes"/>.
         ///
         /// <para>A copy, so that the tensor is the only name for its memory: holding the caller's
-        /// array would leave a second one, through which a write reaches the tensor without it
-        /// knowing — and a run that had copied the old contents would go on reading them.</para>
+        /// array would leave a second one, through which a write would change contents that are
+        /// fixed when the tensor is built — and a run that had copied them would go on reading the
+        /// old ones.</para>
         /// </summary>
         public HostTensorData(Shape shape, byte[] bytes)
             : this(shape, [.. bytes ?? throw new ArgumentNullException(nameof(bytes))], OnnxUtils.GetDType<T>())
@@ -109,21 +107,6 @@ namespace Shorokoo
             }
         }
 
-        /// <summary>
-        /// A writable span over the elements. Taking it retires every copy a run made of these
-        /// bytes: the next run builds a fresh one from what was written, and a run still reading an
-        /// old copy finishes on it — the copy is released only when that run returns, because a
-        /// value handed to a session is a bare pointer from then on and freeing one under a running
-        /// read is the use-after-free the reader lock exists to stop (Shorokoo/Shorokoo#366).
-        /// </summary>
-        private protected override Span<V> AccessModifiableElements<V>()
-        {
-            ThrowIfDisposed();
-            var bytes = Bytes;
-            Written();
-            return MemoryMarshal.Cast<byte, V>(bytes.AsSpan());
-        }
-
         /// <inheritdoc/>
         private protected override ReadOnlySpan<V> AccessElements<V>()
         {
@@ -131,18 +114,8 @@ namespace Shorokoo
             return MemoryMarshal.Cast<byte, V>(Bytes);
         }
 
-        /// <summary>A writable byte span over the storage, retiring the copies runs made of it as
-        /// <see cref="TensorData.AccessModifiableMemory{V}"/> does.</summary>
-        public override Span<byte> AccessModifiableRawMemory()
-        {
-            ThrowIfDisposed();
-            var bytes = Bytes;
-            Written();
-            return bytes;
-        }
-
         /// <inheritdoc/>
-        public override ReadOnlySpan<byte> AccessRawMemory()
+        private protected override ReadOnlySpan<byte> AccessRawStorage()
         {
             ThrowIfDisposed();
             return Bytes;

@@ -314,14 +314,6 @@ namespace Shorokoo
         /// </summary>
         private protected abstract IShorokooTensorValue BuildValueOn(IShorokooBackend backend);
 
-        /// <summary>
-        /// Called when one of this sequence's own elements is written: every sequence value runs
-        /// built from it was copied from the old contents, so each is retired and the next run builds
-        /// a fresh one — the rule a tensor's own copies follow, applied to the copies of the sequence
-        /// holding it.
-        /// </summary>
-        internal void ElementWritten() => RetireCopies();
-
         /// <summary>Retires every copy runs built of this sequence, for a caller that knows they will
         /// not be read again soon; see <see cref="TensorData.ReleaseRunCopies"/>.</summary>
         internal void ReleaseRunCopies() => RetireCopies();
@@ -434,9 +426,6 @@ namespace Shorokoo
             internal ListTensorDataSequence(List<TensorData<T>> elements)
             {
                 _elements = elements;
-                // Each element is this sequence's own, and what a run builds from this sequence is
-                // copied from them: a write to one has to retire that too.
-                foreach (var element in elements) element.BelongsTo(this);
             }
 
             public override int Count
@@ -465,7 +454,7 @@ namespace Shorokoo
             /// (Shorokoo/Shorokoo#180). The copy is the same one <c>TensorDataSequence.Create</c>
             /// makes for the same reason, taken on this backend rather than the process default,
             /// and it is made straight from each element's contents: through nothing held on the
-            /// element that a write to it could retire mid-copy.</para>
+            /// element that could be retired mid-copy.</para>
             ///
             /// <para>The elements are read without the liveness check, as the caller holds them: a
             /// run reading or consuming this sequence holds every element with it.</para>
@@ -509,15 +498,8 @@ namespace Shorokoo
                 {
                     try
                     {
-                        switch (element.TryTake(death))
-                        {
-                            case TakeOutcome.Taken:
-                                element.ReleaseTaken();
-                                break;
-                            case TakeOutcome.Locked:
-                                element.Leaves(this);
-                                break;
-                        }
+                        // One a run is reading on its own account lives on by itself.
+                        if (element.TryTake(death) == TakeOutcome.Taken) element.ReleaseTaken();
                     }
                     catch (Exception e)
                     {
@@ -756,7 +738,7 @@ namespace Shorokoo
         /// The backing backend-runtime sequence value, which this sequence owns: disposing the
         /// sequence releases it, and nothing else may hold or free it.
         /// </summary>
-        public IShorokooTensorValue Value
+        internal IShorokooTensorValue Value
         {
             get
             {
@@ -764,6 +746,9 @@ namespace Shorokoo
                 return backing;
             }
         }
+
+        /// <inheritdoc/>
+        IShorokooTensorValue IOnnxData.Value => Value;
 
         public override int Count => Reading(backing.GetValueCount);
 

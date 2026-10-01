@@ -14,9 +14,8 @@ namespace Shorokoo.Runtime
     /// <item><b>What it counts.</b> The bytes of the live tensors attached to the context that are in
     /// its memory (<see cref="ReadDeviceMemoryUse"/>), plus — while one of its runs executes — that
     /// run's arena, which the session was built to cap at what the attached tensors leave.</item>
-    /// <item><b>Transfers.</b> <see cref="TensorData.To"/>, <see cref="TensorData.CopyTo"/>,
-    /// <see cref="AllocateUninitialized(Shape, DType)"/> and the copies a run makes of memory it
-    /// cannot read where it is are refused, naming the budget, what is attached and what was asked
+    /// <item><b>Transfers.</b> <see cref="TensorData.To"/>, <see cref="TensorData.CopyTo"/> and the
+    /// copies a run makes of memory it cannot read where it is are refused, naming the budget, what is attached and what was asked
     /// for, when what is attached plus what they would add would pass the limit.</item>
     /// <item><b>Runs.</b> A session's arena limit is the budget less what the context holds in its
     /// memory outside that arena for the length of the run — the <i>discount</i>. A session is kept

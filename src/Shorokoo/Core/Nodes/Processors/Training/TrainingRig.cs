@@ -2712,9 +2712,10 @@ namespace Shorokoo
         ///
         /// <para>Each call hands back the whole training state where the step left it — host memory
         /// on a CPU backend, the card's memory on a GPU one — and the next step reads it there, so
-        /// nothing crosses the bus between steps. <see cref="TrainingCheckpoint.ToHost"/> brings a
-        /// checkpoint into host memory where its elements are to be read; its loss is read on the
-        /// host already (<see cref="TrainingCheckpoint.Loss"/>). A loop that does not need every
+        /// nothing crosses the bus between steps. Reading a state tensor's values copies them to the
+        /// host and leaves the tensor where it is; <see cref="TrainingCheckpoint.ToHost"/> makes a
+        /// copy of the whole state in host memory. The loss is a plain number
+        /// (<see cref="TrainingCheckpoint.Loss"/>). A loop that does not need every
         /// step's checkpoint can run through <see cref="BeginResidentRun(TrainingCheckpoint?)"/>,
         /// which owns the state between steps and releases each step's as the next supersedes
         /// it.</para>
@@ -3195,7 +3196,8 @@ namespace Shorokoo
         /// One training step. Its three state outputs (params, model state, optimizer state) come
         /// back where the step ran — on a GPU backend, the card's memory — so the next step feeds
         /// them without crossing the bus; the returned checkpoint's tensors are there.
-        /// The loss is read on the host, explicitly: it is a scalar every step reports.
+        /// The loss is read where the step left it — a read copies it to the host — since every step
+        /// reports it, and its tensor is released once read.
         /// <paramref name="call"/> is how a message about the run names it, <c>TrainStep</c> where
         /// none is given. <paramref name="reclaimSuperseded"/> says whether the state this step
         /// supersedes is a checkpoint the caller holds, garbage only once the caller drops it
@@ -3370,14 +3372,11 @@ namespace Shorokoo
                 updatedOptimizerState = new TensorDataStruct(OptimizerStateDef, updatedOptStateFields);
                 StepOutputFaultInjection?.Invoke(results);
 
-                // The loss follows the state outputs, where the step left it: moved to the host to be
-                // read, and read through the rooted accessor, not a bare span. Everything past the
-                // state outputs is released below: the state is the resident run's to own or the
-                // checkpoint's to carry, the rest is a step's worth of outputs nobody keeps.
-                var lossTensor = results[stateOutputCount].ToTensorData<float32>();
-                var lossOnHost = lossTensor.ToHost();
-                lossValue = lossOnHost.As<float32>().ValueAt<float>(0);
-                if (!ReferenceEquals(lossOnHost, lossTensor)) lossOnHost.Dispose();
+                // The loss follows the state outputs, where the step left it, and is read from there
+                // through the rooted accessor, not a bare span. Everything past the state outputs is
+                // released below: the state is the resident run's to own or the checkpoint's to
+                // carry, the rest is a step's worth of outputs nobody keeps.
+                lossValue = results[stateOutputCount].ToTensorData<float32>().ValueAt<float>(0);
                 // Graph outputs after the loss: one per scheduled hyperparameter, the value this step applied.
                 for (int j = 0; j < _scheduledHyperparameterOutputs.Length; j++)
                     applied[_scheduledHyperparameterOutputs[j]] =
@@ -3535,8 +3534,8 @@ namespace Shorokoo
         /// read them has returned.
         ///
         /// <para>A run reads memory it cannot address — a host tensor on a card, and every managed
-        /// array on any backend — through a copy the tensor holds and reuses until it is written or
-        /// dies, which is right for a tensor read again and again. A batch is read once a step: a
+        /// array on any backend — through a copy the tensor holds and reuses for as long as it
+        /// lives, which is right for a tensor read again and again. A batch is read once a step: a
         /// dataset fed <c>.Shared()</c> epoch after epoch would otherwise keep a copy of every batch
         /// in the run's memory for as long as the dataset lives — on a card, through an allocator
         /// that never shrinks, every batch of it on the card at once. So a step lets go of them as it

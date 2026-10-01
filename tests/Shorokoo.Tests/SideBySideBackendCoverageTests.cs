@@ -556,7 +556,7 @@ internal static class SideBySideModel
     }
 
     internal static float[] Floats(NamedModelParam param)
-        => param.ToTensorData().ToHost().As<float32>().CopyMemory<float>();
+        => param.ToTensorData().As<float32>().CopyMemory<float>();
 
     /// <summary>
     /// What two runtimes running on the <i>same</i> device may differ by, which is very little:

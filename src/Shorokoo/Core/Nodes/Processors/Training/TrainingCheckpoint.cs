@@ -220,12 +220,13 @@ namespace Shorokoo
         public TrainingCheckpoint TryConsume() => Derive(feedMode: SharedInputMode.TryConsume);
 
         /// <summary>
-        /// This checkpoint with its state in host memory, where its elements can be read. A
-        /// checkpoint a training run hands out keeps its tensors where the run left them — on a GPU,
-        /// the training device's memory — and nothing needs them on the host to save, resume or
-        /// train from it; reading the elements is what does. So this copies each tensor the host
-        /// cannot read into host memory of the new checkpoint's own, and takes each one it can as it
-        /// is: the very same checkpoint where every tensor already is host-readable.
+        /// This checkpoint with its state in host memory. A checkpoint a training run hands out
+        /// keeps its tensors where the run left them — on a GPU, the training device's memory — and
+        /// nothing needs them on the host to save, resume or train from it, or to read their values,
+        /// which copies them to the host and leaves each tensor where it is. This is for the state
+        /// wanted in host memory as a whole: it copies each tensor the host cannot read into host
+        /// memory of the new checkpoint's own, and takes each one it can as it is: the very same
+        /// checkpoint where every tensor already is host-readable.
         ///
         /// <para>Every other slot — counters, rig, loss, applied hyperparameters, history and
         /// <see cref="FeedMode"/> — carries through. The feed mode does because a tensor already

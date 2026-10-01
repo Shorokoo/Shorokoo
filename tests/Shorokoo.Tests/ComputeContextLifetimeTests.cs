@@ -61,13 +61,12 @@ public class ComputeContextLifetimeCoverageTests
         var placed = Sample().To(context);
         var copied = Sample().CopyTo(context);
         var output = compiled.Execute(a.Shared(), b.Shared())[0].ToTensorData();
-        var allocated = context.AllocateUninitialized<float32>(new Shape(4L));
 
         context.Dispose();
 
         Assert.True(compiled.IsDisposed);
         Assert.Empty(context.Tensors);
-        Assert.All((TensorData[])[placed, copied, output, allocated, a, b], t => Assert.False(t.IsDisposed));
+        Assert.All((TensorData[])[placed, copied, output, a, b], t => Assert.False(t.IsDisposed));
         Assert.Equal([1f, 2f, 3f, 4f], Floats(placed));
         Assert.Equal([1f, 2f, 3f, 4f], Floats(copied));
         Assert.Equal(expected, Floats(output));
@@ -294,53 +293,16 @@ public class ComputeContextLifetimeCoverageTests
         var passthrough = context.Compile(new InternalComputationGraph([x], [x]), [[4L]], trainingStep: false);
         var source = Sample();
         var output = passthrough.Execute(source.Shared())[0].ToTensorData();
+        var copy = source.CopyHeldAt(TensorData.RunMemoryOf(context.ResolvedBackend, source.DType))!;
 
-        output.As<float32>().WriteMemory<float>(span => span.Fill(9f));
-
-        Assert.Equal([1f, 2f, 3f, 4f], Floats(passthrough.Execute(source.Shared())[0].ToTensorData()));
+        Assert.False(SameMemory(output, copy));
+        Assert.Equal([1f, 2f, 3f, 4f], Floats(output));
 
         var doubled = x * 2f;
         var twice = context.Compile(new InternalComputationGraph([x], [doubled, doubled]), [[4L]], trainingStep: false)
             .Execute(Sample());
-        twice[0].ToTensorData().As<float32>().WriteMemory<float>(span => span.Fill(9f));
+        Assert.False(SameMemory(twice[0].ToTensorData(), twice[1].ToTensorData()));
         Assert.Equal([2f, 4f, 6f, 8f], Floats(twice[1].ToTensorData()));
-    }
-
-    [Fact]
-    public void TestACopyARunReadsInATensorsPlaceCannotBeWrittenSoEveryLaterReadSeesTheTensor()
-    {
-        using var context = new ComputeContext();
-        var compiled = context.Compile(Doubling());
-        var source = Sample();
-        compiled.Execute(source.Shared());
-        var copy = source.CopyHeldAt(TensorData.RunMemoryOf(context.ResolvedBackend, source.DType))!;
-
-        Assert.Throws<InvalidOperationException>(() => copy.As<float32>().WriteMemory<float>(span => span.Fill(9f)));
-        Assert.Equal([2f, 4f, 6f, 8f], Floats(compiled.Execute(source.Shared())[0].ToTensorData()));
-    }
-
-    [Fact]
-    public void TestATensorBeingWrittenCannotBeConsumedOrDeletedUntilTheWriteIsDone()
-    {
-        using var context = new ComputeContext();
-        var compiled = context.Compile(Doubling());
-        var written = Sample();
-        using var writing = new ManualResetEventSlim();
-        using var release = new ManualResetEventSlim();
-        var write = Task.Run(() => written.As<float32>().WriteMemory<float>(span =>
-        {
-            writing.Set();
-            release.Wait(TimeSpan.FromSeconds(10));
-            span.Fill(5f);
-        }));
-        Assert.True(writing.Wait(TimeSpan.FromSeconds(10)));
-
-        Assert.Throws<InvalidOperationException>(() => compiled.Execute(written));
-        Assert.Throws<InvalidOperationException>(written.Delete);
-
-        release.Set();
-        Assert.True(write.Wait(TimeSpan.FromSeconds(10)));
-        Assert.Equal([10f, 10f, 10f, 10f], Floats(compiled.Execute(written)[0].ToTensorData()));
     }
 
     [Fact]
@@ -394,69 +356,6 @@ public class ComputeContextLifetimeCoverageTests
     private static float[] Feed() => [.. Enumerable.Range(0, Wide).Select(i => (float)(i % 7))];
 
     private static HostTensorData<float32> Wide32() => (HostTensorData<float32>)TensorData([(long)Wide], Feed());
-
-    /// <summary>
-    /// Shorokoo/Shorokoo#366: writing to a tensor on one thread while a run on another reads it
-    /// used to free the buffer the execution provider was reading. The write retires the copy the
-    /// run reads through, and the retired copy waits for the run.
-    ///
-    /// <para>A round counts only where the write landed inside the run: where the run still held
-    /// the copy once the write was done. A write that lost the race to the run's end puts nothing
-    /// to the product, and is retried rather than taken for a pass.</para>
-    /// </summary>
-    [Fact]
-    public void TestATensorWrittenOnAnotherThreadStaysValidForTheRunFeedingIt()
-    {
-        using var context = new ComputeContext();
-        var (graph, expected) = Chain();
-        var compiled = context.Compile(graph);
-        var copyAt = TensorData.RunMemoryOf(DefaultBackend.Instance, DType.Float32);
-        var landed = 0;
-
-        for (int round = 0; round < 20 && landed < 3; round++)
-        {
-            var fed = Wide32();
-            var ran = false;
-            using var spinning = new ManualResetEventSlim();
-            var other = Task.Run(() =>
-            {
-                spinning.Set();
-                var spin = new SpinWait();
-                TensorData? held;
-                while ((held = fed.CopyHeldAt(copyAt)) is not { IsLocked: true } && !Volatile.Read(ref ran))
-                    spin.SpinOnce(sleep1Threshold: -1);
-                fed.AccessModifiableMemory<float>()[0] = 99f;
-                return held is { IsLocked: true };
-            });
-            Assert.True(spinning.Wait(TimeSpan.FromSeconds(10)));
-
-            float[] result;
-            try { result = Floats(compiled.Execute(fed.Shared())[0].ToTensorData()); }
-            finally { Volatile.Write(ref ran, true); }
-            var inside = other.Result;
-
-            Assert.Equal(expected, result);
-            if (inside) landed++;
-        }
-
-        Assert.NotEqual(0, landed);
-    }
-
-    [Fact]
-    public void TestARunReadingATensorWhileItIsWrittenLeavesNothingStaleForTheNextRun()
-    {
-        using var context = new ComputeContext();
-        var t = Sample();
-
-        t.As<float32>().WriteMemory<float>(span =>
-        {
-            span[0] = 9f;
-            context.Execute(Doubling(), t.Shared());
-            span[1] = 9f;
-        });
-
-        Assert.Equal([18f, 18f, 6f, 8f], Floats(context.Execute(Doubling(), t.Shared())[0].ToTensorData()));
-    }
 
     [Fact]
     public void TestATensorARunConsumedKeepsNeitherTheGraphNorTheContextThatRanItAlive()
@@ -935,25 +834,35 @@ public class ComputeContextLifetimeCoverageTests
     }
 
     [Fact]
-    public void TestAnOutputTheRuntimeFoldsToAConstantIsMemoryOfItsOwnThatAWriteDoesNotCarryIntoAnotherRun()
+    public void TestAnOutputTheRuntimeFoldsToAConstantIsMemoryOfItsOwnOnEveryRun()
     {
         using var context = new ComputeContext();
         var x = InputVector<float32>("x");
-        float[] AfterAWrite(Variable output)
+        float[] ThreeRuns(Variable output)
         {
             var compiled = context.Compile(new InternalComputationGraph([x], [output]), [[4L]], trainingStep: false);
-            TensorData<float32> Run() => compiled.Execute(Sample())[0].ToTensorData().As<float32>();
-            var (first, second) = (Run(), Run());
-            first.WriteMemory<float>(written => written.Fill(9f));
-            return [.. second.CopyMemory<float>(), .. Run().CopyMemory<float>()];
+            TensorData[] runs = [.. Enumerable.Range(0, 3).Select(_ => compiled.Execute(Sample())[0].ToTensorData())];
+            Assert.False(SameMemory(runs[0], runs[1]) || SameMemory(runs[0], runs[2]) || SameMemory(runs[1], runs[2]));
+            return [.. runs.SelectMany(run => run.As<float32>().CopyMemory<float>())];
         }
 
-        Assert.Equal([1f, 1f, 1f, 1f, 1f, 1f, 1f, 1f],
-            AfterAWrite(OnnxOp.ConstantOfShape(OnnxOp.Shape(x), TensorData(DType.Float32, [1L], 1f).MoveToAttribute())));
-        Assert.Equal([1f, 2f, 3f, 4f, 1f, 2f, 3f, 4f], AfterAWrite(Vector(1f, 2f, 3f, 4f)));
-        Assert.Equal([1f, 2f, 3f, 4f, 1f, 2f, 3f, 4f], AfterAWrite(OnnxOp.Identity(Vector(1f, 2f, 3f, 4f), rank: 1)));
-        Assert.Equal([1f, 2f, 3f, 4f, 1f, 2f, 3f, 4f], AfterAWrite(OnnxOp.Reshape(Vector(1f, 2f, 3f, 4f), Vector(2L, 2L), allowZero: false)));
-        Assert.Equal([11f, 22f, 33f, 44f, 11f, 22f, 33f, 44f], AfterAWrite(Vector(1f, 2f, 3f, 4f) + Vector(10f, 20f, 30f, 40f)));
+        Assert.Equal(Enumerable.Repeat(1f, 12),
+            ThreeRuns(OnnxOp.ConstantOfShape(OnnxOp.Shape(x), TensorData(DType.Float32, [1L], 1f).MoveToAttribute())));
+        Assert.Equal(Thrice(1f, 2f, 3f, 4f), ThreeRuns(Vector(1f, 2f, 3f, 4f)));
+        Assert.Equal(Thrice(1f, 2f, 3f, 4f), ThreeRuns(OnnxOp.Identity(Vector(1f, 2f, 3f, 4f), rank: 1)));
+        Assert.Equal(Thrice(1f, 2f, 3f, 4f), ThreeRuns(OnnxOp.Reshape(Vector(1f, 2f, 3f, 4f), Vector(2L, 2L), allowZero: false)));
+        Assert.Equal(Thrice(11f, 22f, 33f, 44f), ThreeRuns(Vector(1f, 2f, 3f, 4f) + Vector(10f, 20f, 30f, 40f)));
+    }
+
+    private static float[] Thrice(params float[] values) => [.. values, .. values, .. values];
+
+    private static bool SameMemory(TensorData a, TensorData b)
+    {
+        var same = Unsafe.AreSame(
+            ref MemoryMarshal.GetReference(a.AccessRawMemory()), ref MemoryMarshal.GetReference(b.AccessRawMemory()));
+        GC.KeepAlive(a);
+        GC.KeepAlive(b);
+        return same;
     }
 
     /// <summary>The model a lowering hands a backend for <paramref name="graph"/>.</summary>
@@ -1244,7 +1153,7 @@ public class ComputeContextLifetimeCoverageTests
     {
         using var context = new ComputeContext();
 
-        var deleted = context.AllocateUninitialized<float32>((long[])[2L]);
+        var deleted = Sample().CopyTo(context);
         var moved = Sample().To(context);
         Assert.Contains(deleted, context.Tensors);
         Assert.Contains(moved, context.Tensors);
@@ -1257,31 +1166,28 @@ public class ComputeContextLifetimeCoverageTests
     }
 
     [Fact]
-    public void TestAnAllocatedTensorIsFilledInPlaceAndFeedsAsACopiedOneDoes()
+    public void TestATensorReadFromAStreamFeedsAsACopiedOneDoesAndOneWithNoFlatBufferIsRefused()
     {
         using var context = new ComputeContext();
         var graph = Doubling();
         float[] values = [1f, 2f, 3f, 4f];
 
-        var allocated = context.AllocateUninitialized<float32>((long[])[4L]);
-        values.CopyTo(allocated.AccessModifiableMemory<float>());
+        var read = context.ReadTensor(new Shape(4L), DType.Float32, new MemoryStream(MemoryMarshal.AsBytes(values.AsSpan()).ToArray()));
 
-        Assert.Contains(allocated, context.Tensors);
-        Assert.Same(DefaultBackend.Instance, allocated.AllocatingBackend);
-        Assert.Equal(values, Floats(allocated));
-        Assert.Equal(Floats(Sample().CopyTo(context)), Floats(allocated));
+        Assert.Contains(read, context.Tensors);
+        Assert.Same(DefaultBackend.Instance, read.AllocatingBackend);
+        Assert.Equal(values, Floats(read));
         Assert.Equal(
             Floats(context.Execute(graph, Sample().CopyTo(context))[0].ToTensorData()),
-            Floats(context.Execute(graph, allocated)[0].ToTensorData()));
+            Floats(context.Execute(graph, read)[0].ToTensorData()));
 
         long[] pair = [2L, 3L];
-        Assert.Equal(DType.Float32, context.AllocateUninitialized(pair, DType.Float32).DType);
-        Assert.Equal(new Shape(pair), context.AllocateUninitialized(pair, DType.Float32).Shape);
-        Assert.Equal(24, ComputeContext.Host.AllocateUninitialized(pair, DType.Float32).CopyRawMemory().Length);
-        Assert.Throws<NotSupportedException>(() => context.AllocateUninitialized(pair, DType.Utf8));
-        Assert.Throws<NotSupportedException>(() => context.AllocateUninitialized(pair, DType.Int4));
-        Assert.Throws<NotSupportedException>(() => ComputeContext.Host.AllocateUninitialized(pair, DType.UInt4));
-        Assert.Throws<ArgumentNullException>(() => context.AllocateUninitialized(pair, null!));
+        Assert.Equal(24, ComputeContext.Host.ReadTensor(pair, DType.Float32, new MemoryStream(new byte[24])).CopyRawMemory().Length);
+        Assert.Throws<EndOfStreamException>(() => context.ReadTensor(pair, DType.Float32, new MemoryStream(new byte[8])));
+        Assert.Throws<NotSupportedException>(() => context.ReadTensor(pair, DType.Utf8, Stream.Null));
+        Assert.Throws<NotSupportedException>(() => context.ReadTensor(pair, DType.Int4, Stream.Null));
+        Assert.Throws<NotSupportedException>(() => ComputeContext.Host.ReadTensor(pair, DType.UInt4, Stream.Null));
+        Assert.Throws<ArgumentNullException>(() => context.ReadTensor(pair, null!, Stream.Null));
 
         using var budgeted = new ComputeContext(new StubBackend(ComputeDevice.Cuda, 0))
         {
@@ -1289,7 +1195,7 @@ public class ComputeContextLifetimeCoverageTests
         };
         foreach (var complex in (DType[])[DType.Complex64, DType.Complex128])
             foreach (var where in (ComputeContext[])[context, ComputeContext.Host, budgeted])
-                Assert.Contains("complex", Assert.Throws<NotSupportedException>(() => where.AllocateUninitialized(pair, complex)).Message);
+                Assert.Contains("complex", Assert.Throws<NotSupportedException>(() => where.ReadTensor(pair, complex, Stream.Null)).Message);
     }
 
     /// <summary>Holds a run open once it has held its feeds and before it builds their values:

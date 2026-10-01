@@ -173,11 +173,11 @@ public class SideBySideBackendHardwareTests
         var cuda = new ComputeContext(LoadCuda());
         var compiled = cuda.Compile(graph);
 
-        // Left where the run put it: this is the one kind of tensor the host cannot read.
+        // Left where the run put it, and read there through a host copy of its values.
         var onCard = compiled.Execute(ta, tb.Shared())[0].ToTensorData();
         Assert.Equal(MemoryKind.Cuda, onCard.Space.Kind);
         Assert.False(onCard.IsHostResident);
-        Assert.Throws<InvalidOperationException>(() => onCard.As<float32>().AccessMemory<float>());
+        SideBySideModel.AssertAgree(expected, onCard.As<float32>().AccessMemory<float>().ToArray(), SideBySideModel.DeviceTolerance);
 
         // One call brings it home, through the backend that made the allocation, and leaves the
         // source where it was.
@@ -272,7 +272,7 @@ public class SideBySideBackendHardwareTests
         Assert.Contains(onCard, cuda.Tensors);
         Assert.Same(onCard, onCard.To(cuda));
         Assert.False(onCard.IsHostResident);
-        Assert.Throws<InvalidOperationException>(() => onCard.As<float32>().AccessMemory<float>());
+        Assert.Equal(av, onCard.As<float32>().AccessMemory<float>().ToArray());
 
         // A copy onto the card, and the source untouched.
         Assert.False(onHost.IsDisposed);
@@ -432,7 +432,7 @@ public class SideBySideBackendHardwareTests
     }
 
     private static float[] Floats(TensorData data)
-        => data.ToHost().As<float32>().CopyMemory<float>();
+        => data.As<float32>().CopyMemory<float>();
 
     private static float[] Floats(NamedModelParam param) => Floats(param.ToTensorData());
 }

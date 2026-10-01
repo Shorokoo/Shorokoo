@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using Shorokoo.Core.Backends;
 using Shorokoo.Modules.Losses;
 using Shorokoo.Modules.Optimizers;
@@ -199,7 +200,7 @@ public class CrossDeviceRoutingCoverageTests
 
         var copied = Floats(4).CopyTo(budgeted);
         var moved = Floats(2).To(budgeted);
-        var allocated = budgeted.AllocateUninitialized<float32>(new Shape(1L));
+        var allocated = Floats(1).CopyTo(budgeted);
         var sharedWithIt = Floats(3).CopyTo(unbudgeted).To(budgeted);
         var hostSide = Floats(8).To(onHost);
 
@@ -231,7 +232,6 @@ public class CrossDeviceRoutingCoverageTests
         Assert.Contains("CopyTo(context) of Tensor (4,):Float32 asks this compute context for 16 bytes", copy);
         Assert.Contains("the budget (DeviceMemorySettings.LimitBytes) is 32 bytes, and 24 bytes of it", copy);
         Assert.Contains("To(context) of Tensor (4,):Float32", Refused(() => Floats(4).To(budgeted)));
-        Assert.Contains("AllocateUninitialized of (4,):Float32", Refused(() => budgeted.AllocateUninitialized<float32>(new Shape(4L))));
         Assert.Contains("To(context) of Tensor (4,):Float32", Refused(() => elsewhere.To(budgeted)));
         Assert.Equal(2, card.Built.Count);
         Assert.DoesNotContain(elsewhere, budgeted.Tensors);
@@ -318,7 +318,7 @@ public class CrossDeviceRoutingCoverageTests
         Assert.Empty(card.Built);
 
         Assert.Equal([1f, 2f, 3f], Run(compiled, TensorData([3L], (float[])[1f, 2f, 3f])));
-        var full = context.AllocateUninitialized<float32>(new Shape(16L));
+        var full = Floats(16).CopyTo(context);
         Assert.Contains("leave nothing of the 64 bytes it has", Assert.Throws<InvalidOperationException>(
             () => context.Compile(Echo())).Message);
         GC.KeepAlive(full);
@@ -352,10 +352,11 @@ public class CrossDeviceRoutingCoverageTests
         using var reader = new ComputeContext(card);
         var compiled = context.Compile(Echo());
         var source = Floats(100);
-        NamedModelParam Writing(float value) => Hooked(source, () => source.As<float32>().AccessModifiableMemory<float>()[0] = value);
+        NamedModelParam Retiring() => Hooked(source, source.ReleaseRunCopies);
 
         Run(compiled, source.Shared());
-        Assert.Equal(9f, Read(context, compiled.Run(Writing(9f)))[0]);
+        Assert.Equal(new float[100], Read(context, compiled.Run(Retiring())));
+        Assert.Equal(2, card.Built.Count);
 
         var copy = Assert.Single(context.Tensors, t => t.Space == MemorySpace.Cuda(0));
         using var reading = new ManualResetEventSlim();
@@ -364,7 +365,7 @@ public class CrossDeviceRoutingCoverageTests
             Hooked(copy, () => { reading.Set(); release.Wait(TimeSpan.FromSeconds(10)); })));
         Assert.True(reading.Wait(TimeSpan.FromSeconds(10)));
         Assert.Contains("still held by another run", Assert.Throws<InvalidOperationException>(
-            () => compiled.Run(Writing(7f))).Message);
+            () => compiled.Run(Retiring())).Message);
         release.Set();
         Assert.True(held.Wait(TimeSpan.FromSeconds(10)));
     }
@@ -651,7 +652,7 @@ public class CrossDeviceRoutingCoverageTests
     }
 
     [Fact]
-    public void TestAConsumedHostFeedWithAPairedOutputIsCopiedOntoTheCardAndTheOutputWrittenThereComesHomeOnlyWhenMoved()
+    public void TestAConsumedHostFeedWithAPairedOutputIsCopiedOntoTheCardAndTheOutputWrittenThereStaysThere()
     {
         var card = new StubBackend(ComputeDevice.Cuda, 0) { ReleasesWhatItConsumes = true, Aliases = true };
         using var context = new ComputeContext(card) { DeviceMemory = Budget(6400) };
@@ -664,7 +665,7 @@ public class CrossDeviceRoutingCoverageTests
         Assert.Equal(2L, context.AliasedOutputs);
         Assert.Single(card.Built);
         Assert.Equal(MemorySpace.Cuda(0), state.Space);
-        Assert.Equal([3f, 4f], state.ToHost().As<float32>().CopyMemory<float>());
+        Assert.Equal([3f, 4f], state.As<float32>().CopyMemory<float>());
         Assert.Equal(MemorySpace.Cuda(0), state.Space);
     }
 
@@ -915,7 +916,7 @@ public class CrossDeviceRoutingCoverageTests
 
     private static float[] Read(ComputeContext context, NamedModelParam[] outputs)
     {
-        var values = outputs[0].ToTensorData().ToHost().As<float32>().CopyMemory<float>();
+        var values = outputs[0].ToTensorData().As<float32>().CopyMemory<float>();
         Detach(context, outputs);
         return values;
     }
@@ -938,8 +939,7 @@ public class CrossDeviceRoutingCoverageTests
         var card = new StubBackend(ComputeDevice.Cuda, 0) { ReleasesWhatItConsumes = true };
         using var context = new ComputeContext(card);
         var output = context.Compile(graph).Execute(feeds(card, context))[0].ToTensorData();
-        var home = output.ToHost();
-        object[] values = home.DType.IsSameElementTypeAs(DType.Utf8) ? home.Data : [.. home.As<float32>().CopyMemory<float>().Cast<object>()];
+        object[] values = output.DType.IsSameElementTypeAs(DType.Utf8) ? output.Data : [.. output.As<float32>().CopyMemory<float>().Cast<object>()];
         return $"{output.Space}: {string.Join(' ', values)}";
     }
 
@@ -993,7 +993,7 @@ public class CrossDeviceRoutingCoverageTests
     }
 
     [Fact]
-    public void TestAHostTensorACardRunReadsIsCopiedOnceUntilWrittenAndConsumedThroughTheCopyItHolds()
+    public void TestAHostTensorACardRunReadsIsCopiedOnceUntilItLetsItsCopiesGoAndConsumedThroughTheCopyItHolds()
     {
         var card = new StubBackend(ComputeDevice.Cuda, 0) { ReleasesWhatItConsumes = true };
         var budget = new DeviceMemorySettings { LimitBytes = 1L << 20 };
@@ -1007,12 +1007,12 @@ public class CrossDeviceRoutingCoverageTests
         Assert.Single(card.Built);
         Assert.Empty(card.Handed);
 
-        source.As<float32>().AccessModifiableMemory<float>()[0] = 7f;
+        source.ReleaseRunCopies();
         Assert.True(copy.IsDisposed);
         Assert.Equal([card.Built[0]], card.Released);
-        Assert.Equal([7f, 2f], Run(compiled, source.Shared()));
+        Assert.Equal([1f, 2f], Run(compiled, source.Shared()));
 
-        Assert.Equal([7f, 2f], Run(compiled, source));
+        Assert.Equal([1f, 2f], Run(compiled, source));
         Assert.True(source.IsDisposed);
         Assert.Equal(2, card.Built.Count);
         Assert.Equal([card.Built[1]], card.Handed);
@@ -1069,7 +1069,7 @@ public class CrossDeviceRoutingCoverageTests
         Assert.True(read.TryDelete());
         Assert.Equal([1f, 2f], compiled.Execute(
             [OnCard(context, 1f), OnCard(context, 3f)], new RunSettings { CancellationToken = patience.Token })[0]
-            .ToTensorData().ToHost().As<float32>().CopyMemory<float>());
+            .ToTensorData().As<float32>().CopyMemory<float>());
     }
 
     [Fact]
@@ -1234,6 +1234,61 @@ public class CrossDeviceRoutingCoverageTests
     }
 
     [Fact]
+    public void TestEveryReadOfACardTensorGoesThroughOneHostCopyWhileItLivesAndLeavesTheTensorOnTheCard()
+    {
+        var card = new StubBackend(ComputeDevice.Cuda, 0);
+        using var context = new ComputeContext(card);
+        var onCard = context.Compile(Echo()).Execute(Pair())[0].ToTensorData().As<float32>();
+
+        Assert.Equal(1, EveryReadOf(onCard, card));
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        GC.Collect();
+        Assert.Equal([1f, 2f], onCard.CopyMemory());
+        Assert.Equal(2, card.HostCopies);
+        Assert.Equal((MemorySpace.Cuda(0), false, false), (onCard.Space, onCard.IsHostResident, onCard.IsDisposed));
+        Assert.Single(card.Built);
+        Assert.Equal([1f, 2f], Run(context.Compile(Echo()), onCard));
+    }
+
+    [Fact]
+    public void TestAnInMemoryLoaderOverTensorsOnACardBatchesThemAsItDoesOnTheHost()
+    {
+        using var context = new ComputeContext(new StubBackend(ComputeDevice.Cuda, 0));
+        var inputs = TrainingRigHelpers.InBatch(1f, 2f, 3f, 4f).CopyTo(context);
+        var targets = TrainingRigHelpers.TargetBatch(2f, 4f, 6f, 8f).CopyTo(context);
+        var batch = new InMemoryDataLoader(inputs, targets, batchSize: 2).Next();
+
+        Assert.Equal([1f, 2f], ((TensorData)((TensorDataStruct)batch.Input).Fields["input"]).As<float32>().CopyMemory());
+        Assert.Equal([2f, 4f], ((TensorData)((TensorDataStruct)batch.Target).Fields["targets"]).As<float32>().CopyMemory());
+        Assert.False(((TensorData)inputs.Fields["input"]).IsHostResident);
+    }
+
+    [Fact]
+    public void TestAWeightSetOnACardIsSavedAsTheSameSetOnTheHostIs()
+    {
+        var model = FCLayer.ComputationGraph.ToConcreteArchitecture([TensorData(DType.Int64, [], 4L), TensorData([4L, 4L], new float[16])]).ToConcreteModel();
+        var onHost = model.ToInternal().Nodes
+            .Where(n => n.OpCode == Shorokoo.Core.Nodes.NodeDefinitions.InternalOpCodes.MODEL_PARAM_DATA
+                && n.IdentifierTemplate != Shorokoo.Core.Nodes.Processors.Fast.FastWireRngKeyDerivation.RngSeedIdentifierTemplate)
+            .ToDictionary(n => n.IdentifierTemplate!, n => n.GetTensorAttribute()!.CopyToTensorData(), StringComparer.Ordinal);
+        using var context = new ComputeContext(new StubBackend(ComputeDevice.Cuda, 0));
+        var onCard = onHost.ToDictionary(kv => kv.Key, kv => kv.Value.CopyTo(context), StringComparer.Ordinal);
+        var (hostPath, cardPath) = (TrainingRigHelpers.TempPath("set-host") + ".skpt", TrainingRigHelpers.TempPath("set-card") + ".skpt");
+        try
+        {
+            Persistence.From(model).WithModel().WithWeights().WithWeights("ema", onHost).Save(hostPath);
+            Persistence.From(model).WithModel().WithWeights().WithWeights("ema", onCard).Save(cardPath);
+            Assert.Equal(File.ReadAllBytes(hostPath), File.ReadAllBytes(cardPath));
+            Assert.All(onCard.Values, t => Assert.False(t.IsHostResident));
+        }
+        finally
+        {
+            foreach (var path in (string[])[hostPath, cardPath]) File.Delete(path);
+        }
+    }
+
+    [Fact]
     public void TestACheckpointLoadOntoACardLeavesOnItOnlyTheStateItReturned()
     {
         var (adamW, trained, _, _) = TrainingRigHelpers.BuildTrainedAdamWRig(1);
@@ -1283,6 +1338,23 @@ public class CrossDeviceRoutingCoverageTests
             .SelectMany(s => s.Fields.Values.OfType<TensorData>());
 
     private static SafeTensor Payload(TensorData tensor) => new("w", tensor, "F32", (long[])tensor.Shape);
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static int EveryReadOf(TensorData<float32> onCard, StubBackend card)
+    {
+        var held = onCard.AccessMemory();
+        Assert.Equal([1f, 2f], held.ToArray());
+        Assert.Equal(2f, onCard.AccessMemory()[1]);
+        Assert.Equal(Bytes(1f, 2f), onCard.AccessRawMemory().ToArray());
+        Assert.Equal([1f, 2f], onCard.CopyMemory());
+        Assert.Equal(2f, onCard.ValueAt(1));
+        Assert.Equal(Bytes(1f, 2f), onCard.CopyRawMemory());
+        Assert.Equal<object>([1f, 2f], onCard.DebugData);
+        Assert.Equal<object>([.. Bytes(1f, 2f).Cast<object>()], onCard.Data);
+        Assert.Throws<IndexOutOfRangeException>(() => onCard.ValueAt(2));
+        Assert.Equal(1f, held[0]);
+        return card.HostCopies;
+    }
 
     private static (bool MatchesHost, int RangeCopies, int HostCopies) SavedOffCard(float[] values, bool copiesRanges)
     {
@@ -1451,7 +1523,7 @@ public class CrossDeviceRoutingCoverageTests
         {
             HostCopies++;
             DuringHostCopy?.Invoke();
-            return ((StubValue)value).Bytes;
+            return [.. ((StubValue)value).Bytes];
         }
 
         /// <summary>Whether it copies a range of one of its values back to the host, as a native

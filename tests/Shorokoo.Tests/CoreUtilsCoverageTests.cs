@@ -1492,13 +1492,13 @@ public class CoreUtilsCoverageTests
     // shape — the caller owns the lifetime from there. CopyMemory / CopyRawMemory / ValueAt do
     // the copy with the tensor kept alive, and are what a call site should reach for instead.
     // The leading `\.` is a real limitation, not an oversight: it keys on a receiver, so a span
-    // taken through an implicit `this` inside TensorData itself -- `write(AccessModifiableMemory
-    // <V>())` in WriteMemory -- is invisible to this guard. Relaxing the dot matches every
-    // declaration of those members too. Those helpers keep their tensor alive by convention and
+    // taken through an implicit `this` inside TensorData itself -- `AccessMemory<V>().ToArray()`
+    // in CopyMemory -- is invisible to this guard. Relaxing the dot matches every declaration of
+    // those members too. Those helpers keep their tensor alive by convention and
     // by review; removing a GC.KeepAlive(this) from one of them leaves the suite green.
     private static readonly Regex SpanOutOfTensor = new(
         @"\.\s*(GetTensorMutableRawData|GetTensorDataAsSpan|GetTensorMutableDataAsSpan"
-        + @"|AccessRawMemory|AccessModifiableRawMemory|AccessMemory|AccessModifiableMemory)"
+        + @"|AccessRawMemory|AccessMemory)"
         + @"\s*(<[^>()]*>)?\s*\(\s*\)", RegexOptions.Compiled);
 
     // The leading identifier of the receiver expression: `t`, `t.Field`, `run[0].ToTensorData()`.
@@ -1785,7 +1785,7 @@ public class CoreUtilsCoverageTests
             "byte[] M() { return v.GetTensorDataAsSpan<byte>().ToArray(); }",
             "long[] M() { return t.As<int64>().AccessMemory().ToArray(); }",
             "float M() { return t.AccessMemory<float>()[0]; }",
-            "void M() { var s = t.AccessModifiableRawMemory(); s[0] = 1; }",
+            "void M() { var s = t.AccessRawMemory(); Use(s[0]); }",
             "void M() { GC.KeepAlive(v); } void N() { var d = v.GetTensorMutableRawData(); b.CopyTo(d); }",
             "void M() { var a = x.AccessRawMemory().ToArray(); GC.KeepAlive(x); var b2 = y.AccessRawMemory().ToArray(); }",
             "void M() { GC.KeepAlive(v); var d = v.GetTensorMutableRawData(); b.CopyTo(d); }",
@@ -1795,7 +1795,7 @@ public class CoreUtilsCoverageTests
         [
             "ReadOnlySpan<T> M() => Inner.GetTensorDataAsSpan<T>();",
             "ReadOnlySpan<T> M() { return Inner.GetTensorDataAsSpan<T>(); }",
-            "Span<double> M(TensorData<float64> d) => d.AccessModifiableMemory<double>();",
+            "ReadOnlySpan<double> M(TensorData<float64> d) => d.AccessMemory<double>();",
             "byte[] M() { var a = v.GetTensorDataAsSpan<byte>().ToArray(); GC.KeepAlive(v); return a; }",
             "void M() { var d = v.GetTensorMutableRawData(); b.CopyTo(d); GC.KeepAlive(v); }",
             "void M() { using var v = Make(); var d = v.GetTensorMutableRawData(); b.CopyTo(d); }",
@@ -2708,5 +2708,5 @@ internal static class ArenaProbeModels
 
     /// <summary>What a run of <see cref="Filled"/> summed.</summary>
     internal static float Sum(NamedModelParam[] outputs)
-        => outputs[0].ToTensorData().ToHost().As<float32>().ValueAt<float>(0);
+        => outputs[0].ToTensorData().As<float32>().ValueAt<float>(0);
 }

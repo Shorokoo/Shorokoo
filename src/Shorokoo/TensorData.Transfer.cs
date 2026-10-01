@@ -110,9 +110,11 @@ namespace Shorokoo
         /// host-readable already, and otherwise a new copy in the framework's own host memory,
         /// attached to nothing. This tensor is untouched either way.
         ///
-        /// <para>What a tensor a run left on a card, or one put there with <see cref="To"/>, needs
-        /// before its elements can be read. The copy is read back through the backend that made
-        /// the memory, which is the only thing that knows how to reach it.</para>
+        /// <para>Reading a tensor's values needs no such copy: <see cref="AccessMemory{V}"/>,
+        /// <see cref="CopyMemory{V}"/>, <see cref="ValueAt{V}"/> and the other reads copy them to
+        /// the host from wherever the tensor is. This is for a tensor wanted in host memory as a
+        /// whole, a tensor of its own there. The copy is read back through the backend that made the
+        /// memory, which is the only thing that knows how to reach it.</para>
         /// </summary>
         /// <exception cref="ObjectDisposedException">This tensor is dead.</exception>
         /// <exception cref="InvalidOperationException">This tensor is in device memory whose producer was
@@ -127,9 +129,7 @@ namespace Shorokoo
         /// <summary>
         /// This tensor moved into host memory, for a caller that owns it and wants nothing of it but
         /// its contents there: itself where the host can read it already, and otherwise a copy in the
-        /// framework's own host memory, this tensor released as soon as the copy is made. How the
-        /// framework reads a run's output it needs on the host — a loss, a resolved key, a value a
-        /// pass folds — at the point it needs it.
+        /// framework's own host memory, this tensor released as soon as the copy is made.
         /// </summary>
         internal TensorData MovedToHost()
         {
@@ -147,7 +147,7 @@ namespace Shorokoo
         /// <para>Nothing happens to the tensor here: the lock is taken when the run starts. What the
         /// run reads is the tensor itself where the run's backend can address its memory, and
         /// otherwise a copy in memory the backend can read — made on the first such read, held by
-        /// this tensor for the next ones, and retired by a write to it.</para>
+        /// this tensor for the next ones, for as long as it lives.</para>
         /// </summary>
         /// <exception cref="ObjectDisposedException">This tensor is dead.</exception>
         public SharedInput Shared()

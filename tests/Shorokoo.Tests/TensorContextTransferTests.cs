@@ -69,8 +69,7 @@ public class TensorContextTransferCoverageTests
 
             Assert.NotSame(source, copy);
             Assert.Same(HostBackend.Instance, copy.AllocatingBackend);
-            copy.AccessModifiableMemory<float>()[0] = 9f;
-            Assert.Equal([9f, 2f, 3f, 4f], Floats(copy));
+            Assert.Equal([1f, 2f, 3f, 4f], Floats(copy));
             Assert.Equal([1f, 2f, 3f, 4f], Floats(source));
         }
 
@@ -111,18 +110,6 @@ public class TensorContextTransferCoverageTests
         Assert.Throws<ObjectDisposedException>(() => Sample().CopyTo(disposed));
         Assert.Throws<ArgumentNullException>(() => Sample().To(null!));
         Assert.Throws<ArgumentNullException>(() => Sample().CopyTo(null!));
-    }
-
-    [Fact]
-    public void TestAWriteThroughATensorIsSeenByARunFedWhatToHandedOver()
-    {
-        using var context = new ComputeContext();
-        var t = (TensorData<float32>)TensorData([2L], (float[])[1f, 2f]);
-        var handed = t.To(context);
-
-        Assert.Equal([2f, 4f], Floats(context.Execute(Doubling(), handed.Shared())[0].ToTensorData()));
-        t.AccessModifiableMemory<float>()[0] = 99f;
-        Assert.Equal([198f, 4f], Floats(context.Execute(Doubling(), handed.Shared())[0].ToTensorData()));
     }
 
     private static InternalComputationGraph Doubling()

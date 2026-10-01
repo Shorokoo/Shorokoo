@@ -72,9 +72,8 @@ public enum ArenaExtendStrategy
 /// compiles, two contexts can differ, and neither reaches the other's sessions: to run under a
 /// different budget or strategy, compile on a context that carries it.</para>
 ///
-/// <para>The tensors a context places on its card — <c>To</c>, <c>CopyTo</c>,
-/// <c>AllocateUninitialized</c>, and the copies its runs make of memory they cannot read where it
-/// is — come out of none of those arenas. They are allocated from one allocator per card and
+/// <para>The tensors a context places on its card — <c>To</c>, <c>CopyTo</c>, and the copies its
+/// runs make of memory they cannot read where it is — come out of none of those arenas. They are allocated from one allocator per card and
 /// runtime, shared by every context over that runtime whatever its settings — a backend loaded in
 /// isolation has a runtime, and so an allocator, of its own — and held for the life of the process; the
 /// budget is kept by counting them against the context they are attached to, not by that
@@ -111,8 +110,8 @@ public sealed record DeviceMemorySettings
     /// It is a budget, not a hint: what would pass it is refused, or fails, rather than eating into
     /// what is left of the device.
     ///
-    /// <para><b>Transfers.</b> <c>To</c>, <c>CopyTo</c> and <c>AllocateUninitialized</c> onto the
-    /// context, and the copies a run of it makes of memory it cannot read where it is, are refused
+    /// <para><b>Transfers.</b> <c>To</c> and <c>CopyTo</c> onto the context, and the copies a run
+    /// of it makes of memory it cannot read where it is, are refused
     /// with an <see cref="InvalidOperationException"/> naming the budget, what is attached and what
     /// was asked for, when what is attached plus what they would add passes the limit.
     /// <see cref="Shorokoo.Runtime.ComputeContext.ReadDeviceMemoryUse"/> reads what is attached
@@ -123,13 +122,11 @@ public sealed record DeviceMemorySettings
     /// the run — the tensors attached to it there, and those the run reads there or copies there to
     /// read. A tensor already on the card is read where it is and never enters the arena, so it
     /// stays in the discount for the whole run; one the session's own earlier runs left in its arena
-    /// is inside the limit already. A host tensor the run consumes is handed to the session in host
-    /// memory, and ORT copies it into the arena, inside the limit — unless an output may be written
-    /// into it, when it is copied onto the card first, like one the run reads, and discounted. What
-    /// the run consumed is released as it returns, and drops out. A run that needs more arena than it
-    /// was left fails with ORT's <c>BFCArena</c> error; one whose discount leaves no arena at all, or
-    /// less than what it would have ORT copy in, is refused before it takes anything it was
-    /// fed.</para>
+    /// is inside the limit already. A host tensor the run consumes is copied onto the card before
+    /// the run, outside the arena, like one the run reads, and discounted — once, however many
+    /// inputs it feeds. What the run consumed is released as it returns, and drops out. A run that
+    /// needs more arena than it was left fails with ORT's <c>BFCArena</c> error; one whose discount
+    /// leaves no arena at all is refused before it takes anything it was fed.</para>
     ///
     /// <para><b>Sessions.</b> ORT fixes a session's <c>gpu_mem_limit</c> when the session is built,
     /// and building one costs about as much as the graph is large, so a session is built with the

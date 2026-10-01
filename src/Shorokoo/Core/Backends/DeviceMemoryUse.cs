@@ -5,9 +5,9 @@ namespace Shorokoo.Core.Backends;
 /// <see cref="Shorokoo.Runtime.ComputeContext.ReadDeviceMemoryUse"/>.
 ///
 /// <para>The budget counts tensors, not arenas. <see cref="AttachedBytes"/> is the bytes of the
-/// live tensors on the context's books that are in its memory: what <c>To</c>, <c>CopyTo</c> and
-/// <c>AllocateUninitialized</c> placed for it, what its runs read there or copied there to read,
-/// and the outputs its runs left there. A tensor attached to two contexts counts on both books; one
+/// live tensors on the context's books that are in its memory: what <c>To</c> and <c>CopyTo</c>
+/// placed for it, what its runs read there or copied there to read, and the outputs its runs left
+/// there. A tensor attached to two contexts counts on both books; one
 /// that dies, is collected, or is detached with <c>Detach</c> leaves them. What the arenas holding
 /// those tensors have taken from the device besides — the blocks they keep spare — is not in it:
 /// read <see cref="Shorokoo.Runtime.CompiledGraph.ReadArenaStatistics"/> for a session's, and

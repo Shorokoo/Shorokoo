@@ -256,7 +256,8 @@ namespace Shorokoo.Runtime
         /// it; the same goes for a sequence, a struct or an optional. Each input is placed in the
         /// memory this graph's backend reads it in before the run, wherever it was. Outputs are new
         /// tensors in that backend's memory — on a GPU backend, the card's — attached to the context
-        /// that compiled this graph; <see cref="TensorData.ToHost"/> brings one to the host.</para>
+        /// that compiled this graph. Reading one's values copies them to the host and leaves it
+        /// where it is.</para>
         /// </summary>
         /// <exception cref="InvalidOperationException">The compiling context is under a device-memory
         /// budget, and what the run would hold in the context's memory outside its session's arena
@@ -681,9 +682,11 @@ namespace Shorokoo.Runtime
     /// a run on a card, or a card's fed to a run on the host.</para>
     ///
     /// <para><b>Outputs.</b> A run's outputs are new tensors in its backend's memory — on a CUDA
-    /// backend, the card's — attached to the context that ran it. Nothing moves them after the run:
-    /// <see cref="TensorData.ToHost"/> brings one to the host to be read, <see cref="TensorData.To"/>
-    /// puts one on another context, and a run elsewhere that is fed one places it there itself.</para>
+    /// backend, the card's — attached to the context that ran it. Nothing moves them after the run.
+    /// Reading one's values (<see cref="TensorData.AccessMemory{V}"/>, <see cref="TensorData.CopyMemory{V}"/>)
+    /// copies them to the host and leaves it where it is; <see cref="TensorData.ToHost"/> makes a
+    /// copy of it in host memory, <see cref="TensorData.To"/> puts one on another context, and a run
+    /// elsewhere that is fed one places it there itself.</para>
     ///
     /// <para><b>A context does not own tensors.</b> It keeps a weak list of the tensors attached to
     /// it — its runs' outputs and inputs, and what <see cref="TensorData.To"/> and
@@ -815,9 +818,9 @@ namespace Shorokoo.Runtime
         ///
         /// <para><b><see cref="DeviceMemorySettings.LimitBytes"/> is a budget on this context's
         /// device memory</b>, and covers both halves of what it holds there: the tensors attached to
-        /// it in its memory — what <see cref="TensorData.To"/>, <see cref="TensorData.CopyTo"/> and
-        /// <see cref="AllocateUninitialized(Shape, DType)"/> placed for it, what its runs read there
-        /// or copied there to read, and the outputs they left there — and, while one of its runs
+        /// it in its memory — what <see cref="TensorData.To"/> and <see cref="TensorData.CopyTo"/>
+        /// placed for it, what its runs read there or copied there to read, and the outputs they left
+        /// there — and, while one of its runs
         /// executes, the arena that run computes in. A transfer that would take the attached bytes
         /// past the limit is refused, naming the budget, what is attached and what was asked for; a
         /// session's arena is capped at the budget less what the context holds outside it for the
@@ -1027,8 +1030,7 @@ namespace Shorokoo.Runtime
         /// being read by one (fed <c>.Shared()</c>, or through <c>.TryConsume()</c> while another
         /// run held it), by being the copy one of its runs read in a tensor's place, by
         /// <see cref="TensorData.To"/> or <see cref="TensorData.CopyTo"/> with this context as the
-        /// target, and by <see cref="AllocateUninitialized(Shape, DType)"/> on it;
-        /// <see cref="Detach"/> takes one off. A tensor a run consumes is dead, and is on no
+        /// target; <see cref="Detach"/> takes one off. A tensor a run consumes is dead, and is on no
         /// list. The list is weak and it is not ownership: it never keeps a tensor alive, never ends
         /// one's life, and a tensor that dies or is collected drops out of it. <see cref="Host"/>'s
         /// is always empty.</para>
@@ -1115,54 +1117,11 @@ namespace Shorokoo.Runtime
 
         /// <summary>
         /// A tensor of <paramref name="shape"/> and <paramref name="dtype"/> in this context's
-        /// memory with nothing written into it — the buffer holds whatever was last there, and the
-        /// caller fills it in place through <c>AccessModifiableMemory</c>.
-        ///
-        /// <para>This is the tensor a producer wants. Building one from a managed array copies it
-        /// into the runtime's buffer, so the tensor exists twice for as long as the caller holds
-        /// the array it was built from — and for a feed built fresh per step that array is the
-        /// whole input. Filling the runtime's buffer directly never has the second copy at all
-        /// (Shorokoo/Shorokoo#359). It is not a way to wrap a managed array you already have:
-        /// the buffer stays the runtime's, which is what lets it be released like every other
-        /// tensor the runtime hands back.</para>
-        ///
-        /// <para>On <see cref="Host"/> the buffer is a managed array, since that is what the
-        /// framework's own host memory is; on a real backend it is the memory that backend
-        /// allocates in, which on a CUDA one is the card's and so is not writable through a span
-        /// at all. <see cref="TensorData.IsHostResident"/> says which. On a real backend the tensor is
-        /// attached to this context, as a <see cref="TensorData.CopyTo"/> result is — <see cref="Host"/>
-        /// keeps no list, so there it is attached to nothing — and on a context under a
-        /// device-memory budget it is refused, as a copy would be, when the budget cannot take
-        /// it.</para>
-        /// </summary>
-        /// <exception cref="ArgumentNullException"><paramref name="dtype"/> is null.</exception>
-        /// <exception cref="NotSupportedException"><paramref name="dtype"/> is
-        /// <see cref="DType.Utf8"/>, whose elements are variable-length, or complex, which no memory
-        /// here holds, or has no whole-byte element stride; or <paramref name="shape"/> has no known
-        /// element count. Refused alike on every context, before any budget is asked.</exception>
-        /// <exception cref="ObjectDisposedException">This context has been disposed.</exception>
-        /// <exception cref="InvalidOperationException">This context's device-memory budget cannot
-        /// take the tensor alongside what is attached to it
-        /// (<see cref="DeviceMemorySettings.LimitBytes"/>).</exception>
-        public TensorData AllocateUninitialized(Shape shape, DType dtype)
-        {
-            var bytes = FlatByteCount(shape, dtype);
-            if (_isHost)
-                return TensorData.NewHostTensor(shape, dtype, new byte[bytes]);
-
-            var backend = ResolvedBackend;
-            return Placed(bytes, () => $"AllocateUninitialized of {shape}:{dtype}", () => TensorData.Create(
-                shape, dtype, backend.CreateUninitializedTensorInBackendMemory(
-                    (ShorokooTensorElementType)(int)dtype, (long[])shape), backend));
-        }
-
-        /// <summary>
-        /// A tensor of <paramref name="shape"/> and <paramref name="dtype"/> in this context's
         /// memory holding the next bytes of <paramref name="source"/> — as many as the tensor
         /// covers — read into it where it lives: on a card, through one bounded host buffer a piece
         /// at a time (<see cref="StagedUpload"/>), so its contents are never whole in host memory.
         /// What a load puts a tensor on the device with (Shorokoo/Shorokoo#436). Attached, budgeted
-        /// and refused as <see cref="AllocateUninitialized(Shape, DType)"/> is; throws
+        /// and refused as a <see cref="TensorData.CopyTo"/> onto this context is; throws
         /// <see cref="EndOfStreamException"/> where the stream ends first.
         /// </summary>
         internal TensorData ReadTensor(Shape shape, DType dtype, Stream source)
@@ -1210,28 +1169,6 @@ namespace Shorokoo.Runtime
 
             return checked(shape.Count * (bits / 8));
         }
-
-        /// <summary>
-        /// <see cref="AllocateUninitialized(Shape, DType)"/> typed, so the result can be filled
-        /// without a cast:
-        /// <c>context.AllocateUninitialized&lt;float32&gt;(new Shape(64L, 768L)).WriteMemory&lt;float&gt;(dst =&gt; …)</c>.
-        /// <see cref="Shape"/> is not a collection type, so a bare <c>[64L, 768L]</c> literal does
-        /// not convert to it; pass <c>new Shape(...)</c> or a <c>long[]</c>.
-        ///
-        /// <para>Fill it through <see cref="TensorData.WriteMemory{V}"/> rather than by taking
-        /// a bare <c>AccessModifiableMemory</c> span. On a real backend the buffer is the
-        /// runtime's, and the tensor is the only thing keeping it alive: taking the span is the
-        /// tensor's last read, so a fill written as one expression has no reachable tensor for its
-        /// whole duration and writes into a block the finalizer may already have handed back.</para>
-        /// </summary>
-        /// <exception cref="NotSupportedException">The element type has no flat byte
-        /// buffer — see the overload above.</exception>
-        /// <exception cref="ObjectDisposedException">This context has been disposed.</exception>
-        /// <exception cref="InvalidOperationException">This context's device-memory budget cannot
-        /// take the tensor alongside what is attached to it
-        /// (<see cref="DeviceMemorySettings.LimitBytes"/>).</exception>
-        public TensorData<T> AllocateUninitialized<T>(Shape shape) where T : IVarType
-            => (TensorData<T>)AllocateUninitialized(shape, OnnxUtils.GetDType<T>());
 
         /// <summary>
         /// Takes a reader lock on <paramref name="target"/> — a tensor or a sequence — for a run of
@@ -2008,7 +1945,8 @@ namespace Shorokoo.Runtime
         /// <summary>
         /// Evaluates the given output variables by building and executing a zero-input graph,
         /// returning their concrete tensor data, in this context's memory as every run's outputs
-        /// are — on a card, the card's; <see cref="TensorData.ToHost"/> brings one to the host.
+        /// are — on a card, the card's. Reading one's values copies them to the host and leaves it
+        /// where it is.
         /// Requires concretized outputs — a <c>[Module]</c>'s output fails fast with the lowering
         /// hint.
         ///
@@ -2522,7 +2460,7 @@ namespace Shorokoo.Runtime
         /// <para>The value returned belongs to <paramref name="data"/>: read it, do not dispose
         /// it.</para>
         /// </summary>
-        public static IShorokooTensorValue ToTensorValue(this IData data)
+        internal static IShorokooTensorValue ToTensorValue(this IData data)
             => data.ToTensorValue(DefaultBackend.Instance);
 
         /// <summary>
@@ -2538,7 +2476,7 @@ namespace Shorokoo.Runtime
         /// <para>The value returned belongs to <paramref name="data"/>: read it, do not dispose
         /// it.</para>
         /// </summary>
-        public static IShorokooTensorValue ToTensorValue(
+        internal static IShorokooTensorValue ToTensorValue(
             this IData data, IShorokooBackend backend)
         {
             ArgumentNullException.ThrowIfNull(backend);

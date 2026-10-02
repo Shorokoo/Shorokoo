@@ -1137,6 +1137,24 @@ public class ComputeContextLifetimeCoverageTests
         Assert.All(one, stage => Assert.Equal(stage.OnBlocks, stage.InUse - one[^1].InUse));
     }
 
+    [Fact]
+    public void TestOutputsOnOneBlockOfAHostTensorMadeFromHostDataEachFreeTheirOwnPages()
+    {
+        const int Rows = 1024, Columns = 1024;
+        var (a, b, _) = TwoHalvesValues(Rows, Columns);
+        using var context = new ComputeContext();
+        var outputs = context.Compile(TwoHalves()).Execute(TensorData([(long)Rows, Columns], a), TensorData([(long)Rows, Columns], b))
+            .Select(o => o.ToTensorData()).ToList();
+        var block = outputs.Where(o => o.Block is not null).GroupBy(o => o.Block).Single(g => g.Count() == 2).Key!;
+        List<long> held = [block.HeldBytes];
+        foreach (var output in outputs.Where(o => o.Block == block))
+        {
+            output.Delete();
+            if (!block.IsReleased) held.Add(block.HeldBytes);
+        }
+        Assert.Equal([4L << 20, 2L << 20], held);
+    }
+
     /// <summary>
     /// A model carrying <paramref name="n"/> floats of its own, added across each row of its consumed
     /// input past a Relu; its output, the session that ran it, and the output it should have.

@@ -11,10 +11,11 @@ namespace Shorokoo.Core.Backends;
 /// system with no block over it.
 ///
 /// <para>A block is whole units, carved best fit from the free stretches of a chunk, which are
-/// coalesced as blocks go back. Where the arena's unit is its granule, as in an account's own arena,
-/// no two blocks share a granule: a block kept alive holds its own granules and no other memory of
-/// the arena's. Where the unit is smaller, as in a card's arena of small blocks, blocks share
-/// granules, and a granule is shed only once no block is over it.</para>
+/// coalesced as blocks go back. Where the arena's unit is its granule, as in an account's arena on a
+/// card, no two blocks share a granule: a block kept alive holds its own granules and no other
+/// memory of the arena's. Where the unit is smaller — the host's 4 KiB pages in its 64 KiB
+/// granules, a card's arena of small blocks — blocks share the granules their ends lie in, and a
+/// granule is shed only once no block is over it.</para>
 ///
 /// <para>Every member runs under the lock of the allocator that owns the arena.</para>
 /// </summary>
@@ -49,27 +50,41 @@ internal sealed class Arena
         // The free stretches, by their first unit and by the unit past their last.
         internal readonly Dictionary<long, long> FreeByStart = [];
         internal readonly Dictionary<long, long> FreeByEnd = [];
-        // Per granule: whether it is committed, how many carved units are over it, and when the last
-        // of them went (the arena's clock), which is what shedding goes by.
+        // Per granule: whether it is committed, how many carved units are over it, and its place in
+        // the arena's list of idle granules.
         internal bool[] Committed = [];
         internal long[] Live = [];
+        internal IdleLink[] Idling = [];
+    }
+
+    /// <summary>A granule's neighbours in the list of idle granules, each a chunk and a granule of
+    /// it; a chunk of -1 for none.</summary>
+    private struct IdleLink
+    {
+        internal bool Listed;
+        internal int PreviousChunk;
+        internal long PreviousGranule;
+        internal int NextChunk;
+        internal long NextGranule;
     }
 
     private readonly List<Chunk?> _chunks = [];
 
-    // Every free stretch, smallest first, for best fit.
-    private readonly SortedSet<(long Units, int Chunk, long Start)> _free = [];
+    // Every free stretch, smallest first, for best fit: a sorted list searched by halving, which finds
+    // and changes a stretch without allocating.
+    private readonly List<(long Units, int Chunk, long Start)> _free = [];
 
-    // Every committed granule no carved unit is over, the one idle longest first.
-    private readonly SortedSet<(long Since, int Chunk, long Granule)> _idle = [];
-    private readonly Dictionary<(int Chunk, long Granule), long> _idleSince = [];
-    private long _clock;
+    // Every committed granule no carved unit is over, linked in the order they went idle, so one joins
+    // at the end and leaves from anywhere at once: the first is the one idle longest.
+    private (int Chunk, long Granule) _idleFirst = (-1, 0);
+    private (int Chunk, long Granule) _idleLast = (-1, 0);
+    private long _idleCount;
 
     /// <summary>The bytes of the granules committed now.</summary>
     internal long CommittedBytes { get; private set; }
 
     /// <summary>The bytes of the committed granules no block is over.</summary>
-    internal long IdleBytes => _idle.Count * _granule;
+    internal long IdleBytes => _idleCount * _granule;
 
     /// <summary>The most bytes of committed granules blocks have been over at once: the arena's
     /// busiest moment.</summary>
@@ -102,13 +117,14 @@ internal sealed class Arena
     {
         var units = bytes / _unit;
         (long Units, int Chunk, long Start)? fallback = null;
-        var tried = 0;
-        foreach (var span in _free.GetViewBetween((units, int.MinValue, long.MinValue), (long.MaxValue, int.MaxValue, long.MaxValue)))
+        var first = _free.BinarySearch((units, int.MinValue, long.MinValue));
+        if (first < 0) first = ~first;
+        // Past a few stretches, the best fit that needs committing is as good as any.
+        for (var i = first; i < _free.Count && i < first + 16; i++)
         {
+            var span = _free[i];
             if (Committed(_chunks[span.Chunk]!, span.Start, units)) return Take(span, units);
             fallback ??= span;
-            // Past a few stretches, the best fit that needs committing is as good as any.
-            if (++tried == 16) break;
         }
         if (!mayCommit) return IntPtr.Zero;
         if (fallback is { } fit)
@@ -132,13 +148,13 @@ internal sealed class Arena
         if (chunk.FreeByEnd.Remove(start, out var before))
         {
             var length = start - before;
-            _free.Remove((length, chunk.Index, before));
+            RemoveFree((length, chunk.Index, before));
             chunk.FreeByStart.Remove(before);
             start = before;
         }
         if (chunk.FreeByStart.Remove(end, out var after))
         {
-            _free.Remove((after, chunk.Index, end));
+            RemoveFree((after, chunk.Index, end));
             chunk.FreeByEnd.Remove(end + after);
             end += after;
         }
@@ -154,9 +170,9 @@ internal sealed class Arena
     {
         runs = 0;
         long released = 0;
-        while (released < bytes && _idle.Count > 0)
+        while (released < bytes && _idleCount > 0)
         {
-            var (_, index, granule) = _idle.Min;
+            var (index, granule) = _idleFirst;
             var chunk = _chunks[index]!;
             var first = granule;
             var last = granule;
@@ -165,8 +181,7 @@ internal sealed class Arena
             var count = last - first + 1;
             for (var g = first; g <= last; g++)
             {
-                _idle.Remove((_idleSince[(index, g)], index, g));
-                _idleSince.Remove((index, g));
+                Unidle(chunk, g);
                 chunk.Committed[g] = false;
             }
             _backing.Decommit(chunk.Base, chunk.State, first, count);
@@ -193,7 +208,7 @@ internal sealed class Arena
         for (var i = 0; i < _chunks.Count; i++)
         {
             if (_chunks[i] is not { CarvedUnits: 0 } chunk) continue;
-            _free.Remove((chunk.Units, chunk.Index, 0));
+            RemoveFree((chunk.Units, chunk.Index, 0));
             _backing.Release(chunk.Base, chunk.Bytes, chunk.State);
             _chunks[i] = null;
         }
@@ -252,7 +267,7 @@ internal sealed class Arena
     private IntPtr Take((long Units, int Chunk, long Start) span, long units)
     {
         var chunk = _chunks[span.Chunk]!;
-        _free.Remove(span);
+        RemoveFree(span);
         chunk.FreeByStart.Remove(span.Start);
         chunk.FreeByEnd.Remove(span.Start + span.Units);
         if (span.Units > units) Free(chunk, span.Start + units, span.Units - units);
@@ -265,9 +280,62 @@ internal sealed class Arena
 
     private void Free(Chunk chunk, long start, long units)
     {
-        _free.Add((units, chunk.Index, start));
+        var span = (units, chunk.Index, start);
+        var at = _free.BinarySearch(span);
+        _free.Insert(at < 0 ? ~at : at, span);
         chunk.FreeByStart[start] = units;
         chunk.FreeByEnd[start + units] = start;
+    }
+
+    private void RemoveFree((long Units, int Chunk, long Start) span)
+    {
+        var at = _free.BinarySearch(span);
+        if (at >= 0) _free.RemoveAt(at);
+    }
+
+    /// <summary>Puts granule <paramref name="granule"/> of <paramref name="chunk"/> last in the list of
+    /// idle granules.</summary>
+    private void Idled(Chunk chunk, long granule)
+    {
+        ref var link = ref chunk.Idling[granule];
+        if (link.Listed) return;
+        link = new IdleLink { Listed = true, PreviousChunk = _idleLast.Chunk, PreviousGranule = _idleLast.Granule, NextChunk = -1 };
+        if (_idleLast.Chunk >= 0)
+        {
+            ref var last = ref _chunks[_idleLast.Chunk]!.Idling[_idleLast.Granule];
+            last.NextChunk = chunk.Index;
+            last.NextGranule = granule;
+        }
+        else
+            _idleFirst = (chunk.Index, granule);
+        _idleLast = (chunk.Index, granule);
+        _idleCount++;
+    }
+
+    /// <summary>Takes granule <paramref name="granule"/> of <paramref name="chunk"/> out of the list
+    /// of idle granules, where it is in it.</summary>
+    private void Unidle(Chunk chunk, long granule)
+    {
+        ref var link = ref chunk.Idling[granule];
+        if (!link.Listed) return;
+        if (link.PreviousChunk >= 0)
+        {
+            ref var previous = ref _chunks[link.PreviousChunk]!.Idling[link.PreviousGranule];
+            previous.NextChunk = link.NextChunk;
+            previous.NextGranule = link.NextGranule;
+        }
+        else
+            _idleFirst = (link.NextChunk, link.NextGranule);
+        if (link.NextChunk >= 0)
+        {
+            ref var next = ref _chunks[link.NextChunk]!.Idling[link.NextGranule];
+            next.PreviousChunk = link.PreviousChunk;
+            next.PreviousGranule = link.PreviousGranule;
+        }
+        else
+            _idleLast = (link.PreviousChunk, link.PreviousGranule);
+        link = default;
+        _idleCount--;
     }
 
     /// <summary>Counts <paramref name="units"/> units from <paramref name="start"/> carved
@@ -283,17 +351,9 @@ internal sealed class Arena
             var was = chunk.Live[g];
             chunk.Live[g] += sign * (to - from);
             if (!chunk.Committed[g]) continue;
-            if (was == 0 && chunk.Live[g] > 0)
-            {
-                // A granule committed for this very block was never idle.
-                if (_idleSince.Remove((chunk.Index, g), out var since)) _idle.Remove((since, chunk.Index, g));
-            }
-            else if (was > 0 && chunk.Live[g] == 0)
-            {
-                var since = ++_clock;
-                _idle.Add((since, chunk.Index, g));
-                _idleSince[(chunk.Index, g)] = since;
-            }
+            // A granule committed for this very block was never idle, which Unidle allows.
+            if (was == 0 && chunk.Live[g] > 0) Unidle(chunk, g);
+            else if (was > 0 && chunk.Live[g] == 0) Idled(chunk, g);
         }
     }
 
@@ -314,7 +374,7 @@ internal sealed class Arena
         var chunk = new Chunk
         {
             Index = index, Base = @base, Bytes = bytes, Units = bytes / _unit, State = state,
-            Committed = new bool[granules], Live = new long[granules],
+            Committed = new bool[granules], Live = new long[granules], Idling = new IdleLink[granules],
         };
         _chunks[index] = chunk;
         Free(chunk, 0, chunk.Units);

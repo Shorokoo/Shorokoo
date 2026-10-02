@@ -924,6 +924,29 @@ public class GpuExecutionTests
     }
 
     [CudaFact]
+    public void CudaProvider_BlocksUpToAMebibyteHoldTheirOwnBytesAndALargerOneWholeCardPagesOfItsOwn()
+    {
+        var card = RuntimeAllocator.ForCard(0);
+        var account = card.Shared.Open("probe");
+        List<OrtValue> values = [];
+        long Take(long floats)
+        {
+            using (CachingAllocator.Charge(null, account))
+                values.Add(OrtValue.CreateAllocatedTensorValue(card.Managed, Microsoft.ML.OnnxRuntime.Tensors.TensorElementType.Float, [floats]));
+            return (long)OrtBackend.AddressOf(values[^1]) % (2L << 20);
+        }
+
+        Take(1000);
+        Take(1L << 18);
+        var large = Take((1L << 18) + 1);
+        var held = card.Shared.Statistics(account).TotalAllocatedBytes;
+        values.ForEach(value => value.Dispose());
+        card.Shared.Close(account);
+
+        Assert.Equal((0L, 4096 + (1L << 20) + (2L << 20)), (large, held));
+    }
+
+    [CudaFact]
     public void CudaProvider_TheReuseScenarioTakesItsKnownBlocksAndNoMoreBeyondItsInputsAndWeightsOnTheCard()
     {
         Assert.Equal((10L, 6L), ArenaProbeModels.ReuseRun(ArenaProbeModels.ReuseShapes.Computed));

@@ -578,9 +578,24 @@ internal sealed class PlacementProof
                 else if (node.OpType == "Concat" && ConcatPart(node, slot, outShape) is { } part && inBytes == outBytes)
                     identical = written.Offset + part * outBytes == start;
             }
+            else if (IsFusedSum(node, slot, written.Value) && _shapes.TryGetValue(name, out var summed) && outShape is not null)
+                identical = PlacementShapes.ElementBytes(summed.ElementType) == outBytes && outBytes > 0
+                            && summed.Shape.SequenceEqual(outShape.Shape) && written.Offset == start;
             yield return (start, end, identical);
         }
     }
+
+    /// <summary>
+    /// Whether <paramref name="value"/> is the sum a fused layer normalization writes beside its
+    /// result — output 3 of ONNX Runtime's <c>SkipLayerNormalization</c> and
+    /// <c>SkipSimplifiedLayerNormalization</c>, its input plus its skip (plus a bias) — and
+    /// <paramref name="slot"/> one of the two it adds element for element: the kernels, on the host
+    /// and the card, read each element of input and skip before writing that element of the sum,
+    /// and read neither again, so the sum may be written over either where it lies.
+    /// </summary>
+    private static bool IsFusedSum(NodeProto node, int slot, string value)
+        => node.Domain == "com.microsoft" && node.OpType is "SkipLayerNormalization" or "SkipSimplifiedLayerNormalization"
+           && slot is 0 or 1 && node.Outputs.Count > 3 && node.Outputs[3] == value;
 
     /// <summary>Whether <paramref name="node"/> writes its output element for element as it reads
     /// its input <paramref name="slot"/>, in the same order: a view operator that keeps every
@@ -691,6 +706,70 @@ internal sealed class PlacementProof
            && placement.Offset % Alignment == 0
            && !_blocks.ContainsKey(placement.Value);
 
+    // ---- the memory a run holds ----
+
+    /// <summary>
+    /// The most the run holds at once beyond its inputs and initializers, as modelled from the graph
+    /// with <paramref name="placements"/> in their blocks: each node, in the graph's order, takes
+    /// memory for every output it makes that is neither placed nor what the backend hands back
+    /// over an input, and lets go of each once the last node reading it — or anything handed back
+    /// over it — has run; what is read after the run is held to its end. A value of unknown shape
+    /// counts nothing.
+    /// </summary>
+    internal long ModelledPeak(IEnumerable<Placement> placements)
+    {
+        var placed = placements.Select(p => p.Value).ToHashSet(StringComparer.Ordinal);
+        var root = new Dictionary<string, string>(StringComparer.Ordinal);
+        var bytes = new Dictionary<string, long>(StringComparer.Ordinal);
+        string RootOf(string name) => root.TryGetValue(name, out var r) ? r : name;
+        for (int n = 0; n < _nodes.Count; n++)
+        {
+            var node = _nodes[n];
+            for (int o = 0; o < node.Outputs.Count; o++)
+            {
+                var output = node.Outputs[o];
+                if (output.Length == 0) continue;
+                var over = Enumerable.Range(0, node.Inputs.Count)
+                    .FirstOrDefault(i => node.Inputs[i].Length > 0 && _memory.AlwaysShares(node, i, o), -1);
+                if (over >= 0)
+                {
+                    root[output] = RootOf(node.Inputs[over]);
+                    continue;
+                }
+                root[output] = output;
+                bytes[output] = placed.Contains(output) || !_shapes.TryGetValue(output, out var value) || value.Bytes < 0 ? 0 : value.Bytes;
+            }
+        }
+        var last = new Dictionary<string, int>(StringComparer.Ordinal);
+        void Read(string name, int n)
+        {
+            var r = RootOf(name);
+            last[r] = Math.Max(last.GetValueOrDefault(r, -1), n);
+        }
+        for (int n = 0; n < _nodes.Count; n++)
+            foreach (var input in _nodes[n].Inputs)
+                if (input.Length > 0) Read(input, n);
+        foreach (var (name, holders) in _capturedBy)
+            foreach (var n in holders) Read(name, n);
+        foreach (var output in _outputs.Keys) Read(output, AfterTheRun);
+
+        var freed = new Dictionary<int, long>();
+        long live = 0, peak = 0;
+        for (int n = 0; n < _nodes.Count; n++)
+        {
+            foreach (var output in _nodes[n].Outputs)
+            {
+                if (output.Length == 0 || RootOf(output) != output || bytes[output] == 0) continue;
+                live += bytes[output];
+                var until = last.GetValueOrDefault(output, n);
+                if (until != AfterTheRun) freed[until] = freed.GetValueOrDefault(until) + bytes[output];
+            }
+            peak = Math.Max(peak, live);
+            live -= freed.GetValueOrDefault(n);
+        }
+        return peak;
+    }
+
     // ---- planning ----
 
     /// <summary>
@@ -790,10 +869,12 @@ internal sealed class PlacementProof
     /// lies at <paramref name="start"/> in its block; null where it reads it no such way.</summary>
     private long? InPlaceOffset(NodeProto writer, int slot, string name, long start, string value)
     {
-        if (!OutputAliasProof.IsStandard(writer) || !_shapes.TryGetValue(name, out var inShape)) return null;
+        if (!_shapes.TryGetValue(name, out var inShape)) return null;
         var outShape = _shapes[value];
         var size = PlacementShapes.ElementBytes(inShape.ElementType);
         if (size != PlacementShapes.ElementBytes(outShape.ElementType)) return null;
+        if (IsFusedSum(writer, slot, value)) return inShape.Shape.SequenceEqual(outShape.Shape) ? start : null;
+        if (!OutputAliasProof.IsStandard(writer)) return null;
         if ((InPlaceUnary.Contains(writer.OpType) && slot == 0) || (writer.OpType == "Clip" && slot == 0)
             || (InPlaceBinary.Contains(writer.OpType) && writer.Inputs.Count == 2))
             return inShape.Shape.SequenceEqual(outShape.Shape) ? start : null;

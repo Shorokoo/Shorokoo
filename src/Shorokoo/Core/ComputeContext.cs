@@ -2116,6 +2116,9 @@ namespace Shorokoo.Runtime
                 var optimization = SessionOptimization(
                     HasOptionalOps(model.Graph) || IsFullyConstant(model.Graph), trainingStep: false);
                 session = BuildSession(backend, modelData, optimization, deviceMemory);
+                // Built for one run: placing that run's values would build two more sessions over
+                // the model for it, the graph the runtime runs and the one that places.
+                session.StopPlacing();
                 outputNames.Value = [.. session.OutputNames];
                 var onnxInputNameByOriginal = SessionNamesOf(originalInputNames, session);
                 string SessionNameOf(string name)

@@ -350,10 +350,11 @@ public abstract class OrtBackend : IShorokooBackend
         if (_stockProvider && !SessionsUseOrtArena && model.Length <= OrtPlacements.ModelBytesKept)
             session.Placements = new OrtPlacements(
                 model,
-                (variant, directory) => Wrap(NewSession(
-                    variant, graphOptimization, logSeverity, deviceMemory, diagnostics with { TraceNodePlacement = false },
+                (variant, directory, externalData) => Wrap(NewSession(
+                    variant, externalData is null ? graphOptimization : ShorokooGraphOptimization.DisableAll, logSeverity,
+                    deviceMemory, diagnostics with { TraceNodePlacement = false },
                     directory, intraOpThreads, suppliedInitializers, precision,
-                    accounts: (session.HostAccount, session.CardAccount)), []),
+                    accounts: externalData is null ? null : (session.HostAccount, session.CardAccount), externalDataDirectory: externalData), []),
                 this,
                 () => session.HeldBytes);
         return session;
@@ -449,7 +450,8 @@ public abstract class OrtBackend : IShorokooBackend
         int intraOpThreads,
         IReadOnlyList<SuppliedInitializer> suppliedInitializers,
         PrecisionSettings precision,
-        (CachingAllocator.Account Host, CachingAllocator.Account? Card)? accounts = null)
+        (CachingAllocator.Account Host, CachingAllocator.Account? Card)? accounts = null,
+        string? externalDataDirectory = null)
     {
         // The `using` is load-bearing, not tidiness. SessionOptions is a SafeHandle, so it
         // carries a critical finalizer that calls OrtReleaseSessionOptions, and ORT takes its
@@ -468,7 +470,10 @@ public abstract class OrtBackend : IShorokooBackend
         // it with no name for the catch to delete it by. The folder the graph is written into is
         // the caller's, made and deleted there.
         var profileDirectory = diagnostics.TraceNodePlacement ? TempDirectory("shorokoo-node-placement-") : null;
-        var placeholderDirectory = suppliedInitializers.Count > 0 ? TempDirectory("shorokoo-supplied-") : null;
+        // A model whose initializers lie in files beside it is read with them from the caller's
+        // folder, which also takes a supplied initializer's placeholder; otherwise a placeholder
+        // gets a folder of its own, made here and deleted below.
+        var placeholderDirectory = suppliedInitializers.Count > 0 && externalDataDirectory is null ? TempDirectory("shorokoo-supplied-") : null;
         List<OrtValue> views = [];
         // What the session allocates -- its weights as it is built, and everything its runs take --
         // comes from Shorokoo's allocators, charged to accounts of its own (see CachingAllocator):
@@ -485,6 +490,11 @@ public abstract class OrtBackend : IShorokooBackend
             if (profileDirectory is not null) EnableProfiling(options, profileDirectory);
             if (optimizedDirectory is not null) WriteOptimizedModel(options, optimizedDirectory);
             if (placeholderDirectory is not null) Supply(options, placeholderDirectory, suppliedInitializers, views);
+            else if (externalDataDirectory is not null)
+            {
+                if (suppliedInitializers.Count > 0) Supply(options, externalDataDirectory, suppliedInitializers, views);
+                else options.AddSessionConfigEntry("session.model_external_initializers_file_folder_path", externalDataDirectory);
+            }
             _configureExecutionProvider(options, deviceMemory, precision);
             InferenceSession session;
             using (CachingAllocator.Charge(host, card))

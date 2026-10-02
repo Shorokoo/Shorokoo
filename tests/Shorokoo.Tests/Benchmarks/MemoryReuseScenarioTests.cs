@@ -154,7 +154,7 @@ public class MemoryReuseScenarioTests
             lines.Add($"{(consume ? "consumed" : "shared")}: median {Median(each):0.00} ms, tenth percentile {each.Order().ElementAt(each.Count / 10):0.00} ms, least {each.Min():0.00} ms over {each.Count} runs");
         if (compiled.Session is OrtSession { Placements: { } placements })
             foreach (var entry in placements.Entries)
-                lines.Add($"ONNX Runtime signature: {entry.Stage}, plain {Mib(entry.PlainPeak)}, placed {Mib(entry.PlacedPeak)}, {entry.Plan.Count} placed{(entry.Refusal is null ? "" : ", " + entry.Refusal)}");
+                lines.Add($"ONNX Runtime signature: {entry.Stage}, modelled {Mib(entry.PredictedPlainPeak)} plain and {Mib(entry.PredictedPlacedPeak)} placed, placed run measured {Mib(entry.PlacedPeak)}, {entry.Plan.Count} placed{(entry.Refusal is null ? "" : ", " + entry.Refusal)}");
         if (compiled.Session is TorchSession { Placements: { } torch })
             foreach (var entry in torch.Entries)
                 lines.Add($"torch signature: {entry.Plan.Count} placed{(entry.Refusal is null ? "" : ", " + entry.Refusal)}");
@@ -280,7 +280,7 @@ public class MemoryReuseScenarioTests
                 foreach (var entry in settled.Where(e => e.Graph is not null))
                 {
                     var graph = entry.Graph!;
-                    lines.Add($"\n{entry.Stage}{(entry.Refusal is null ? "" : ": " + entry.Refusal)}; plain {Mib(entry.PlainPeak)}, placed {Mib(entry.PlacedPeak)}; "
+                    lines.Add($"\n{entry.Stage}{(entry.Refusal is null ? "" : ": " + entry.Refusal)}; modelled {Mib(entry.PredictedPlainPeak)} plain, {Mib(entry.PredictedPlacedPeak)} placed; placed run measured {Mib(entry.PlacedPeak)}; "
                               + $"{entry.BlockBytes.Count} blocks of {Mib(entry.BlockBytes.Values.Sum())}; {entry.Plan.Count} placed, {Mib(entry.Plan.Sum(p => p.Bytes))}\n");
                     var shapes = PlacementShapes.Evaluate(graph, entry.Given);
                     var outputs = graph.Outputs.Select(o => o.Name).ToHashSet(StringComparer.Ordinal);
@@ -379,7 +379,7 @@ public class MemoryReuseScenarioTests
                 foreach (var e in settled.Where(e => e.Graph is not null && e.Stage == OrtPlacements.Stage.Refused))
                     File.AppendAllText(Path.Combine(OutputDirectory(), "refusals.md"), $"\n## {e.Refusal}\n\n{Why(e)}\n");
                 var line = string.Join(", ", settled.Select(e => e.Stage == OrtPlacements.Stage.Adopted
-                    ? $"adopted {e.Plan.Count} ({Mib(e.PlainPeak)} to {Mib(e.PlacedPeak)})"
+                    ? $"adopted {e.Plan.Count} (modelled {Mib(e.PredictedPlainPeak)} to {Mib(e.PredictedPlacedPeak)}, placed run {Mib(e.PlacedPeak)})"
                     : $"refused: {e.Refusal} ({string.Join(",", e.BlockBytes.Select(b => $"{b.Key}={b.Value}"))}; {string.Join(",", e.Given.Select(g => $"{g.Key}:{string.Join("x", g.Value.Shape)}:{g.Value.ElementType}"))})").GroupBy(x => x).Select(g => g.Count() == 1 ? g.Key : $"{g.Count()}x {g.Key}"));
                 settled.Clear();
                 return line.Length == 0 ? "-" : line;

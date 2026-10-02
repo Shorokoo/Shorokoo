@@ -160,7 +160,7 @@ internal static class PlacementShapes
         "MemcpyFromHost", "MemcpyToHost", "Softmax",
         "LogSoftmax", "Hardmax", "Not", "BitwiseNot", "Shrink", "LpNormalization", "CumSum", "Trilu",
         "InstanceNormalization", "LayerNormalization", "SimplifiedLayerNormalization",
-        "SkipLayerNormalization", "SkipSimplifiedLayerNormalization", "BatchNormalization", "Dropout",
+        "BatchNormalization", "Dropout",
         "BiasDropout", "SoftmaxCrossEntropyLossGrad", "ReluGrad", "SigmoidGrad", "TanhGrad", "GeluGrad",
         "FastGeluGrad", "SoftmaxGrad", "SoftmaxGrad_13", "LogSoftmaxGrad", "LogSoftmaxGrad_13",
     };
@@ -220,6 +220,14 @@ internal static class PlacementShapes
                 "Dropout" or "BiasDropout" => [first, new Value(x.Shape, Bool, null)],
                 _ => [first],
             };
+        }
+        if (op is "SkipLayerNormalization" or "SkipSimplifiedLayerNormalization")
+        {
+            // The normalized value, the mean and inverse deviation of each row, and the sum of input,
+            // skip and bias it normalized.
+            if (x is null || x.Shape.Length == 0) return [];
+            var statistics = new Value([.. x.Shape[..^1], 1], Float, null);
+            return [new Value(x.Shape, x.ElementType, null), statistics, statistics, new Value(x.Shape, x.ElementType, null)];
         }
         if (op is "IsNaN" or "IsInf")
             return x is null ? [] : [new Value(x.Shape, Bool, null)];

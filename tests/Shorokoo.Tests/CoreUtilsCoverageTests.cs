@@ -1140,7 +1140,7 @@ public class CoreUtilsCoverageTests
 
         var sum = filled.Execute(ArenaProbeModels.FilledShape(1 << 20))[0].ToTensorData();
         var negated = product.Execute(ArenaProbeModels.MatMulOperand(64), ArenaProbeModels.MatMulOperand(64))[0].ToTensorData();
-        var spreadSum = spread.Execute(ArenaProbeModels.Ones(1 << 20))[0].ToTensorData();
+        var spreadSum = spread.Execute(ArenaProbeModels.Ones(1 << 20).Shared())[0].ToTensorData();
         var kept = InUse();
         Assert.Equal([1 << 20, 0f, -(1 << 20)], [sum.ValueAt<float>(0), negated.ValueAt<float>(4095), spreadSum.ValueAt<float>(999)]);
         TensorData[] outputs = [sum, negated, spreadSum];

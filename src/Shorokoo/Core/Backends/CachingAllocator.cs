@@ -38,7 +38,10 @@ namespace Shorokoo.Core.Backends;
 /// needs kept, and an account fed one shape after another holds what its busiest call used rather
 /// than a block of every class it ever saw. The price is a block from the device for each request
 /// of a shape it no longer keeps blocks for, where an arena would carve one out of a larger free
-/// region. What is kept also goes back when a run that
+/// region. On the host, where a fresh block would take the account past its mark, a kept block of
+/// pages larger than the request serves it instead, the pages past the request going back to the
+/// system (<see cref="HostPages.Trim"/>): what it keeps is warm, where a fresh block's pages are each
+/// zeroed as they are first touched. What is kept also goes back when a run that
 /// hands back its memory ends (<see cref="ReleaseCached(Account)"/>), when a session closes,
 /// before an account would refuse an allocation for want of room, before the device would refuse
 /// one, and when the program asks (<see cref="ReleaseEverywhere"/>).</para>
@@ -224,26 +227,33 @@ internal sealed unsafe class CachingAllocator
         var account = scope?.AccountOn(this) ?? Placements;
         var size = SizeClass(bytes);
         List<(IntPtr, long)>? release = null;
+        long trimmed = 0;
+        IntPtr block = IntPtr.Zero;
         lock (_gate)
         {
             if ((scope is not null && scope.TakeHeld(account, size, out var held)) || account.TakeCached(size, out held))
                 return Hand(held, size, bytes, account);
-            // A fresh block: what the account kept longest goes back, as much as the block takes
-            // what it holds from the device past the most one of its calls has used, this one with
-            // the block included. On a card, as the call charging the account ends (Scope.End), where
-            // one does: handing a block back waits for the card, which mid-run would stall the run's
-            // queued work.
             if (account == Placements) BeginPlacementsCall();
-            release = OnCard && scope is not null && scope.Charges(account)
-                ? []
-                : account.Shed(account.InUse + account.Cached + account.Held + size
-                               - Math.Max(account.MaxUsed, account.Used + size));
-            if (account.LimitUnderLock is { } limit && account.Charged + account.Cached + account.Held + size > limit)
+            // What a fresh block would take the account past the most one of its calls has used,
+            // this one with the block included.
+            var excess = account.InUse + account.Cached + account.Held + size
+                         - Math.Max(account.MaxUsed, account.Used + size);
+            // On the host, where it would, a kept block of pages larger than asked serves the request
+            // instead: the pages past the request go back to the system, and those it keeps are the
+            // process's already, warm, where a fresh block's would each be zeroed as first touched.
+            if (excess > 0 && !OnCard && HostPages.Serve(size) && account.TakeLarger(size, out held, out trimmed))
+                block = Hand(held, size, bytes, account);
+            // A fresh block: what the account kept longest goes back, as much as the excess. On a
+            // card, as the call charging the account ends (Scope.End), where one does: handing a
+            // block back waits for the card, which mid-run would stall the run's queued work.
+            else
+                release = OnCard && scope is not null && scope.Charges(account) ? [] : account.Shed(excess);
+            if (block == IntPtr.Zero && account.LimitUnderLock is { } limit && account.Charged + account.Cached + account.Held + size > limit)
             {
                 // What it keeps goes back first -- cached, and on a card what this call let go of,
                 // which handing back waits for the stream to be done with -- and then only what it
                 // has out counts.
-                release.AddRange(account.EmptyCache());
+                release!.AddRange(account.EmptyCache());
                 if (scope is not null) release.AddRange(scope.EmptyHeld(account));
                 if (account.Charged + size > limit)
                 {
@@ -254,9 +264,14 @@ internal sealed unsafe class CachingAllocator
                 }
             }
         }
+        if (block != IntPtr.Zero)
+        {
+            HostPages.Trim(block, size, trimmed);
+            return block;
+        }
         Release(release);
         if (refusal is not null) return IntPtr.Zero;
-        var block = Fresh(size);
+        block = Fresh(size);
         if (block == IntPtr.Zero)
         {
             // The device is full: what is kept anywhere on it goes back, and the request is tried
@@ -594,6 +609,18 @@ internal sealed unsafe class CachingAllocator
             return false;
         }
 
+        /// <summary>The smallest kept block of pages larger than <paramref name="size"/>, if one is
+        /// kept, taken out of the cache with its size class in <paramref name="larger"/>.</summary>
+        internal bool TakeLarger(long size, out IntPtr block, out long larger)
+        {
+            larger = 0;
+            foreach (var kept in _kept.Keys)
+                if (kept > size && HostPages.Serve(kept) && (larger == 0 || kept < larger)) larger = kept;
+            if (larger != 0) return TakeCached(larger, out block);
+            block = IntPtr.Zero;
+            return false;
+        }
+
         /// <summary>The blocks kept longest, taken out of the cache until they come to at least
         /// <paramref name="bytes"/> or none is left, for the caller to hand back.</summary>
         internal List<(IntPtr, long)> Shed(long bytes)
@@ -789,6 +816,22 @@ internal static partial class HostPages
         return pages == MapFailed ? IntPtr.Zero : pages;
     }
 
+    /// <summary>
+    /// Hands back to the system the pages of the <paramref name="size"/>-byte block at
+    /// <paramref name="block"/> past its first <paramref name="kept"/> bytes, so that it is a block
+    /// of <paramref name="kept"/> from then on. On Windows its address range stays reserved, and goes
+    /// with it as <see cref="Release"/> releases the block.
+    /// </summary>
+    internal static void Trim(IntPtr block, long kept, long size)
+    {
+        var page = (long)Environment.SystemPageSize;
+        var keep = (kept + page - 1) / page * page;
+        var end = (size + page - 1) / page * page;
+        if (end <= keep) return;
+        if (OperatingSystem.IsWindows()) VirtualFree(block + (nint)keep, (nuint)(end - keep), MemDecommit);
+        else munmap(block + (nint)keep, (nuint)(end - keep));
+    }
+
     /// <summary>Hands the <paramref name="size"/> bytes at <paramref name="block"/>, which
     /// <see cref="Allocate"/> answered, back to the system.</summary>
     internal static void Release(IntPtr block, long size)
@@ -800,6 +843,7 @@ internal static partial class HostPages
     private const uint MemCommit = 0x1000;
     private const uint MemReserve = 0x2000;
     private const uint MemRelease = 0x8000;
+    private const uint MemDecommit = 0x4000;
     private const uint PageReadWrite = 0x04;
     private const int ProtRead = 0x1;
     private const int ProtWrite = 0x2;

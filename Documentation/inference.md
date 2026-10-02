@@ -938,7 +938,10 @@ C runtime's heap, which may keep its pages for the process's next allocations.
   new block would take it past that mark. So a loop whose runs repeat finds every block it needs,
   and a session fed one shape after another holds what its busiest run used, not a block of every
   size it has seen; the price is that a run of a shape it has not kept blocks for takes them from
-  the device, handing older ones back, where an arena would carve them out of what it holds. What
+  the device, handing older ones back, where an arena would carve them out of what it holds. On
+  the host a kept block of 64 KiB or more that is larger than a request serves it, where a fresh
+  block would take the session past that mark, its pages past the request going back to the
+  system — so only the pages a larger request adds come fresh. What
   the tensors placed on a card let go of is kept the same way, for the next tensor placed there,
   counting what is placed between two runs on the card as one run.
 - **What is kept goes back to the system**:

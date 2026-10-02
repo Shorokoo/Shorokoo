@@ -982,6 +982,26 @@ public class CoreUtilsCoverageTests
         Assert.Equal([false, false, false], ((long[])[1L << 20, 64L << 10, 16L << 10]).Select(floats => ProcessMemory.Holds(HandedBack(floats))));
     }
 
+    [Fact]
+    public void TestASmallerHostRequestTakesAKeptLargerBlockAndHandsBackItsTail()
+    {
+        var host = RuntimeAllocator.ForHost();
+        var account = host.Shared.Open("probe");
+        (IntPtr Address, long Held) Take(long floats)
+        {
+            using (CachingAllocator.Charge(account, null))
+            using (var value = OrtValue.CreateAllocatedTensorValue(host.Managed, Microsoft.ML.OnnxRuntime.Tensors.TensorElementType.Float, [floats]))
+                return (OrtBackend.AddressOf(value), host.Shared.Statistics(account).TotalAllocatedBytes);
+        }
+
+        var large = Take(1L << 20);
+        var small = Take(64L << 10);
+
+        Assert.Equal((large.Address, 256L << 10), small);
+        Assert.Equal((true, false), (ProcessMemory.Holds(small.Address), ProcessMemory.Holds(small.Address + (512 << 10))));
+        host.Shared.Close(account);
+    }
+
     /// <summary>
     /// A session's own arena, read back through the public surface: zeroed before it has run, and
     /// carrying what the run took afterwards — the product the run negates, its output being memory

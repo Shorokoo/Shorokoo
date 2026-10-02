@@ -234,6 +234,81 @@ public class MemoryReuseScenarioTests
         File.WriteAllText(Path.Combine(OutputDirectory(), $"why-placement-reaches-each-family-x{scale}.md"), string.Join("\n", lines) + "\n");
     }
 
+    /// <summary>
+    /// Why placement reaches a resident training step or not: <c>WideLinearModel</c> under AdamW,
+    /// its batch fed <c>.Shared()</c>, with output aliasing on and off and placement on. Per
+    /// signature the session settled: how it settled, its blocks, what was placed, and for every
+    /// value of a mebibyte or more the step hands out, where it went or why it could not
+    /// (<see cref="PlacementProof.WhyNot"/>).
+    /// </summary>
+    [Fact]
+    public void RecordWhyPlacementReachesATrainingStep()
+    {
+        var settled = new List<OrtPlacements.Entry>();
+        var lines = new List<string> { "# Why placement reaches a resident training step" };
+        OrtPlacements.Settled = entry => { lock (settled) settled.Add(entry); };
+        try
+        {
+            foreach (var aliasing in (bool[])[true, false])
+            {
+                using var context = new ComputeContext { OutputAliasing = aliasing, ValuePlacement = true };
+                var sample = TensorData([2L, 4096L], [.. Enumerable.Range(0, 8192).Select(i => (i % 13) / 13f)]);
+                var rig = TrainingRig.FromScratch(
+                    WideLinearModel.ComputationGraph, Shorokoo.Modules.Losses.L2Loss.ComputationGraph,
+                    Shorokoo.Modules.Optimizers.AdamWOptimizer.ComputationGraph, [sample.CopyTo(ComputeContext.Host)],
+                    new Shorokoo.Modules.Optimizers.AdamWOptimizerHyperparameters { LearningRate = 0.001f }, runtimeContext: context);
+                var input = rig.InputDef.FromOrderedData(sample);
+                var target = rig.TargetDef.FromOrderedData(TensorData([2L, 4096L], new float[8192]));
+                lock (settled) settled.Clear();
+                using (var run = rig.BeginResidentRun(rig.CreateInitialCheckpoint()))
+                    for (int i = 0; i < 3; i++) run.Step(input.Shared(), target.Shared());
+                lines.Add($"\n## Output aliasing {(aliasing ? "on" : "off")}");
+                foreach (var entry in settled.Where(e => e.Graph is not null))
+                {
+                    var graph = entry.Graph!;
+                    lines.Add($"\n{entry.Stage}{(entry.Refusal is null ? "" : ": " + entry.Refusal)}; plain {Mib(entry.PlainPeak)}, placed {Mib(entry.PlacedPeak)}; "
+                              + $"{entry.BlockBytes.Count} blocks of {Mib(entry.BlockBytes.Values.Sum())}; {entry.Plan.Count} placed, {Mib(entry.Plan.Sum(p => p.Bytes))}\n");
+                    var shapes = PlacementShapes.Evaluate(graph, entry.Given);
+                    var outputs = graph.Outputs.Select(o => o.Name).ToHashSet(StringComparer.Ordinal);
+                    var proof = new PlacementProof(graph, entry.BlockBytes, shapes, outputs);
+                    var plan = proof.Plan(PlacementProof.Smallest, PlacementProof.IdleOutputBytes);
+                    foreach (var output in graph.Outputs.Select(o => o.Name).Where(o => shapes.TryGetValue(o, out var v) && v.Bytes >= PlacementProof.Smallest))
+                    {
+                        var at = plan.FirstOrDefault(p => p.Value == output);
+                        lines.Add($"- {output} {Mib(shapes[output].Bytes)}: {(at.Value is not null ? $"placed at {at.Block}+{at.Offset}" : proof.WhyNot(output, plan))}");
+                    }
+                }
+            }
+        }
+        finally
+        {
+            OrtPlacements.Settled = null;
+        }
+        File.WriteAllText(Path.Combine(OutputDirectory(), "why-placement-reaches-a-training-step.md"), string.Join("\n", lines) + "\n");
+    }
+
+    /// <summary>Why a settled signature's graph places what it does: the operators of its values
+    /// whose shape is unknown, and each value of a mebibyte or more, where the planner put it or why
+    /// it could not.</summary>
+    private static string Why(OrtPlacements.Entry entry)
+    {
+        var graph = entry.Graph!;
+        var shapes = PlacementShapes.Evaluate(graph, entry.Given);
+        var proof = new PlacementProof(graph, entry.BlockBytes, shapes);
+        var plan = proof.Plan(PlacementProof.Smallest, PlacementProof.IdleOutputBytes);
+        var lines = new List<string>
+        {
+            $"{graph.Nodes.Count} nodes; unknown shapes: {string.Join(", ", graph.Nodes.Where(n => n.Outputs.Any(o => o.Length > 0 && !shapes.ContainsKey(o))).GroupBy(n => $"{n.Domain}:{n.OpType}").Select(g => $"{g.Key} x{g.Count()}"))}",
+        };
+        foreach (var node in graph.Nodes)
+            foreach (var value in node.Outputs.Where(o => o.Length > 0 && shapes.TryGetValue(o, out var v) && v.Bytes >= PlacementProof.Smallest))
+            {
+                var at = plan.FirstOrDefault(p => p.Value == value);
+                lines.Add($"- {node.OpType} {value} {Mib(shapes[value].Bytes)}: {(at.Value is not null ? $"placed at {at.Block}+{at.Offset}" : proof.WhyNot(value, plan))}");
+            }
+        return string.Join("\n", lines);
+    }
+
     /// <summary>What makes <paramref name="value"/> in <paramref name="graph"/>, and what that reads,
     /// two levels down.</summary>
     private static string Producer(GraphProto graph, string value, int depth = 2)
@@ -270,9 +345,11 @@ public class MemoryReuseScenarioTests
         {
             lock (settled)
             {
+                foreach (var e in settled.Where(e => e.Graph is not null && e.Stage == OrtPlacements.Stage.Refused))
+                    File.AppendAllText(Path.Combine(OutputDirectory(), "refusals.md"), $"\n## {e.Refusal}\n\n{Why(e)}\n");
                 var line = string.Join(", ", settled.Select(e => e.Stage == OrtPlacements.Stage.Adopted
                     ? $"adopted {e.Plan.Count} ({Mib(e.PlainPeak)} to {Mib(e.PlacedPeak)})"
-                    : $"refused: {e.Refusal}").GroupBy(x => x).Select(g => g.Count() == 1 ? g.Key : $"{g.Count()}x {g.Key}"));
+                    : $"refused: {e.Refusal} ({string.Join(",", e.BlockBytes.Select(b => $"{b.Key}={b.Value}"))}; {string.Join(",", e.Given.Select(g => $"{g.Key}:{string.Join("x", g.Value.Shape)}:{g.Value.ElementType}"))})").GroupBy(x => x).Select(g => g.Count() == 1 ? g.Key : $"{g.Count()}x {g.Key}"));
                 settled.Clear();
                 return line.Length == 0 ? "-" : line;
             }

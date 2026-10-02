@@ -240,23 +240,37 @@ its run in flight), so staging the next batch onto it from another thread does
 not overlap the current step. Staging through a second context over the same
 backend keeps the overlap.
 
-### A fed input's buffer is not recycled inside the run
+### A fed input's buffer is recycled only where the run consumed it
 
 ONNX Runtime never reuses a graph input's buffer for an intermediate, whatever the
-session or run options, so every fed input is resident for the whole run. This
-does not matter for a training step (its peak is intermediates, its output a
-scalar loss), but for a pipeline over a very large input with an input-shaped
-output, the unrecyclable buffer is the largest in the run.
+session or run options, so every fed input is resident for the whole run. A run
+that consumes an input — [fed as it is](inference.md#feeding-a-run-consumed-shared-or-tried)
+rather than `.Shared()` — writes its values into that input's memory where the
+graph proves it safe and it saves memory
+([A run that writes into what it consumed](inference.md#a-run-that-writes-into-what-it-consumed)).
+What that still leaves:
 
-[Feeding the input as it is](inference.md#feeding-a-run-consumed-shared-or-tried)
-instead of `.Shared()` releases it when the run returns; that does not free it for
-intermediates. A training
-step writes outputs into the state it replaces through ONNX Runtime's I/O binding
-([A run that writes an output into what it consumed](inference.md#a-run-that-writes-an-output-into-what-it-consumed)),
-saving one input-sized buffer per output that matches an input's dtype and
-shape where nothing reads the input afterwards. A graph you compile yourself
-marks no such outputs, so your pipeline holds its input beside its input-shaped
-output.
+- **A shared input** is resident for the whole run and written into by nothing.
+- **Values under a mebibyte** are left to the runtime.
+- **A value only a fusion makes** is not written into an input on ONNX Runtime:
+  making it a value the session binds stops the fusion, and a placement that changes
+  what runs is not used. A transformer layer's residual sum, which ONNX Runtime
+  folds into `SkipLayerNormalization`, is one.
+- **Order the graph does not state.** A value goes into a range only after
+  everything reading what the range held, by the graph's own edges; two independent
+  branches never share a range, whatever order the runtime would run them in.
+- **A training step.** The state it consumes it already writes over
+  ([A step writes its state over the state it consumed](training.md#a-step-writes-its-state-over-the-state-it-consumed)),
+  and a batch it consumes is read by the backward pass as well as the forward one —
+  the first layer's weight gradient reads the input — so its memory is free only
+  as the step ends.
+
+### Outputs written into one consumed input are freed together
+
+Outputs a run wrote into the memory of one input it consumed stand on that memory
+together, and it is freed only when the last of them ends: deleting one frees
+nothing while another lives, and a device-memory budget counts the whole of it
+until then. Copy an output out (`CopyTo`) to keep it apart from the others.
 
 ### A sequence's elements live in host memory
 

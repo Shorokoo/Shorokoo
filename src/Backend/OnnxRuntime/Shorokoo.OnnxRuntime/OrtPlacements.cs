@@ -76,6 +76,12 @@ internal sealed class OrtPlacements : IDisposable
         internal Dictionary<string, (long[] Shape, ShorokooTensorElementType Type)> Shapes = new(StringComparer.Ordinal);
         internal OrtSession? Variant;
         internal string? Refusal;
+
+        // What the entry was planned over, for a measurement to read: the graph ONNX Runtime runs
+        // for the plain session, the shapes the run's inputs came in, and its blocks.
+        internal GraphProto? Graph;
+        internal IReadOnlyDictionary<string, (long[] Shape, int ElementType)> Given = new Dictionary<string, (long[], int)>();
+        internal IReadOnlyDictionary<string, long> BlockBytes = new Dictionary<string, long>();
     }
 
     /// <summary>Told of every signature as it is settled — adopted or refused — for a measurement to
@@ -276,6 +282,8 @@ internal sealed class OrtPlacements : IDisposable
                 if (value is OrtTensorValue { ValueType: ShorokooOnnxValueType.Tensor } tensor)
                     given[name] = (tensor.ReadShape, (int)tensor.ElementType);
             var blockBytes = blocks.ToDictionary(b => b.Key, b => BytesOf(b.Value), StringComparer.Ordinal);
+            entry.Given = given;
+            entry.BlockBytes = blockBytes;
             // The model as handed over first, which costs no build: what it places nothing in, the
             // graph ONNX Runtime makes of it does not either, short of a rewrite freeing a range --
             // and a session builds nothing for such a run.
@@ -283,10 +291,11 @@ internal sealed class OrtPlacements : IDisposable
                 || handed.Nodes.Count > PlacementProof.MostNodes
                 || new PlacementProof(handed, blockBytes, PlacementShapes.Evaluate(handed, given)).Plan(PlacementProof.Smallest, PlacementProof.IdleOutputBytes).Count == 0)
             {
-                Refuse(entry, "nothing to place");
+                Refuse(entry, "nothing to place in the graph handed over");
                 return;
             }
             var runs = RunGraph();
+            entry.Graph = runs;
             if (runs.Nodes.Count > PlacementProof.MostNodes)
             {
                 Refuse(entry, "too large a graph to place in");
@@ -295,13 +304,16 @@ internal sealed class OrtPlacements : IDisposable
             var shapes = PlacementShapes.Evaluate(runs, given);
             var proof = new PlacementProof(runs, blockBytes, shapes);
             var originalOutputs = original.Graph.Outputs.Select(o => o.Name).ToHashSet(StringComparer.Ordinal);
-            var plan = proof.Prove(proof.Plan(PlacementProof.Smallest, PlacementProof.IdleOutputBytes)
+            var planned = proof.Plan(PlacementProof.Smallest, PlacementProof.IdleOutputBytes);
+            var plan = proof.Prove(planned
                 .Where(p => _originalValues!.Contains(p.Value) && (originalOutputs.Contains(p.Value) ? outputNames.Contains(p.Value) : true)));
             for (int attempt = 0; attempt < 3; attempt++)
             {
                 if (plan.Count == 0)
                 {
-                    Refuse(entry, "nothing to place");
+                    Refuse(entry, attempt > 0 ? "the variant's own graph proves none of the placements"
+                        : planned.Count == 0 ? "nothing to place in the graph ONNX Runtime runs"
+                        : $"the graph ONNX Runtime runs places only values its rewrites made ({string.Join(", ", planned.Select(p => p.Value))})");
                     return;
                 }
                 var exposed = plan.Where(p => !originalOutputs.Contains(p.Value)).Select(p => p.Value).ToList();

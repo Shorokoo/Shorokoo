@@ -1402,19 +1402,20 @@ namespace Shorokoo.Runtime
         /// <summary>
         /// Whether this context's runs may write into the memory of the inputs they consume: the
         /// outputs its compiles mark for it — output aliasing, which the training rig's steps use for
-        /// the state they replace (<see cref="OutputAlias"/>) — and the values its sessions place
-        /// there (<see cref="PlacementProof"/>). On unless turned off, and turned off only by a test
-        /// comparing a run that writes into what it consumed with one that writes nothing there.
+        /// the state they replace (<see cref="OutputAlias"/>) — and, unless <see cref="ValuePlacement"/>
+        /// says otherwise, the values its sessions place there (<see cref="PlacementProof"/>). On
+        /// unless turned off, and turned off only by a test comparing a run that writes into what it
+        /// consumed with one that writes nothing there.
         /// </summary>
         internal bool OutputAliasing { get; init; } = true;
 
         /// <summary>
         /// Whether this context's sessions place their runs' values in the memory of the inputs
-        /// those runs consume (<see cref="PlacementProof"/>), with <see cref="OutputAliasing"/>
-        /// leaving the marked outputs as they are. On unless turned off, and turned off only by a
-        /// measurement comparing runs that place with runs that do not.
+        /// those runs consume (<see cref="PlacementProof"/>), whatever <see cref="OutputAliasing"/>
+        /// says of the marked outputs; null, the default, places where <see cref="OutputAliasing"/>
+        /// is on. Set only by a measurement comparing runs that place with runs that do not.
         /// </summary>
-        internal bool ValuePlacement { get; init; } = true;
+        internal bool? ValuePlacement { get; init; }
 
         // How many outputs this context's runs have written into consumed memory, over its life.
         private long _aliasedOutputs;
@@ -2258,7 +2259,7 @@ namespace Shorokoo.Runtime
             var session = backend.CreateSession(
                 modelData, optimization, ShorokooLogSeverity.Fatal, deviceMemory, Diagnostics,
                 outputAliases ?? [], intraOpThreads, supplied ?? [], Precision);
-            if (!OutputAliasing || !ValuePlacement) session.StopPlacing();
+            if (!(ValuePlacement ?? OutputAliasing)) session.StopPlacing();
             return session;
         }
 

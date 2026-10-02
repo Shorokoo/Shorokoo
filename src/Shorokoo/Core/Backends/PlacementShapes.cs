@@ -156,7 +156,8 @@ internal static class PlacementShapes
         "Abs", "Neg", "Sigmoid", "Relu", "Exp", "Log", "Sqrt", "Tanh", "Sin", "Cos", "Tan", "Asin", "Acos",
         "Atan", "Sinh", "Cosh", "Asinh", "Acosh", "Atanh", "Reciprocal", "Floor", "Ceil", "Round", "Sign",
         "Erf", "Softplus", "Softsign", "Elu", "Selu", "LeakyRelu", "ThresholdedRelu", "HardSigmoid",
-        "HardSwish", "Celu", "Mish", "Gelu", "FastGelu", "QuickGelu", "BiasGelu", "Clip", "Identity", "Softmax",
+        "HardSwish", "Celu", "Mish", "Gelu", "FastGelu", "QuickGelu", "BiasGelu", "Clip", "Identity",
+        "MemcpyFromHost", "MemcpyToHost", "Softmax",
         "LogSoftmax", "Hardmax", "Not", "BitwiseNot", "Shrink", "LpNormalization", "CumSum", "Trilu",
         "InstanceNormalization", "LayerNormalization", "SimplifiedLayerNormalization",
         "SkipLayerNormalization", "SkipSimplifiedLayerNormalization", "BatchNormalization", "Dropout",
@@ -210,7 +211,7 @@ internal static class PlacementShapes
                 "Neg" when x.Ints is { } v => v.Select(e => -e).ToArray(),
                 "Abs" when x.Ints is { } v => v.Select(Math.Abs).ToArray(),
                 "Not" when x.Ints is { } v => v.Select(e => e == 0 ? 1L : 0L).ToArray(),
-                "Identity" => x.Ints,
+                "Identity" or "MemcpyFromHost" or "MemcpyToHost" => x.Ints,
                 _ => null,
             };
             var first = new Value(x.Shape, type, ints);

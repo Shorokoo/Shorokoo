@@ -910,6 +910,7 @@ public class ComputeContextLifetimeCoverageTests
         Assert.Equal("4x2", ShapeOf(GraphOf("a:float[2,4]", "O", Op("Shape", "a", "s"), Op("Gather", "s one", "c"), Op("Unsqueeze", "c zero", "u"),
             Op("ReduceProd", "s", "p", attribute: ("keepdims", 0)), Op("Div", "p c", "q"), Op("Unsqueeze", "q zero", "v"), Op("Concat", "u v", "t", attribute: ("axis", 0)), Op("Reshape", "a t", "O")), "O"));
         Assert.Equal("3:7=1,2,3", ShapeOf(GraphOf("a:float[4]", "O", Op("Size", "a", "n"), Op("Range", "one n one", "O")), "O"));
+        Assert.Equal("2:7=2,4", ShapeOf(GraphOf("a:float[2,4]", "O", Op("Shape", "a", "s"), Op("MemcpyFromHost", "s", "O")), "O"));
         Assert.Equal(":7=1", ShapeOf(GraphOf("a:float[4]", "O", Op("Size", "a", "n"), Op("Equal", "n four", "e"), Op("Not", "e", "f"), Op("Cast", "f", "c", attribute: ("to", 7)),
             Op("Where", "e one zero", "w"), Op("Add", "w c", "O")), "O"));
         Assert.Equal("unknown", ShapeOf(GraphOf("a:float[4]", "O", Op("Size", "a", "n"), Op("Cast", "n", "u", attribute: ("to", 13)), Op("Sub", "u five", "d"), Op("Range", "zero d one", "O")), "O"));

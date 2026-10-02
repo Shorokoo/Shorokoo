@@ -27,6 +27,9 @@ Related: [core-types.md](core-types.md) · [defining-models.md](defining-models.
   card's — and nothing moves them afterwards. Reading one's values copies them to the host and
   leaves it there; fed to a run on another context, it is placed there by that run —
   [Where a run's inputs and outputs are](#where-a-runs-inputs-and-outputs-are).
+- **A run may write its values into the memory of the inputs it consumes**, where the graph proves
+  it safe and it saves memory; its outputs then stand on that memory, and it is freed with the last
+  of them — [A run that writes into what it consumed](#a-run-that-writes-into-what-it-consumed).
 - On a GPU backend a context's `DeviceMemory` settings are a budget on what it holds on the card,
   which the allocator its sessions allocate through holds each run to —
   [Device memory](#device-memory-gpu-backends). Diagnostics start at
@@ -558,8 +561,8 @@ native runtime.
 ### Feeding a run: consumed, shared or tried
 
 A tensor fed **as it is** is taken by the run when it starts — dead from then — and its memory
-is released before the call returns, or reused for an output
-([below](#a-run-that-writes-an-output-into-what-it-consumed)):
+is released before the call returns, or reused for the run's values
+([below](#a-run-that-writes-into-what-it-consumed)):
 
 ```csharp
 var result = compiled.Execute(batch)[0].ToTensorData();
@@ -639,10 +642,12 @@ where they share a runtime.
   makes a copy of it in host memory, `To(context)` puts it on another context, and a run on
   another context that is fed it places it there as one of its inputs.
 - **An output holds only its own bytes.** On ONNX Runtime a session allocates through an
-  allocator of Shorokoo's, and an output is the block its run wrote it into: keeping it keeps that
-  block's memory and nothing else of the session's alive — the session may run on, sit idle or be
-  disposed — and nothing copies it after the run. [Device memory](#device-memory-gpu-backends) says
-  how blocks are laid out and what the allocator keeps between runs.
+  allocator of Shorokoo's, and an output is the block its run wrote it into — or a range of the
+  memory of an input the run consumed, where the run wrote it there
+  ([below](#a-run-that-writes-into-what-it-consumed)). Keeping it keeps that memory and nothing else
+  of the session's alive — the session may run on, sit idle or be disposed — and nothing copies it
+  after the run. [Device memory](#device-memory-gpu-backends) says how blocks are laid out and what
+  the allocator keeps between runs.
 
 ```csharp
 var compiled = cuda.Compile(graph);
@@ -656,30 +661,59 @@ On a CUDA backend an operator the provider runs on the host reads its inputs fro
 writes its outputs back there ([Shorokoo/Shorokoo#493](https://github.com/Shorokoo/Shorokoo/issues/493)).
 On a CPU backend nothing of this is visible: its run memory is the host's.
 
-### A run that writes an output into what it consumed
+### A run that writes into what it consumed
 
 ONNX Runtime holds every input until the run ends, so a consumed input's memory cannot be
-freed mid-run. Instead a run can write an output **into** it (output aliasing), so the output
-needs no memory of its own. This happens only for outputs a lowering marks as safe; the only
-such lowering is the training rig's step, which pairs each updated state field with the one it
-replaces ([A step writes its state over the state it consumed](training.md#a-step-writes-its-state-over-the-state-it-consumed)).
-Graphs you compile yourself never alias. A marked output is written into an input only where:
+freed mid-run. Instead a run can write **into** it, so what it writes there needs no memory of its
+own. It does so two ways, both only into an input the run consumed — `.Shared()` memory is left as
+it was — and fed as no other input. Both inputs and outputs are in the backend's run memory, so
+where they are never stands in the way: a host tensor consumed by a card run is copied onto the
+card first, and written into as that copy.
 
-- **the run consumed that input** — `.Shared()` memory is left as it was;
-- **it was fed as no other input**;
-- **the input has the output's element type**, and the shape the session settled at build time.
+**Output aliasing.** An output a lowering marks as safe is written over the whole of an input of
+its element type and the shape the session settled at build time. The only such lowering is the
+training rig's step, which pairs each updated state field with the one it replaces
+([A step writes its state over the state it consumed](training.md#a-step-writes-its-state-over-the-state-it-consumed));
+a graph you compile yourself marks no output.
 
-Both are in the backend's run memory, so where they are never stands in the way: a host tensor
-consumed by a card run is copied onto the card first, and the output written into that copy.
+**Placement.** For any graph, a run's values of a mebibyte or more — outputs and intermediates
+alike — are written into ranges of the consumed inputs' memory where the graph the backend runs
+proves a range free for the value:
+
+- everything that reads what the range held runs before the value is written, by the graph's
+  own edges, so it holds whatever order the runtime picks;
+- nothing reads it after the run: an output, or a view of one, is never written over;
+- an operator that reads what it overwrites reads each element where it writes it — an
+  element-wise operator in place, a slice at its own offset, a part of a concatenation already in
+  its slot.
+
+Where the values go is planned the first time a run *signature* — which inputs are consumed, the
+shape of every input, the outputs asked for — runs, and kept for it.
+
+| | ONNX Runtime | PyTorch |
+|---|---|---|
+| **How** | a second session over the model, its placed values bound to their ranges | a translation writing each placed value with torch's own operator: an `out=` form, a fill, a concatenation part by part, or a copy of what a view reads |
+| **When it applies** | the signature's first run runs as always and its second placed, each measured on the session's allocator; the placements are kept only where the placed run asked for less, by more than the larger of a mebibyte and a sixty-fourth of the plain run | from the first run: nothing placed allocates |
+| **Not used** | where binding the values changes the operators ONNX Runtime runs (a fusion they would block); for a model over 16 MiB; past 8 signatures | in a training step whose gradient torch takes; for a model over 16 MiB; past 8 signatures |
+
+**Outputs on consumed memory.** An output written into an input stands on that input's memory —
+its **block** — as a `TensorData` of its own over its range, never overlapping another's. Several
+outputs of one run may stand on one block; the block is freed when the last of them ends, not
+before, so deleting one of them frees nothing while another lives
+([A tensor's lifetime](#a-tensors-lifetime-locks-and-deletion)). A device-memory budget counts the
+block once, whole, for as long as any tensor on it is attached.
 
 Otherwise nothing differs: outputs are new `TensorData` attached to the running context, and
 values are the same.
 
 ### A tensor's lifetime: locks and deletion
 
-A `TensorData` **is** its memory: one object per allocation. It records the backend that
-allocated it (`AllocatingBackend`), which releases it, and where it lives: `Space` (the
-device) and `Location` (device plus runtime). It does not know which contexts it is attached
+A `TensorData` **is** its memory: one object per allocation, or per range of a block several
+tensors stand on — the memory of an input a run consumed and wrote them into
+([A run that writes into what it consumed](#a-run-that-writes-into-what-it-consumed)). Ranges
+never overlap, and a block is freed with the last tensor standing on it. A tensor records the
+backend that allocated it (`AllocatingBackend`), which releases it, and where it lives: `Space`
+(the device) and `Location` (device plus runtime). It does not know which contexts it is attached
 to — see [Moving data between contexts](#moving-data-between-contexts).
 
 **How a tensor ends** (disposing a context is not one of them):
@@ -702,8 +736,9 @@ consumed one, which run took it). `Shape`, `DType`, `ToString()`, `IsDisposed`,
 no-op, so double disposal is harmless.
 
 An unreferenced tensor is reclaimed by the GC through its backend; deleting only chooses
-*when*. Runtime-allocated buffers (run outputs, card copies) are native and freed at once; a
-tensor built from a C# array frees its native read-copies at once and leaves the array to the GC.
+*when*. Runtime-allocated buffers (run outputs, card copies) are native and freed at once — a
+tensor standing on a block with others frees the block when it is the last; a tensor built from a
+C# array frees its native read-copies at once and leaves the array to the GC.
 
 **What a run holds.** A run holds a reader lock on every tensor it reads until it returns; any
 number of runs may read one tensor. While locked, `Delete()` and `Dispose()` throw
@@ -1241,8 +1276,8 @@ onto the card before the run, outside the session, and counted in the discount:
 What the session allocates is its weights, everything the run computes, and the run's outputs
 until it returns. From then on every output on the card is counted with the attached tensors, in
 the discount of every later run until it goes, so delete each output once you are done with it.
-An output [written into consumed memory](#a-run-that-writes-an-output-into-what-it-consumed) is
-counted once, where that memory is.
+Outputs [written into consumed memory](#a-run-that-writes-into-what-it-consumed) count that
+memory once, whole, while any of them is attached.
 
 A run whose discount leaves its session nothing is refused before taking anything; one whose
 session needs more than it was left fails with an allocation failure naming the limit:

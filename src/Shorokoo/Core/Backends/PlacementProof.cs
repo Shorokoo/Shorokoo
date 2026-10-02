@@ -439,22 +439,93 @@ internal sealed class PlacementProof
 
     /// <summary>Whether occupant <paramref name="first"/> comes before <paramref name="second"/>
     /// on the bytes their ranges share.</summary>
-    private bool Before(Occupant first, Occupant second)
+    private bool Before(Occupant first, Occupant second) => ConflictOf(first, second, out _) == Conflict.None;
+
+    /// <summary>Why one occupant cannot come before another on the bytes they share.</summary>
+    private enum Conflict { None, ContentLast, WriterOrder, ReadAfterRun, ReaderOrder, WriterReads }
+
+    /// <summary>
+    /// What stands in the way of occupant <paramref name="first"/> coming before
+    /// <paramref name="second"/> on the bytes their ranges share — <see cref="Conflict.None"/>
+    /// where nothing does — with <paramref name="node"/> the node it names, or -1.
+    /// </summary>
+    private Conflict ConflictOf(Occupant first, Occupant second, out int node)
     {
+        node = -1;
         var w = second.Writer;
-        if (w < 0) return false;
-        if (first.Writer >= 0 && (first.Writer == w || !Precedes(first.Writer, w))) return false;
+        if (w < 0) return Conflict.ContentLast;
+        if (first.Writer >= 0 && (first.Writer == w || !Precedes(first.Writer, w)))
+        {
+            node = first.Writer;
+            return Conflict.WriterOrder;
+        }
         var lo = Math.Max(first.Placement.Offset, second.Placement.Offset);
         var hi = Math.Min(first.Placement.End, second.Placement.End);
         foreach (var (reader, start, end) in first.Reads)
         {
             if (end <= lo || start >= hi) continue;
             if (reader == w) continue;
-            if (reader == AfterTheRun || !Precedes(reader, w)) return false;
+            if (reader == AfterTheRun) return Conflict.ReadAfterRun;
+            if (!Precedes(reader, w))
+            {
+                node = reader;
+                return Conflict.ReaderOrder;
+            }
         }
         foreach (var (start, end, identical) in WriterReads(w, first, second.Placement))
-            if (end > lo && start < hi && !identical) return false;
-        return true;
+            if (end > lo && start < hi && !identical)
+            {
+                node = w;
+                return Conflict.WriterReads;
+            }
+        return Conflict.None;
+    }
+
+    /// <summary>
+    /// Why <paramref name="value"/> is not placed beside <paramref name="placements"/>, for a
+    /// measurement to read: why it cannot be placed at all, or, for each of the first ranges the
+    /// planner would try, the occupant in its way and how — in neither order can the two share the
+    /// range.
+    /// </summary>
+    internal string WhyNot(string value, IReadOnlyList<Placement> placements)
+    {
+        if (Unplaceable(value) is { } why) return why;
+        var occupants = Occupants(placements);
+        var placed = placements.Select(p => p.Value).Append(value).ToHashSet(StringComparer.Ordinal);
+        var reasons = new List<string>();
+        foreach (var option in Options(value, occupants).Take(4))
+        {
+            var at = $"{option.Block}+{option.Offset}";
+            if (!Fits(option))
+            {
+                reasons.Add($"{at}: outside its block or off a boundary");
+                continue;
+            }
+            var candidate = Placed(option, placed);
+            var other = occupants.FirstOrDefault(o => !Compatible(o, candidate));
+            if (other is null)
+            {
+                reasons.Add($"{at}: fits");
+                continue;
+            }
+            reasons.Add($"{at}: over {other.Placement.Value}, {Describe(ConflictOf(other, candidate, out var n1), n1)}; "
+                        + $"before it, {Describe(ConflictOf(candidate, other, out var n2), n2)}");
+        }
+        return reasons.Count == 0 ? "no range to try" : string.Join(" | ", reasons);
+    }
+
+    private string Describe(Conflict conflict, int node)
+    {
+        var named = node >= 0 ? $"{_nodes[node].OpType} '{_nodes[node].Name}'" : "";
+        return conflict switch
+        {
+            Conflict.ContentLast => "an input's own content comes first",
+            Conflict.WriterOrder => $"written by {named}, which need not run first",
+            Conflict.ReadAfterRun => "read after the run",
+            Conflict.ReaderOrder => $"read by {named}, which need not run first",
+            Conflict.WriterReads => $"its writer {named} reads it where it does not write it",
+            _ => "nothing",
+        };
     }
 
     /// <summary>Whether two occupants of one block can share it: their ranges do not overlap, or one

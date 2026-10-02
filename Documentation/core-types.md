@@ -325,7 +325,8 @@ var b = TensorFill((Vector<int64>)[Scalar(3L)], fill);   // fine: fill is untouc
 
 ## What a `TensorData` holds, and when its values go away
 
-A `TensorData` **is** its memory: one object per allocation, never shared with
+A `TensorData` **is** its memory: one object per allocation, or per range of the
+memory of an input a run consumed and wrote several values into, never shared with
 another tensor. `Delete()` (the same as `Dispose()`) releases it. The full lifetime
 model is in [A tensor's lifetime](inference.md#a-tensors-lifetime-locks-and-deletion).
 In short:

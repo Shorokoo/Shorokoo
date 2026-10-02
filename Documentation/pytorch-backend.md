@@ -213,7 +213,7 @@ String tensors work, and always stay on the host; sequences of tensors work.
 
 Every output is memory of its own, even where the model returns an input or weight
 unchanged, except an output written into a *consumed* input
-([output aliasing](#runs)), which nothing else holds.
+([output aliasing and placement](#runs)), which no other value's range overlaps.
 
 ## Runs
 
@@ -222,6 +222,7 @@ What a run does with the settings every backend is handed, on each device:
 | | CPU | CUDA |
 |---|---|---|
 | **Output aliasing** (a run writing an output into a consumed input) | yes, for an output produced by `Add`/`Sub`/`Mul`/`Div` | the same, on the card |
+| **Placement** (a run writing its values into ranges of consumed inputs) | yes: floating-point element-wise operators, fills, concatenations and copies of views; not in a training step torch differentiates | the same, on the card |
 | **Where inputs and outputs are** | host memory | the card for every tensor, the host for strings and sequences: every input is placed there before the run, and every output stays there |
 | **Cancellation** (`RunSettings.CancellationToken`) | stops before the next node | stops before the next node |
 | **`DeviceMemory.LimitBytes`** | ignored, as on every CPU backend | caps each run's allocations (see below) |
@@ -237,6 +238,15 @@ updated parameter with the parameter) is written into the input's memory when it
 `Add`, `Sub`, `Mul` or `Div`, so the optimizer's `p - lr * g` costs no memory. Other operators'
 pairs are not bound. A write is declined where the input's memory may still be read through a
 view (`Transpose`, `Expand`, `Slice`, a same-type `Cast`).
+
+**Placement.** A run that consumes inputs writes its values of a mebibyte or more into ranges
+of their memory where the graph proves it safe
+([A run that writes into what it consumed](inference.md#a-run-that-writes-into-what-it-consumed)):
+each with torch's own operator writing into the range — an element-wise operator's `out=` form
+(on floating-point values), a fill, a concatenation part by part, or a copy of what a slice,
+reshape or transpose reads, which an output that views an input is copied out by anyway. An
+operator with no such form is not placed. Every output a run wrote into one input stands on that
+input's memory, which torch frees with the last of them.
 
 **Intermediate values.** A run releases each value after its last reader (in function, branch
 and loop bodies too), so its peak is what is live at once. In a training step whose gradient

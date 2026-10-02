@@ -337,7 +337,13 @@ internal static class PlacementShapes
         if (op == "Expand")
         {
             if (x is null || In(1)?.Ints is not { } target) return [];
-            return [new Value(Broadcast(x.Shape, target), x.ElementType, null)];
+            var expanded = Broadcast(x.Shape, target);
+            var count = expanded.Aggregate(1L, (a, d) => a * d);
+            long[]? ints = x.Ints is not { } v || count > SmallInts ? null
+                : v.Length == 1 ? [.. Enumerable.Repeat(v[0], (int)count)]
+                : expanded.SequenceEqual(x.Shape) ? v
+                : null;
+            return [new Value(expanded, x.ElementType, ints)];
         }
         if (op == "Transpose")
         {
@@ -361,7 +367,7 @@ internal static class PlacementShapes
             if (y.Shape.Length > 1) dims.Add(b[^1]);
             return [new Value([.. dims], x.ElementType, null)];
         }
-        if (op == "Gemm")
+        if (op is "Gemm" or "FusedGemm")
         {
             if (x is null || In(1) is not { } y || x.Shape.Length != 2 || y.Shape.Length != 2) return [];
             var m = (Attr(node, "transA") ?? 0) != 0 ? x.Shape[1] : x.Shape[0];
@@ -423,6 +429,40 @@ internal static class PlacementShapes
                 return (Value?)new Value(dims, x.ElementType, null);
             })];
         }
+        if (op == "Compress")
+        {
+            if (x is null || In(1)?.Ints is not { } condition) return [];
+            var rank = x.Shape.Length;
+            if (Attr(node, "axis") is not { } axisAttr)
+            {
+                var kept = condition.Take((int)Math.Min(condition.Length, x.Elements)).Select((c, i) => (c, i)).Where(p => p.c != 0).Select(p => p.i).ToArray();
+                return [new Value([kept.Length], x.ElementType, x.Ints is { } all ? [.. kept.Select(i => all[i])] : null)];
+            }
+            var axis = (int)(axisAttr < 0 ? axisAttr + rank : axisAttr);
+            if (axis < 0 || axis >= rank) return [];
+            var dims = (long[])x.Shape.Clone();
+            var selected = condition.Take((int)Math.Min(condition.Length, x.Shape[axis])).Select((c, i) => (c, i)).Where(p => p.c != 0).Select(p => p.i).ToArray();
+            dims[axis] = selected.Length;
+            return [new Value(dims, x.ElementType, rank == 1 && x.Ints is { } data ? [.. selected.Select(i => data[i])] : null)];
+        }
+        if (op == "Pad")
+        {
+            if (x is null || (In(1)?.Ints ?? Ints(node, "pads")) is not { } pads) return [];
+            var rank = x.Shape.Length;
+            if (node.Inputs.Count > 3 && node.Inputs[3].Length > 0 && In(3)?.Ints is null) return [];
+            var axes = (node.Inputs.Count > 3 && node.Inputs[3].Length > 0 ? In(3)!.Ints! : [.. Enumerable.Range(0, rank).Select(d => (long)d)])
+                .Select(a => (int)(a < 0 ? a + rank : a)).ToArray();
+            if (pads.Length != 2 * axes.Length || axes.Any(a => a < 0 || a >= rank)) return [];
+            var dims = (long[])x.Shape.Clone();
+            for (int k = 0; k < axes.Length; k++) dims[axes[k]] += pads[k] + pads[k + axes.Length];
+            if (dims.Any(d => d < 0)) return [];
+            var mode = node.Attributes.FirstOrDefault(a => a.Name == "mode")?.S is { Length: > 0 } m ? System.Text.Encoding.UTF8.GetString(m) : "constant";
+            long[]? ints = null;
+            if (rank == 1 && x.Ints is { } data && mode == "constant" && pads.All(p => p >= 0) && dims[0] <= SmallInts
+                && (node.Inputs.Count < 3 || node.Inputs[2].Length == 0 ? 0L : In(2)?.Ints is [var c] ? c : (long?)null) is { } fill)
+                ints = [.. Enumerable.Repeat(fill, (int)pads[0]), .. data, .. Enumerable.Repeat(fill, (int)pads[1])];
+            return [new Value(dims, x.ElementType, ints)];
+        }
         if (op == "Range")
         {
             if (x?.Ints is not [var start] || In(1)?.Ints is not [var limit] || In(2)?.Ints is not [var delta] || delta == 0) return [];
@@ -430,13 +470,13 @@ internal static class PlacementShapes
             long[]? ints = count <= SmallInts ? [.. Enumerable.Range(0, (int)count).Select(k => start + k * delta)] : null;
             return [new Value([count], x.ElementType, ints)];
         }
-        if (op is "Conv" or "MaxPool" or "AveragePool" or "LpPool")
+        if (op is "Conv" or "FusedConv" or "MaxPool" or "AveragePool" or "LpPool")
         {
             if (x is null || x.Shape.Length < 3) return [];
             var spatial = x.Shape.Length - 2;
             long channels;
             long[] kernel;
-            if (op == "Conv")
+            if (op is "Conv" or "FusedConv")
             {
                 if (In(1) is not { } w || w.Shape.Length != x.Shape.Length) return [];
                 channels = w.Shape[0];
@@ -475,6 +515,31 @@ internal static class PlacementShapes
             }
             var output = new Value([.. dims], x.ElementType, null);
             return op == "MaxPool" ? [output, new Value([.. dims], Int64, null)] : [output];
+        }
+        if (op == "ConvTranspose")
+        {
+            if (x is null || x.Shape.Length < 3 || In(1) is not { } w || w.Shape.Length != x.Shape.Length) return [];
+            var spatial = x.Shape.Length - 2;
+            var kernel = Ints(node, "kernel_shape") ?? w.Shape[2..];
+            var strides = Ints(node, "strides") is { Length: > 0 } st ? st : Enumerable.Repeat(1L, spatial).ToArray();
+            var dilations = Ints(node, "dilations") is { Length: > 0 } dl ? dl : Enumerable.Repeat(1L, spatial).ToArray();
+            var pads = Ints(node, "pads") is { Length: > 0 } pd ? pd : new long[2 * spatial];
+            var extra = Ints(node, "output_padding") is { Length: > 0 } op2 ? op2 : new long[spatial];
+            var autoPad = node.Attributes.FirstOrDefault(a => a.Name == "auto_pad")?.S is { Length: > 0 } bytes
+                ? System.Text.Encoding.UTF8.GetString(bytes) : "NOTSET";
+            if (kernel.Length != spatial || strides.Length != spatial || dilations.Length != spatial || pads.Length != 2 * spatial
+                || extra.Length != spatial || autoPad != "NOTSET") return [];
+            var channels = w.Shape[1] * (Attr(node, "group") ?? 1);
+            var dims = new List<long> { x.Shape[0], channels };
+            if (Ints(node, "output_shape") is { } shape)
+            {
+                if (shape.Length != spatial) return [];
+                dims.AddRange(shape);
+            }
+            else
+                for (int d = 0; d < spatial; d++)
+                    dims.Add(strides[d] * (x.Shape[d + 2] - 1) + extra[d] + (kernel[d] - 1) * dilations[d] + 1 - pads[d] - pads[d + spatial]);
+            return dims.Any(d => d < 0) ? [] : [new Value([.. dims], x.ElementType, null)];
         }
         if (op is "GlobalAveragePool" or "GlobalMaxPool" or "GlobalLpPool")
             return x is null || x.Shape.Length < 3 ? [] : [new Value([x.Shape[0], x.Shape[1], .. Enumerable.Repeat(1L, x.Shape.Length - 2)], x.ElementType, null)];

@@ -223,6 +223,152 @@ public class MemoryReuseScenarioTests
     }
 
     /// <summary>
+    /// What bounds each benchmark family's training step's peak: the step (AdamW, L2 loss, state
+    /// written over itself, batch fed <c>.Shared()</c>) measured on the backend
+    /// <c>$SHOROKOO_MEMORY_REUSE_BACKEND</c> names — the most its allocator handed out beyond what it
+    /// had as the step began, read off Shorokoo's allocator's observer on ONNX Runtime and off torch's
+    /// CUDA allocator on a card (torch keeps no such figure on the CPU) — beside the step's
+    /// <see cref="StepAnatomy"/>: the modelled peak in the order the backend runs the step (ONNX
+    /// Runtime's depth-first order, or the graph's own for a translation), and what is held there,
+    /// by part. <c>$SHOROKOO_MEMORY_REUSE_SCALE</c> multiplies each family's batch.
+    /// </summary>
+    [Fact]
+    public void RecordWhatBoundsATrainingStepsPeak()
+    {
+        var backend = Environment.GetEnvironmentVariable("SHOROKOO_MEMORY_REUSE_BACKEND") ?? "ort";
+        var onCard = backend == "torch-cuda"
+                     || (backend == "ort" && DefaultBackend.Instance.GetType().Assembly.GetName().Name?.EndsWith("GPU", StringComparison.Ordinal) == true);
+        var scale = long.TryParse(Environment.GetEnvironmentVariable("SHOROKOO_MEMORY_REUSE_SCALE"), out var s) ? s : 1;
+        var only = Environment.GetEnvironmentVariable("SHOROKOO_MEMORY_REUSE_FAMILIES")?.Split(',');
+        var where = backend == "ort" ? $"ONNX Runtime on the {(onCard ? "card" : "host")}" : backend;
+        var lines = new List<string>
+        {
+            $"# What bounds a training step's peak, {where}, batch x{scale}", "",
+            "| family | measured | modelled, graph handed over | modelled, graph run | forward | backward | parameter gradients | update | every element-wise op over a dying operand | batch freed after its last read | a shape read holds nothing | Relu's gradient reads its output | all four | batch | parameters | state | peak at |",
+            "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+        };
+        foreach (var (family, model, benchmarkShape) in MemoryPassBenchmarkTests.Suite)
+        {
+            if (only is not null && !only.Contains(family)) continue;
+            long[] shape = [benchmarkShape[0] * scale, .. benchmarkShape[1..]];
+            var count = (int)shape.Aggregate(1L, (a, d) => a * d);
+            float[] Values(int seed) => [.. Enumerable.Range(0, count).Select(i => ((i * 7 + seed) % 101) / 101f - 0.5f)];
+            using var context = backend switch
+            {
+                "torch-cpu" => new ComputeContext(new Shorokoo.PyTorch.Cpu.TorchCpuBackend()),
+                "torch-cuda" => new ComputeContext(new Shorokoo.PyTorch.Cuda.TorchCudaBackend()),
+                _ => new ComputeContext(),
+            };
+            var sample = TensorData(shape, Values(0));
+            var concrete = model().ToConcreteArchitecture([sample]).ToConcreteModel();
+            var predicted = context.Execute(concrete, sample.Shared())[0].ToTensorData();
+            long[] dims = [.. predicted.Shape.Dims.Select(d => (long)d)];
+            predicted.Delete();
+            var rig = TrainingRig.FromScratch(
+                model(), Shorokoo.Modules.Losses.L2Loss.ComputationGraph, Shorokoo.Modules.Optimizers.AdamWOptimizer.ComputationGraph,
+                [sample.CopyTo(ComputeContext.Host)], new Shorokoo.Modules.Optimizers.AdamWOptimizerHyperparameters { LearningRate = 0.001f },
+                runtimeContext: context);
+            var input = rig.InputDef.FromOrderedData(sample);
+            var targets = rig.TargetDef.FromOrderedData(TensorData(dims, new float[dims.Aggregate(1L, (a, d) => a * d)]));
+            long measured;
+            using (var run = rig.BeginResidentRun(rig.CreateInitialCheckpoint()))
+            {
+                for (int i = 0; i < 3; i++) run.Step(input.Shared(), targets.Shared());
+                measured = backend switch
+                {
+                    "ort" => Observed(onCard, () => run.Step(input.Shared(), targets.Shared())).Peak,
+                    "torch-cuda" => TorchObserved(backend, () => run.Step(input.Shared(), targets.Shared())).Peak,
+                    _ => -1,
+                };
+            }
+            var stepModel = MemoryPassBenchmarkTests.RigModel(rig.TrainingStepPureGraph, rig.OptimizationInputShapes);
+            var state = rig.UpdatedParamFieldCount + rig.UpdatedStateFieldCount + rig.UpdatedOptimizerStateFieldCount;
+            StepAnatomy Anatomy(GraphProto graph) => new(graph, rig.UpdatedParamFieldCount, state, rig.UpdatedOptimizerStateFieldCount);
+            var handed = Anatomy(stepModel.Graph);
+            // ONNX Runtime runs the graph it rewrites, in its own order, writing an activation over
+            // its input where the input dies there; a translation runs the graph as handed over, in
+            // its own order.
+            var anatomy = backend == "ort" ? Anatomy(OrtOptimized(stepModel, onCard)) : handed;
+            int[] OrderOf(StepAnatomy a, GraphProto g) => backend == "ort" ? a.OrtOrder() : [.. Enumerable.Range(0, g.Nodes.Count)];
+            var graphRun = backend == "ort" ? OrtOptimized(stepModel, onCard) : stepModel.Graph;
+            var order = OrderOf(anatomy, graphRun);
+            Func<NodeProto, int, int, bool> shares = backend == "ort" ? OutputAliasProof.Shares : PlacementMemory.PyTorch.SharesUnlessPlaced;
+            Func<NodeProto, int, bool>? own = backend == "ort" ? static (node, slot) => slot == 0 && OrtWritesOver.Contains(node.OpType) : null;
+            var peak = anatomy.Peak(order, shares, own);
+            var handedPeak = handed.Peak(OrderOf(handed, stepModel.Graph), shares, own);
+            var inPlace = anatomy.Peak(order, shares, (node, slot) => (own?.Invoke(node, slot) ?? false) || (OutputAliasProof.IsStandard(node)
+                && ((PlacementProof.InPlaceUnary.Contains(node.OpType) && slot == 0) || (PlacementProof.InPlaceBinary.Contains(node.OpType) && node.Inputs.Count == 2))));
+            var batchFreed = anatomy.Peak(order, shares, own, batchFreed: true);
+            var shapesFree = anatomy.Peak(order, shares, own, shapeReadsHold: false);
+            var rewired = ReluMasksReadTheOutput(stepModel);
+            var reluAnatomy = backend == "ort" ? Anatomy(OrtOptimized(rewired, onCard)) : Anatomy(rewired.Graph);
+            var reluOrder = backend == "ort" ? reluAnatomy.OrtOrder() : [.. Enumerable.Range(0, rewired.Graph.Nodes.Count)];
+            var relu = reluAnatomy.Peak(reluOrder, shares, own);
+            var everything = reluAnatomy.Peak(reluOrder, shares, (node, slot) => (own?.Invoke(node, slot) ?? false) || (OutputAliasProof.IsStandard(node)
+                && ((PlacementProof.InPlaceUnary.Contains(node.OpType) && slot == 0) || (PlacementProof.InPlaceBinary.Contains(node.OpType) && node.Inputs.Count == 2))),
+                batchFreed: true, shapeReadsHold: false);
+            lines.Add($"| {family} | {(measured < 0 ? "-" : Mib(measured))} | {Mib(handedPeak.Bytes)} | {Mib(peak.Bytes)} | {Mib(peak.ByPart[StepAnatomy.Part.Forward])} | {Mib(peak.ByPart[StepAnatomy.Part.Backward])} "
+                      + $"| {Mib(peak.ByPart[StepAnatomy.Part.ParameterGradient])} | {Mib(peak.ByPart[StepAnatomy.Part.Update])} | {Mib(inPlace.Bytes)} | {Mib(batchFreed.Bytes)} "
+                      + $"| {Mib(shapesFree.Bytes)} | {Mib(relu.Bytes)} | {Mib(everything.Bytes)} "
+                      + $"| {Mib(anatomy.BatchBytes)} | {Mib(anatomy.ParameterBytes)} | {Mib(anatomy.StateBytes)} | {peak.Position}/{order.Length}: {anatomy.At(order, peak.Position)} |");
+            File.AppendAllText(Path.Combine(OutputDirectory(), $"step-anatomy-{backend}-{(onCard ? "card" : "host")}-x{scale}-detail.md"),
+                $"\n## {family}\n\nnodes by part: {string.Join(", ", anatomy.NodesByPart.Select(p => $"{p.Key} {p.Value}"))}; values of unknown shape: {anatomy.UnknownValues}\n\nunknown from: {anatomy.UnknownRoots}\n\n"
+                + "largest held at the peak: " + string.Join(", ", peak.Largest.Select(l => $"{l.Op} {l.Part} {Mib(l.Bytes)} (read until {l.Until})")) + "\n"
+                + $"\nwith Relu's gradient reading its output: values of unknown shape {reluAnatomy.UnknownValues} ({reluAnatomy.UnknownRoots}); largest held at the peak: "
+                + string.Join(", ", relu.Largest.Select(l => $"{l.Op} {l.Part} {Mib(l.Bytes)} (read until {l.Until})")) + "\n");
+        }
+        File.WriteAllText(Path.Combine(OutputDirectory(), $"step-anatomy-{backend}-{(onCard ? "card" : "host")}-x{scale}.md"), string.Join("\n", lines) + "\n");
+    }
+
+    /// <summary><paramref name="model"/> with each <c>Greater</c> that reads a <c>Relu</c>'s input
+    /// — the mask of its gradient — reading the <c>Relu</c>'s output instead, which is positive
+    /// exactly where the input is.</summary>
+    private static ModelProto ReluMasksReadTheOutput(ModelProto model)
+    {
+        using var stream = new MemoryStream();
+        ProtoBuf.Serializer.Serialize(stream, model);
+        stream.Position = 0;
+        var copy = ProtoBuf.Serializer.Deserialize<ModelProto>(stream);
+        foreach (var relu in copy.Graph.Nodes.Where(n => n.OpType == "Relu").ToList())
+            foreach (var mask in copy.Graph.Nodes.Where(n => n.OpType == "Greater" && n.Inputs.Count == 2 && n.Inputs[0] == relu.Inputs[0]))
+                mask.Inputs[0] = relu.Outputs[0];
+        return copy;
+    }
+
+    /// <summary>The activations ONNX Runtime's kernels write over their input where it dies there
+    /// (they register to run in place).</summary>
+    private static readonly HashSet<string> OrtWritesOver = new(StringComparer.Ordinal)
+    {
+        "Relu", "Sigmoid", "Tanh", "Elu", "LeakyRelu", "HardSigmoid", "Selu", "Softplus", "Softsign", "ThresholdedRelu",
+    };
+
+    /// <summary>The graph ONNX Runtime runs for <paramref name="model"/>, built as a training step's
+    /// session is — on the card's provider where <paramref name="onCard"/> — and written out.</summary>
+    private static GraphProto OrtOptimized(ModelProto model, bool onCard)
+    {
+        var directory = Path.Combine(Path.GetTempPath(), $"shorokoo-step-anatomy-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        try
+        {
+            using var stream = new MemoryStream();
+            ProtoBuf.Serializer.Serialize(stream, model);
+            using (var options = new SessionOptions())
+            {
+                OrtBackend.Configure(options, ShorokooGraphOptimization.TrainingStep, ShorokooLogSeverity.Fatal);
+                options.OptimizedModelFilePath = Path.Combine(directory, "optimized.onnx");
+                if (onCard) OrtBackend.AppendCuda(options, 0, DeviceMemorySettings.Default);
+                using var session = new InferenceSession(stream.ToArray(), options);
+            }
+            using var written = File.OpenRead(Path.Combine(directory, "optimized.onnx"));
+            return ProtoBuf.Serializer.Deserialize<ModelProto>(written).Graph;
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    /// <summary>
     /// Why placement does or does not reach each benchmark family's inference graph: per family, at
     /// <c>$SHOROKOO_MEMORY_REUSE_SCALE</c> times its batch, the values of a mebibyte or more, each
     /// with its operator and why it cannot be placed (<see cref="PlacementProof.Unplaceable"/>) or

@@ -185,9 +185,9 @@ public class MemoryReuseScenarioTests
         {
             $"# Placement across the benchmark families, {where}, batch x{(long.TryParse(Environment.GetEnvironmentVariable("SHOROKOO_MEMORY_REUSE_SCALE"), out var x) ? x : 1)}", "",
             backend == "torch-cpu"
-                ? "| family | placement | step allocated | step ms | step plans | inference allocated | inference ms | inference plans |"
-                : "| family | placement | step peak | step ms | step plans | inference peak | inference ms | inference plans |",
-            "|---|---|---|---|---|---|---|---|",
+                ? "| family | placement | step allocated | step ms | step plans | inference allocated | inference ms | ms, input shared | inference plans |"
+                : "| family | placement | step peak | step ms | step plans | inference peak | inference ms | ms, input shared | inference plans |",
+            "|---|---|---|---|---|---|---|---|---|",
         };
         var scale = long.TryParse(Environment.GetEnvironmentVariable("SHOROKOO_MEMORY_REUSE_SCALE"), out var s) ? s : 1;
         foreach (var (family, model, benchmarkShape) in MemoryPassBenchmarkTests.Suite)
@@ -198,7 +198,7 @@ public class MemoryReuseScenarioTests
             foreach (var placing in Enumerable.Range(0, 2 * rounds).Select(k => k % 2 == 1))
             {
                 var m = MeasureFamily(model(), shape, placing, onCard, backend);
-                lines.Add($"| {family} | {(placing ? "on" : "off")} | {Mib(m.StepPeak)} | {m.StepMs:0.00} | {m.StepPlans} | {Mib(m.InferencePeak)} | {m.InferenceMs:0.00} | {m.InferencePlans} |");
+                lines.Add($"| {family} | {(placing ? "on" : "off")} | {Mib(m.StepPeak)} | {m.StepMs:0.00} | {m.StepPlans} | {Mib(m.InferencePeak)} | {m.InferenceMs:0.00} | {m.SharedInferenceMs:0.00} | {m.InferencePlans} |");
             }
         }
         File.WriteAllText(Path.Combine(OutputDirectory(), $"placement-across-the-families-{(backend == "ort" ? onCard ? "card" : "host" : backend)}-x{scale}.md"), string.Join("\n", lines) + "\n");
@@ -345,7 +345,8 @@ public class MemoryReuseScenarioTests
         return $"{node.OpType}<{attrs}>({string.Join("; ", node.Inputs.Where(x => x.Length > 0).Select(x => Explain(graph, shapes, x, depth - 1)))})->{known}";
     }
 
-    private sealed record FamilyFigures(long StepPeak, double StepMs, string StepPlans, long InferencePeak, double InferenceMs, string InferencePlans);
+    private sealed record FamilyFigures(
+        long StepPeak, double StepMs, string StepPlans, long InferencePeak, double InferenceMs, double SharedInferenceMs, string InferencePlans);
 
     private static FamilyFigures MeasureFamily(ComputationGraph model, long[] shape, bool placing, bool onCard, string backend = "ort")
     {
@@ -418,7 +419,10 @@ public class MemoryReuseScenarioTests
         for (int i = 0; i < Warm; i++) Release(Infer());
         var (outputs, inferencePeak) = Observe(Infer);
         Release(outputs);
+        // Each timed run is paired with one on a shared input, which no run writes into: the same
+        // session's plain run beside its placed one, in the same moment of a loaded machine.
         var inferenceTimes = new List<double>();
+        var sharedTimes = new List<double>();
         for (int i = 0; i < Timed; i++)
         {
             var input1 = TensorData(shape, Values(1));
@@ -426,10 +430,16 @@ public class MemoryReuseScenarioTests
             var each = compiled.Execute(input1);
             inferenceTimes.Add(watch.Elapsed.TotalMilliseconds);
             Release(each);
+            var kept = TensorData(shape, Values(1));
+            watch.Restart();
+            each = compiled.Execute(kept.Shared());
+            sharedTimes.Add(watch.Elapsed.TotalMilliseconds);
+            Release(each);
+            kept.Delete();
         }
         OrtPlacements.Settled = null;
         TorchPlacements.Settled = null;
-        return new FamilyFigures(stepPeak, Median(stepTimes), stepPlans, inferencePeak, Median(inferenceTimes), Settled());
+        return new FamilyFigures(stepPeak, Median(stepTimes), stepPlans, inferencePeak, Median(inferenceTimes), Median(sharedTimes), Settled());
     }
 
     private static void Release(NamedModelParam[] outputs)

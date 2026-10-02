@@ -145,7 +145,7 @@ public class PyTorchCudaHardwareTests
     }
 
     [TorchCudaFact]
-    public void TestAnOutputIsWrittenIntoTheConsumedInputWhereverTheOutputEndsUp()
+    public void TestAnOutputIsWrittenIntoTheConsumedInputWhereItsOperatorCanOverwriteItAndProducedAsUsualWhereItCannot()
     {
         var sub = PyTorchBackendCoverageTests.Serialize(ComputeContextLifetimeCoverageTests.GraphOf("a:float[4] b:float[4]", "O:float[4]", Op("Sub", "a b", "O")));
         var matmul = PyTorchBackendCoverageTests.Serialize(ComputeContextLifetimeCoverageTests.GraphOf("a:float[2,2] b:float[2,2]", "O:float[2,2]", Op("MatMul", "b a", "O")));
@@ -171,16 +171,19 @@ public class PyTorchCudaHardwareTests
         var consumedMemory = Address(consumed);
         var (inPlace, written) = Run(session, consumed, b);
         using var identity = OnCard([2, 2], 1f, 0f, 0f, 1f);
-        var (copied, square) = Run(product, OnCard([2, 2], 1f, 2f, 3f, 4f), identity);
+        var operand = OnCard([2, 2], 1f, 2f, 3f, 4f);
+        var operandMemory = Address(operand);
+        var (produced, square) = Run(product, operand, identity);
 
-        Assert.Equal(("a", "a", "a"), (onCard, inPlace, copied));
+        Assert.Equal(("a", "a", null), (onCard, inPlace, produced));
         Assert.False(kept.IsHostAccessible);
         Assert.Equal(Bytes(9f, 18f, 27f, 36f), Cuda.Value.CopyTensorToHost(kept));
         Assert.False(written.IsHostAccessible);
         Assert.Equal(Bytes(9f, 18f, 27f, 36f), Cuda.Value.CopyTensorToHost(written));
         Assert.Equal(consumedMemory, Address(written));
         Assert.Equal(Bytes(1f, 2f, 3f, 4f), Cuda.Value.CopyTensorToHost(square));
-        Assert.Equal([new OutputAlias("O", "a")], product.BindableAliases);
+        Assert.NotEqual(operandMemory, Address(square));
+        Assert.Empty(product.BindableAliases);
         kept.Dispose();
         written.Dispose();
         square.Dispose();

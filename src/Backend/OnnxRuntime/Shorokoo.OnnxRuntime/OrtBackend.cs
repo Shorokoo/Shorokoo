@@ -314,6 +314,9 @@ public abstract class OrtBackend : IShorokooBackend
     /// </summary>
     internal bool SessionsUseOrtArena { get; init; }
 
+    /// <summary>Whether this backend's sessions run on a CUDA card.</summary>
+    internal bool OnCard => _cudaDeviceId is not null;
+
     /// <summary>This backend's sessions take supplied initializers.</summary>
     public bool SuppliesInitializers => true;
 

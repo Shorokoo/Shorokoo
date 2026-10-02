@@ -339,7 +339,7 @@ internal sealed class OrtPlacements : IDisposable
             // and a session builds nothing for such a run.
             if (original.Graph is not { } handed
                 || handed.Nodes.Count > PlacementProof.MostNodes
-                || new PlacementProof(handed, blockBytes, PlacementShapes.Evaluate(handed, given), runsInOrder: true)
+                || new PlacementProof(handed, blockBytes, PlacementShapes.Evaluate(handed, given), memory: MemoryOf(handed), runsInOrder: true)
                     .Plan(PlacementProof.Smallest, PlacementProof.IdleOutputBytes, givingBack).Count == 0)
             {
                 Refuse(entry, "nothing to place in the graph handed over");
@@ -355,7 +355,7 @@ internal sealed class OrtPlacements : IDisposable
             }
             var shapes = PlacementShapes.Evaluate(runs, given);
             var runsOutputs = runs.Outputs.Select(o => o.Name).ToHashSet(StringComparer.Ordinal);
-            var proof = new PlacementProof(runs, blockBytes, shapes, runsInOrder: true);
+            var proof = new PlacementProof(runs, blockBytes, shapes, memory: MemoryOf(runs), runsInOrder: true);
             var plan = proof.Prove(proof.Plan(PlacementProof.Smallest, PlacementProof.IdleOutputBytes, givingBack)
                 .Where(p => !runsOutputs.Contains(p.Value) || outputNames.Contains(p.Value)));
             if (plan.Count == 0)
@@ -433,7 +433,7 @@ internal sealed class OrtPlacements : IDisposable
                 return (null, false);
             }
             var variantShapes = PlacementShapes.Evaluate(graph, given);
-            var variantProof = new PlacementProof(graph, blockBytes, variantShapes, runsOutputs, runsInOrder: true);
+            var variantProof = new PlacementProof(graph, blockBytes, variantShapes, runsOutputs, MemoryOf(graph), runsInOrder: true);
             var proved = variantProof.Prove(plan
                 .Where(p => variantShapes.TryGetValue(p.Value, out var v) && v.Bytes == p.Bytes && StatedAgrees(graph, p.Value, v, given)));
             if (proved.Count == 0)
@@ -492,6 +492,54 @@ internal sealed class OrtPlacements : IDisposable
         entry.Refusal = why;
         entry.Variant?.Dispose();
         entry.Variant = null;
+    }
+
+    /// <summary>
+    /// How this session lays out the values of <paramref name="graph"/>, a graph it runs, as far as
+    /// placing them goes: ONNX Runtime's way, where on a card a node that runs on the host
+    /// (<see cref="HostNodes"/>) writes into no range — its output is host memory, which a binding
+    /// to a range on the card receives only as the run ends, over whatever the run wrote there since.
+    /// </summary>
+    private PlacementMemory MemoryOf(GraphProto graph)
+    {
+        if (!_backend.OnCard) return PlacementMemory.OnnxRuntime;
+        var host = HostNodes(graph);
+        return PlacementMemory.OnnxRuntime with { Writes = (node, _) => !host.Contains(node) };
+    }
+
+    // The CUDA provider's operators reading nothing of the card's memory to write their output there:
+    // a fill of a shape, a range, random values.
+    private static readonly HashSet<string> CardGenerators = new(StringComparer.Ordinal)
+    {
+        "ConstantOfShape", "Range", "RandomNormal", "RandomUniform",
+    };
+
+    /// <summary>
+    /// The nodes of <paramref name="graph"/>, a graph a session on a card runs, whose outputs are in
+    /// host memory: a copy to the host, a shape or a size, and every node of the CPU provider's. ONNX
+    /// Runtime hands a node only values in its provider's memory, copying one across where it is not,
+    /// so a node reading a value in the card's memory — an input, a copy onto the card, or the output
+    /// of a node reading one — is the CUDA provider's; and of the nodes reading none, only its
+    /// generators, where no copy onto the card takes what they write.
+    /// </summary>
+    internal static HashSet<NodeProto> HostNodes(GraphProto graph)
+    {
+        var onCard = graph.Inputs.Select(i => i.Name).ToHashSet(StringComparer.Ordinal);
+        var copiedOn = graph.Nodes.Where(n => n.OpType == "MemcpyFromHost").SelectMany(n => n.Inputs).ToHashSet(StringComparer.Ordinal);
+        var host = new HashSet<NodeProto>(ReferenceEqualityComparer.Instance);
+        foreach (var node in graph.Nodes)
+        {
+            var card = node.OpType switch
+            {
+                "MemcpyFromHost" => true,
+                "MemcpyToHost" or "Shape" or "Size" => false,
+                _ => node.Inputs.Any(onCard.Contains)
+                     || (CardGenerators.Contains(node.OpType) && !node.Outputs.Any(copiedOn.Contains)),
+            };
+            if (card) onCard.UnionWith(node.Outputs);
+            else host.Add(node);
+        }
+        return host;
     }
 
     /// <summary>The model as handed to the backend, for a measurement to read.</summary>

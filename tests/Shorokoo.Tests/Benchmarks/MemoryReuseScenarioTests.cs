@@ -287,12 +287,12 @@ public class MemoryReuseScenarioTests
                     var shapes = PlacementShapes.Evaluate(graph, entry.Given);
                     if (entry.VariantGraph is { } variantGraph)
                     {
-                        var variantProof = new PlacementProof(variantGraph, entry.BlockBytes, PlacementShapes.Evaluate(variantGraph, entry.Given));
+                        var variantProof = new PlacementProof(variantGraph, entry.BlockBytes, PlacementShapes.Evaluate(variantGraph, entry.Given), runsInOrder: true);
                         lines.Add($"variant graph, in its own order: modelled {Mib(variantProof.ModelledPeak([]))} plain, {Mib(variantProof.ModelledPeak(entry.Plan))} placed; "
                                   + $"its order {(variantGraph.Nodes.Select(n => n.Name).SequenceEqual(graph.Nodes.Select(n => n.Name)) ? "is" : "is not")} the plain graph's");
                     }
                     var outputs = graph.Outputs.Select(o => o.Name).ToHashSet(StringComparer.Ordinal);
-                    var proof = new PlacementProof(graph, entry.BlockBytes, shapes, outputs);
+                    var proof = new PlacementProof(graph, entry.BlockBytes, shapes, outputs, runsInOrder: true);
                     var plan = proof.Plan(PlacementProof.Smallest, PlacementProof.IdleOutputBytes);
                     foreach (var output in graph.Outputs.Select(o => o.Name).Where(o => shapes.TryGetValue(o, out var v) && v.Bytes >= PlacementProof.Smallest))
                     {
@@ -316,7 +316,7 @@ public class MemoryReuseScenarioTests
     {
         var graph = entry.Graph!;
         var shapes = PlacementShapes.Evaluate(graph, entry.Given);
-        var proof = new PlacementProof(graph, entry.BlockBytes, shapes);
+        var proof = new PlacementProof(graph, entry.BlockBytes, shapes, runsInOrder: true);
         var plan = proof.Plan(PlacementProof.Smallest, PlacementProof.IdleOutputBytes);
         var lines = new List<string>
         {

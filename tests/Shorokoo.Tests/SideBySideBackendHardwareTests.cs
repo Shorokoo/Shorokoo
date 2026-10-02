@@ -480,7 +480,7 @@ public class SideBySideBackendHardwareTests
     private static bool BothCudaBackendsRun(bool pytorchFirst)
     {
         IShorokooBackend[] inOrder = pytorchFirst ? [new TorchCudaBackend(), LoadCuda()] : [LoadCuda(), new TorchCudaBackend()];
-        return inOrder.All(ConvolutionRuns) && (!Windows || OneCopyOfEachCudaLibrary());
+        return inOrder.All(ConvolutionRuns) && OneCopyOfEachCudaLibrary();
     }
 
     private static int AConvolutionEndsInAResultOrAnException()
@@ -491,10 +491,10 @@ public class SideBySideBackendHardwareTests
 
     private static bool OneCopyOfEachCudaLibrary()
         => Process.GetCurrentProcess().Modules.Cast<ProcessModule>()
-            .Where(m => ((string[])["cublas", "cudnn"])
+            .Where(m => ((string[])["cublas", "cudnn", "libcublas", "libcudnn"])
                 .Any(family => m.ModuleName.StartsWith(family, StringComparison.OrdinalIgnoreCase)))
             .GroupBy(m => m.ModuleName, StringComparer.OrdinalIgnoreCase)
-            .All(copies => copies.Count() == 1);
+            .All(copies => copies.Select(m => m.FileName).Distinct().Count() == 1);
 
     /// <summary>The allocator ONNX Runtime made this value's buffer from, and the device it is on.
     /// Through the backend's own types, which an isolated backend loads privately, so the route to

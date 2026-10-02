@@ -609,6 +609,7 @@ public class SideBySideBackendCoverageTests
         Assert.True(CudaLibraryCache.LinkEnvironment(environment, sitePackages, pins, cache, _ => [], TimeSpan.FromSeconds(30)));
         Assert.True(CudaLibraryCache.IsComplete(Path.Combine(cache, cudnn.CacheKey), cudnn));
         Assert.Equal(pins.Identity, File.ReadAllText(Path.Combine(environment, CudaLibraryCache.LinkedMarker)));
+        Assert.Equal(["cublas64_13.dll", "cudnn64_9.dll", "cudnn_graph64_9.dll"], Directory.GetFiles(torchLib).Select(Path.GetFileName).Order());
         File.AppendAllText(Path.Combine(cache, cudnn.CacheKey, "cudnn64_9.dll"), "+");
         File.AppendAllText(Path.Combine(cache, cublas.CacheKey, "cublas64_13.dll"), "+");
         Assert.Equal(3, new FileInfo(Path.Combine(torchLib, "cudnn64_9.dll")).Length);

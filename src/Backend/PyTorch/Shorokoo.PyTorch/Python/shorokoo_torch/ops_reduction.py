@@ -81,8 +81,24 @@ def _mean(x, dims, keep):
     return torch.div(torch.sum(x, dims, keepdim=keep), count, rounding_mode="trunc")
 
 
+def _sum(x, dims, keep):
+    """torch.sum over `dims`. On a card, a sum over the leading axes of a contiguous floating-point
+    tensor leaving fewer values than each one adds up -- a bias's gradient, summed over the batch --
+    is taken in two stages, a block of leading rows at a time and then the blocks' sums: summed at
+    once, torch's kernel stages partial sums in a buffer twice the input's size."""
+    rows = math.prod(x.shape[:len(dims)])
+    columns = x.numel() // rows if rows else 0
+    if (x.is_cuda and x.is_floating_point() and dims == list(range(len(dims))) and x.is_contiguous()
+            and rows >= 1024 and 0 < columns < rows):
+        block = max(d for d in range(1, math.isqrt(rows) + 1) if rows % d == 0)
+        total = x.reshape(block, rows // block, columns).sum(0).sum(0)
+        shape = ([1] * len(dims) if keep else []) + list(x.shape[len(dims):])
+        return total.reshape(shape)
+    return torch.sum(x, dims, keepdim=keep)
+
+
 def reduce_sum(data, axes_input=None, /, *, axes=None, keepdims=1, noop_with_empty_axes=0):
-    return _reduce(lambda x, d, k: torch.sum(x, d, keepdim=k), 0, data, axes_input, axes, keepdims, noop_with_empty_axes, alone=True)
+    return _reduce(_sum, 0, data, axes_input, axes, keepdims, noop_with_empty_axes, alone=True)
 
 
 def reduce_mean(data, axes_input=None, /, *, axes=None, keepdims=1, noop_with_empty_axes=0):

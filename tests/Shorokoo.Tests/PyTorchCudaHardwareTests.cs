@@ -262,6 +262,21 @@ public class PyTorchCudaHardwareTests
         => PyTorchBackendCoverageTests.SoftmaxesNormalizationsClipsConvolutionsAndGemmsArePlaced(Cuda.Value);
 
     [TorchCudaFact]
+    public void TestASumOverTheLeadingAxesOnTheCardHoldsLittleBeyondItsResult()
+    {
+        var graph = ComputeContextLifetimeCoverageTests.WithInts(ComputeContextLifetimeCoverageTests.GraphOf("x:float[128,128,512]", "y",
+            ComputeContextLifetimeCoverageTests.Op("ReduceSum", "x axes", "y")), "axes", 0, 1);
+        using var session = Cuda.Value.CreateSession(PyTorchBackendCoverageTests.Serialize(graph), default, default, DeviceMemorySettings.Default);
+        using var x = Cuda.Value.CreateTensorInBackendMemory(ShorokooTensorElementType.Float,
+            [.. MemoryMarshal.AsBytes<float>(Enumerable.Repeat(0.5f, 128 * 128 * 512).ToArray())], [128, 128, 512]);
+        var feeds = new Dictionary<string, IShorokooTensorValue> { ["x"] = x };
+        session.Run(feeds, ["y"], RunSettings.Default)[0].Dispose();
+        var (peak, y) = PyTorchBackendCoverageTests.CardPeak(() => session.Run(feeds, ["y"], RunSettings.Default)[0]);
+        using (y) Assert.Equal([.. MemoryMarshal.AsBytes<float>([8192f, 8192f])], Cuda.Value.CopyTensorToHost(y)[..8]);
+        Assert.True(peak < 1 << 20);
+    }
+
+    [TorchCudaFact]
     public void TestAConvolutionOfTwoTransposedViewsIsComputedAsTheWeightGradientItIsOnTheCard()
     {
         Assert.Equal("True True", PyTorchBackendCoverageTests.WeightGradient(batch: 4, sizes: 9, kernel: 3, stride: 1, dilation: 1, pad: 1, Cuda.Value));

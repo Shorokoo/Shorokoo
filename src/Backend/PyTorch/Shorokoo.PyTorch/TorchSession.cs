@@ -57,7 +57,7 @@ internal sealed class TorchSession : IShorokooSession
     private readonly PyObject _constants;
     private readonly PyObject _constantStorages;
     private readonly PyObject _constantIds;
-    private readonly TorchPlacements? _placements;
+    private TorchPlacements? _placements;
     private int _disposed;
 
     // torch's CUDA caching allocator is the whole process's, so a cap on it is too: a run under a
@@ -213,6 +213,12 @@ internal sealed class TorchSession : IShorokooSession
 
     /// <summary>Where this session's consuming runs place their values; null where it places none.</summary>
     internal TorchPlacements? Placements => _placements;
+
+    void IShorokooSession.StopPlacing()
+    {
+        _placements?.Dispose();
+        _placements = null;
+    }
 
     /// <summary>
     /// On CUDA, torch's caching allocator on this session's device, as <c>torch.cuda.memory_stats</c>

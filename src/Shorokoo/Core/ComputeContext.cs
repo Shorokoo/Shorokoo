@@ -1400,10 +1400,11 @@ namespace Shorokoo.Runtime
         }
 
         /// <summary>
-        /// Whether this context's compiles mark outputs a run may write into the memory of an input
-        /// it consumed — output aliasing, which the training rig's steps use for the state they
-        /// replace (<see cref="OutputAlias"/>). On unless turned off, and turned off only by a test
-        /// comparing a run with aliasing to one without.
+        /// Whether this context's runs may write into the memory of the inputs they consume: the
+        /// outputs its compiles mark for it — output aliasing, which the training rig's steps use for
+        /// the state they replace (<see cref="OutputAlias"/>) — and the values its sessions place
+        /// there (<see cref="PlacementProof"/>). On unless turned off, and turned off only by a test
+        /// comparing a run that writes into what it consumed with one that writes nothing there.
         /// </summary>
         internal bool OutputAliasing { get; init; } = true;
 
@@ -2245,9 +2246,13 @@ namespace Shorokoo.Runtime
             IShorokooBackend backend, byte[] modelData, ShorokooGraphOptimization optimization,
             DeviceMemorySettings deviceMemory, IReadOnlyList<OutputAlias>? outputAliases = null,
             int intraOpThreads = 0, IReadOnlyList<SuppliedInitializer>? supplied = null)
-            => backend.CreateSession(
+        {
+            var session = backend.CreateSession(
                 modelData, optimization, ShorokooLogSeverity.Fatal, deviceMemory, Diagnostics,
                 outputAliases ?? [], intraOpThreads, supplied ?? [], Precision);
+            if (!OutputAliasing) session.StopPlacing();
+            return session;
+        }
 
         /// <summary>
         /// Whether the model takes no runtime input, so every node's value is already

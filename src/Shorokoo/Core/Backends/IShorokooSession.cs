@@ -103,6 +103,13 @@ public interface IShorokooSession : IDisposable
     // The default is none: a session that aliases nothing binds no pair.
     IReadOnlyList<OutputAlias> BindableAliases => [];
 
+    // Stops this session from placing its runs' values in the memory of the inputs they consume
+    // (PlacementProof): from then on a consuming run writes nothing into that memory but the pairs
+    // it binds. Called on a new session, before its first run.
+    //
+    // The default does nothing: a session that places nothing has nothing to stop.
+    internal void StopPlacing() { }
+
     // Sets the most this session's runs may hold in its device memory -- what a device-memory
     // budget leaves them -- without the session being built again, where its backend can enforce
     // that itself, and answers whether it can. The framework sets it before each run under a budget,

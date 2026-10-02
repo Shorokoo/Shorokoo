@@ -69,6 +69,12 @@ internal sealed class OrtSession : IShorokooSession
     /// nothing. Set once, as the backend builds the session.</summary>
     internal OrtPlacements? Placements { get; set; }
 
+    void IShorokooSession.StopPlacing()
+    {
+        Placements?.Dispose();
+        Placements = null;
+    }
+
     private readonly object _profileGate = new();
     private NodePlacement? _nodePlacement;
     private bool _profilingEnded;

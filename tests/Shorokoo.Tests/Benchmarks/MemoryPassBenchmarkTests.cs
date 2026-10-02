@@ -168,7 +168,7 @@ public class MemoryPassBenchmarkTests
         && MallocEnvironment.Split(' ').All(kv =>
             Environment.GetEnvironmentVariable(kv[..kv.IndexOf('=')]) == kv[(kv.IndexOf('=') + 1)..]);
 
-    private static readonly (string Family, Func<ComputationGraph> Model, long[] Shape)[] Suite =
+    internal static readonly (string Family, Func<ComputationGraph> Model, long[] Shape)[] Suite =
     [
         ("mlp",         () => MemoryPassMlp.ComputationGraph,          [64L, 256L]),
         ("conv",        () => MemoryPassConv.ComputationGraph,         [8L, 3L, 64L, 64L]),

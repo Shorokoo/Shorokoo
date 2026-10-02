@@ -1408,6 +1408,14 @@ namespace Shorokoo.Runtime
         /// </summary>
         internal bool OutputAliasing { get; init; } = true;
 
+        /// <summary>
+        /// Whether this context's sessions place their runs' values in the memory of the inputs
+        /// those runs consume (<see cref="PlacementProof"/>), with <see cref="OutputAliasing"/>
+        /// leaving the marked outputs as they are. On unless turned off, and turned off only by a
+        /// measurement comparing runs that place with runs that do not.
+        /// </summary>
+        internal bool ValuePlacement { get; init; } = true;
+
         // How many outputs this context's runs have written into consumed memory, over its life.
         private long _aliasedOutputs;
 
@@ -2250,7 +2258,7 @@ namespace Shorokoo.Runtime
             var session = backend.CreateSession(
                 modelData, optimization, ShorokooLogSeverity.Fatal, deviceMemory, Diagnostics,
                 outputAliases ?? [], intraOpThreads, supplied ?? [], Precision);
-            if (!OutputAliasing) session.StopPlacing();
+            if (!OutputAliasing || !ValuePlacement) session.StopPlacing();
             return session;
         }
 

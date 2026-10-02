@@ -18,8 +18,9 @@ internal sealed class OrtSession : IShorokooSession
     private readonly CachingAllocator.Account? _cardAccount;
 
     // Closes those accounts once the session is gone -- disposed, or collected without -- so what
-    // they keep cached goes where the allocator can hand it back.
-    private readonly AccountsCloser _accounts;
+    // they keep cached goes where the allocator can hand it back. Null for a session charging
+    // another's accounts, which that one closes: a session carrying out another's placements.
+    private readonly AccountsCloser? _accounts;
 
     private sealed class AccountsCloser(CachingAllocator.Account host, CachingAllocator.Account? card)
     {
@@ -107,7 +108,8 @@ internal sealed class OrtSession : IShorokooSession
         string? profileDirectory,
         IReadOnlyList<ProvedAlias> outputAliases,
         CachingAllocator.Account hostAccount,
-        CachingAllocator.Account? cardAccount)
+        CachingAllocator.Account? cardAccount,
+        bool ownsAccounts = true)
     {
         _session = session;
         _cudaDeviceId = cudaDeviceId;
@@ -115,7 +117,7 @@ internal sealed class OrtSession : IShorokooSession
         _profileDirectory = profileDirectory;
         _hostAccount = hostAccount;
         _cardAccount = cardAccount;
-        _accounts = new AccountsCloser(hostAccount, cardAccount);
+        _accounts = ownsAccounts ? new AccountsCloser(hostAccount, cardAccount) : null;
         _aliases = Slots(session, outputAliases);
         BindableAliases = [.. _aliases.Values.Select(slot => new OutputAlias(slot.Output, slot.Input))];
         // Nothing to clean up, so nothing to finalize -- every untraced session would otherwise
@@ -399,6 +401,13 @@ internal sealed class OrtSession : IShorokooSession
             }
         }
     }
+
+    /// <summary>The allocator account this session charges its host memory to, which the sessions
+    /// carrying out its placements charge too (<see cref="OrtPlacements"/>).</summary>
+    internal CachingAllocator.Account HostAccount => _hostAccount;
+
+    /// <summary>The account this session charges its card memory to, or null on the host.</summary>
+    internal CachingAllocator.Account? CardAccount => _cardAccount;
 
     /// <summary>
     /// What <paramref name="run"/> answers, with <paramref name="peak"/> the most it asked of this
@@ -739,7 +748,6 @@ internal sealed class OrtSession : IShorokooSession
     {
         if (_cardAccount is not { } card) return false;
         card.Limit = limitBytes;
-        Placements?.LimitDeviceMemory(limitBytes);
         return true;
     }
 
@@ -837,7 +845,7 @@ internal sealed class OrtSession : IShorokooSession
         Placements?.Dispose();
         _session.Dispose();
         // After the session, whose release lets go of its weights through them.
-        _accounts.Close();
+        _accounts?.Close();
         _cardMemory?.Dispose();
         foreach (var view in SuppliedViews) view.Dispose();
         // After the session, which is what closes the profile file it has been writing.

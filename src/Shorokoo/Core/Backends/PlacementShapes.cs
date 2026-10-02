@@ -42,7 +42,12 @@ internal static class PlacementShapes
         _ => 0,
     };
 
-    private const int Float = 1, Int32 = 6, Int64 = 7, Bool = 9;
+    private const int Float = 1, Int32 = 6, Int64 = 7, Bool = 9, UInt32 = 12, UInt64 = 13;
+
+    /// <summary>Whether values of ONNX element type <paramref name="type"/> carry small integer
+    /// contents here: the integer types and bool. An unsigned value is carried only while it reads
+    /// the same as a signed one.</summary>
+    private static bool Integral(int type) => type is 2 or 3 or 4 or 5 or Int32 or Int64 or Bool or UInt32 or UInt64;
 
     /// <summary>
     /// Every value of <paramref name="graph"/> whose shape follows from <paramref name="inputs"/> —
@@ -122,17 +127,26 @@ internal static class PlacementShapes
         var dims = tensor.Dims ?? [];
         var count = dims.Aggregate(1L, (a, d) => a * d);
         long[]? ints = null;
-        if (count <= SmallInts && tensor.data_type is Int64 or Int32)
+        var type = tensor.data_type;
+        if (count <= SmallInts && Integral(type))
         {
-            if (tensor.data_type == Int64 && tensor.Int64Datas is { Length: > 0 } l && l.Length == count) ints = [.. l];
-            else if (tensor.data_type == Int32 && tensor.Int32Datas is { Length: > 0 } i32 && i32.Length == count) ints = [.. i32.Select(v => (long)v)];
-            else if (tensor.RawData is { } raw && raw.Length == count * ElementBytes(tensor.data_type))
-                ints = tensor.data_type == Int64
-                    ? [.. Enumerable.Range(0, (int)count).Select(k => BitConverter.ToInt64(raw, k * 8))]
-                    : [.. Enumerable.Range(0, (int)count).Select(k => (long)BitConverter.ToInt32(raw, k * 4))];
+            var size = ElementBytes(type);
+            if (type == Int64 && tensor.Int64Datas is { Length: > 0 } l && l.Length == count) ints = [.. l];
+            else if (type is UInt64 or UInt32 && tensor.Uint64Datas is { Length: > 0 } u && u.Length == count)
+                ints = u.All(v => v <= long.MaxValue) ? [.. u.Select(v => (long)v)] : null;
+            else if (type is not (Int64 or UInt64 or UInt32) && tensor.Int32Datas is { Length: > 0 } i32 && i32.Length == count) ints = [.. i32.Select(v => (long)v)];
+            else if (tensor.RawData is { } raw && raw.Length == count * size)
+                ints = [.. Enumerable.Range(0, (int)count).Select(k => size switch
+                {
+                    8 => BitConverter.ToInt64(raw, k * 8),
+                    4 => type == UInt32 ? BitConverter.ToUInt32(raw, k * 4) : BitConverter.ToInt32(raw, k * 4),
+                    2 => type == 4 ? BitConverter.ToUInt16(raw, k * 2) : BitConverter.ToInt16(raw, k * 2),
+                    _ => type is 2 or Bool ? raw[k] : (sbyte)raw[k],
+                })];
             else if (count == 0) ints = [];
+            if (type == UInt64 && ints is not null && ints.Any(v => v < 0)) ints = null;
         }
-        return new Value([.. dims], tensor.data_type, ints);
+        return new Value([.. dims], type, ints);
     }
 
     // ---- operators ----
@@ -195,6 +209,7 @@ internal static class PlacementShapes
             {
                 "Neg" when x.Ints is { } v => v.Select(e => -e).ToArray(),
                 "Abs" when x.Ints is { } v => v.Select(Math.Abs).ToArray(),
+                "Not" when x.Ints is { } v => v.Select(e => e == 0 ? 1L : 0L).ToArray(),
                 "Identity" => x.Ints,
                 _ => null,
             };
@@ -213,10 +228,13 @@ internal static class PlacementShapes
             var shape = read[0]!.Shape;
             for (int i = 1; i < read.Length; i++) shape = Broadcast(shape, read[i]!.Shape);
             var type = Comparing.Contains(op) ? Bool : op == "Where" ? read[1]!.ElementType : read[0]!.ElementType;
-            return [new Value(shape, type, IntArithmetic(op, read))];
+            return [new Value(shape, type, op == "Where" ? IntWhere(read) : IntArithmetic(op, read))];
         }
         if (op == "Cast")
-            return x is null || Attr(node, "to") is not { } to ? [] : [new Value(x.Shape, (int)to, to is Int64 or Int32 ? x.Ints : null)];
+            return x is null || Attr(node, "to") is not { } to ? []
+                : [new Value(x.Shape, (int)to, Integral((int)to) && Integral(x.ElementType) && (x.Ints?.All(v => v >= 0) == true || to is Int64 or Int32)
+                    ? (to == Bool ? x.Ints?.Select(v => v != 0 ? 1L : 0L).ToArray() : x.Ints)
+                    : null)];
         if (op == "CastLike")
             return x is null || In(1) is not { } like ? [] : [new Value(x.Shape, like.ElementType, null)];
         if (op == "ConstantOfShape")
@@ -355,7 +373,15 @@ internal static class PlacementShapes
             for (int d = 0; d < rank; d++)
                 if (!reduced.Contains(d)) dims.Add(x.Shape[d]);
                 else if (keep) dims.Add(1);
-            return [new Value([.. dims], x.ElementType, null)];
+            long[]? ints = rank == 1 && reduced.Contains(0) && x.Ints is { Length: > 0 } v ? op switch
+            {
+                "ReduceSum" => [v.Sum()],
+                "ReduceProd" => [v.Aggregate(1L, (a, b) => a * b)],
+                "ReduceMax" => [v.Max()],
+                "ReduceMin" => [v.Min()],
+                _ => null,
+            } : null;
+            return [new Value([.. dims], x.ElementType, ints)];
         }
         if (op is "ArgMax" or "ArgMin")
         {
@@ -387,6 +413,77 @@ internal static class PlacementShapes
                 dims[axis] = size;
                 return (Value?)new Value(dims, x.ElementType, null);
             })];
+        }
+        if (op == "Range")
+        {
+            if (x?.Ints is not [var start] || In(1)?.Ints is not [var limit] || In(2)?.Ints is not [var delta] || delta == 0) return [];
+            var count = Math.Max(delta > 0 ? (limit - start + delta - 1) / delta : (start - limit - delta - 1) / -delta, 0);
+            long[]? ints = count <= SmallInts ? [.. Enumerable.Range(0, (int)count).Select(k => start + k * delta)] : null;
+            return [new Value([count], x.ElementType, ints)];
+        }
+        if (op is "Conv" or "MaxPool" or "AveragePool" or "LpPool")
+        {
+            if (x is null || x.Shape.Length < 3) return [];
+            var spatial = x.Shape.Length - 2;
+            long channels;
+            long[] kernel;
+            if (op == "Conv")
+            {
+                if (In(1) is not { } w || w.Shape.Length != x.Shape.Length) return [];
+                channels = w.Shape[0];
+                kernel = Ints(node, "kernel_shape") ?? w.Shape[2..];
+            }
+            else
+            {
+                channels = x.Shape[1];
+                if (Ints(node, "kernel_shape") is not { } k) return [];
+                kernel = k;
+            }
+            if (kernel.Length != spatial) return [];
+            var strides = Ints(node, "strides") is { Length: > 0 } st ? st : Enumerable.Repeat(1L, spatial).ToArray();
+            var dilations = Ints(node, "dilations") is { Length: > 0 } dl ? dl : Enumerable.Repeat(1L, spatial).ToArray();
+            var pads = Ints(node, "pads") is { Length: > 0 } pd ? pd : new long[2 * spatial];
+            var autoPad = node.Attributes.FirstOrDefault(a => a.Name == "auto_pad")?.S is { Length: > 0 } bytes
+                ? System.Text.Encoding.UTF8.GetString(bytes) : "NOTSET";
+            var ceil = (Attr(node, "ceil_mode") ?? 0) != 0;
+            if (strides.Length != spatial || dilations.Length != spatial || pads.Length != 2 * spatial) return [];
+            var dims = new List<long> { x.Shape[0], channels };
+            for (int d = 0; d < spatial; d++)
+            {
+                var size = x.Shape[d + 2];
+                var extent = dilations[d] * (kernel[d] - 1) + 1;
+                long outSize = autoPad switch
+                {
+                    "SAME_UPPER" or "SAME_LOWER" => (size + strides[d] - 1) / strides[d],
+                    "VALID" => (size - extent) / strides[d] + 1,
+                    "NOTSET" => ceil
+                        ? (size + pads[d] + pads[d + spatial] - extent + strides[d] - 1) / strides[d] + 1
+                        : (size + pads[d] + pads[d + spatial] - extent) / strides[d] + 1,
+                    _ => -1,
+                };
+                if (outSize < 0) return [];
+                dims.Add(outSize);
+            }
+            var output = new Value([.. dims], x.ElementType, null);
+            return op == "MaxPool" ? [output, new Value([.. dims], Int64, null)] : [output];
+        }
+        if (op is "GlobalAveragePool" or "GlobalMaxPool" or "GlobalLpPool")
+            return x is null || x.Shape.Length < 3 ? [] : [new Value([x.Shape[0], x.Shape[1], .. Enumerable.Repeat(1L, x.Shape.Length - 2)], x.ElementType, null)];
+        if (op is "LSTM" or "GRU" or "RNN")
+        {
+            if (x is null || x.Shape.Length != 3 || Attr(node, "hidden_size") is not { } hidden) return [];
+            var layout = Attr(node, "layout") ?? 0;
+            var direction = node.Attributes.FirstOrDefault(a => a.Name == "direction")?.S is { Length: > 0 } d
+                ? System.Text.Encoding.UTF8.GetString(d) : "forward";
+            long directions = direction == "bidirectional" ? 2 : 1;
+            var (sequence, batch) = layout == 0 ? (x.Shape[0], x.Shape[1]) : (x.Shape[1], x.Shape[0]);
+            var y = layout == 0
+                ? new Value([sequence, directions, batch, hidden], x.ElementType, null)
+                : new Value([batch, sequence, directions, hidden], x.ElementType, null);
+            var last = layout == 0
+                ? new Value([directions, batch, hidden], x.ElementType, null)
+                : new Value([batch, directions, hidden], x.ElementType, null);
+            return op == "LSTM" ? [y, last, last] : [y, last];
         }
         if (op == "Tile")
         {
@@ -533,12 +630,27 @@ internal static class PlacementShapes
         return dims;
     }
 
+    /// <summary>The contents of a <c>Where</c> over small integer values whose contents are known,
+    /// broadcasting a single value; null otherwise.</summary>
+    private static long[]? IntWhere(Value?[] read)
+    {
+        if (read.Length != 3 || read[0]?.Ints is not { } c || read[1]?.Ints is not { } a || read[2]?.Ints is not { } b) return null;
+        if (!Integral(read[1]!.ElementType)) return null;
+        var n = Math.Max(c.Length, Math.Max(a.Length, b.Length));
+        if ((c.Length != n && c.Length != 1) || (a.Length != n && a.Length != 1) || (b.Length != n && b.Length != 1)) return null;
+        if (c.Length == 0 || a.Length == 0 || b.Length == 0) return [];
+        var result = new long[n];
+        for (int i = 0; i < n; i++)
+            result[i] = c[c.Length == 1 ? 0 : i] != 0 ? a[a.Length == 1 ? 0 : i] : b[b.Length == 1 ? 0 : i];
+        return result;
+    }
+
     /// <summary>The contents of an integer operator over small integer values whose contents are
     /// known, broadcasting a single value; null otherwise.</summary>
     private static long[]? IntArithmetic(string op, Value?[] read)
     {
         if (read.Length != 2 || read[0]?.Ints is not { } a || read[1]?.Ints is not { } b) return null;
-        if (read[0]!.ElementType is not (Int64 or Int32)) return null;
+        if (!Integral(read[0]!.ElementType)) return null;
         if (a.Length != b.Length && a.Length != 1 && b.Length != 1) return null;
         var n = Math.Max(a.Length, b.Length);
         if (a.Length == 0 || b.Length == 0) return [];
@@ -553,13 +665,22 @@ internal static class PlacementShapes
                 case "Sub": result[i] = l - r; break;
                 case "Mul": result[i] = l * r; break;
                 // Truncating, as ONNX Runtime's integer kernels divide.
-                case "Div": result[i] = l / r; break;
-                case "Mod": result[i] = l % r; break;
+                case "Div" when r != 0: result[i] = l / r; break;
+                case "Mod" when r != 0: result[i] = l % r; break;
                 case "Max": result[i] = Math.Max(l, r); break;
                 case "Min": result[i] = Math.Min(l, r); break;
+                case "Equal": result[i] = l == r ? 1 : 0; break;
+                case "Less": result[i] = l < r ? 1 : 0; break;
+                case "Greater": result[i] = l > r ? 1 : 0; break;
+                case "LessOrEqual": result[i] = l <= r ? 1 : 0; break;
+                case "GreaterOrEqual": result[i] = l >= r ? 1 : 0; break;
+                case "And": result[i] = l != 0 && r != 0 ? 1 : 0; break;
+                case "Or": result[i] = l != 0 || r != 0 ? 1 : 0; break;
+                case "Xor": result[i] = (l != 0) != (r != 0) ? 1 : 0; break;
                 default: return null;
             }
         }
-        return result;
+        // An unsigned value that would wrap reads differently from a signed one: not carried.
+        return read[0]!.ElementType is 2 or 4 or UInt32 or UInt64 && result.Any(v => v < 0) ? null : result;
     }
 }

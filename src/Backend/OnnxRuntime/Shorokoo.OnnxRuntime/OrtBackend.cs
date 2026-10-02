@@ -343,13 +343,19 @@ public abstract class OrtBackend : IShorokooBackend
         // A session of a stock provider over a model small enough to keep can place the values of a
         // run that consumes inputs in the memory of what it consumes (see OrtPlacements), through
         // sessions of its own built over the same model the same way, with the memory pattern off.
-        if (_stockProvider && model.Length <= OrtPlacements.ModelBytesKept)
+        // They charge the session's own allocator accounts, so that what a run of the session takes is
+        // read, budgeted and limited as one session's, whichever of them ran it.
+        // Not where its sessions allocate through ONNX Runtime's own arena, a comparison's alone:
+        // what a placed run saves is measured on Shorokoo's allocator.
+        if (_stockProvider && !SessionsUseOrtArena && model.Length <= OrtPlacements.ModelBytesKept)
             session.Placements = new OrtPlacements(
                 model,
                 (variant, directory) => Wrap(NewSession(
                     variant, graphOptimization, logSeverity, deviceMemory, diagnostics with { TraceNodePlacement = false },
-                    directory, intraOpThreads, suppliedInitializers, precision, memoryPattern: false), []),
-                this);
+                    directory, intraOpThreads, suppliedInitializers, precision, memoryPattern: false,
+                    accounts: (session.HostAccount, session.CardAccount)), []),
+                this,
+                () => session.HeldBytes);
         return session;
     }
 
@@ -424,11 +430,14 @@ public abstract class OrtBackend : IShorokooBackend
         string? ProfileDirectory,
         IReadOnlyList<OrtValue> SuppliedViews,
         CachingAllocator.Account HostAccount,
-        CachingAllocator.Account? CardAccount);
+        CachingAllocator.Account? CardAccount,
+        bool OwnsAccounts = true);
 
     /// <summary>
     /// An ONNX Runtime session over <paramref name="model"/>, writing the graph it will run into
-    /// <paramref name="optimizedDirectory"/> where one is named.
+    /// <paramref name="optimizedDirectory"/> where one is named, and charging what it allocates to
+    /// <paramref name="accounts"/> where they are given — another session's, which keeps them —
+    /// or to accounts of its own.
     /// </summary>
     private BuiltSession NewSession(
         byte[] model,
@@ -440,7 +449,8 @@ public abstract class OrtBackend : IShorokooBackend
         int intraOpThreads,
         IReadOnlyList<SuppliedInitializer> suppliedInitializers,
         PrecisionSettings precision,
-        bool memoryPattern = true)
+        bool memoryPattern = true,
+        (CachingAllocator.Account Host, CachingAllocator.Account? Card)? accounts = null)
     {
         // The `using` is load-bearing, not tidiness. SessionOptions is a SafeHandle, so it
         // carries a critical finalizer that calls OrtReleaseSessionOptions, and ORT takes its
@@ -467,9 +477,10 @@ public abstract class OrtBackend : IShorokooBackend
         // ONNX Runtime writes every output into memory its session's allocator gives it, so an
         // output can hold only its own block only where that allocator is Shorokoo's. On a card, the
         // account carries the session's limit, which ONNX Runtime has no say in.
-        var host = RuntimeAllocator.ForHost().Shared.Open("session");
-        var card = _cudaDeviceId is { } device ? RuntimeAllocator.ForCard(device).Shared.Open("session") : null;
-        if (card is not null) card.Limit = deviceMemory.LimitBytes;
+        var host = accounts?.Host ?? RuntimeAllocator.ForHost().Shared.Open("session");
+        var card = accounts is { } given ? given.Card
+            : _cudaDeviceId is { } device ? RuntimeAllocator.ForCard(device).Shared.Open("session") : null;
+        if (card is not null && accounts is null) card.Limit = deviceMemory.LimitBytes;
         if (!SessionsUseOrtArena) options.AddSessionConfigEntry("session.use_env_allocators", "1");
         try
         {
@@ -483,12 +494,15 @@ public abstract class OrtBackend : IShorokooBackend
             // The values themselves are the caller's to keep alive for the session's life; this
             // keeps them reachable across the constructor, which takes them as bare handles.
             GC.KeepAlive(suppliedInitializers);
-            return new BuiltSession(session, profileDirectory, views, host, card);
+            return new BuiltSession(session, profileDirectory, views, host, card, accounts is null);
         }
         catch
         {
-            host.Allocator.Close(host);
-            card?.Allocator.Close(card);
+            if (accounts is null)
+            {
+                host.Allocator.Close(host);
+                card?.Allocator.Close(card);
+            }
             // No session to own the folder, so nothing would ever delete it.
             DeleteDirectory(profileDirectory);
             foreach (var view in views) view.Dispose();
@@ -506,12 +520,12 @@ public abstract class OrtBackend : IShorokooBackend
     /// <paramref name="outputAliases"/> it can.</summary>
     private OrtSession Wrap(BuiltSession built, IReadOnlyList<OrtSession.ProvedAlias> outputAliases)
     {
-        var (session, profileDirectory, views, host, card) = built;
+        var (session, profileDirectory, views, host, card, owns) = built;
         try
         {
             // The session keeps this backend to release what its runs consume through it, and to
             // name it in a refusal.
-            return new OrtSession(session, _cudaDeviceId, this, profileDirectory, outputAliases, host, card)
+            return new OrtSession(session, _cudaDeviceId, this, profileDirectory, outputAliases, host, card, owns)
             {
                 SuppliedViews = views,
                 OnOrtArena = SessionsUseOrtArena,
@@ -528,8 +542,11 @@ public abstract class OrtBackend : IShorokooBackend
     private static void Discard(BuiltSession built)
     {
         built.Session.Dispose();
-        built.HostAccount.Allocator.Close(built.HostAccount);
-        built.CardAccount?.Allocator.Close(built.CardAccount);
+        if (built.OwnsAccounts)
+        {
+            built.HostAccount.Allocator.Close(built.HostAccount);
+            built.CardAccount?.Allocator.Close(built.CardAccount);
+        }
         foreach (var view in built.SuppliedViews) view.Dispose();
         DeleteDirectory(built.ProfileDirectory);
     }

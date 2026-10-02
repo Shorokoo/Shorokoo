@@ -152,6 +152,208 @@ public class MemoryReuseScenarioTests
         File.WriteAllText(Path.Combine(OutputDirectory(), $"through-the-compute-context-{backend}.md"), string.Join("\n", lines) + "\n");
     }
 
+    /// <summary>
+    /// Placement across the memory-pass benchmark's model families (<see cref="MemoryPassBenchmarkTests.Suite"/>)
+    /// on ONNX Runtime, through the public API, with placement off — every session running as it
+    /// always ran — and on: a resident training step (AdamW, the rig's state written over the state
+    /// it consumes), and inference of the same model on an input each run consumes. A step's or a
+    /// run's peak is what Shorokoo's allocator had handed out at most beyond what it had as the
+    /// step began, on the card in a <c>-p:ShorokooGpuTests=true</c> build and on the host otherwise,
+    /// read off its observer; time is the median of steps run with nothing observing.
+    /// <c>$SHOROKOO_MEMORY_REUSE_FAMILIES</c>, a comma-separated list, picks families, and
+    /// <c>$SHOROKOO_MEMORY_REUSE_SCALE</c> multiplies each family's batch, and
+    /// <c>$SHOROKOO_MEMORY_REUSE_ROUNDS</c> repeats each family's pair of measurements, off then on.
+    /// </summary>
+    [Fact]
+    public void RecordPlacementAcrossTheBenchmarkFamilies()
+    {
+        var only = Environment.GetEnvironmentVariable("SHOROKOO_MEMORY_REUSE_FAMILIES")?.Split(',');
+        var onCard = DefaultBackend.Instance.GetType().Assembly.GetName().Name?.EndsWith("GPU", StringComparison.Ordinal) == true;
+        var lines = new List<string>
+        {
+            $"# Placement across the benchmark families, ONNX Runtime on the {(onCard ? "card" : "host")}, batch x{(long.TryParse(Environment.GetEnvironmentVariable("SHOROKOO_MEMORY_REUSE_SCALE"), out var x) ? x : 1)}", "",
+            "| family | placement | step peak | step ms | step plans | inference peak | inference ms | inference plans |",
+            "|---|---|---|---|---|---|---|---|",
+        };
+        var scale = long.TryParse(Environment.GetEnvironmentVariable("SHOROKOO_MEMORY_REUSE_SCALE"), out var s) ? s : 1;
+        foreach (var (family, model, benchmarkShape) in MemoryPassBenchmarkTests.Suite)
+        {
+            if (only is not null && !only.Contains(family)) continue;
+            long[] shape = [benchmarkShape[0] * scale, .. benchmarkShape[1..]];
+            var rounds = int.TryParse(Environment.GetEnvironmentVariable("SHOROKOO_MEMORY_REUSE_ROUNDS"), out var r) ? r : 1;
+            foreach (var placing in Enumerable.Range(0, 2 * rounds).Select(k => k % 2 == 1))
+            {
+                var m = MeasureFamily(model(), shape, placing, onCard);
+                lines.Add($"| {family} | {(placing ? "on" : "off")} | {Mib(m.StepPeak)} | {m.StepMs:0.00} | {m.StepPlans} | {Mib(m.InferencePeak)} | {m.InferenceMs:0.00} | {m.InferencePlans} |");
+            }
+        }
+        File.WriteAllText(Path.Combine(OutputDirectory(), $"placement-across-the-families-{(onCard ? "card" : "host")}-x{scale}.md"), string.Join("\n", lines) + "\n");
+    }
+
+    /// <summary>
+    /// Why placement does or does not reach each benchmark family's inference graph: per family, at
+    /// <c>$SHOROKOO_MEMORY_REUSE_SCALE</c> times its batch, the values of a mebibyte or more, each
+    /// with its operator and why it cannot be placed (<see cref="PlacementProof.Unplaceable"/>) or
+    /// where the planner put it, the operators of the values whose shape is not known, and the plan.
+    /// </summary>
+    [Fact]
+    public void RecordWhyPlacementReachesEachFamilyOrNot()
+    {
+        var scale = long.TryParse(Environment.GetEnvironmentVariable("SHOROKOO_MEMORY_REUSE_SCALE"), out var s) ? s : 1;
+        var lines = new List<string> { $"# Why placement reaches each family's inference graph, batch x{scale}" };
+        foreach (var (family, model, benchmarkShape) in MemoryPassBenchmarkTests.Suite)
+        {
+            long[] shape = [benchmarkShape[0] * scale, .. benchmarkShape[1..]];
+            var count = (int)shape.Aggregate(1L, (a, d) => a * d);
+            var sample = TensorData(shape, new float[count]);
+            var concrete = model().ToConcreteArchitecture([sample]).ToConcreteModel();
+            using var context = new ComputeContext();
+            var compiled = context.Compile(concrete);
+            var graph = ((OrtSession)compiled.Session).Placements!.OriginalModel.Graph!;
+            var input = graph.Inputs.First(i => graph.Initializers.All(t => t.Name != i.Name)).Name;
+            var shapes = PlacementShapes.Evaluate(graph, new Dictionary<string, (long[], int)> { [input] = (shape, 1) });
+            var proof = new PlacementProof(graph, new Dictionary<string, long> { [input] = count * 4L }, shapes, new HashSet<string>(graph.Outputs.Select(o => o.Name)));
+            var plan = proof.Plan(PlacementProof.Smallest, PlacementProof.IdleOutputBytes);
+            lines.Add($"\n## {family} {string.Join("x", shape)}: {graph.Nodes.Count} nodes, input {Mib(count * 4L)}, {plan.Count} placed\n");
+            var unknown = graph.Nodes.Where(n => n.Outputs.Any(o => o.Length > 0 && !shapes.ContainsKey(o))).GroupBy(n => n.OpType).Select(g => $"{g.Key} x{g.Count()}");
+            lines.Add($"unknown shapes: {string.Join(", ", unknown)}");
+            var roots = graph.Nodes.Where(n => n.Outputs.Any(o => o.Length > 0 && !shapes.ContainsKey(o))
+                                               && n.Inputs.All(i => i.Length == 0 || shapes.ContainsKey(i)))
+                .Select(n => $"{n.OpType}({string.Join("; ", n.Inputs.Select(i => i.Length == 0 ? "-" : $"{Producer(graph, i)} {string.Join("x", shapes[i].Shape)}:{shapes[i].ElementType}{(shapes[i].Ints is { } v ? "=" + string.Join(",", v) : "")}"))})")
+                .Distinct().Take(12);
+            lines.Add($"first unknown: {string.Join(" | ", roots)}");
+            var range = graph.Nodes.FirstOrDefault(n => n.OpType == "Range" && !shapes.ContainsKey(n.Outputs[0]));
+            if (range is not null) lines.Add($"range limit: {Explain(graph, shapes, range.Inputs[1], 5)}");
+            foreach (var node in graph.Nodes)
+                foreach (var value in node.Outputs.Where(o => o.Length > 0 && shapes.TryGetValue(o, out var v) && v.Bytes >= PlacementProof.Smallest))
+                {
+                    var placed = plan.FirstOrDefault(p => p.Value == value);
+                    lines.Add($"- {node.OpType} {value} {Mib(shapes[value].Bytes)}: {(placed.Value is not null ? $"placed at {placed.Block}+{placed.Offset}" : proof.Unplaceable(value) ?? "placeable, not placed")}");
+                }
+        }
+        File.WriteAllText(Path.Combine(OutputDirectory(), $"why-placement-reaches-each-family-x{scale}.md"), string.Join("\n", lines) + "\n");
+    }
+
+    /// <summary>What makes <paramref name="value"/> in <paramref name="graph"/>, and what that reads,
+    /// two levels down.</summary>
+    private static string Producer(GraphProto graph, string value, int depth = 2)
+    {
+        if (graph.Initializers.Any(t => t.Name == value)) return "init";
+        if (graph.Inputs.Any(i => i.Name == value)) return "input";
+        var node = graph.Nodes.FirstOrDefault(n => n.Outputs.Contains(value));
+        if (node is null) return "?";
+        return depth == 0 ? node.OpType : $"{node.OpType}[{string.Join(",", node.Inputs.Where(i => i.Length > 0).Select(i => Producer(graph, i, depth - 1)))}]";
+    }
+
+    /// <summary>How <paramref name="value"/> is made, with each value's known contents, a few
+    /// levels down.</summary>
+    private static string Explain(GraphProto graph, Dictionary<string, PlacementShapes.Value> shapes, string value, int depth)
+    {
+        var known = shapes.TryGetValue(value, out var v) ? $"{string.Join("x", v.Shape)}:{v.ElementType}{(v.Ints is { } i ? "=" + string.Join(",", i) : "")}" : "unknown";
+        var node = graph.Nodes.FirstOrDefault(n => n.Outputs.Contains(value));
+        if (node is null || depth == 0) return known;
+        var attrs = string.Join(",", node.Attributes.Select(a => $"{a.Name}={a.I}"));
+        return $"{node.OpType}<{attrs}>({string.Join("; ", node.Inputs.Where(x => x.Length > 0).Select(x => Explain(graph, shapes, x, depth - 1)))})->{known}";
+    }
+
+    private sealed record FamilyFigures(long StepPeak, double StepMs, string StepPlans, long InferencePeak, double InferenceMs, string InferencePlans);
+
+    private static FamilyFigures MeasureFamily(ComputationGraph model, long[] shape, bool placing, bool onCard)
+    {
+        const int Warm = 4, Timed = 15;
+        var count = (int)shape.Aggregate(1L, (a, d) => a * d);
+        float[] Values(int seed) => [.. Enumerable.Range(0, count).Select(i => ((i * 7 + seed) % 101) / 101f - 0.5f)];
+        using var context = new ComputeContext { ValuePlacement = placing };
+        var settled = new List<OrtPlacements.Entry>();
+        OrtPlacements.Settled = entry => { lock (settled) settled.Add(entry); };
+        string Settled()
+        {
+            lock (settled)
+            {
+                var line = string.Join(", ", settled.Select(e => e.Stage == OrtPlacements.Stage.Adopted
+                    ? $"adopted {e.Plan.Count} ({Mib(e.PlainPeak)} to {Mib(e.PlacedPeak)})"
+                    : $"refused: {e.Refusal}").GroupBy(x => x).Select(g => g.Count() == 1 ? g.Key : $"{g.Count()}x {g.Key}"));
+                settled.Clear();
+                return line.Length == 0 ? "-" : line;
+            }
+        }
+
+        var sample = TensorData(shape, Values(0));
+        var concrete = model.ToConcreteArchitecture([sample]).ToConcreteModel();
+        var predicted = context.Execute(concrete, sample.Shared())[0].ToTensorData();
+        long[] dims = [.. predicted.Shape.Dims.Select(d => (long)d)];
+        var target = TensorData(dims, new float[dims.Aggregate(1L, (a, d) => a * d)]);
+        predicted.Delete();
+
+        var rig = TrainingRig.FromScratch(
+            model, Shorokoo.Modules.Losses.L2Loss.ComputationGraph, Shorokoo.Modules.Optimizers.AdamWOptimizer.ComputationGraph,
+            [sample.CopyTo(ComputeContext.Host)], new Shorokoo.Modules.Optimizers.AdamWOptimizerHyperparameters { LearningRate = 0.001f },
+            runtimeContext: context);
+        var input = rig.InputDef.FromOrderedData(sample);
+        var targets = rig.TargetDef.FromOrderedData(target);
+        long stepPeak;
+        var stepTimes = new List<double>();
+        using (var run = rig.BeginResidentRun(rig.CreateInitialCheckpoint()))
+        {
+            for (int i = 0; i < Warm; i++) run.Step(input.Shared(), targets.Shared());
+            (_, stepPeak) = Observed(onCard, () => run.Step(input.Shared(), targets.Shared()));
+            for (int i = 0; i < Timed; i++)
+            {
+                var watch = Stopwatch.StartNew();
+                run.Step(input.Shared(), targets.Shared());
+                stepTimes.Add(watch.Elapsed.TotalMilliseconds);
+            }
+        }
+        var stepPlans = Settled();
+
+        var compiled = context.Compile(concrete);
+        NamedModelParam[] Infer() => compiled.Execute(TensorData(shape, Values(1)));
+        for (int i = 0; i < Warm; i++) Release(Infer());
+        var (outputs, inferencePeak) = Observed(onCard, Infer);
+        Release(outputs);
+        var inferenceTimes = new List<double>();
+        for (int i = 0; i < Timed; i++)
+        {
+            var input1 = TensorData(shape, Values(1));
+            var watch = Stopwatch.StartNew();
+            var each = compiled.Execute(input1);
+            inferenceTimes.Add(watch.Elapsed.TotalMilliseconds);
+            Release(each);
+        }
+        OrtPlacements.Settled = null;
+        return new FamilyFigures(stepPeak, Median(stepTimes), stepPlans, inferencePeak, Median(inferenceTimes), Settled());
+    }
+
+    private static void Release(NamedModelParam[] outputs)
+    {
+        foreach (var output in outputs) output.ToTensorData().Delete();
+    }
+
+    /// <summary>What <paramref name="run"/> answers, and the most Shorokoo's allocator had handed
+    /// out — on the card or the host — beyond what it had as the run began.</summary>
+    private static (T Result, long Peak) Observed<T>(bool onCard, Func<T> run)
+    {
+        var gate = new object();
+        long current = 0, peak = 0;
+        CachingAllocator.Observer = e =>
+        {
+            if (e.OnCard != onCard) return;
+            lock (gate)
+            {
+                current += e.Allocation ? e.Size : -e.Size;
+                peak = Math.Max(peak, current);
+            }
+        };
+        try
+        {
+            return (run(), peak);
+        }
+        finally
+        {
+            CachingAllocator.Observer = null;
+        }
+    }
+
     private static double Median(List<double> values)
     {
         var sorted = values.Order().ToList();

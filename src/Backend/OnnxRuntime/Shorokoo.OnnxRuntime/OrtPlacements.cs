@@ -43,6 +43,9 @@ internal sealed class OrtPlacements : IDisposable
     private readonly byte[] _model;
     private readonly VariantBuilder _build;
     private readonly OrtBackend _backend;
+    // What the session and its variants hold of the allocator accounts they share, read either side
+    // of building a variant to tell what the variant holds of its own.
+    private readonly Func<long> _held;
     private readonly object _gate = new();
     private readonly Dictionary<string, Entry> _entries = new(StringComparer.Ordinal);
     private ModelProto? _original;
@@ -51,11 +54,12 @@ internal sealed class OrtPlacements : IDisposable
     private string? _broken;
     private bool _disposed;
 
-    internal OrtPlacements(byte[] model, VariantBuilder build, OrtBackend backend)
+    internal OrtPlacements(byte[] model, VariantBuilder build, OrtBackend backend, Func<long> held)
     {
         _model = model;
         _build = build;
         _backend = backend;
+        _held = held;
     }
 
     /// <summary>Where a signature is: run as the session runs to measure it, run placed to measure
@@ -74,6 +78,10 @@ internal sealed class OrtPlacements : IDisposable
         internal OrtSession? Variant;
         internal string? Refusal;
     }
+
+    /// <summary>Told of every signature as it is settled — adopted or refused — for a measurement to
+    /// read; null where nothing listens.</summary>
+    internal static Action<Entry>? Settled;
 
     /// <summary>Every signature planned so far, for a test to read.</summary>
     internal IReadOnlyList<Entry> Entries
@@ -180,7 +188,11 @@ internal sealed class OrtPlacements : IDisposable
                     {
                         entry.PlacedPeak = peak;
                         var margin = Math.Max(1L << 20, entry.PlainPeak / 64);
-                        if (peak + entry.VariantHeld + margin <= entry.PlainPeak) entry.Stage = Stage.Adopted;
+                        if (peak + entry.VariantHeld + margin <= entry.PlainPeak)
+                        {
+                            entry.Stage = Stage.Adopted;
+                            Settled?.Invoke(entry);
+                        }
                         else Refuse(entry, $"placed, the run asked {peak} bytes against {entry.PlainPeak} plain");
                     }
                 }
@@ -300,7 +312,9 @@ internal sealed class OrtPlacements : IDisposable
                 OrtSession? variant = null;
                 try
                 {
+                    var heldBefore = _held();
                     variant = _build(model, directory);
+                    var variantHeld = _held() - heldBefore;
                     var graph = ReadOptimized(directory);
                     var variantShapes = PlacementShapes.Evaluate(graph, given);
                     if (!SameComputeNodes(runs, graph))
@@ -316,7 +330,7 @@ internal sealed class OrtPlacements : IDisposable
                         entry.Shapes = plan.ToDictionary(
                             p => p.Value, p => (variantShapes[p.Value].Shape, (ShorokooTensorElementType)variantShapes[p.Value].ElementType),
                             StringComparer.Ordinal);
-                        entry.VariantHeld = variant.HeldBytes;
+                        entry.VariantHeld = variantHeld;
                         entry.Variant = variant;
                         variant = null;
                         return;
@@ -343,6 +357,13 @@ internal sealed class OrtPlacements : IDisposable
         entry.Refusal = why;
         entry.Variant?.Dispose();
         entry.Variant = null;
+        Settled?.Invoke(entry);
+    }
+
+    /// <summary>The model as handed to the backend, for a measurement to read.</summary>
+    internal ModelProto OriginalModel
+    {
+        get { lock (_gate) return Original(); }
     }
 
     /// <summary>The model as handed to the backend, parsed once.</summary>
@@ -452,13 +473,6 @@ internal sealed class OrtPlacements : IDisposable
             else if (dim.ShouldSerializeDimValue() && dim.DimValue != value.Shape[i]) return false;
         }
         return true;
-    }
-
-    /// <summary>Sets the most each variant's runs may hold on its card.</summary>
-    internal void LimitDeviceMemory(long limitBytes)
-    {
-        lock (_gate)
-            foreach (var entry in _entries.Values) entry.Variant?.TryLimitDeviceMemory(limitBytes);
     }
 
     public void Dispose()

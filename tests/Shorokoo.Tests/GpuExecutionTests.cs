@@ -222,6 +222,23 @@ public class GpuExecutionTests
     }
 
     [CudaFact]
+    public void CudaProvider_ARunThatFitsItsBudgetOnlyWhenPlacedSucceedsOnItsFirstCall()
+    {
+        const int Rows = 512, Columns = 1024;
+        const long MiB = 1024 * 1024;
+        var (a, b, l) = ComputeContextLifetimeCoverageTests.TwoHalvesValues(Rows, Columns);
+        static float[] Read(NamedModelParam p) => [.. p.ToTensorData().ToHost().As<float32>().AccessMemory<float>()];
+        using var context = new ComputeContext { DeviceMemory = new DeviceMemorySettings { LimitBytes = 6 * MiB } };
+        var compiled = context.Compile(ComputeContextLifetimeCoverageTests.TwoHalves());
+        var outputs = compiled.Execute(TensorData([(long)Rows, Columns], a).CopyTo(context), TensorData([(long)Rows, Columns], b).CopyTo(context));
+
+        Assert.True(l.Zip(Read(outputs[0]), (x, y) => MathF.Abs(x - y) < 1e-5f).All(x => x));
+        Assert.Equal(a[..(Rows / 2 * Columns)], Read(outputs[1]));
+        Assert.Equal(b[(Rows / 2 * Columns)..], Read(outputs[2]));
+        Assert.All(outputs, o => Assert.NotNull(o.ToTensorData().Block));
+    }
+
+    [CudaFact]
     public void CudaProvider_ABudgetCountsABlockOnceWholeForAsLongAsAnyTensorOnItIsAttached()
     {
         const long MiB = 1024 * 1024;

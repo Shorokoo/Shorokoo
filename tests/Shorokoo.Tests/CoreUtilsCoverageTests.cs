@@ -1075,6 +1075,22 @@ public class CoreUtilsCoverageTests
     }
 
     [Fact]
+    public void TestASessionWhoseRunsRepeatTakesNoBlockFromTheDeviceAfterItsFirstRun()
+    {
+        using var context = new ComputeContext();
+        var refilled = ArenaProbeModels.Refilled(context);
+        ArenaStatistics Run()
+        {
+            Assert.Equal(1048576f * 786432f, ArenaProbeModels.Sum(refilled.Execute(ArenaProbeModels.FilledShape(1 << 20), ArenaProbeModels.FilledShape(3 << 18))));
+            return Assert.IsType<ArenaStatistics>(refilled.ReadArenaStatistics());
+        }
+        var first = Run();
+        Run();
+        var third = Run();
+        Assert.Equal((first.ArenaExtensionCount, first.ArenaShrinkageCount), (third.ArenaExtensionCount, third.ArenaShrinkageCount));
+    }
+
+    [Fact]
     public void TestReleasingWhatTheAllocatorsKeepLeavesASessionHoldingWhatItUsesAndRunningOn()
     {
         using var context = new ComputeContext();
@@ -2787,6 +2803,20 @@ internal static class ArenaProbeModels
 
     /// <inheritdoc cref="Filled"/>
     internal static TensorData<int64> FilledShape(long elements) => TensorData([1L], elements);
+
+    /// <summary>
+    /// Two fills one after the other, of the sizes the two shapes it is fed ask for: the second
+    /// spreads the first's sum, so the first is freed before the second is made, and a run uses a
+    /// block of each size though it never has both in use at once.
+    /// </summary>
+    internal static CompiledGraph Refilled(ComputeContext context)
+    {
+        var first = InputVector<int64>("first");
+        var second = InputVector<int64>("second");
+        var sum = OnnxOp.ReduceSum(OnnxOp.Expand(Vector(1f), first), keepdims: false);
+        return context.Compile(new InternalComputationGraph(
+            [first, second], [OnnxOp.ReduceSum(OnnxOp.Expand(sum, second), keepdims: false)]));
+    }
 
     /// <summary>
     /// A graph whose output's shape its session settles when it is built and whose one large block

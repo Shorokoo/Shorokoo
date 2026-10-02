@@ -1185,6 +1185,39 @@ public class PyTorchBackendCoverageTests
     }
 
     [Fact]
+    public void TestTheMemoryAwarePassHandsATorchContextNoStepHoldingMoreThanTheStepItWasHanded()
+    {
+        Assert.True(PassHoldsNoMoreOnTorch(Benchmarks.MemoryPassConv.ComputationGraph, [8L, 3L, 64L, 64L]));
+        Assert.True(PassHoldsNoMoreOnTorch(Benchmarks.MemoryPassMlp.ComputationGraph, [64L, 256L]));
+        Assert.True(PassHoldsNoMoreOnTorch(ChunkedSdpaMeanPoolModel.ComputationGraph, [2L, 4L, 256L, 32L]));
+    }
+
+    /// <summary>Whether the training step a rig on a torch context runs holds no more at its peak
+    /// than the step before the memory-aware pass would, each as the translation runs it: in its
+    /// order, a view as its input's memory, and a node written over an operand dying there.</summary>
+    private static bool PassHoldsNoMoreOnTorch(ComputationGraph model, long[] shape)
+    {
+        using var context = new ComputeContext(Torch);
+        var sample = TensorData(shape, new float[shape.Aggregate(1L, (a, d) => a * d)]);
+        var rig = TrainingRig.FromScratch(model, Shorokoo.Modules.Losses.L2Loss.ComputationGraph,
+            Shorokoo.Modules.Optimizers.AdamWOptimizer.ComputationGraph, [sample],
+            new Shorokoo.Modules.Optimizers.AdamWOptimizerHyperparameters { LearningRate = 0.001f }, runtimeContext: context);
+        var state = rig.UpdatedParamFieldCount + rig.UpdatedStateFieldCount + rig.UpdatedOptimizerStateFieldCount;
+        long Holds(ComputationGraph step)
+        {
+            var graph = Benchmarks.MemoryPassBenchmarkTests.RigModel(step, rig.OptimizationInputShapes).Graph!;
+            var index = new Dictionary<NodeProto, int>(ReferenceEqualityComparer.Instance);
+            for (int i = 0; i < graph.Nodes.Count; i++) index[graph.Nodes[i]] = i;
+            var over = TorchInPlace.Plan(graph);
+            return new Benchmarks.StepAnatomy(graph, rig.UpdatedParamFieldCount, state, rig.UpdatedOptimizerStateFieldCount)
+                .Peak([.. Shorokoo.PythonTranslation.OnnxToPythonTranslator.RunOrder(graph.Nodes).Select(n => index[n])],
+                    PlacementMemory.PyTorch.SharesUnlessPlaced,
+                    (node, slot) => node.Outputs.Count > 0 && over.TryGetValue(node.Outputs[0], out var s) && s == slot).Bytes;
+        }
+        return Holds(rig.TrainingStepPureGraph) <= Holds(rig.PreOptimizationGraph);
+    }
+
+    [Fact]
     public void TestAConvolutionOfTwoTransposedViewsIsComputedAsTheWeightGradientItIs()
     {
         Assert.Equal("True True", WeightGradient(batch: 4, sizes: 9, kernel: 3, stride: 1, dilation: 1, pad: 1));

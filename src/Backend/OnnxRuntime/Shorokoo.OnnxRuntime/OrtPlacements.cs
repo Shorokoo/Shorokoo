@@ -376,7 +376,7 @@ internal sealed class OrtPlacements : IDisposable
             }
             // A variant over the model as handed over, optimized as the plain session is, runs its
             // nodes in the order the plain session does; it can only bind values of that model, and
-            // where exposing them stops a fusion, what it runs is no longer the plain session's. A
+            // where exposing them stops a fusion, it runs other operators than the plain session. A
             // variant over the graph ONNX Runtime wrote out binds any value of it, a fusion's too,
             // but ONNX Runtime orders that graph afresh as it loads it. So the first is tried where it
             // can be, and the second where it cannot or did not hold.

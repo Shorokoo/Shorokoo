@@ -603,8 +603,8 @@ internal sealed unsafe class CachingAllocator
             if (block.HandedOver) account.HandedOver -= block.Size - block.ReleasedBytes;
             if (block.Released is { } released)
             {
-                // Parts of it went back while the rest was in use, so it is no longer one block to
-                // keep: what is left goes back to the arena as those parts did -- on a card once work
+                // Parts of it went back while the rest was in use, so what is left is not a block to
+                // keep whole: it goes back to the arena as those parts did -- on a card once work
                 // this thread's call queued is done with it.
                 if (OnCard && scope is not null && scope.Charges(account)) CudaRuntime.Synchronize(_device);
                 foreach (var (from, to) in Outside(released, 0, block.Size)) account.Arena!.Uncarve(pointer + (nint)from, to - from);

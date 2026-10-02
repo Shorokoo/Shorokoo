@@ -213,7 +213,7 @@ internal sealed unsafe class CachingAllocator
         var scope = t_scope;
         var account = scope?.AccountOn(this) ?? Placements;
         var size = SizeClass(bytes);
-        List<IntPtr>? release = null;
+        List<(IntPtr, long)>? release = null;
         lock (_gate)
         {
             if ((scope is not null && scope.TakeHeld(account, size, out var held)) || account.TakeCached(size, out held))
@@ -290,9 +290,10 @@ internal sealed unsafe class CachingAllocator
     {
         if (pointer == IntPtr.Zero) return;
         var scope = t_scope;
+        Block block;
         lock (_gate)
         {
-            if (!_blocks.Remove(pointer, out var block)) return;
+            if (!_blocks.Remove(pointer, out block)) return;
             var account = block.Account;
             account.InUse -= block.Size;
             account.Requested -= block.Requested;
@@ -308,7 +309,7 @@ internal sealed unsafe class CachingAllocator
             account.Blocks--;
             account.Shrinkages++;
         }
-        Release([pointer]);
+        Release([(pointer, block.Size)]);
     }
 
     /// <summary>
@@ -329,10 +330,17 @@ internal sealed unsafe class CachingAllocator
         }
     }
 
-    /// <summary>A block from the device itself, or null where it has not that much free.</summary>
+    /// <summary>
+    /// A block from the device itself, or null where it has not that much free. On the host, a
+    /// block of <see cref="HostPages.From"/> or more is pages of its own from the operating system,
+    /// which go back to it whole when the block is handed back: a C runtime's heap serves such a
+    /// block out of memory it keeps for itself once the block is freed, so the process would go on
+    /// holding what this allocator had handed back.
+    /// </summary>
     private IntPtr Fresh(long size)
     {
         if (OnCard) return CudaRuntime.Allocate(_device, size);
+        if (HostPages.Serve(size)) return HostPages.Allocate(size);
         try
         {
             // Sixty-four bytes, as ONNX Runtime aligns its own host blocks for its kernels.
@@ -344,14 +352,15 @@ internal sealed unsafe class CachingAllocator
         }
     }
 
-    /// <summary>Hands <paramref name="blocks"/> back to the device. Outside the lock: on a card
-    /// each waits for the work the card has in hand.</summary>
-    private void Release(List<IntPtr>? blocks)
+    /// <summary>Hands <paramref name="blocks"/>, each with its size class, back to the device.
+    /// Outside the lock: on a card each waits for the work the card has in hand.</summary>
+    private void Release(List<(IntPtr Block, long Size)>? blocks)
     {
         if (blocks is null) return;
-        foreach (var block in blocks)
+        foreach (var (block, size) in blocks)
         {
             if (OnCard) CudaRuntime.Release(_device, block);
+            else if (HostPages.Serve(size)) HostPages.Release(block, size);
             else NativeMemory.AlignedFree((void*)block);
         }
     }
@@ -362,7 +371,7 @@ internal sealed unsafe class CachingAllocator
     /// </summary>
     internal void ReleaseCached(Account account)
     {
-        List<IntPtr> release;
+        List<(IntPtr, long)> release;
         lock (_gate)
         {
             release = account.EmptyCache();
@@ -374,7 +383,7 @@ internal sealed unsafe class CachingAllocator
     /// <summary>Hands back everything cached on the device, in every account still open.</summary>
     private void ReleaseEverythingCached()
     {
-        List<IntPtr> release = [];
+        List<(IntPtr, long)> release = [];
         lock (_gate)
         {
             foreach (var account in _accounts)
@@ -393,7 +402,7 @@ internal sealed unsafe class CachingAllocator
     /// </summary>
     internal void Close(Account account)
     {
-        List<IntPtr> release;
+        List<(IntPtr, long)> release;
         lock (_gate)
         {
             if (account.Closed) return;
@@ -494,12 +503,12 @@ internal sealed unsafe class CachingAllocator
         }
 
         /// <summary>Every cached block, taken out of the cache, for the caller to hand back.</summary>
-        internal List<IntPtr> EmptyCache()
+        internal List<(IntPtr, long)> EmptyCache()
         {
-            List<IntPtr> blocks = [];
-            foreach (var cached in Free.Values)
+            List<(IntPtr, long)> blocks = [];
+            foreach (var (size, cached) in Free)
             {
-                blocks.AddRange(cached);
+                foreach (var block in cached) blocks.Add((block, size));
                 cached.Clear();
             }
             Shrinkages += blocks.Count;
@@ -564,15 +573,15 @@ internal sealed unsafe class CachingAllocator
 
         /// <summary>Every block this call let go of for <paramref name="account"/>, taken out of its
         /// hold for the caller to hand back. Under the allocator's lock.</summary>
-        internal List<IntPtr> EmptyHeld(Account account)
+        internal List<(IntPtr, long)> EmptyHeld(Account account)
         {
-            List<IntPtr> blocks = [];
+            List<(IntPtr, long)> blocks = [];
             if (account != card || _held is null) return blocks;
             foreach (var (size, held) in _held)
             {
                 foreach (var block in held)
                 {
-                    blocks.Add(block);
+                    blocks.Add((block, size));
                     account.Held -= size;
                 }
                 held.Clear();
@@ -601,7 +610,7 @@ internal sealed unsafe class CachingAllocator
         {
             if (_held is null || card is null) return;
             var allocator = card.Allocator;
-            List<IntPtr> release = [];
+            List<(IntPtr, long)> release = [];
             lock (allocator._gate)
             {
                 foreach (var (size, blocks) in _held)
@@ -615,11 +624,66 @@ internal sealed unsafe class CachingAllocator
                         }
                         card.Blocks--;
                         card.Shrinkages++;
-                        release.Add(block);
+                        release.Add((block, size));
                     }
             }
             _held = null;
             allocator.Release(release);
         }
     }
+}
+
+/// <summary>
+/// Host memory as pages of its own from the operating system, for the blocks of the host's
+/// <see cref="CachingAllocator"/> of <see cref="From"/> bytes or more: <c>VirtualAlloc</c> on
+/// Windows, <c>mmap</c> on Linux, each handed back whole. The pages are zeroed on their first touch.
+/// </summary>
+internal static partial class HostPages
+{
+    /// <summary>The smallest block served this way: the granularity Windows reserves address space
+    /// in, below which a C runtime's heap serves a block out of its own pages anyway.</summary>
+    internal const long From = 64L << 10;
+
+    /// <summary>Whether a block of <paramref name="size"/> is pages of its own.</summary>
+    internal static bool Serve(long size) => size >= From && (OperatingSystem.IsWindows() || OperatingSystem.IsLinux());
+
+    /// <summary><paramref name="size"/> bytes of fresh pages, or null where the system has not that
+    /// much to commit.</summary>
+    internal static IntPtr Allocate(long size)
+    {
+        if (OperatingSystem.IsWindows()) return VirtualAlloc(IntPtr.Zero, (nuint)size, MemCommit | MemReserve, PageReadWrite);
+        var pages = mmap(IntPtr.Zero, (nuint)size, ProtRead | ProtWrite, MapPrivate | MapAnonymous, -1, 0);
+        return pages == MapFailed ? IntPtr.Zero : pages;
+    }
+
+    /// <summary>Hands the <paramref name="size"/> bytes at <paramref name="block"/>, which
+    /// <see cref="Allocate"/> answered, back to the system.</summary>
+    internal static void Release(IntPtr block, long size)
+    {
+        if (OperatingSystem.IsWindows()) VirtualFree(block, 0, MemRelease);
+        else munmap(block, (nuint)size);
+    }
+
+    private const uint MemCommit = 0x1000;
+    private const uint MemReserve = 0x2000;
+    private const uint MemRelease = 0x8000;
+    private const uint PageReadWrite = 0x04;
+    private const int ProtRead = 0x1;
+    private const int ProtWrite = 0x2;
+    private const int MapPrivate = 0x02;
+    private const int MapAnonymous = 0x20;
+    private static readonly IntPtr MapFailed = -1;
+
+    [LibraryImport("kernel32")]
+    private static partial IntPtr VirtualAlloc(IntPtr address, nuint size, uint allocationType, uint protection);
+
+    [LibraryImport("kernel32")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool VirtualFree(IntPtr address, nuint size, uint freeType);
+
+    [LibraryImport("libc")]
+    private static partial IntPtr mmap(IntPtr address, nuint length, int protection, int flags, int descriptor, nint offset);
+
+    [LibraryImport("libc")]
+    private static partial int munmap(IntPtr address, nuint length);
 }

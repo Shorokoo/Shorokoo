@@ -926,7 +926,10 @@ host or a card, for the whole process, whichever runtime or backend built the se
 than through an arena of its own, and the tensors a context places on a card come from the same
 one. Every block it hands out is an allocation of its
 own, never a piece of a larger one, its request rounded up to a size class: a multiple of 512
-bytes up to a mebibyte, and of an eighth of the power of two below it above that.
+bytes up to a mebibyte, and of an eighth of the power of two below it above that. On the host a
+block of 64 KiB or more is pages of its own from the operating system (`VirtualAlloc` on Windows,
+`mmap` on Linux), so one the allocator hands back leaves the process; a smaller one comes from the
+C runtime's heap, which may keep its pages for the process's next allocations.
 
 - **What a session lets go of is kept for its next runs**, so a loop's runs find their blocks
   waiting, as they would in an arena. It goes back to the device when a run asks for that

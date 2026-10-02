@@ -184,7 +184,9 @@ public class MemoryReuseScenarioTests
         var lines = new List<string>
         {
             $"# Placement across the benchmark families, {where}, batch x{(long.TryParse(Environment.GetEnvironmentVariable("SHOROKOO_MEMORY_REUSE_SCALE"), out var x) ? x : 1)}", "",
-            "| family | placement | step peak | step ms | step plans | inference peak | inference ms | inference plans |",
+            backend == "torch-cpu"
+                ? "| family | placement | step allocated | step ms | step plans | inference allocated | inference ms | inference plans |"
+                : "| family | placement | step peak | step ms | step plans | inference peak | inference ms | inference plans |",
             "|---|---|---|---|---|---|---|---|",
         };
         var scale = long.TryParse(Environment.GetEnvironmentVariable("SHOROKOO_MEMORY_REUSE_SCALE"), out var s) ? s : 1;
@@ -435,9 +437,10 @@ public class MemoryReuseScenarioTests
         foreach (var output in outputs) output.ToTensorData().Delete();
     }
 
-    /// <summary>What <paramref name="run"/> answers, and the most torch's allocator had handed out
-    /// beyond what it had as the run began: its CUDA allocator's peak, or on the CPU what its
-    /// profiler records, transfers onto the host excluded.</summary>
+    /// <summary>What <paramref name="run"/> answers, and on CUDA the most torch's allocator had
+    /// handed out beyond what it had as the run began; on the CPU, where torch keeps no such figure
+    /// and its profiler's releases cannot be placed in time, everything the run allocated, transfers
+    /// onto the host excluded.</summary>
     private static (T Result, long Peak) TorchObserved<T>(string backend, Func<T> run)
     {
         using (PythonRuntime.Gil())
@@ -470,10 +473,14 @@ public class MemoryReuseScenarioTests
                               return True
                           e = e.cpu_parent
                       return False
-                  running = peak = 0
-                  for e in sorted((e for e in prof.events() if not transfer(e)), key=lambda e: e.time_range.start):
-                      running += e.self_cpu_memory_usage
-                      peak = max(peak, running)
+                  # What the run allocated: the profiler attributes each allocation to the operator
+                  # making it, but not each release to when it happens, so a peak cannot be read
+                  # off it reliably; the total can.
+                  peak = sum(e.self_cpu_memory_usage for e in prof.events() if not transfer(e) and e.self_cpu_memory_usage > 0)
+                  import os
+                  if os.environ.get("SHOROKOO_MEMORY_REUSE_LOG"):
+                      with open(os.path.join(os.environ["SHOROKOO_MEMORY_REUSE_DIR"], "torch-profile.txt"), "a") as f:
+                          f.write(f"{len(prof.events())} events, {sum(e.self_cpu_memory_usage for e in prof.events() if e.self_cpu_memory_usage > 0)} allocated, peak {peak}" + chr(10))
                   """);
             return (result, scope.Get<long>("peak"));
         }

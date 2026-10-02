@@ -7,7 +7,11 @@ using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using Shorokoo.Core.Backends;
 using Shorokoo.Core.Factory.IR;
+using Shorokoo.Jax;
 using Shorokoo.OnnxRuntime;
+using Shorokoo.PythonHost;
+using Shorokoo.PythonTranslation;
+using Shorokoo.PyTorch;
 using OrtElementType = Microsoft.ML.OnnxRuntime.Tensors.TensorElementType;
 
 namespace Shorokoo.Tests.Benchmarks;
@@ -72,6 +76,99 @@ public class MemoryReuseScenarioTests
     [CudaFact]
     public void RecordTheScenarioOnTheCard() => Record(card: true, "card");
 
+    /// <summary>
+    /// The scenario on PyTorch, eagerly on the card and the CPU, and on JAX/XLA on the CPU — each way
+    /// it can be written, and through Shorokoo's translation of its model — run by
+    /// <c>memory_reuse_scenario.py</c> beside this file in the PyTorch backend's CUDA environment
+    /// (which carries JAX's CPU build too), or its CPU environment where that cannot be had.
+    /// </summary>
+    [Fact]
+    public void RecordTheScenarioOnPyTorchAndJax()
+    {
+        var dir = OutputDirectory();
+        var root = AppContext.BaseDirectory;
+        while (!File.Exists(Path.Combine(root, "Shorokoo.sln"))) root = Path.GetDirectoryName(root)!;
+        PythonEnvironment environment;
+        try
+        {
+            environment = PythonEnvironmentResolver.Resolve(PythonEnvironmentLock.Cu13);
+        }
+        catch (PythonEnvironmentException)
+        {
+            environment = PythonEnvironmentResolver.Resolve(PythonEnvironmentLock.Cpu);
+        }
+
+        ModelProto model;
+        using (var stream = new MemoryStream(Scenario(Shapes.Computed, exposeIntermediates: false)))
+            model = ProtoBuf.Serializer.Deserialize<ModelProto>(stream);
+        var torch = OnnxToPythonTranslator.Translate(model, [], TorchDialect.Instance);
+        var jax = OnnxToPythonTranslator.Translate(model, [], JaxDialect.Instance);
+        File.WriteAllText(Path.Combine(dir, "scenario-torch.py"), torch.Source);
+        File.WriteAllText(Path.Combine(dir, "scenario-jax.py"), jax.Source);
+        static object Constants(TranslatedModel translated) => translated.Constants.Select(c => new
+        {
+            code = (int)c.ElementType,
+            shape = c.Shape,
+            bytes = Convert.ToBase64String(c.Bytes ?? []),
+        }).ToList();
+        var outFile = Path.Combine(dir, "memory-reuse-python.json");
+        var configFile = Path.Combine(dir, "memory-reuse-python-config.json");
+        File.WriteAllText(configFile, JsonConvert.SerializeObject(new
+        {
+            N, M,
+            torch_source = torch.Source,
+            torch_constants = Constants(torch),
+            jax_source = jax.Source,
+            jax_constants = Constants(jax),
+            torch_package = Path.Combine(root, "src", "Backend", "PyTorch", "Shorokoo.PyTorch", "Python"),
+            jax_package = Path.Combine(root, "src", "Backend", "Jax", "Shorokoo.Jax", "Python"),
+            @out = outFile,
+            hlo_dir = dir,
+        }));
+
+        var python = Path.Combine(environment.Directory, OperatingSystem.IsWindows() ? "Scripts" : "bin",
+            OperatingSystem.IsWindows() ? "python.exe" : "python");
+        var script = Path.Combine(root, "tests", "Shorokoo.Tests", "Benchmarks", "memory_reuse_scenario.py");
+        using var process = Process.Start(new ProcessStartInfo(python, [script, configFile])
+        {
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+        })!;
+        var stdout = process.StandardOutput.ReadToEndAsync();
+        var stderr = process.StandardError.ReadToEndAsync();
+        Assert.True(process.WaitForExit(TimeSpan.FromMinutes(15)));
+        File.WriteAllText(Path.Combine(dir, "memory-reuse-python.log"), stdout.Result + stderr.Result);
+        Assert.Equal(0, process.ExitCode);
+
+        var results = JObject.Parse(File.ReadAllText(outFile));
+        var text = new StringBuilder();
+        text.AppendLine("# Memory reuse scenario on PyTorch and JAX");
+        text.AppendLine();
+        text.AppendLine(CultureInfo.InvariantCulture, $"Inputs A and B are [{2 * N}, {M}] float, {Mib(WholeBytes)} each; halves {Mib(HalfBytes)}. Python: {environment}.");
+        text.AppendLine();
+        text.AppendLine("## PyTorch (third of three runs)");
+        text.AppendLine();
+        text.AppendLine("| device | variant | allocations >= 1 MiB | MiB allocated | peak beyond inputs (MiB) | held once inputs let go (MiB) | L / A_half / B_half | correct | ms |");
+        text.AppendLine("|---|---|---|---|---|---|---|---|---|");
+        foreach (var r in results["torch"]!)
+            text.AppendLine(r["error"] is { } error
+                ? $"| {r["device"]} | {r["variant"]} | failed: {error} | | | | | | |"
+                : $"| {r["device"]} | {r["variant"]} | {r["allocations"]} | {r["bytes_allocated_mib"]} | {r["peak_beyond_inputs_mib"]} | {r["held_after_inputs_released_mib"]} | {r["outputs"]} | {r["correct"]} | {r["ms"]} |");
+        text.AppendLine();
+        text.AppendLine("## JAX/XLA on the CPU (buffer assignment of the compiled program)");
+        text.AppendLine();
+        text.AppendLine("| variant | donated | arguments | outputs | aliased | temporaries | beyond inputs | inputs deleted | outputs | correct | ms | aliasing |");
+        text.AppendLine("|---|---|---|---|---|---|---|---|---|---|---|---|");
+        foreach (var r in results["jax"]!)
+            text.AppendLine(
+                $"| {r["variant"]} | {r["donated"]} | {r["argument_mib"]} | {r["output_mib"]} | {r["alias_mib"]} | {r["temp_mib"]} | {r["beyond_inputs_mib"]} | {r["inputs_deleted"]} | {r["outputs"]} | {r["correct"]} | {r["ms"]} | {((string?)r["aliases"])?.Replace("|", "/")}{(r["error"] is { } e ? " failed: " + e : "")} |");
+        if (results["errors"] is JArray errors)
+            foreach (var error in errors) text.AppendLine().AppendLine("```").AppendLine((string?)error).AppendLine("```");
+        File.WriteAllText(Path.Combine(dir, "memory-reuse-python.md"), text.ToString());
+        Assert.Null(results["errors"]);
+    }
+
     // ---- the scenario as an ONNX model ----
 
     /// <summary>
@@ -96,7 +193,12 @@ public class MemoryReuseScenarioTests
 
     private static long[] HalfShape(Shapes shapes) => Leading(shapes) ? [1, N, M] : [N, M];
 
-    internal static byte[] Scenario(Shapes shapes, bool exposeIntermediates)
+    /// <summary>
+    /// The scenario's model: whole, its outputs alone or every intermediate too; or, with
+    /// <paramref name="front"/>, its front half alone — the halves and C's chain, every value an
+    /// output — which <see cref="Back"/> finishes.
+    /// </summary>
+    internal static byte[] Scenario(Shapes shapes, bool exposeIntermediates, bool front = false)
     {
         var graph = new GraphProto { Name = "memory_reuse" };
         string?[] dims = shapes switch
@@ -149,12 +251,43 @@ public class MemoryReuseScenarioTests
         graph.Nodes.Add(Node("c_neg", "Neg", "C0", "C1"));
         graph.Nodes.Add(Node("c_abs", "Abs", "C1", "C2"));
         graph.Nodes.Add(Node("c_sigmoid", "Sigmoid", "C2", "C3"));
+        if (front)
+        {
+            foreach (var name in (string[])["A_half", "B_half", "C0", "C1", "C2", "C3"])
+                graph.Outputs.Add(FloatValue(name, null));
+            return Serialized(graph);
+        }
         graph.Nodes.Add(Node("concat_L", "Concat", "C3 B_half", "L0", Int("axis", 0)));
+        AddLChain(graph);
+        foreach (var name in exposeIntermediates ? [.. Outputs, .. Intermediates] : Outputs)
+            graph.Outputs.Add(FloatValue(name, null));
+        return Serialized(graph);
+    }
+
+    /// <summary>The scenario's back half: L's chain over a whole-shaped input L0 — which, run after
+    /// <see cref="Scenario"/>'s front half wrote C into B's first half, is B itself, the
+    /// concatenation made by placement alone — every value an output.</summary>
+    internal static byte[] Back(Shapes shapes)
+    {
+        var graph = new GraphProto { Name = "memory_reuse_back" };
+        graph.Inputs.Add(FloatValue("L0", Leading(shapes) ? ["2", "n", "m"] : shapes == Shapes.Static
+            ? [(2 * N).ToString(CultureInfo.InvariantCulture), M.ToString(CultureInfo.InvariantCulture)]
+            : ["rows", "cols"]));
+        AddLChain(graph);
+        foreach (var name in (string[])["L1", "L2", "L"])
+            graph.Outputs.Add(FloatValue(name, null));
+        return Serialized(graph);
+    }
+
+    private static void AddLChain(GraphProto graph)
+    {
         graph.Nodes.Add(Node("l_sigmoid", "Sigmoid", "L0", "L1"));
         graph.Nodes.Add(Node("l_neg", "Neg", "L1", "L2"));
         graph.Nodes.Add(Node("l_abs", "Abs", "L2", "L"));
-        foreach (var name in exposeIntermediates ? [.. Outputs, .. Intermediates] : Outputs)
-            graph.Outputs.Add(FloatValue(name, null));
+    }
+
+    private static byte[] Serialized(GraphProto graph)
+    {
         var model = new ModelProto { IrVersion = 10, Graph = graph, ProducerName = "memory-reuse-scenario" };
         model.OpsetImports.Add(new OperatorSetIdProto { Domain = "", Version = 21 });
         using var stream = new MemoryStream();
@@ -304,7 +437,7 @@ public class MemoryReuseScenarioTests
 
     private enum AllocatorKind { Arena, Shorokoo }
 
-    private enum Approach { Plain, BindFinal, BindAll, Redirect, Shipped }
+    private enum Approach { Plain, BindFinal, BindAll, Split, Redirect, Shipped }
 
     private sealed record Config(bool Card, Shapes Shapes, AllocatorKind Allocator, bool Optimized, bool MemoryPattern, Approach Approach, bool Parallel = false)
     {
@@ -316,7 +449,7 @@ public class MemoryReuseScenarioTests
     {
         foreach (var shapes in AllShapes)
         {
-            foreach (var approach in (Approach[])[Approach.Plain, Approach.BindFinal, Approach.BindAll])
+            foreach (var approach in (Approach[])[Approach.Plain, Approach.BindFinal, Approach.BindAll, Approach.Split])
                 foreach (var allocator in (AllocatorKind[])[AllocatorKind.Arena, AllocatorKind.Shorokoo])
                     foreach (var optimized in (bool[])[true, false])
                         foreach (var pattern in (bool[])[true, false])
@@ -527,9 +660,12 @@ public class MemoryReuseScenarioTests
                 try
                 {
                     var model = Scenario(config.Shapes, exposeIntermediates: config.Approach == Approach.BindAll);
-                    records.Add(config.Approach == Approach.Shipped
-                        ? RunShipped(config, model)
-                        : RunConfig(config, model, inputs, dir));
+                    records.Add(config.Approach switch
+                    {
+                        Approach.Shipped => RunShipped(config, model),
+                        Approach.Split => RunSplit(config, inputs, dir),
+                        _ => RunConfig(config, model, inputs, dir),
+                    });
                 }
                 catch (Exception failure)
                 {
@@ -700,6 +836,109 @@ public class MemoryReuseScenarioTests
         foreach (var (_, view, _) in views) view.Dispose();
         binding?.Dispose();
         return raw;
+    }
+
+    /// <summary>
+    /// The scenario split in two sessions, run one after the other: the front half writes A_half
+    /// over A's first half, B_half into A's second, and C's chain into B's first half; the back half
+    /// then runs L's chain over B — which holds the concatenation already, C in its first half and
+    /// B_half's rows where they always were — writing each value back into B. Nothing is
+    /// concatenated and nothing copied but B_half; the session boundary is what orders the back
+    /// half's writes into B after the front half's reads of it.
+    /// </summary>
+    private static ConfigRecord RunSplit(Config config, Inputs inputs, string dir)
+    {
+        var prefix = Path.Combine(dir, "profile-" + config.ToString().Replace('/', '-'));
+        CachingAllocator.Account? host = null, card = null;
+        if (config.Allocator == AllocatorKind.Shorokoo)
+        {
+            host = CachingAllocator.ForHost().Open("scenario");
+            card = config.Card ? CachingAllocator.ForCard(0).Open("scenario") : null;
+        }
+        InferenceSession front, back;
+        using (CachingAllocator.Charge(host, card))
+        {
+            front = NewSession(Scenario(config.Shapes, exposeIntermediates: true, front: true), config, prefix + "-front");
+            back = NewSession(Back(config.Shapes), config, prefix + "-back");
+        }
+        var whole = WholeShape(config.Shapes);
+        var half = HalfShape(config.Shapes);
+        List<RunRecord> runs = [];
+        try
+        {
+            for (int run = 1; run <= Runs; run++)
+            {
+                inputs.Refill();
+                using var a = inputs.View(inputs.A, whole);
+                using var b = inputs.View(inputs.B, whole);
+                using var l0 = inputs.View(inputs.B, whole);
+                List<OrtValue> views = [];
+                OrtValue View(IntPtr at, long[] shape)
+                {
+                    var view = inputs.View(at, shape);
+                    views.Add(view);
+                    return view;
+                }
+                using var first = front.CreateIoBinding();
+                first.BindInput("A", a);
+                first.BindInput("B", b);
+                first.BindOutput("A_half", View(inputs.A, half));
+                first.BindOutput("B_half", View(inputs.A + (nint)HalfBytes, half));
+                foreach (var name in (string[])["C0", "C1", "C2", "C3"]) first.BindOutput(name, View(inputs.B, half));
+                using var second = back.CreateIoBinding();
+                second.BindInput("L0", l0);
+                foreach (var name in (string[])["L1", "L2", "L"]) second.BindOutput(name, View(inputs.B, whole));
+
+                var arenaBefore = Merged(ArenaFigures(front, config), ArenaFigures(back, config));
+                using var runOptions = new RunOptions();
+                var trace = new Trace();
+                double micros;
+                using (CachingAllocator.Charge(host, card))
+                {
+                    trace.Start();
+                    try
+                    {
+                        front.RunWithBinding(runOptions, first);
+                        first.SynchronizeBoundOutputs();
+                        back.RunWithBinding(runOptions, second);
+                        second.SynchronizeBoundOutputs();
+                    }
+                    finally
+                    {
+                        micros = trace.MicrosSinceStart();
+                        Trace.Stop();
+                    }
+                }
+                var arenaAfter = Merged(ArenaFigures(front, config), ArenaFigures(back, config));
+                var addresses = new Dictionary<string, IntPtr>
+                {
+                    ["L"] = inputs.B, ["A_half"] = inputs.A, ["B_half"] = inputs.A + (nint)HalfBytes,
+                };
+                var correct = inputs.Correct(inputs.B, inputs.A, inputs.A + (nint)HalfBytes);
+                runs.Add(Summarize(new RawRun(run, trace.Events, micros, addresses, correct, arenaBefore, arenaAfter), inputs, null));
+                foreach (var view in views) view.Dispose();
+            }
+        }
+        finally
+        {
+            foreach (var session in (InferenceSession[])[front, back])
+            {
+                var profile = session.EndProfiling();
+                session.Dispose();
+                try { File.Delete(profile); } catch (IOException) { }
+            }
+            if (host is not null) host.Allocator.Close(host);
+            if (card is not null) card.Allocator.Close(card);
+        }
+        return new ConfigRecord(config.ToString(), runs, [], null);
+    }
+
+    /// <summary>Two sessions' arena figures, added together.</summary>
+    private static Dictionary<string, string>? Merged(Dictionary<string, string>? first, Dictionary<string, string>? second)
+    {
+        if (first is null || second is null) return first ?? second;
+        return first.Keys.Intersect(second.Keys).ToDictionary(key => key,
+            key => (Figure(first, key) + Figure(second, key)).ToString(CultureInfo.InvariantCulture));
     }
 
     /// <summary>The backend's own path: a session of the stock backend for the device, fed tensors

@@ -86,6 +86,29 @@ internal sealed class OrtPlacements : IDisposable
     private string? _broken;
     private bool _disposed;
 
+    /// <summary>
+    /// The placements of a session that wrote the graph it runs into <paramref name="runsDirectory"/>
+    /// as it was built (<paramref name="runs"/>), its larger initializers in a file beside it, and
+    /// reads the initializers <paramref name="sharedWeights"/> names from copies the variants are
+    /// handed too: the probe and the variants are built from that graph, and the folder is kept,
+    /// and deleted with these.
+    /// </summary>
+    internal OrtPlacements(
+        string runsDirectory, ModelProto runs, IReadOnlySet<string> sharedWeights, VariantBuilder build, OrtBackend backend,
+        Func<long> held)
+    {
+        _runsDirectory = runsDirectory;
+        _runs = runs;
+        _sharedWeights = sharedWeights;
+        _build = build;
+        _backend = backend;
+        _held = held;
+    }
+
+    // The initializers the session and its variants read from copies the session holds, which no
+    // variant holds of its own.
+    private readonly IReadOnlySet<string> _sharedWeights = new HashSet<string>();
+
     internal OrtPlacements(byte[] model, VariantBuilder build, OrtBackend backend, Func<long> held)
     {
         _build = build;
@@ -481,7 +504,7 @@ internal sealed class OrtPlacements : IDisposable
         var handed = model.Graph!.Inputs.Select(i => i.Name).ToHashSet(StringComparer.Ordinal);
         long bytes = 0;
         foreach (var initializer in model.Graph.Initializers)
-            if (!handed.Contains(initializer.Name))
+            if (!handed.Contains(initializer.Name) && !_sharedWeights.Contains(initializer.Name))
                 bytes += (initializer.Dims ?? []).Aggregate(1L, (a, d) => a * d) * PlacementShapes.ElementBytes(initializer.data_type);
         return bytes;
     }
@@ -554,6 +577,7 @@ internal sealed class OrtPlacements : IDisposable
     private ModelProto Original()
     {
         if (_original is not null) return _original;
+        if (_model is null && _modelFile is null) return _original = _runs!;
         if (_model is not null)
         {
             using var stream = new MemoryStream(_model, writable: false);
@@ -604,7 +628,7 @@ internal sealed class OrtPlacements : IDisposable
 
     /// <summary>The model a build wrote into <paramref name="directory"/>, its larger initializers
     /// left in the file beside it.</summary>
-    private static ModelProto ReadOptimized(string directory)
+    internal static ModelProto ReadOptimized(string directory)
     {
         using var stream = File.OpenRead(Path.Combine(directory, OrtBackend.OptimizedModelFile));
         var model = ProtoBuf.Serializer.Deserialize<ModelProto>(stream);

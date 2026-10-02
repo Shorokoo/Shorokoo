@@ -358,6 +358,9 @@ public abstract class OrtBackend : IShorokooBackend
         ArgumentNullException.ThrowIfNull(diagnostics);
         // One copy for however many sessions are built from it: ORT takes the model as an array.
         var model = modelBytes.ToArray();
+        if (WeightsToShare(model, outputAliases, suppliedInitializers) is { } weights
+            && BuildSharingWeights(model, weights, graphOptimization, logSeverity, deviceMemory, diagnostics, intraOpThreads, suppliedInitializers, precision) is { } sharing)
+            return sharing;
         BuiltSession New(string? optimizedDirectory) => NewSession(
             model, graphOptimization, logSeverity, deviceMemory, diagnostics, optimizedDirectory, intraOpThreads,
             suppliedInitializers, precision);
@@ -379,6 +382,103 @@ public abstract class OrtBackend : IShorokooBackend
                     accounts: shared ? (session.HostAccount, session.CardAccount) : null, externalDataDirectory: externalData), []),
                 this,
                 () => session.HeldBytes);
+        return session;
+    }
+
+    /// <summary>
+    /// The weights of <paramref name="model"/> a session on a card reads from copies of this
+    /// backend's rather than the model's, so that the sessions it places values through read them
+    /// too, holding no copy of their own: on a card of a stock provider, a model over
+    /// <see cref="OrtPlacements.ModelBytesKept"/> — whose second session would otherwise hold a
+    /// second copy of the weights it carries — built with no output written into an input. Its
+    /// initializers and constants of a mebibyte or more of fixed-width elements that it carries
+    /// itself; null for
+    /// any other model, or where it carries none. On the host such a copy saves nothing: ONNX Runtime
+    /// packs a product's constant weight into memory of the session's own, and keeps a weight it was
+    /// handed beside its packed copy.
+    /// </summary>
+    private IReadOnlyList<TensorProto>? WeightsToShare(
+        byte[] model, IReadOnlyList<OutputAlias>? outputAliases, IReadOnlyList<SuppliedInitializer> suppliedInitializers)
+    {
+        if (!_stockProvider || SessionsUseOrtArena || _cudaDeviceId is null || outputAliases is not null
+            || model.Length <= OrtPlacements.ModelBytesKept)
+            return null;
+        ModelProto parsed;
+        using (var stream = new MemoryStream(model, writable: false))
+            parsed = ProtoBuf.Serializer.Deserialize<ModelProto>(stream);
+        var supplied = suppliedInitializers.Select(s => s.Name).ToHashSet(StringComparer.Ordinal);
+        // Its initializers, and the tensors of its Constant nodes, which ONNX Runtime makes
+        // initializers of the nodes' outputs as it loads the model.
+        var tensors = (parsed.Graph?.Initializers ?? []).Concat((parsed.Graph?.Nodes ?? [])
+            .Where(n => n.OpType == "Constant" && n.Domain is null or "" && n.Outputs.Count == 1)
+            .SelectMany(n => n.Attributes.Where(a => a.Name == "value" && a.T is not null)
+                .Select(a => new TensorProto { Name = n.Outputs[0], data_type = a.T.data_type, Dims = a.T.Dims, RawData = a.T.RawData })));
+        List<TensorProto> weights = [.. tensors.Where(t =>
+            t.RawData is { Length: >= 1 << 20 } && !supplied.Contains(t.Name)
+            && PlacementShapes.ElementBytes(t.data_type) > 0
+            && (t.Dims ?? []).Aggregate(1L, (a, d) => a * d) * PlacementShapes.ElementBytes(t.data_type) == t.RawData.Length)];
+        return weights.Count == 0 ? null : weights;
+    }
+
+    /// <summary>
+    /// A session over <paramref name="model"/> reading <paramref name="weights"/> from copies of
+    /// this backend's (<see cref="WeightsToShare"/>), with the placements of its runs built over the
+    /// graph it writes out as it is built — its larger initializers in a file beside it, so that
+    /// writing it holds no second copy of them — and handed the copies its graph still reads; those
+    /// ONNX Runtime's rewrites left unread are let go of. Null where the folder to write into cannot
+    /// be made, for the caller to build the session as any other.
+    /// </summary>
+    private OrtSession? BuildSharingWeights(
+        byte[] model, IReadOnlyList<TensorProto> weights, ShorokooGraphOptimization graphOptimization, ShorokooLogSeverity logSeverity,
+        DeviceMemorySettings deviceMemory, DiagnosticSettings diagnostics, int intraOpThreads,
+        IReadOnlyList<SuppliedInitializer> suppliedInitializers, PrecisionSettings precision)
+    {
+        var directory = TempDirectory("shorokoo-runs-");
+        try
+        {
+            Directory.CreateDirectory(directory);
+        }
+        catch (Exception unwritable) when (unwritable is IOException or UnauthorizedAccessException)
+        {
+            return null;
+        }
+        OrtSession session;
+        ModelProto runs;
+        List<(string Name, OrtTensorValue Value)> kept = [];
+        try
+        {
+            var built = NewSession(model, graphOptimization, logSeverity, deviceMemory, diagnostics, directory, intraOpThreads,
+                suppliedInitializers, precision, weightsToShare: weights);
+            try
+            {
+                runs = OrtPlacements.ReadOptimized(directory);
+            }
+            catch
+            {
+                Discard(built);
+                throw;
+            }
+            var read = runs.Graph!.Initializers.Select(i => i.Name).ToHashSet(StringComparer.Ordinal);
+            for (int i = 0; i < weights.Count; i++)
+                if (read.Contains(weights[i].Name)) kept.Add((weights[i].Name, built.SharedWeights[i]));
+                else built.SharedWeights[i].Dispose();
+            session = Wrap(built with { SharedWeights = [.. kept.Select(k => k.Value)] }, []);
+        }
+        catch
+        {
+            DeleteDirectory(directory);
+            throw;
+        }
+        IReadOnlyList<SuppliedInitializer> handed = [.. suppliedInitializers, .. kept.Select(k => new SuppliedInitializer(k.Name, k.Value))];
+        session.Placements = new OrtPlacements(
+            directory, runs, kept.Select(k => k.Name).ToHashSet(StringComparer.Ordinal),
+            (variant, optimized, externalData, shared) => Wrap(NewSession(
+                variant, externalData is null ? graphOptimization : ShorokooGraphOptimization.DisableAll, logSeverity,
+                deviceMemory, diagnostics with { TraceNodePlacement = false },
+                optimized, intraOpThreads, handed, precision,
+                accounts: shared ? (session.HostAccount, session.CardAccount) : null, externalDataDirectory: externalData), []),
+            this,
+            () => session.HeldBytes);
         return session;
     }
 
@@ -454,7 +554,12 @@ public abstract class OrtBackend : IShorokooBackend
         IReadOnlyList<OrtValue> SuppliedViews,
         CachingAllocator.Account HostAccount,
         CachingAllocator.Account? CardAccount,
-        bool OwnsAccounts = true);
+        bool OwnsAccounts = true)
+    {
+        /// <summary>The weights the session reads from copies of this backend's (see
+        /// <see cref="WeightsToShare"/>), which the session owns.</summary>
+        internal IReadOnlyList<OrtTensorValue> SharedWeights { get; init; } = [];
+    }
 
     /// <summary>
     /// An ONNX Runtime session over <paramref name="model"/>, writing the graph it will run into
@@ -473,12 +578,13 @@ public abstract class OrtBackend : IShorokooBackend
         IReadOnlyList<SuppliedInitializer> suppliedInitializers,
         PrecisionSettings precision,
         (CachingAllocator.Account Host, CachingAllocator.Account? Card)? accounts = null,
-        string? externalDataDirectory = null)
+        string? externalDataDirectory = null,
+        IReadOnlyList<TensorProto>? weightsToShare = null)
     {
         try
         {
             return NewSessionOnce(model, graphOptimization, logSeverity, deviceMemory, diagnostics, optimizedDirectory,
-                intraOpThreads, suppliedInitializers, precision, accounts, externalDataDirectory);
+                intraOpThreads, suppliedInitializers, precision, accounts, externalDataDirectory, weightsToShare);
         }
         catch (OnnxRuntimeException refused) when (refused.Message.Contains("CreateEnvWithGlobalThreadPools", StringComparison.Ordinal))
         {
@@ -486,7 +592,7 @@ public abstract class OrtBackend : IShorokooBackend
             // on them: from now on every session keeps its own.
             OrtEnvironment.NoSharedThreadPools();
             return NewSessionOnce(model, graphOptimization, logSeverity, deviceMemory, diagnostics, optimizedDirectory,
-                intraOpThreads, suppliedInitializers, precision, accounts, externalDataDirectory);
+                intraOpThreads, suppliedInitializers, precision, accounts, externalDataDirectory, weightsToShare);
         }
     }
 
@@ -500,8 +606,9 @@ public abstract class OrtBackend : IShorokooBackend
         int intraOpThreads,
         IReadOnlyList<SuppliedInitializer> suppliedInitializers,
         PrecisionSettings precision,
-        (CachingAllocator.Account Host, CachingAllocator.Account? Card)? accounts = null,
-        string? externalDataDirectory = null)
+        (CachingAllocator.Account Host, CachingAllocator.Account? Card)? accounts,
+        string? externalDataDirectory,
+        IReadOnlyList<TensorProto>? weightsToShare)
     {
         // The `using` is load-bearing, not tidiness. SessionOptions is a SafeHandle, so it
         // carries a critical finalizer that calls OrtReleaseSessionOptions, and ORT takes its
@@ -531,6 +638,7 @@ public abstract class OrtBackend : IShorokooBackend
         // gets a folder of its own, made here and deleted below.
         var placeholderDirectory = suppliedInitializers.Count > 0 && externalDataDirectory is null ? TempDirectory("shorokoo-supplied-") : null;
         List<OrtValue> views = [];
+        List<OrtTensorValue> shared = [];
         // What the session allocates -- its weights as it is built, and everything its runs take --
         // comes from Shorokoo's allocators, charged to accounts of its own (see CachingAllocator):
         // ONNX Runtime writes every output into memory its session's allocator gives it, so an
@@ -554,14 +662,31 @@ public abstract class OrtBackend : IShorokooBackend
             _configureExecutionProvider(options, deviceMemory, precision);
             InferenceSession session;
             using (CachingAllocator.Charge(host, card))
+            {
+                // Copies of the weights in this backend's memory, charged to the session as its own
+                // weights would be, which the session reads in place of copying the model's.
+                foreach (var weight in weightsToShare ?? [])
+                {
+                    var copy = (OrtTensorValue)CreateTensorInBackendMemory((ShorokooTensorElementType)weight.data_type, weight.RawData, weight.Dims);
+                    shared.Add(copy);
+                    using var memory = copy.Inner.GetTensorMemoryInfo();
+                    var view = OrtValue.CreateTensorValueWithData(
+                        memory, (TensorElementType)weight.data_type, weight.Dims, DevicePointer(copy), weight.RawData.Length);
+                    GC.KeepAlive(copy);
+                    views.Add(view);
+                    options.AddInitializer(weight.Name, view);
+                }
                 session = new InferenceSession(model, options);
+            }
             // The values themselves are the caller's to keep alive for the session's life; this
             // keeps them reachable across the constructor, which takes them as bare handles.
             GC.KeepAlive(suppliedInitializers);
-            return new BuiltSession(session, profileDirectory, views, host, card, accounts is null);
+            return new BuiltSession(session, profileDirectory, views, host, card, accounts is null) { SharedWeights = shared };
         }
         catch
         {
+            foreach (var view in views) view.Dispose();
+            foreach (var copy in shared) copy.Dispose();
             if (accounts is null)
             {
                 host.Allocator.Close(host);
@@ -569,7 +694,6 @@ public abstract class OrtBackend : IShorokooBackend
             }
             // No session to own the folder, so nothing would ever delete it.
             DeleteDirectory(profileDirectory);
-            foreach (var view in views) view.Dispose();
             throw;
         }
         finally
@@ -592,6 +716,7 @@ public abstract class OrtBackend : IShorokooBackend
             return new OrtSession(session, _cudaDeviceId, this, profileDirectory, outputAliases, host, card, owns)
             {
                 SuppliedViews = views,
+                SharedWeights = built.SharedWeights,
                 OnOrtArena = SessionsUseOrtArena,
             };
         }
@@ -606,6 +731,7 @@ public abstract class OrtBackend : IShorokooBackend
     private static void Discard(BuiltSession built)
     {
         built.Session.Dispose();
+        foreach (var weight in built.SharedWeights) weight.Dispose();
         if (built.OwnsAccounts)
         {
             built.HostAccount.Allocator.Close(built.HostAccount);

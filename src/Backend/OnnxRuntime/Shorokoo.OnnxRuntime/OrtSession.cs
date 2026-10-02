@@ -65,6 +65,10 @@ internal sealed class OrtSession : IShorokooSession
     /// <c>OrtBackend.Supply</c>), which ONNX Runtime requires to outlive it: released after it.</summary>
     internal IReadOnlyList<OrtValue> SuppliedViews { get; init; } = [];
 
+    /// <summary>The copies of its model's weights in the backend's memory this session reads in
+    /// place of the model's, which it owns, and its variants read too.</summary>
+    internal IReadOnlyList<OrtTensorValue> SharedWeights { get; init; } = [];
+
     /// <summary>Where this session's runs that consume inputs place their values in the memory of
     /// what they consume (see <see cref="OrtPlacements"/>), or null for a session that places
     /// nothing. Set once, as the backend builds the session.</summary>
@@ -844,6 +848,7 @@ internal sealed class OrtSession : IShorokooSession
         }
         Placements?.Dispose();
         _session.Dispose();
+        foreach (var weight in SharedWeights) weight.Dispose();
         // After the session, whose release lets go of its weights through them.
         _accounts?.Close();
         _cardMemory?.Dispose();

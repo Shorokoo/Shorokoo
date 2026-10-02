@@ -41,6 +41,9 @@
          their runtimes; every copy of a backend has to reach the one in this assembly. -->
     <InternalsVisibleTo Include="Shorokoo.OnnxRuntime" />
     <InternalsVisibleTo Include="Shorokoo.PythonHost" />
+    <!-- A backend that places a run's outputs in the memory of what the run consumed proves the
+         placements and hands back values standing on a shared block (Core/Backends/PlacementProof.cs,
+         Core/Backends/SharedBlock.cs), which are this assembly's. -->
     <InternalsVisibleTo Include="Shorokoo.PyTorch" />
   </ItemGroup>
 </Project>

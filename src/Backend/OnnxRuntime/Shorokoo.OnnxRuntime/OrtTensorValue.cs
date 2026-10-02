@@ -28,6 +28,23 @@ internal sealed class OrtTensorValue : IShorokooTensorValue
 
     public OrtTensorValue(OrtValue inner) { _inner = inner; }
 
+    /// <summary>
+    /// A value over a range of a shared block (<see cref="SharedBlock"/>): <paramref name="inner"/>
+    /// is an ORT value over that memory, owning none of it, and <paramref name="range"/> where it
+    /// stands, with a lease the caller has taken for it, which this releases as it is released.
+    /// </summary>
+    public OrtTensorValue(OrtValue inner, BlockRange range)
+    {
+        _inner = inner;
+        Range = range;
+    }
+
+    /// <summary>Where this value stands on a block it shares, or null for one that owns its memory
+    /// whole.</summary>
+    internal BlockRange? Range { get; }
+
+    BlockRange? IShorokooTensorValue.Range => Range;
+
     private static ObjectDisposedException Released() => new(
         nameof(OrtTensorValue),
         "This runtime value has been released -- the tensor it belonged to was deleted, or consumed "
@@ -293,6 +310,9 @@ internal sealed class OrtTensorValue : IShorokooTensorValue
     {
         if (Interlocked.Exchange(ref _released, 1) != 0) return;
         _inner.Dispose();
+        // After the value over the memory, which reads nothing once released: the lease may be the
+        // block's last, and letting it go frees the memory.
+        Range?.Block.Release();
     }
 
     /// <summary>

@@ -879,6 +879,58 @@ public class ComputeContextLifetimeCoverageTests
         Assert.Empty(new PlacementProof(graph, new Dictionary<string, long> { ["A"] = 128 }, shapes).Plan(smallest: 64, idleOutputBytes: 0).Where(p => p.Value == "L"));
     }
 
+    /// <summary>Two tensors standing on one host block of eight floats, its halves, and the block.</summary>
+    private static (TensorData First, TensorData Second, SharedBlock Block, OrtTensorValue Owner) Halved()
+    {
+        var backend = DefaultBackend.Instance;
+        var owner = (OrtTensorValue)backend.CreateTensor((float[])[1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f], [8L]);
+        var block = new SharedBlock(32, () => backend.Release(owner));
+        var first = TensorData.Create((long[])[4], DType.Float32, OrtBackend.View(owner, 0, ShorokooTensorElementType.Float, [4], 16, block, 0), backend);
+        var second = TensorData.Create((long[])[4], DType.Float32, OrtBackend.View(owner, 16, ShorokooTensorElementType.Float, [4], 16, block, 16), backend);
+        return (first, second, block, owner);
+    }
+
+    [Fact]
+    public void TestTensorsStandingOnOneBlockEachOwnTheirRangeAndTheBlockGoesWithTheLastOfThem()
+    {
+        var (first, second, block, owner) = Halved();
+        Assert.Equal([1f, 2f, 3f, 4f], Floats(first));
+        Assert.Equal([5f, 6f, 7f, 8f], Floats(second));
+        Assert.Same(block, first.Block);
+        Assert.Equal(2, block.Leases);
+        first.Delete();
+        Assert.False(block.IsReleased);
+        Assert.Equal([5f, 6f, 7f, 8f], Floats(second));
+        second.Delete();
+        Assert.True(block.IsReleased);
+        Assert.Throws<ObjectDisposedException>(() => owner.Inner);
+    }
+
+    [Fact]
+    public void TestATensorStandingOnABlockMovesSavesLoadsAndJoinsASequenceAsItsOwnRange()
+    {
+        var (first, second, block, _) = Halved();
+        using var context = new ComputeContext();
+        Assert.Equal([5f, 6f, 7f, 8f], Floats(second.ToHost()));
+        Assert.Equal([5f, 6f, 7f, 8f], Floats(second.CopyTo(context)));
+        using var stream = new MemoryStream();
+        SafeTensorLoader.SaveSafeTensorsToStream(stream, [new("first", first, "F32", [4L]), new("second", second, "F32", [4L])]);
+        var path = Path.Combine(Path.GetTempPath(), $"halves-{Guid.NewGuid():N}.safetensors");
+        File.WriteAllBytes(path, stream.ToArray());
+        var loaded = SafeTensorLoader.LoadTensorDictionary(path);
+        File.Delete(path);
+        Assert.Equal([1f, 2f, 3f, 4f], Floats(loaded["first"]));
+        Assert.Equal([5f, 6f, 7f, 8f], Floats(loaded["second"]));
+        var backend = DefaultBackend.Instance;
+        using var sequence = backend.CreateSequence([OrtBackend.View((OrtTensorValue)((IOnnxData)first).Value, 8, ShorokooTensorElementType.Float, [2], 8, block, 8)]);
+        Assert.Equal(2, block.Leases);
+        Assert.Equal([3f, 4f], sequence.GetValue(0).GetTensorDataAsSpan<float>().ToArray());
+        first.Delete();
+        second.Delete();
+        Assert.True(block.IsReleased);
+        Assert.Equal([3f, 4f], sequence.GetValue(0).GetTensorDataAsSpan<float>().ToArray());
+    }
+
     [Fact]
     public void TestASerializedModelProvesWhatItsGraphProvesAndOneWithoutAGraphProvesNothing()
     {

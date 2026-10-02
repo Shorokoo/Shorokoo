@@ -282,6 +282,14 @@ namespace Shorokoo
         internal virtual byte[]? OwnBytes => null;
 
         /// <summary>
+        /// The block this tensor's memory is a range of, where it shares one with other tensors —
+        /// an output a run placed in the memory of an input it consumed (see
+        /// <see cref="Core.Backends.SharedBlock"/>) — or null where the tensor owns its allocation
+        /// whole. A device-memory budget counts the block, once, rather than this tensor's bytes.
+        /// </summary>
+        internal virtual Core.Backends.SharedBlock? Block => null;
+
+        /// <summary>
         /// The bytes this tensor's elements take up where they are: its element count at its
         /// element's storage width, rounded up to a whole byte. What a compute context's
         /// device-memory budget counts it as.
@@ -738,6 +746,9 @@ namespace Shorokoo
 
         /// <inheritdoc/>
         private protected override void ReleaseMemory() => AllocatingBackend.Release(backing);
+
+        /// <inheritdoc/>
+        internal override Core.Backends.SharedBlock? Block => backing.Range?.Block;
 
         /// <inheritdoc/>
         private protected override IShorokooTensorValue ValueFor(IShorokooBackend backend) => backing;

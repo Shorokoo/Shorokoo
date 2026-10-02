@@ -82,20 +82,39 @@ namespace Shorokoo.Runtime
         /// <summary>
         /// The bytes of the live tensors attached to this context in its own memory, and how many
         /// they are. A run's outputs are among them once the run has returned, apart from what its
-        /// session's runs are limited to.
+        /// session's runs are limited to. Tensors standing on one shared block count the block
+        /// once, whole: its memory is held while any of them lives.
         /// </summary>
         internal (long Bytes, int Tensors) AttachedIn()
         {
             var space = MemorySpace;
             long bytes = 0;
             var tensors = 0;
+            HashSet<SharedBlock>? blocks = null;
             foreach (var tensor in _attached.Snapshot())
             {
                 if (tensor.IsDisposed || tensor.Space != space) continue;
-                bytes += tensor.ByteCount;
+                if (tensor.Block is { } block)
+                {
+                    if ((blocks ??= new(ReferenceEqualityComparer.Instance)).Add(block)) bytes += block.Bytes;
+                }
+                else bytes += tensor.ByteCount;
                 tensors++;
             }
             return (bytes, tensors);
+        }
+
+        /// <summary>
+        /// What putting <paramref name="tensor"/> on this context's books adds to them: its own
+        /// bytes, or for a tensor standing on a shared block, the whole block where no live tensor
+        /// on this context's books stands on it already, and nothing where one does.
+        /// </summary>
+        internal long BooksBytesOf(TensorData tensor)
+        {
+            if (tensor.Block is not { } block) return tensor.ByteCount;
+            foreach (var attached in _attached.Snapshot())
+                if (!attached.IsDisposed && ReferenceEquals(attached.Block, block)) return 0;
+            return block.Bytes;
         }
 
         /// <summary>

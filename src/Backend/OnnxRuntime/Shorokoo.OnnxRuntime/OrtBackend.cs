@@ -1008,6 +1008,11 @@ public abstract class OrtBackend : IShorokooBackend
     /// it is that one the message's advice is about.</exception>
     public IShorokooTensorValue CreateSequence(IReadOnlyList<IShorokooTensorValue> values)
     {
+        // A sequence holds its elements' ORT values and frees them with itself, and a value standing
+        // on a shared block owns none of its memory: such an element goes in as a copy of its own,
+        // and the value it was made from is released here, its lease with it.
+        if (values.Any(v => v is OrtTensorValue { Range: not null }))
+            values = [.. values.Select(v => v is OrtTensorValue { Range: not null, IsInDeviceMemory: false } view ? Owned(view) : v)];
         var inner = new List<OrtValue>(values.Count);
         try
         {
@@ -1048,6 +1053,48 @@ public abstract class OrtBackend : IShorokooBackend
             // itself live reaches ORT on its next read as a handle that is gone: an access
             // violation, not an exception.
             foreach (var v in values) v.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>A host copy of <paramref name="view"/>, a value standing on a shared block, which is
+    /// released.</summary>
+    private OrtTensorValue Owned(OrtTensorValue view)
+    {
+        try
+        {
+            return Allocate((TensorElementType)(int)view.ElementType, view.GetTensorDataAsSpan<byte>(), view.Shape);
+        }
+        finally
+        {
+            view.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// A value over <paramref name="bytes"/> bytes of <paramref name="owner"/>'s memory from byte
+    /// <paramref name="offset"/>, of <paramref name="elementType"/> and <paramref name="shape"/>,
+    /// standing on <paramref name="block"/> — the block <paramref name="owner"/> is, or stands on —
+    /// at <paramref name="offsetInBlock"/>, with a lease of its own on it. The memory is where the
+    /// owner's is, on the host or a card, and the value owns none of it.
+    /// </summary>
+    internal static OrtTensorValue View(
+        OrtTensorValue owner, long offset, ShorokooTensorElementType elementType, long[] shape, long bytes,
+        SharedBlock block, long offsetInBlock)
+    {
+        block.Lease();
+        try
+        {
+            var inner = owner.Inner;
+            using var memory = inner.GetTensorMemoryInfo();
+            var view = OrtValue.CreateTensorValueWithData(
+                memory, (TensorElementType)(int)elementType, shape, (IntPtr)((long)AddressOf(inner) + offset), bytes);
+            GC.KeepAlive(owner);
+            return new OrtTensorValue(view, new BlockRange(block, offsetInBlock, bytes));
+        }
+        catch
+        {
+            block.Release();
             throw;
         }
     }

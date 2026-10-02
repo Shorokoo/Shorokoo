@@ -101,7 +101,7 @@ namespace Shorokoo
             var space = target.MemorySpace;
             if (space.IsHost) return 0;
             if (!copying && target.CanAddress(this))
-                return Space == space && !target.Attaches(this) && (handedOver?.Add(this) ?? true) ? ByteCount : 0;
+                return Space == space && !target.Attaches(this) && (handedOver?.Add(this) ?? true) ? target.BooksBytesOf(this) : 0;
             return RunMemoryOf(target.ResolvedBackend, DType).Space.IsHost ? 0 : ByteCount;
         }
 

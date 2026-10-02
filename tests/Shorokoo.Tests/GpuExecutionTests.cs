@@ -192,6 +192,24 @@ public class GpuExecutionTests
         Assert.Equal(new DeviceMemoryUse(32 * MiB, 1, 64 * MiB), budgeted.ReadDeviceMemoryUse());
     }
 
+    [CudaFact]
+    public void CudaProvider_ABudgetCountsABlockOnceWholeForAsLongAsAnyTensorOnItIsAttached()
+    {
+        const long MiB = 1024 * 1024;
+        using var budgeted = new ComputeContext { DeviceMemory = new DeviceMemorySettings { LimitBytes = 64 * MiB } };
+        var backend = DefaultBackend.Instance;
+        var owner = (OrtTensorValue)backend.CreateTensorInBackendMemory(ShorokooTensorElementType.Float, new byte[16 * MiB], [4L << 20]);
+        var block = new SharedBlock(16 * MiB, () => backend.Release(owner));
+        var first = TensorData.Create((long[])[2L << 20], DType.Float32, OrtBackend.View(owner, 0, ShorokooTensorElementType.Float, [2L << 20], 8 * MiB, block, 0), backend).To(budgeted);
+        var second = TensorData.Create((long[])[1L << 20], DType.Float32, OrtBackend.View(owner, 8 * MiB, ShorokooTensorElementType.Float, [1L << 20], 4 * MiB, block, 8 * MiB), backend).To(budgeted);
+        Assert.Equal(new DeviceMemoryUse(16 * MiB, 2, 64 * MiB), budgeted.ReadDeviceMemoryUse());
+        first.Delete();
+        Assert.Equal(new DeviceMemoryUse(16 * MiB, 1, 64 * MiB), budgeted.ReadDeviceMemoryUse());
+        second.Delete();
+        Assert.Equal(new DeviceMemoryUse(0, 0, 64 * MiB), budgeted.ReadDeviceMemoryUse());
+        Assert.True(block.IsReleased);
+    }
+
     /// <summary>
     /// What a run's session may allocate is capped at exactly the budget less what the context holds
     /// on the card for the run — here the eight-byte copy of the shape it is fed: with nothing else

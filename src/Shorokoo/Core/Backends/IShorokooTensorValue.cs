@@ -39,4 +39,9 @@ public interface IShorokooTensorValue : IDisposable
     // The element type of a sequence's tensor elements. Only meaningful when
     // ValueType is Sequence.
     ShorokooTensorElementType GetSequenceElementType();
+
+    // Where this value stands on a block it shares with other values, each over a range of its
+    // own, holding a lease on it (see SharedBlock): a run's output placed in the memory of an input
+    // the run consumed. Null for a value that owns its memory whole, which is every value but those.
+    internal BlockRange? Range => null;
 }

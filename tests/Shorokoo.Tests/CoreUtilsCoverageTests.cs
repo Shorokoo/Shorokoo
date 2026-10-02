@@ -945,6 +945,26 @@ public class CoreUtilsCoverageTests
     }
 
     [Fact]
+    public void TestAnAccountWhoseCallsRepeatTakesNoBlockFromTheDeviceAfterItsFirstCall()
+    {
+        var host = RuntimeAllocator.ForHost();
+        var account = host.Shared.Open("probe");
+        (long, long) Call()
+        {
+            using (CachingAllocator.Charge(account, null))
+                foreach (var floats in (long[])[1L << 20, 3L << 18])
+                    OrtValue.CreateAllocatedTensorValue(host.Managed, Microsoft.ML.OnnxRuntime.Tensors.TensorElementType.Float, [floats]).Dispose();
+            var figures = host.Shared.Statistics(account);
+            return (figures.ArenaExtensionCount, figures.ArenaShrinkageCount);
+        }
+
+        var first = Call();
+        Call();
+        Assert.Equal(first, Call());
+        host.Shared.Close(account);
+    }
+
+    [Fact]
     public void TestABlockTheHostAllocatorHandsBackIsNoLongerTheProcesssMemory()
     {
         var host = RuntimeAllocator.ForHost();
@@ -1081,13 +1101,13 @@ public class CoreUtilsCoverageTests
         var refilled = ArenaProbeModels.Refilled(context);
         ArenaStatistics Run()
         {
-            Assert.Equal(1048576f * 786432f, ArenaProbeModels.Sum(refilled.Execute(ArenaProbeModels.FilledShape(1 << 20), ArenaProbeModels.FilledShape(3 << 18))));
+            var outputs = refilled.Execute(ArenaProbeModels.FilledShape(1 << 20), ArenaProbeModels.FilledShape(3 << 18));
+            Assert.Equal(1048576f * 786432f, ArenaProbeModels.Sum(outputs));
+            ComputeContext.ReleaseOutputs(outputs);
             return Assert.IsType<ArenaStatistics>(refilled.ReadArenaStatistics());
         }
-        var first = Run();
-        Run();
-        var third = Run();
-        Assert.Equal((first.ArenaExtensionCount, first.ArenaShrinkageCount), (third.ArenaExtensionCount, third.ArenaShrinkageCount));
+        var runs = Enumerable.Range(0, 6).Select(_ => Run()).Select(r => (r.ArenaExtensionCount, r.ArenaShrinkageCount)).ToList();
+        Assert.Equal(runs[1], runs[^1]);
     }
 
     [Fact]

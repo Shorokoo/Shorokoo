@@ -938,6 +938,10 @@ public class ComputeContextLifetimeCoverageTests
         Assert.Equal("1x3x8x8", ShapeOf(GraphOf("x:float[1,4,4,4] w:float[4,3,2,2]", "O", With(Op("ConvTranspose", "x w", "O"), "strides", 2, 2)), "O"));
         Assert.Equal("1x4x8x8", ShapeOf(GraphOf("x:float[1,3,8,8] w:float[4,3,3,3]", "O", With(Op("FusedConv", "x w", "O", domain: "com.microsoft"), "pads", 1, 1, 1, 1)), "O"));
         Assert.Equal("8x16", ShapeOf(GraphOf("a:float[8,4] b:float[4,16]", "O", Op("FusedGemm", "a b", "O", domain: "com.microsoft")), "O"));
+        Assert.Equal("4x2", ShapeOf(GraphOf("a:float[4,2] c:bool[1]", "t", PyTorchBackendCoverageTests.Branch("c", GraphOf("", "t", Op("Neg", "a", "t")), GraphOf("", "t", Op("Abs", "a", "t")))), "t"));
+        Assert.Equal("unknown", ShapeOf(GraphOf("a:float[4,2] c:bool[1]", "t", PyTorchBackendCoverageTests.Branch("c", GraphOf("", "t", Op("Neg", "a", "t")), GraphOf("", "t", Op("Shape", "a", "t")))), "t"));
+        Assert.Equal("2:7=4,2", ShapeOf(GraphOf("a:float[4,2]", "t", Op("Greater", "two one", "c"),
+            PyTorchBackendCoverageTests.Branch("c", GraphOf("", "t", Op("Shape", "a", "t")), GraphOf("", "t", Op("Neg", "a", "t")))), "t"));
     }
 
     /// <summary>The shapes <see cref="PlacementShapes"/> evaluates for <paramref name="values"/> of

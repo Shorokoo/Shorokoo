@@ -268,19 +268,36 @@ public class MemoryReuseScenarioTests
                 model(), Shorokoo.Modules.Losses.L2Loss.ComputationGraph, Shorokoo.Modules.Optimizers.AdamWOptimizer.ComputationGraph,
                 [sample.CopyTo(ComputeContext.Host)], new Shorokoo.Modules.Optimizers.AdamWOptimizerHyperparameters { LearningRate = 0.001f },
                 runtimeContext: context);
-            var input = rig.InputDef.FromOrderedData(sample);
-            var targets = rig.TargetDef.FromOrderedData(TensorData(dims, new float[dims.Aggregate(1L, (a, d) => a * d)]));
+            var input = rig.InputDef.FromOrderedData(sample.CopyTo(context));
+            var target = TensorData(dims, new float[dims.Aggregate(1L, (a, d) => a * d)]);
+            var targets = rig.TargetDef.FromOrderedData(target.CopyTo(context));
             long measured;
+            var settled = new List<string>();
+            OrtPlacements.Settled = e => { lock (settled) settled.Add(e.Stage == OrtPlacements.Stage.Adopted ? $"ONNX Runtime placed {e.Plan.Count} ({Mib(e.Plan.Sum(p => p.Bytes))})" : $"ONNX Runtime refused: {e.Refusal} (blocks {string.Join(",", e.BlockBytes.Select(b => $"{b.Key}={Mib(b.Value)}"))})"); };
+            TorchPlacements.Settled = e => { lock (settled) settled.Add(e.Plan.Count > 0 ? $"torch placed {e.Plan.Count} ({Mib(e.Plan.Sum(p => p.Bytes))})" : $"torch refused: {e.Refusal}"); };
             using (var run = rig.BeginResidentRun(rig.CreateInitialCheckpoint()))
             {
-                for (int i = 0; i < 3; i++) run.Step(input.Shared(), targets.Shared());
+                // A batch handed over as it is, as a loader hands one, is the step's to consume; one
+                // passed .Shared() is only read.
+                var consumed = Environment.GetEnvironmentVariable("SHOROKOO_MEMORY_REUSE_BATCH") == "consumed";
+                (IData Input, IData Target) Batch() => consumed
+                    ? (rig.InputDef.FromOrderedData(sample.CopyTo(context)), rig.TargetDef.FromOrderedData(target.CopyTo(context)))
+                    : (input.Shared(), targets.Shared());
+                for (int i = 0; i < 3; i++)
+                {
+                    var (x, t) = Batch();
+                    run.Step(x, t);
+                }
+                var (bx, bt) = Batch();
                 measured = backend switch
                 {
-                    "ort" => Observed(onCard, () => run.Step(input.Shared(), targets.Shared())).Peak,
-                    "torch-cuda" => TorchObserved(backend, () => run.Step(input.Shared(), targets.Shared())).Peak,
+                    "ort" => Observed(onCard, () => { run.Step(bx, bt); return 0; }).Peak,
+                    "torch-cuda" => TorchObserved(backend, () => { run.Step(bx, bt); return 0; }).Peak,
                     _ => -1,
                 };
             }
+            OrtPlacements.Settled = null;
+            TorchPlacements.Settled = null;
             var stepModel = MemoryPassBenchmarkTests.RigModel(rig.TrainingStepPureGraph, rig.OptimizationInputShapes);
             if (backend.StartsWith("torch", StringComparison.Ordinal) && Environment.GetEnvironmentVariable("SHOROKOO_MEMORY_REUSE_LOG") is not null)
                 File.WriteAllText(Path.Combine(OutputDirectory(), $"step-{family}.py"), OnnxToPythonTranslator.Translate(stepModel, [], Shorokoo.PyTorch.TorchDialect.Instance).Source);
@@ -315,13 +332,70 @@ public class MemoryReuseScenarioTests
                       + $"| {Mib(shapesFree.Bytes)} | {Mib(relu.Bytes)} | {Mib(everything.Bytes)} "
                       + $"| {Mib(anatomy.BatchBytes)} | {Mib(anatomy.ParameterBytes)} | {Mib(anatomy.StateBytes)} | {peak.Position}/{order.Length}: {anatomy.At(order, peak.Position)} |");
             File.AppendAllText(Path.Combine(OutputDirectory(), $"step-anatomy-{backend}-{(onCard ? "card" : "host")}-x{scale}-detail.md"),
-                $"\n## {family}\n\nnodes by part: {string.Join(", ", anatomy.NodesByPart.Select(p => $"{p.Key} {p.Value}"))}; values of unknown shape: {anatomy.UnknownValues}\n\nunknown from: {anatomy.UnknownRoots}\n\n"
+                $"\n## {family}\n\nplacements: {string.Join(", ", settled.GroupBy(x => x).Select(g => g.Count() == 1 ? g.Key : $"{g.Count()}x {g.Key}"))}\n\n"
+                + $"nodes by part: {string.Join(", ", anatomy.NodesByPart.Select(p => $"{p.Key} {p.Value}"))}; values of unknown shape: {anatomy.UnknownValues}\n\nunknown from: {anatomy.UnknownRoots}\n\n"
                 + "largest held at the peak: " + string.Join(", ", peak.Largest.Select(l => $"{l.Op} {l.Part} {Mib(l.Bytes)} (read until {l.Until})")) + "\n"
+                + $"\nplanned in the batch, as a translation lays values out: {BatchPlan(stepModel.Graph, state, PlacementMemory.PyTorch)}; as ONNX Runtime does: {BatchPlan(stepModel.Graph, state, PlacementMemory.OnnxRuntime)}"
+                + (SessionModel(rig) is { } handedOver ? $"; in the graph the step's session was handed, as ONNX Runtime lays values out: {BatchPlan(handedOver.Graph, state, PlacementMemory.OnnxRuntime, rig.OptimizationInputShapes)} ({handedOver.Graph.Nodes.Count} nodes against {stepModel.Graph.Nodes.Count}; "
+                    + $"unknown shapes {UnknownIn(handedOver.Graph, rig.OptimizationInputShapes)}; " + $"the batch read by {BatchReaders(handedOver.Graph, state)} there, by {BatchReaders(stepModel.Graph, state)} in the other)" : "") + "\n"
                 + (backend == "ort" ? $"\n{ortRun.Held}\n" : "")
                 + $"\nwith Relu's gradient reading its output: values of unknown shape {reluAnatomy.UnknownValues} ({reluAnatomy.UnknownRoots}); largest held at the peak: "
                 + string.Join(", ", relu.Largest.Select(l => $"{l.Op} {l.Part} {Mib(l.Bytes)} (read until {l.Until})")) + "\n");
         }
         File.WriteAllText(Path.Combine(OutputDirectory(), $"step-anatomy-{backend}-{(onCard ? "card" : "host")}-x{scale}.md"), string.Join("\n", lines) + "\n");
+    }
+
+    /// <summary>The model the rig's shape-specialized training-step session on ONNX Runtime was
+    /// handed, where it keeps one.</summary>
+    private static ModelProto? SessionModel(TrainingRig rig)
+    {
+        var steps = (System.Collections.IDictionary?)typeof(TrainingRig)
+            .GetField("_compiledTrainSteps", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)?.GetValue(rig);
+        return steps?.Values.Cast<CompiledGraph>().Select(c => c.Session).OfType<OrtSession>().FirstOrDefault()?.Placements?.OriginalModel;
+    }
+
+    /// <summary>How many values of <paramref name="graph"/> fed <paramref name="fed"/> have no shape the
+    /// placement evaluates, and the first operators where evaluation stops.</summary>
+    private static string UnknownIn(GraphProto graph, (Shape Shape, DType DType)[] fed)
+    {
+        var given = graph.Inputs.Select((i, k) => (i.Name, Dims: k < fed.Length ? fed[k].Shape.Dims.Select(d => (long)d).ToArray() : [], i.Type.TensorType.ElemType))
+            .ToDictionary(i => i.Name, i => (i.Dims, i.ElemType), StringComparer.Ordinal);
+        var shapes = PlacementShapes.Evaluate(graph, given);
+        var unknown = graph.Nodes.Where(n => n.Outputs.Any(o => o.Length > 0 && !shapes.ContainsKey(o))).ToList();
+        return $"{unknown.Count} nodes, from " + string.Join(", ", unknown.Where(n => n.Inputs.All(i => i.Length == 0 || shapes.ContainsKey(i))).Select(n => $"{n.Domain}:{n.OpType}").Distinct().Take(6));
+    }
+
+    /// <summary>The operators reading a training step's batch — the inputs after its
+    /// <paramref name="state"/> — or a view of it, each at its place in the graph's order.</summary>
+    private static string BatchReaders(GraphProto graph, int state)
+    {
+        var memory = graph.Inputs.Skip(state).Select(i => i.Name).ToHashSet(StringComparer.Ordinal);
+        var readers = new List<string>();
+        for (int n = 0; n < graph.Nodes.Count; n++)
+        {
+            var node = graph.Nodes[n];
+            if (!node.Inputs.Any(memory.Contains) || OutputAliasProof.ReadsOnlyAShape(node)) continue;
+            readers.Add($"{node.OpType}@{n}");
+            for (int o = 0; o < node.Outputs.Count; o++)
+                if (Enumerable.Range(0, node.Inputs.Count).Any(i => memory.Contains(node.Inputs[i]) && OutputAliasProof.Shares(node, i, o))) memory.Add(node.Outputs[o]);
+        }
+        return $"{string.Join(" ", readers)} of {graph.Nodes.Count}";
+    }
+
+    /// <summary>What the planner places in a training step's batch — the inputs after its
+    /// <paramref name="state"/> — were the step to consume it, under <paramref name="memory"/>: each
+    /// value's operator and size.</summary>
+    private static string BatchPlan(GraphProto graph, int state, PlacementMemory memory, (Shape Shape, DType DType)[]? fed = null)
+    {
+        var given = graph.Inputs.Select((i, k) => (i.Name, Dims: fed is null || k >= fed.Length
+                ? i.Type.TensorType.Shape.Dims.Select(d => d.DimValue).ToArray() : fed[k].Shape.Dims.Select(d => (long)d).ToArray(), i.Type.TensorType.ElemType))
+            .ToDictionary(i => i.Name, i => (i.Dims, i.ElemType), StringComparer.Ordinal);
+        var shapes = PlacementShapes.Evaluate(graph, given);
+        var blocks = graph.Inputs.Skip(state).Where(i => shapes.TryGetValue(i.Name, out var v) && v.Bytes > 0)
+            .ToDictionary(i => i.Name, i => shapes[i.Name].Bytes, StringComparer.Ordinal);
+        var plan = new PlacementProof(graph, blocks, shapes, graph.Outputs.Select(o => o.Name).ToHashSet(StringComparer.Ordinal), memory)
+            .Plan(PlacementProof.Smallest, PlacementProof.IdleOutputBytes);
+        return plan.Count == 0 ? "nothing" : string.Join(", ", plan.Select(p => $"{graph.Nodes.First(n => n.Outputs.Contains(p.Value)).OpType} {Mib(p.Bytes)}"));
     }
 
     /// <summary>The order a translation runs <paramref name="graph"/>'s nodes in, by index.</summary>

@@ -73,6 +73,14 @@ internal static class PlacementShapes
                 values[input.Name] = stated;
         }
 
+        Run(graph, values, symbols);
+        return values;
+    }
+
+    /// <summary>Evaluates <paramref name="graph"/>'s nodes into <paramref name="values"/>, which holds
+    /// what they read from outside them.</summary>
+    private static void Run(GraphProto graph, Dictionary<string, Value> values, Dictionary<string, long> symbols)
+    {
         var statedTypes = new Dictionary<string, ValueInfoProto>(StringComparer.Ordinal);
         foreach (var info in graph.ValueInfoes.Concat(graph.Outputs)) statedTypes.TryAdd(info.Name, info);
 
@@ -82,7 +90,7 @@ internal static class PlacementShapes
             Value?[] made;
             try
             {
-                made = Infer(node, read);
+                made = node.OpType == "If" && node.Domain is "" or "ai.onnx" ? Branched(node, read, values, symbols) : Infer(node, read);
             }
             catch (Exception exception) when (exception is ArgumentException or InvalidOperationException
                                                   or IndexOutOfRangeException or OverflowException or DivideByZeroException)
@@ -98,7 +106,31 @@ internal static class PlacementShapes
                 if (value is not null && value.Shape.All(d => d >= 0)) values[name] = value;
             }
         }
-        return values;
+    }
+
+    /// <summary>
+    /// The outputs of an <c>If</c>: those of the branch its condition takes, where the condition's
+    /// value is known, else each output both branches make alike — of one shape and type, and of the
+    /// same contents where those are known. Each branch is evaluated over the values it reads from
+    /// the graph around it.
+    /// </summary>
+    private static Value?[] Branched(NodeProto node, Value?[] read, Dictionary<string, Value> values, Dictionary<string, long> symbols)
+    {
+        Value?[]? Outputs(string branch)
+        {
+            if (node.Attributes.FirstOrDefault(a => a.Name == branch)?.G is not { } graph) return null;
+            var inner = new Dictionary<string, Value>(values, StringComparer.Ordinal);
+            foreach (var initializer in graph.Initializers)
+                if (FromTensor(initializer) is { } value) inner[initializer.Name] = value;
+            Run(graph, inner, symbols);
+            return [.. graph.Outputs.Select(o => inner.TryGetValue(o.Name, out var v) ? v : null)];
+        }
+        if (read.ElementAtOrDefault(0)?.Ints is [var condition])
+            return Outputs(condition != 0 ? "then_branch" : "else_branch") ?? [];
+        if (Outputs("then_branch") is not { } then || Outputs("else_branch") is not { } otherwise) return [];
+        return [.. then.Zip(otherwise, (a, b) => a is not null && b is not null && a.ElementType == b.ElementType && a.Shape.SequenceEqual(b.Shape)
+            ? new Value(a.Shape, a.ElementType, a.Ints is not null && b.Ints is not null && a.Ints.SequenceEqual(b.Ints) ? a.Ints : null)
+            : null)];
     }
 
     /// <summary>The shape <paramref name="info"/> states, where every dimension is a number or a

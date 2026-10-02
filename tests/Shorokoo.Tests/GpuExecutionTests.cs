@@ -882,6 +882,17 @@ public class GpuExecutionTests
         Assert.True(HeldOnTheCard() - before < 16 * MiB);
     }
 
+    [CudaFact]
+    public void CudaProvider_ASessionRunOverManyShapesKeepsNoMoreOnTheCardThanItsBusiestRunHadInUse()
+    {
+        using var ctx = new ComputeContext();
+        var filled = ArenaProbeModels.Filled(ctx);
+        foreach (var elements in (long[])[16L << 20, 3L << 22, 1L << 23, 3L << 21, 1L << 22])
+            ComputeContext.ReleaseOutputs(filled.Execute(ArenaProbeModels.FilledShape(elements)));
+        var held = Assert.IsType<ArenaStatistics>(filled.ReadArenaStatistics());
+        Assert.True(held.TotalAllocatedBytes <= held.MaxInUseBytes);
+    }
+
     /// <summary>What this process holds on the card once every tensor nothing reaches any more is
     /// released: a released tensor's finalizer can leave another to the next collection.</summary>
     private static long HeldOnTheCard()

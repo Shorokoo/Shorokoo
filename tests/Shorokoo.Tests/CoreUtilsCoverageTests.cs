@@ -1063,6 +1063,17 @@ public class CoreUtilsCoverageTests
         Assert.Equal(weights, InUse());
     }
 
+    [Fact]
+    public void TestASessionRunOverManyShapesKeepsNoMoreThanItsBusiestRunHadInUse()
+    {
+        using var context = new ComputeContext();
+        var filled = ArenaProbeModels.Filled(context);
+        foreach (var elements in (long[])[1L << 20, 3L << 18, 1L << 19, 3L << 17, 1L << 18])
+            ComputeContext.ReleaseOutputs(filled.Execute(ArenaProbeModels.FilledShape(elements)));
+        var held = Assert.IsType<ArenaStatistics>(filled.ReadArenaStatistics());
+        Assert.True(held.TotalAllocatedBytes <= held.MaxInUseBytes);
+    }
+
     /// <summary>
     /// An output whose shape only the run learns is the block its session's run wrote it into: its
     /// session's allocator holds exactly the output's bytes more while the caller keeps it, and

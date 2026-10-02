@@ -157,15 +157,14 @@ namespace Shorokoo.Core.Nodes.AutoDiff
             where T1 : IVarType
             where T2 : IVarType
         {
-            // Gradient of ReduceMean: grad / N broadcast back to original shape, N the size of
-            // each group — divided before it is broadcast, so the division reads and writes the
-            // output's size rather than the input's, and computes each element just the same.
-            // noop_with_empty_axes with no axes makes every element a group of its own (N = 1).
-            // With axes, N is the input's element count over the output's, which covers an empty
-            // axes tensor either way: every element one group without noop_with_empty_axes, each
-            // element its own under it. The output's count is floored at 1 so an empty output
+            // Gradient of ReduceMean: broadcast grad / N back to original shape, N the size of
+            // each group. noop_with_empty_axes with no axes makes every element a group of its own
+            // (N = 1). With axes, N is the input's element count over the output's, which covers an
+            // empty axes tensor either way: every element one group without noop_with_empty_axes,
+            // each element its own under it. The output's count is floored at 1 so an empty output
             // (whose gradient is empty) never divides by zero.
-            if (!axes.HasValue && noopWithEmptyAxes == true) return [ExpandGradToOriginalShape(grad, data, axes, keepdims), null];
+            var expandedGrad = ExpandGradToOriginalShape(grad, data, axes, keepdims);
+            if (!axes.HasValue && noopWithEmptyAxes == true) return [expandedGrad, null];
 
             Tensor<int64> reducedCount = OnnxOp.ReduceProd(OnnxOp.Shape(data), keepdims: false);
             if (axes.HasValue)
@@ -175,7 +174,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
             }
             Tensor<T1> reducedCountTyped = OnnxOp.Cast(reducedCount, saturate: null, to: data.Type);
 
-            return [ExpandGradToOriginalShape(grad / reducedCountTyped, data, axes, keepdims), null];
+            return [expandedGrad / reducedCountTyped, null];
         }
 
         // ===== Shape Operations =====

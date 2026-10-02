@@ -252,6 +252,16 @@ public class GpuExecutionTests
     }
 
     [CudaFact]
+    public void CudaProvider_AModelOverSixteenMebibytesPlacesARunsValuesWhereThatPays()
+    {
+        using var context = new ComputeContext();
+        var (output, session, expected) = ComputeContextLifetimeCoverageTests.LargeModelRun(context, 9 << 19);
+        Assert.Equal(OrtPlacements.Stage.Adopted, Assert.Single(Assert.IsType<OrtPlacements>(session.Placements).Entries).Stage);
+        Assert.NotNull(output.Block);
+        Assert.Equal(expected, [.. output.ToHost().As<float32>().AccessMemory<float>()]);
+    }
+
+    [CudaFact]
     public void CudaProvider_ABudgetCountsABlockOnceWholeForAsLongAsAnyTensorOnItIsAttached()
     {
         const long MiB = 1024 * 1024;

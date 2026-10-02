@@ -16,12 +16,21 @@ namespace Shorokoo.OnnxRuntime;
 /// hand ONNX Runtime the range each one goes to, and charging the session's own allocator accounts.</para>
 ///
 /// <para><b>Built from the graph that runs.</b> The plan is made over the graph ONNX Runtime runs
-/// for this session — written out once, with its initializers, by a probe build of the model — and
-/// the variant is built from that graph itself, with ONNX Runtime's optimizations off: its fusions
-/// are made already, so a value only a fusion makes (a fused layer normalization's sum) is a value
-/// the variant can bind, and nothing is rewritten again. The plan is proved again over the graph
-/// the variant writes out as it is built, and the variant's compute nodes must be the plain
-/// session's, operator for operator.</para>
+/// for this session — written out once, with its initializers, by a probe build of the model. Where
+/// every value the plan places is a value of the model as handed over, the variant is first built
+/// over that model, optimized as the plain session is, which runs its nodes in the plain session's
+/// order; otherwise, or where that variant does not hold the plan, it is built from the graph that
+/// runs itself, with ONNX Runtime's optimizations off: its fusions are made already, so a value only
+/// a fusion makes (a fused layer normalization's sum) is a value the variant can bind, and nothing is
+/// rewritten again. Either way the plan is proved again over the graph the variant writes out as it
+/// is built, and the variant's compute nodes must be the plain session's, operator for
+/// operator.</para>
+///
+/// <para><b>The model is kept</b> to build the probe and the variants from: in memory up to
+/// <see cref="ModelBytesKept"/>, and a larger one in a file of its own, written as the session is
+/// built and deleted with it, so that its weights are not held a second time. A variant of such a
+/// model is built from the graph that runs alone, which reads its weights from the files the probe
+/// wrote rather than from a copy of the model.</para>
 ///
 /// <para><b>Decided before the first run.</b> Whether a plan pays is read off the proof's model of
 /// the memory a run holds (<see cref="PlacementProof.ModelledPeak"/>): with every placed value in its
@@ -32,7 +41,8 @@ namespace Shorokoo.OnnxRuntime;
 /// </summary>
 internal sealed class OrtPlacements : IDisposable
 {
-    /// <summary>The largest model a session keeps to build variants from.</summary>
+    /// <summary>The largest model a session keeps in memory to build variants from; a larger one it
+    /// keeps in a file.</summary>
     internal const int ModelBytesKept = 16 << 20;
 
     /// <summary>How many signatures a session plans for; a run of any other runs unplaced.</summary>
@@ -47,7 +57,9 @@ internal sealed class OrtPlacements : IDisposable
     /// </summary>
     internal delegate OrtSession VariantBuilder(byte[] model, string? optimizedDirectory, string? externalDataDirectory, bool variant);
 
-    private readonly byte[] _model;
+    // The model as handed over: in memory where it is small, and otherwise in a file of its own.
+    private readonly byte[]? _model;
+    private string? _modelFile;
     private readonly VariantBuilder _build;
     private readonly OrtBackend _backend;
     // What the session and its variants hold of the allocator accounts they share, read either side
@@ -65,8 +77,22 @@ internal sealed class OrtPlacements : IDisposable
 
     internal OrtPlacements(byte[] model, VariantBuilder build, OrtBackend backend, Func<long> held)
     {
-        _model = model;
         _build = build;
+        if (model.Length <= ModelBytesKept)
+            _model = model;
+        else
+            try
+            {
+                _modelFile = Path.Combine(Path.GetTempPath(), "shorokoo-model-" + Guid.NewGuid().ToString("N") + ".onnx");
+                File.WriteAllBytes(_modelFile, model);
+            }
+            catch (Exception unwritable) when (unwritable is IOException or UnauthorizedAccessException)
+            {
+                // Placing is a saving and never a requirement: a model that cannot be kept is not
+                // placed in.
+                _broken = $"the model could not be kept in a file: {unwritable.Message}";
+                DeleteModelFile();
+            }
         _backend = backend;
         _held = held;
     }
@@ -343,7 +369,7 @@ internal sealed class OrtPlacements : IDisposable
             // but ONNX Runtime orders that graph afresh as it loads it. So the first is tried where it
             // can be, and the second where it cannot or did not hold.
             var originalValues = original.Graph.Nodes.SelectMany(n => n.Outputs).ToHashSet(StringComparer.Ordinal);
-            bool[] sources = plan.All(p => originalValues.Contains(p.Value)) ? [false, true] : [true];
+            bool[] sources = _model is not null && plan.All(p => originalValues.Contains(p.Value)) ? [false, true] : [true];
             foreach (var fromRuns in sources)
             {
                 var candidate = plan;
@@ -462,12 +488,35 @@ internal sealed class OrtPlacements : IDisposable
         get { lock (_gate) return Original(); }
     }
 
-    /// <summary>The model as handed to the backend, parsed once.</summary>
+    /// <summary>The model as handed to the backend, parsed once. One kept in a file is kept parsed
+    /// without the contents of its larger tensors, which the proof does not read: it is a graph to
+    /// plan over, and never one to build from.</summary>
     private ModelProto Original()
     {
         if (_original is not null) return _original;
-        using var stream = new MemoryStream(_model, writable: false);
-        return _original = ProtoBuf.Serializer.Deserialize<ModelProto>(stream);
+        if (_model is not null)
+        {
+            using var stream = new MemoryStream(_model, writable: false);
+            return _original = ProtoBuf.Serializer.Deserialize<ModelProto>(stream);
+        }
+        using (var file = File.OpenRead(_modelFile!))
+            _original = ProtoBuf.Serializer.Deserialize<ModelProto>(file);
+        foreach (var tensor in _original.Graph?.Initializers ?? [])
+            if (tensor.RawData is { Length: > 1024 }) tensor.RawData = [];
+        foreach (var node in _original.Graph?.Nodes ?? [])
+            foreach (var attribute in node.Attributes)
+                if (attribute.T?.RawData is { Length: > 1024 }) attribute.T.RawData = [];
+        return _original;
+    }
+
+    /// <summary>The model's bytes, as handed to the backend.</summary>
+    private byte[] ModelBytes() => _model ?? File.ReadAllBytes(_modelFile!);
+
+    private void DeleteModelFile()
+    {
+        if (_modelFile is null) return;
+        try { File.Delete(_modelFile); } catch (Exception) { }
+        _modelFile = null;
     }
 
     /// <summary>The graph ONNX Runtime runs for the plain session, with its initializers in files
@@ -480,7 +529,7 @@ internal sealed class OrtPlacements : IDisposable
         Directory.CreateDirectory(directory);
         try
         {
-            _build(_model, directory, null, false).Dispose();
+            _build(ModelBytes(), directory, null, false).Dispose();
             _runs = ReadOptimized(directory);
             _runsDirectory = directory;
             return _runs;
@@ -580,6 +629,7 @@ internal sealed class OrtPlacements : IDisposable
                 try { Directory.Delete(_runsDirectory, recursive: true); } catch (Exception) { }
                 _runsDirectory = null;
             }
+            DeleteModelFile();
         }
     }
 }

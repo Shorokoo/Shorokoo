@@ -1145,13 +1145,12 @@ public class ComputeContextLifetimeCoverageTests
     }
 
     [Fact]
-    public void TestAModelOverSixteenMebibytesPlacesARunsValuesWhereThatPaysForTheVariantsOwnCopyOfItsWeights()
+    public void TestAModelOverSixteenMebibytesPlacesARunsValuesWhereThatPays()
     {
         using var context = new ComputeContext();
         var (output, session, expected) = LargeModelRun(context, 9 << 19);
         var entry = Assert.Single(Assert.IsType<OrtPlacements>(session.Placements).Entries);
         Assert.Equal(OrtPlacements.Stage.Adopted, entry.Stage);
-        Assert.True(entry.VariantHeld >= 18L << 20);
         Assert.NotNull(output.Block);
         Assert.Equal(expected, Floats(output));
     }

@@ -340,14 +340,14 @@ public abstract class OrtBackend : IShorokooBackend
             model, graphOptimization, logSeverity, deviceMemory, diagnostics, optimizedDirectory, intraOpThreads,
             suppliedInitializers, precision);
         var session = BuildSession(model, New, outputAliases);
-        // A session of a stock provider over a model small enough to keep can place the values of a
-        // run that consumes inputs in the memory of what it consumes (see OrtPlacements), through
-        // sessions of its own built over the same model the same way. They charge the session's own
+        // A session of a stock provider can place the values of a run that consumes inputs in the
+        // memory of what it consumes (see OrtPlacements), through sessions of its own built over the
+        // same model the same way. They charge the session's own
         // allocator accounts, so that what a run of the session takes is read, budgeted and limited
         // as one session's, whichever of them ran it. Not where its sessions allocate through ONNX
         // Runtime's own arena, a comparison's alone: what a placed run saves is measured on
         // Shorokoo's allocator.
-        if (_stockProvider && !SessionsUseOrtArena && model.Length <= OrtPlacements.ModelBytesKept)
+        if (_stockProvider && !SessionsUseOrtArena)
             session.Placements = new OrtPlacements(
                 model,
                 (variant, directory, externalData, shared) => Wrap(NewSession(

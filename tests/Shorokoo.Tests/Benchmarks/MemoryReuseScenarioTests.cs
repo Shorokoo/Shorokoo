@@ -775,7 +775,8 @@ public class MemoryReuseScenarioTests
                               held -= live.pop(event["addr"])["size"]
                       def where(event):
                           frames = [f for f in event.get("frames", []) if "shorokoo" in f["filename"]]
-                          return " < ".join(f"{f['name']}:{f['line']}" for f in frames[:3]) or "?"
+                          main = [f for f in frames if f["name"] == "main"]
+                          return " < ".join(f"{f['name']}:{f['line']}" for f in frames[:2] + main[:1]) or "?"
                       lines = sorted(((e["size"], where(e)) for e in at_most.values()), reverse=True)[:16]
                       with open(os.path.join(os.environ["SHOROKOO_MEMORY_REUSE_DIR"], "torch-cuda-peak.txt"), "a") as f:
                           f.write(f"peak {most / 2**20:.2f} MiB: " + "; ".join(f"{s / 2**20:.2f} {w}" for s, w in lines) + chr(10))

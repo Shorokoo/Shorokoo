@@ -262,6 +262,13 @@ public class PyTorchCudaHardwareTests
         => PyTorchBackendCoverageTests.SoftmaxesNormalizationsClipsConvolutionsAndGemmsArePlaced(Cuda.Value);
 
     [TorchCudaFact]
+    public void TestAConvolutionOfTwoTransposedViewsIsComputedAsTheWeightGradientItIsOnTheCard()
+    {
+        Assert.Equal("True True", PyTorchBackendCoverageTests.WeightGradient(batch: 4, sizes: 9, kernel: 3, stride: 1, dilation: 1, pad: 1, Cuda.Value));
+        Assert.Equal("True True", PyTorchBackendCoverageTests.WeightGradient(batch: 2, sizes: 11, kernel: 3, stride: 2, dilation: 2, pad: 2, Cuda.Value));
+    }
+
+    [TorchCudaFact]
     public void TestAnElementWiseChainOnTheCardHoldsOneOfItsValuesAtATime()
     {
         const long Count = 1L << 22;

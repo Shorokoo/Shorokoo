@@ -793,9 +793,9 @@ public class PyTorchBackendCoverageTests
                 [torch.tensor(a, dtype=torch.float32, requires_grad=True) for a in ({string.Join(", ", arguments)},)])
             """).Trim('[', ']').Split(", ").Select(v => float.Parse(v, System.Globalization.CultureInfo.InvariantCulture))];
 
-    private static string Evaluated(string expression)
+    private static string Evaluated(string expression, TorchBackend? backend = null)
     {
-        Torch.Start();
+        (backend ?? Torch).Start();
         using (PythonRuntime.Gil())
         {
             using var scope = Py.CreateScope();
@@ -1180,6 +1180,31 @@ public class PyTorchBackendCoverageTests
         return string.Join(" ", System.Text.RegularExpressions.Regex.Matches(source, @"(_over\(\w+, )?ops_\w+\.(\w+)[(,]")
             .Select(m => (m.Groups[1].Success ? "over:" : "") + m.Groups[2].Value));
     }
+
+    [Fact]
+    public void TestAConvolutionOfTwoTransposedViewsIsComputedAsTheWeightGradientItIs()
+    {
+        Assert.Equal("True True", WeightGradient(batch: 4, sizes: 9, kernel: 3, stride: 1, dilation: 1, pad: 1));
+        Assert.Equal("True True", WeightGradient(batch: 4, sizes: 10, kernel: 3, stride: 2, dilation: 1, pad: 1));
+        Assert.Equal("True True", WeightGradient(batch: 2, sizes: 11, kernel: 3, stride: 2, dilation: 2, pad: 2));
+        Assert.Equal("True True", WeightGradient(batch: 3, sizes: 7, kernel: 5, stride: 3, dilation: 1, pad: 0));
+        Assert.Equal("True False", Evaluated("(lambda C, x: (str(C.conv(x, x).shape == (2, 2, 1, 1)) + ' ' + str(C._weight_gradient(x.transpose(0, 1).contiguous(), x, [1, 1], [0, 0], [1, 1], 1) is not None)))"
+                                             + "(__import__('shorokoo_torch.ops_conv_pool', fromlist=['_']), torch.ones(2, 2, 3, 3))"));
+    }
+
+    /// <summary>Whether the translation's convolution of a convolution's input and output gradient,
+    /// each with its batch and channel axes swapped, computes the convolution torch computes for
+    /// them, and does it as torch's gradient of the convolution's weights.</summary>
+    internal static string WeightGradient(int batch, int sizes, int kernel, int stride, int dilation, int pad, TorchBackend? backend = null)
+        => Evaluated($$"""
+            (lambda C, F, x, w: (lambda g: str((C.conv(x.transpose(0, 1), g.transpose(0, 1), strides=[{{dilation}}] * 2, dilations=[{{stride}}] * 2, pads=[{{pad}}] * 4)
+                - F.conv2d(x.transpose(0, 1), g.transpose(0, 1), stride={{dilation}}, dilation={{stride}}, padding={{pad}})).abs().max().item() < 1e-12) + ' '
+                + str(C._weight_gradient(x.transpose(0, 1), g.transpose(0, 1), [{{dilation}}] * 2, [{{pad}}] * 2, [{{stride}}] * 2, 1) is not None))(
+                torch.randn(F.conv2d(x, w, stride={{stride}}, dilation={{dilation}}, padding={{pad}}).shape, dtype=torch.float64, device=x.device)))(
+                __import__('shorokoo_torch.ops_conv_pool', fromlist=['_']), __import__('torch.nn.functional', fromlist=['_']),
+                torch.randn({{batch}}, 3, {{sizes}}, {{sizes}}, dtype=torch.float64, device="{{(backend?.OnCuda == true ? "cuda" : "cpu")}}"),
+                torch.randn(5, 3, {{kernel}}, {{kernel}}, dtype=torch.float64, device="{{(backend?.OnCuda == true ? "cuda" : "cpu")}}"))
+            """.Replace("\n", " ").Replace("\r", " "), backend);
 
     [Fact]
     public void TestAnElementWiseNodeIsWrittenOverAnOperandOfItsOwnMemoryThatNothingReadsAfterIt()

@@ -189,6 +189,33 @@ public class BackendPackageCoverageTests
         Assert.Equal(4, result.As<float32>().AccessMemory<float>().Length);
     }
 
+    /// <summary>The file the program's own ONNX Runtime was loaded from: the candidate whose handle
+    /// is the one the wrapper's own resolution answers.</summary>
+    private static string ProgramsOwnNative()
+    {
+        var own = NativeLibrary.Load("onnxruntime", typeof(Microsoft.ML.OnnxRuntime.OrtEnv).Assembly, null);
+        string[] candidates = [Path.Combine(AppContext.BaseDirectory, "runtimes", PortableRid, "native", NativeFileName),
+            Path.Combine(AppContext.BaseDirectory, NativeFileName)];
+        return candidates.Where(File.Exists).First(path => NativeLibrary.Load(path) == own);
+    }
+
+    [Fact]
+    public void TestABackendLoadedOverTheProgramsOwnRuntimeLeavesEverySessionItsOwnAllocatorFigures()
+    {
+        using var program = new ComputeContext();
+        var name = Path.GetFileNameWithoutExtension(NativeBackend);
+        using var isolated = new ComputeContext(IsolatedBackend.Load(new IsolatedBackendSpec
+        {
+            Name = $"{name} (cpu)", BackendAssembly = name, NativeRuntimePath = ProgramsOwnNative(),
+        }));
+        long Weights(ComputeContext context)
+            => Assert.IsType<ArenaStatistics>(ArenaProbeModels.Weighted(context).ReadArenaStatistics()).InUseBytes;
+
+        Assert.Equal(
+            (ArenaProbeModels.WeightBytes, ArenaProbeModels.WeightBytes, ArenaProbeModels.WeightBytes),
+            (Weights(program), Weights(isolated), Weights(program)));
+    }
+
     [Fact]
     public void TestProbingRefusesABlankPathRatherThanAnsweringAboutNothing()
         => Assert.Throws<ArgumentException>(() => BackendPackage.Probe("  "));

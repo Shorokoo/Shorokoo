@@ -906,6 +906,24 @@ public class GpuExecutionTests
     }
 
     [CudaFact]
+    public void CudaProvider_ASessionCyclingThroughShapesTakesNothingMoreFromTheCardAfterItsFirstCycle()
+    {
+        using var ctx = new ComputeContext();
+        var filled = ArenaProbeModels.Filled(ctx);
+        (long, long) Cycle()
+        {
+            foreach (var elements in (long[])[2L << 20, 8L << 20, 4L << 20, 6L << 20])
+                ComputeContext.ReleaseOutputs(filled.Execute(ArenaProbeModels.FilledShape(elements)));
+            var held = Assert.IsType<ArenaStatistics>(filled.ReadArenaStatistics());
+            return (held.ArenaShrinkageCount, held.TotalAllocatedBytes);
+        }
+
+        Cycle();
+        var second = Cycle();
+        Assert.Equal(second, Cycle());
+    }
+
+    [CudaFact]
     public void CudaProvider_TheReuseScenarioTakesItsKnownBlocksAndNoMoreBeyondItsInputsAndWeightsOnTheCard()
     {
         Assert.Equal((10L, 6L), ArenaProbeModels.ReuseRun(ArenaProbeModels.ReuseShapes.Computed));

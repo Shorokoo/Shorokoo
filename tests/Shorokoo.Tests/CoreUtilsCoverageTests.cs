@@ -1157,6 +1157,24 @@ public class CoreUtilsCoverageTests
     }
 
     [Fact]
+    public void TestASessionCyclingThroughShapesTakesNothingMoreFromTheDeviceAfterItsFirstCycle()
+    {
+        using var context = new ComputeContext();
+        var filled = ArenaProbeModels.Filled(context);
+        (long, long) Cycle()
+        {
+            foreach (var elements in (long[])[1L << 20, 4L << 20, 2L << 20, 3L << 20])
+                ComputeContext.ReleaseOutputs(filled.Execute(ArenaProbeModels.FilledShape(elements)));
+            var held = Assert.IsType<ArenaStatistics>(filled.ReadArenaStatistics());
+            return (held.ArenaShrinkageCount, held.TotalAllocatedBytes);
+        }
+
+        Cycle();
+        var second = Cycle();
+        Assert.Equal(second, Cycle());
+    }
+
+    [Fact]
     public void TestReleasingWhatTheAllocatorsKeepLeavesASessionHoldingWhatItUsesAndRunningOn()
     {
         using var context = new ComputeContext();

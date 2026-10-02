@@ -41,10 +41,15 @@ def _filled(data, dims, keepdims, value):
     return torch.full(shape, value, dtype=data.dtype, device=data.device)
 
 
-def _reduce(fn, empty_value, data, axes_input, axes, keepdims, noop_with_empty_axes, ordered=False):
+def _reduce(fn, empty_value, data, axes_input, axes, keepdims, noop_with_empty_axes, ordered=False, alone=False):
+    """`fn` over the axes the node names. Where it names none and asks for no reduction, each
+    element is a group of its own: a reduction whose answer for one element is that element
+    (`alone`) hands the data back as it is."""
     if ordered and data.dtype == torch.uint64:
         fn = _ordered_uint64(fn)
     dims = _dims(data, axes_input, axes, noop_with_empty_axes)
+    if not dims and alone:
+        return data
     work = data.to(torch.int64) if data.dtype in _NARROW_UNSIGNED else data
     if not dims:
         # No axis reduced: every element is a group of its own. Reducing a leading axis of one
@@ -77,21 +82,21 @@ def _mean(x, dims, keep):
 
 
 def reduce_sum(data, axes_input=None, /, *, axes=None, keepdims=1, noop_with_empty_axes=0):
-    return _reduce(lambda x, d, k: torch.sum(x, d, keepdim=k), 0, data, axes_input, axes, keepdims, noop_with_empty_axes)
+    return _reduce(lambda x, d, k: torch.sum(x, d, keepdim=k), 0, data, axes_input, axes, keepdims, noop_with_empty_axes, alone=True)
 
 
 def reduce_mean(data, axes_input=None, /, *, axes=None, keepdims=1, noop_with_empty_axes=0):
-    return _reduce(_mean, math.nan, data, axes_input, axes, keepdims, noop_with_empty_axes)
+    return _reduce(_mean, math.nan, data, axes_input, axes, keepdims, noop_with_empty_axes, alone=True)
 
 
 def reduce_max(data, axes_input=None, /, *, axes=None, keepdims=1, noop_with_empty_axes=0):
     return _reduce(lambda x, d, k: torch.amax(x, d, keepdim=k), _lowest, data, axes_input, axes, keepdims, noop_with_empty_axes,
-                   ordered=True)
+                   ordered=True, alone=True)
 
 
 def reduce_min(data, axes_input=None, /, *, axes=None, keepdims=1, noop_with_empty_axes=0):
     return _reduce(lambda x, d, k: torch.amin(x, d, keepdim=k), _highest, data, axes_input, axes, keepdims, noop_with_empty_axes,
-                   ordered=True)
+                   ordered=True, alone=True)
 
 
 def reduce_prod(data, axes_input=None, /, *, axes=None, keepdims=1, noop_with_empty_axes=0):
@@ -99,7 +104,7 @@ def reduce_prod(data, axes_input=None, /, *, axes=None, keepdims=1, noop_with_em
         for d in sorted(dims, reverse=True):
             x = torch.prod(x, d, keepdim=keep)
         return x
-    return _reduce(prod, 1, data, axes_input, axes, keepdims, noop_with_empty_axes)
+    return _reduce(prod, 1, data, axes_input, axes, keepdims, noop_with_empty_axes, alone=True)
 
 
 def reduce_l1(data, axes_input=None, /, *, axes=None, keepdims=1, noop_with_empty_axes=0):

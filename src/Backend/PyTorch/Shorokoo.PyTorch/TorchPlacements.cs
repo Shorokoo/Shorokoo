@@ -82,6 +82,10 @@ internal sealed class TorchPlacements : IDisposable
         internal int[] Blocks = [];
     }
 
+    /// <summary>Told of every signature as it is planned, for a measurement to read; null where
+    /// nothing listens.</summary>
+    internal static Action<Entry>? Settled;
+
     /// <summary>Every signature planned so far, for a test to read.</summary>
     internal IReadOnlyList<Entry> Entries
     {
@@ -141,6 +145,7 @@ internal sealed class TorchPlacements : IDisposable
             if (_entries.Count >= MostSignatures) return null;
             entry = new Entry { Blocks = [.. blocks] };
             Prepare(entry, feeds, blocks, outputNames);
+            Settled?.Invoke(entry);
             return _entries[key.ToString()] = entry;
         }
     }

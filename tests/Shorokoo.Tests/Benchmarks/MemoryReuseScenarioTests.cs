@@ -168,10 +168,13 @@ public class MemoryReuseScenarioTests
     public void RecordPlacementAcrossTheBenchmarkFamilies()
     {
         var only = Environment.GetEnvironmentVariable("SHOROKOO_MEMORY_REUSE_FAMILIES")?.Split(',');
-        var onCard = DefaultBackend.Instance.GetType().Assembly.GetName().Name?.EndsWith("GPU", StringComparison.Ordinal) == true;
+        var backend = Environment.GetEnvironmentVariable("SHOROKOO_MEMORY_REUSE_BACKEND") ?? "ort";
+        var onCard = backend == "torch-cuda"
+                     || (backend == "ort" && DefaultBackend.Instance.GetType().Assembly.GetName().Name?.EndsWith("GPU", StringComparison.Ordinal) == true);
+        var where = backend == "ort" ? $"ONNX Runtime on the {(onCard ? "card" : "host")}" : backend;
         var lines = new List<string>
         {
-            $"# Placement across the benchmark families, ONNX Runtime on the {(onCard ? "card" : "host")}, batch x{(long.TryParse(Environment.GetEnvironmentVariable("SHOROKOO_MEMORY_REUSE_SCALE"), out var x) ? x : 1)}", "",
+            $"# Placement across the benchmark families, {where}, batch x{(long.TryParse(Environment.GetEnvironmentVariable("SHOROKOO_MEMORY_REUSE_SCALE"), out var x) ? x : 1)}", "",
             "| family | placement | step peak | step ms | step plans | inference peak | inference ms | inference plans |",
             "|---|---|---|---|---|---|---|---|",
         };
@@ -183,11 +186,11 @@ public class MemoryReuseScenarioTests
             var rounds = int.TryParse(Environment.GetEnvironmentVariable("SHOROKOO_MEMORY_REUSE_ROUNDS"), out var r) ? r : 1;
             foreach (var placing in Enumerable.Range(0, 2 * rounds).Select(k => k % 2 == 1))
             {
-                var m = MeasureFamily(model(), shape, placing, onCard);
+                var m = MeasureFamily(model(), shape, placing, onCard, backend);
                 lines.Add($"| {family} | {(placing ? "on" : "off")} | {Mib(m.StepPeak)} | {m.StepMs:0.00} | {m.StepPlans} | {Mib(m.InferencePeak)} | {m.InferenceMs:0.00} | {m.InferencePlans} |");
             }
         }
-        File.WriteAllText(Path.Combine(OutputDirectory(), $"placement-across-the-families-{(onCard ? "card" : "host")}-x{scale}.md"), string.Join("\n", lines) + "\n");
+        File.WriteAllText(Path.Combine(OutputDirectory(), $"placement-across-the-families-{(backend == "ort" ? onCard ? "card" : "host" : backend)}-x{scale}.md"), string.Join("\n", lines) + "\n");
     }
 
     /// <summary>
@@ -333,16 +336,32 @@ public class MemoryReuseScenarioTests
 
     private sealed record FamilyFigures(long StepPeak, double StepMs, string StepPlans, long InferencePeak, double InferenceMs, string InferencePlans);
 
-    private static FamilyFigures MeasureFamily(ComputationGraph model, long[] shape, bool placing, bool onCard)
+    private static FamilyFigures MeasureFamily(ComputationGraph model, long[] shape, bool placing, bool onCard, string backend = "ort")
     {
         const int Warm = 4, Timed = 15;
         var count = (int)shape.Aggregate(1L, (a, d) => a * d);
         float[] Values(int seed) => [.. Enumerable.Range(0, count).Select(i => ((i * 7 + seed) % 101) / 101f - 0.5f)];
-        using var context = new ComputeContext { ValuePlacement = placing };
+        using var context = backend switch
+        {
+            "torch-cpu" => new ComputeContext(new Shorokoo.PyTorch.Cpu.TorchCpuBackend()) { ValuePlacement = placing },
+            "torch-cuda" => new ComputeContext(new Shorokoo.PyTorch.Cuda.TorchCudaBackend()) { ValuePlacement = placing },
+            _ => new ComputeContext { ValuePlacement = placing },
+        };
+        (T, long) Observe<T>(Func<T> run) => backend == "ort" ? Observed(onCard, run) : TorchObserved(backend, run);
         var settled = new List<OrtPlacements.Entry>();
+        var torchSettled = new List<TorchPlacements.Entry>();
         OrtPlacements.Settled = entry => { lock (settled) settled.Add(entry); };
+        TorchPlacements.Settled = entry => { lock (torchSettled) torchSettled.Add(entry); };
         string Settled()
         {
+            lock (torchSettled)
+                if (torchSettled.Count > 0)
+                {
+                    var torchLine = string.Join(", ", torchSettled.Select(e => e.Plan.Count > 0 ? $"placed {e.Plan.Count}" : $"refused: {e.Refusal}")
+                        .GroupBy(x => x).Select(g => g.Count() == 1 ? g.Key : $"{g.Count()}x {g.Key}"));
+                    torchSettled.Clear();
+                    return torchLine;
+                }
             lock (settled)
             {
                 foreach (var e in settled.Where(e => e.Graph is not null && e.Stage == OrtPlacements.Stage.Refused))
@@ -373,7 +392,7 @@ public class MemoryReuseScenarioTests
         using (var run = rig.BeginResidentRun(rig.CreateInitialCheckpoint()))
         {
             for (int i = 0; i < Warm; i++) run.Step(input.Shared(), targets.Shared());
-            (_, stepPeak) = Observed(onCard, () => run.Step(input.Shared(), targets.Shared()));
+            (_, stepPeak) = Observe(() => run.Step(input.Shared(), targets.Shared()));
             for (int i = 0; i < Timed; i++)
             {
                 var watch = Stopwatch.StartNew();
@@ -386,7 +405,7 @@ public class MemoryReuseScenarioTests
         var compiled = context.Compile(concrete);
         NamedModelParam[] Infer() => compiled.Execute(TensorData(shape, Values(1)));
         for (int i = 0; i < Warm; i++) Release(Infer());
-        var (outputs, inferencePeak) = Observed(onCard, Infer);
+        var (outputs, inferencePeak) = Observe(Infer);
         Release(outputs);
         var inferenceTimes = new List<double>();
         for (int i = 0; i < Timed; i++)
@@ -398,12 +417,57 @@ public class MemoryReuseScenarioTests
             Release(each);
         }
         OrtPlacements.Settled = null;
+        TorchPlacements.Settled = null;
         return new FamilyFigures(stepPeak, Median(stepTimes), stepPlans, inferencePeak, Median(inferenceTimes), Settled());
     }
 
     private static void Release(NamedModelParam[] outputs)
     {
         foreach (var output in outputs) output.ToTensorData().Delete();
+    }
+
+    /// <summary>What <paramref name="run"/> answers, and the most torch's allocator had handed out
+    /// beyond what it had as the run began: its CUDA allocator's peak, or on the CPU what its
+    /// profiler records, transfers onto the host excluded.</summary>
+    private static (T Result, long Peak) TorchObserved<T>(string backend, Func<T> run)
+    {
+        using (PythonRuntime.Gil())
+        {
+            using var scope = Py.CreateScope();
+            scope.Exec(backend == "torch-cuda"
+                ? """
+                  import torch
+                  torch.cuda.synchronize()
+                  torch.cuda.reset_peak_memory_stats()
+                  before = torch.cuda.memory_allocated()
+                  """
+                : """
+                  import torch
+                  from torch.profiler import profile, ProfilerActivity
+                  prof = profile(activities=[ProfilerActivity.CPU], profile_memory=True, with_stack=True)
+                  prof.__enter__()
+                  """);
+            var result = run();
+            scope.Exec(backend == "torch-cuda"
+                ? """
+                  torch.cuda.synchronize()
+                  peak = torch.cuda.max_memory_allocated() - before
+                  """
+                : """
+                  prof.__exit__(None, None, None)
+                  def transfer(e):
+                      while e is not None:
+                          if "from_host" in e.name:
+                              return True
+                          e = e.cpu_parent
+                      return False
+                  running = peak = 0
+                  for e in sorted((e for e in prof.events() if not transfer(e)), key=lambda e: e.time_range.start):
+                      running += e.self_cpu_memory_usage
+                      peak = max(peak, running)
+                  """);
+            return (result, scope.Get<long>("peak"));
+        }
     }
 
     /// <summary>What <paramref name="run"/> answers, and the most Shorokoo's allocator had handed

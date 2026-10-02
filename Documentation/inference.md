@@ -931,8 +931,8 @@ bytes up to a mebibyte, and of an eighth of the power of two below it above that
 - **What a session lets go of is kept for its next runs**, so a loop's runs find their blocks
   waiting, as they would in an arena. It goes back to the device when a run asks for that
   (`RunSettings.ShrinkArenaAfterRun`, always on under a budget), and everything kept on a device
-  goes back before the device would refuse a request for want of room. What a disposed session
-  kept goes back with the next run that hands its memory back.
+  goes back before the device would refuse a request for want of room. A disposed session's goes
+  back as it is disposed, and a block it still has out — an output a caller keeps — as that goes.
 - **A request that cannot be served fails the call that made it**, as ONNX Runtime's own
   allocators fail one: a block the budget leaves no room for, or one the device does not have,
   fails the run — or the placing of the tensor — with an allocation failure, and leaves the

@@ -126,8 +126,7 @@ internal sealed unsafe class CachingAllocator
     /// <summary>Whether this is a card's allocator.</summary>
     internal bool OnCard => _device != Host;
 
-    /// <summary>The account of what the framework places on the device itself, and of every block a
-    /// closed account still had cached.</summary>
+    /// <summary>The account of what the framework places on the device itself.</summary>
     internal Account Placements { get; }
 
     /// <summary>A new account, for a session about to be built.</summary>
@@ -283,9 +282,9 @@ internal sealed unsafe class CachingAllocator
 
     /// <summary>
     /// Takes <paramref name="pointer"/> back from whoever had it: into the cache of the account it
-    /// was charged to — of <see cref="Placements"/> where that account has closed — or, on a card,
-    /// held for the call this thread is making for that account, whose stream may still read it,
-    /// until the call ends.
+    /// was charged to, or, on a card, held for the call this thread is making for that account,
+    /// whose stream may still read it, until the call ends. A block of an account that has closed
+    /// goes back to the device: nothing is left to reuse it.
     /// </summary>
     internal void Free(IntPtr pointer)
     {
@@ -298,13 +297,18 @@ internal sealed unsafe class CachingAllocator
             account.InUse -= block.Size;
             account.Requested -= block.Requested;
             if (block.HandedOver) account.HandedOver -= block.Size;
-            if (account.Closed)
-                Placements.TakeOver(account, pointer, block.Size);
-            else if (OnCard && scope is not null && scope.Charges(account))
-                scope.Hold(account, pointer, block.Size);
-            else
-                account.Cache(pointer, block.Size);
+            if (!account.Closed)
+            {
+                if (OnCard && scope is not null && scope.Charges(account))
+                    scope.Hold(account, pointer, block.Size);
+                else
+                    account.Cache(pointer, block.Size);
+                return;
+            }
+            account.Blocks--;
+            account.Shrinkages++;
         }
+        Release([pointer]);
     }
 
     /// <summary>
@@ -383,21 +387,21 @@ internal sealed unsafe class CachingAllocator
     private readonly HashSet<Account> _accounts = [];
 
     /// <summary>
-    /// Closes <paramref name="account"/>, whose session is gone: what it held cached goes to
-    /// <see cref="Placements"/>, and each block it still has out goes there as it is let go of.
+    /// Closes <paramref name="account"/>, whose session is gone: what it kept goes back to the
+    /// device, and each block it still has out — an output its caller keeps — goes back as it is let
+    /// go of.
     /// </summary>
     internal void Close(Account account)
     {
+        List<IntPtr> release;
         lock (_gate)
         {
             if (account.Closed) return;
             account.Closed = true;
             _accounts.Remove(account);
-            foreach (var (size, blocks) in account.Free)
-                foreach (var block in blocks) Placements.TakeOver(account, block, size);
-            account.Free.Clear();
-            account.Cached = 0;
+            release = account.EmptyCache();
         }
+        Release(release);
     }
 
     /// <summary>The figures of <paramref name="account"/>, in the form a session reports its
@@ -476,15 +480,6 @@ internal sealed unsafe class CachingAllocator
             if (!Free.TryGetValue(size, out var blocks)) Free[size] = blocks = new Stack<IntPtr>();
             blocks.Push(block);
             Cached += size;
-        }
-
-        /// <summary>Caches <paramref name="block"/>, a block of <paramref name="from"/>, which is
-        /// closed, as this account's own.</summary>
-        internal void TakeOver(Account from, IntPtr block, long size)
-        {
-            from.Blocks--;
-            Blocks++;
-            Cache(block, size);
         }
 
         internal bool TakeCached(long size, out IntPtr block)
@@ -600,22 +595,31 @@ internal sealed unsafe class CachingAllocator
             return false;
         }
 
-        /// <summary>The call is over, its stream done with what it held: into the cache.</summary>
+        /// <summary>The call is over, its stream done with what it held: into the cache, or back to
+        /// the device where the account has closed meanwhile.</summary>
         internal void End()
         {
             if (_held is null || card is null) return;
             var allocator = card.Allocator;
+            List<IntPtr> release = [];
             lock (allocator._gate)
             {
                 foreach (var (size, blocks) in _held)
                     foreach (var block in blocks)
                     {
                         card.Held -= size;
-                        if (card.Closed) allocator.Placements.TakeOver(card, block, size);
-                        else card.Cache(block, size);
+                        if (!card.Closed)
+                        {
+                            card.Cache(block, size);
+                            continue;
+                        }
+                        card.Blocks--;
+                        card.Shrinkages++;
+                        release.Add(block);
                     }
             }
             _held = null;
+            allocator.Release(release);
         }
     }
 }

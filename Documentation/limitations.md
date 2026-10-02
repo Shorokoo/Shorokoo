@@ -206,12 +206,12 @@ That count is exact, but the card also holds:
 
 - **What the allocator keeps for reuse.** Every session on a card, whichever
   runtime built it, and every tensor placed there, allocates through one
-  allocator, held for the life of the process. A block a session lets go of is kept for that session's
-  next runs, and one a placed tensor lets go of for the next tensor placed,
-  until a run hands memory back (`ShrinkArenaAfterRun`, always on under a
-  budget) or the card has no room for a request. Between a budgeted context's
-  runs that is what its tensors let go of since the last one; an unbudgeted
-  context's sessions keep every block their runs let go of.
+  allocator, held for the life of the process. A block a live session lets go
+  of is kept for its next runs, and one a placed tensor lets go of for the next
+  tensor placed, until a run hands memory back (`ShrinkArenaAfterRun`, always
+  on under a budget) or the card has no room for a request. Between a budgeted
+  context's runs that is what its tensors let go of since the last one; an
+  unbudgeted context's live sessions keep every block their runs let go of.
 - **Rounding.** A block is its request rounded up to a size class — a multiple
   of 512 bytes up to a mebibyte, of an eighth of the power of two below it
   above that — so a tensor holds up to an eighth more than its bytes. A

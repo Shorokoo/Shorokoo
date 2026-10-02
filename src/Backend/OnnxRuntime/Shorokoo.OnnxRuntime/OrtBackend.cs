@@ -666,9 +666,23 @@ public abstract class OrtBackend : IShorokooBackend
     /// <summary>
     /// Applies the settings every session this backend creates runs with — the log severity
     /// and the graph-optimization level, plus the session configuration entry that
-    /// <see cref="ShorokooGraphOptimization.TrainingStep"/> stands for — to
-    /// <paramref name="options"/>. Public so a diagnostic can build an ORT session with exactly
-    /// the product's configuration plus its own (profiling, an optimized-model dump).
+    /// <see cref="ShorokooGraphOptimization.TrainingStep"/> stands for, and ONNX Runtime's memory
+    /// pattern off — to <paramref name="options"/>. Public so a diagnostic can build an ORT session
+    /// with exactly the product's configuration plus its own (profiling, an optimized-model dump).
+    ///
+    /// <para><b>The memory pattern is off</b> (<c>EnableMemoryPattern</c>). With it on, ONNX Runtime
+    /// traces a session's first run for each set of input shapes and from the second allocates the
+    /// run's planned tensors as one block laid out by that trace, in place of a block per tensor.
+    /// The block is never smaller than the most the planner's own reuse has in use at once, and
+    /// measured it was larger on every graph tried, on the host and on a card, through Shorokoo's
+    /// allocator: the memory-reuse scenario (two consumed 64 MiB inputs sliced, a fill through a
+    /// unary chain, a concatenation through another) reached 256–272 MiB beyond its inputs against
+    /// 160–192 without it; training steps of the 12-layer, MLP, convolution, encoder and LSTM
+    /// families 3–24% higher; inference graphs with symbolic shapes 29–37% higher, and with static ones
+    /// 7–13%. What the pattern saves is allocations — a step of the 12-layer stack makes 2 rather than
+    /// 282 on the host — at about half a microsecond each through Shorokoo's allocator: the step times
+    /// measured agree within the noise of the machine, with the smallest models (a 4×2 linear, a
+    /// two-layer MLP) 3–10% slower on the host without it.</para>
     ///
     /// <para>For <see cref="ShorokooGraphOptimization.TrainingStep"/>:
     /// <c>optimization.disable_specified_optimizers</c> = CommonSubexpressionElimination;
@@ -691,6 +705,7 @@ public abstract class OrtBackend : IShorokooBackend
         ShorokooLogSeverity logSeverity)
     {
         options.LogSeverityLevel = (OrtLoggingLevel)(int)logSeverity;
+        options.EnableMemoryPattern = false;
         if (graphOptimization == ShorokooGraphOptimization.TrainingStep)
         {
             options.GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL;

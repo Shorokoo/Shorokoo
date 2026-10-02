@@ -955,6 +955,12 @@ C runtime's heap, which may keep its pages for the process's next allocations.
   and nothing of a session it disposed. ONNX Runtime's own arena, where a session uses one,
   keeps a session's busiest run too, rounded up to the regions it grows by, until the session is
   disposed or a run asks it to shrink.
+- **Sessions run without ONNX Runtime's memory pattern.** With it, a session's runs from the second
+  on take their planned tensors as one block laid out by the first run; that block came out larger
+  than what the runs have in use at once with a block per tensor on every graph measured — 33–50%
+  on a scenario of slices, fills and concatenations, 3–24% on training steps, 7–37% on inference —
+  for fewer allocations, which cost about half a microsecond each. So `AllocationCount` counts a
+  run's tensors one by one.
 - **A request that cannot be served fails the call that made it**, as ONNX Runtime's own
   allocators fail one: a block the budget leaves no room for, or one the device does not have,
   fails the run — or the placing of the tensor — with an allocation failure, and leaves the

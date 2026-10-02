@@ -269,8 +269,9 @@ What that still leaves:
 - **A training step.** The state it consumes it already writes over
   ([A step writes its state over the state it consumed](training.md#a-step-writes-its-state-over-the-state-it-consumed)),
   and a batch it consumes is read by the backward pass as well as the forward one —
-  the first layer's weight gradient reads the input — so its memory is free only
-  as the step ends.
+  the first layer's weight gradient reads the input — so values go into its memory
+  only once that gradient is made, late in the step, and save at most the batch's
+  own size.
 
 ### Some outputs written into one consumed input are freed together
 

@@ -222,7 +222,7 @@ What a run does with the settings every backend is handed, on each device:
 | | CPU | CUDA |
 |---|---|---|
 | **Output aliasing** (a run writing an output into a consumed input) | yes, for an output produced by `Add`/`Sub`/`Mul`/`Div` | the same, on the card |
-| **Placement** (a run writing its values into ranges of consumed inputs) | yes: floating-point element-wise operators and matrix products, fills, concatenations and copies of views; not in a training step torch differentiates | the same, on the card |
+| **Placement** (a run writing its values into ranges of consumed inputs) | yes: floating-point element-wise operators, matrix products, `Gemm`, `Softmax`, `LogSoftmax`, `Gelu`, `Clip` and the normalizations, fills, concatenations and copies of views; a convolution by a copy; not in a training step torch differentiates | the same, a convolution written into its range by cuDNN |
 | **Where inputs and outputs are** | host memory | the card for every tensor, the host for strings and sequences: every input is moved there before the run, and every output stays there |
 | **Cancellation** (`RunSettings.CancellationToken`) | stops before the next node | stops before the next node |
 | **`DeviceMemory.LimitBytes`** | ignored, as on every CPU backend | caps each run's allocations (see below) |
@@ -239,20 +239,32 @@ updated parameter with the parameter) is written into the input's memory when it
 pairs are not bound. A write is declined where the input's memory may still be read through a
 view (`Transpose`, `Expand`, `Slice`, a same-type `Cast`).
 
-**Placement.** A run that consumes inputs writes its values of a mebibyte or more into ranges
-of their memory where the graph proves it safe
-([A run that writes into what it consumed](inference.md#a-run-that-writes-into-what-it-consumed)):
-each with torch's own operator writing into the range — an element-wise operator's or a matrix
-product's `out=` form (on floating-point values), a fill, a concatenation part by part, or a copy
-of what a slice, reshape or transpose reads, which an output that views an input is copied out by
-anyway. An operator with no such form is not placed. Where the values go is planned per run
-signature, for up to 8 of them, and not for a model over 16 MiB, a graph of over 20 000 nodes, or a
-run of a graph not compiled. Every output a run wrote into one input stands on that input's memory,
-which torch frees with the last of them.
+**Placement.** A run that consumes inputs writes its values of a mebibyte or more into ranges of
+their memory where the graph proves it safe ([A run that writes into what it
+consumed](inference.md#a-run-that-writes-into-what-it-consumed)): each with torch's own operator
+writing into the range — an element-wise operator's or a matrix product's `out=` form (on
+floating-point values), `Softmax`, `LogSoftmax` and `Gelu` through theirs, `Gemm` as a product
+written into the range and scaled and summed there, `Clip` and the normalizations computed step by
+step in the range, a fill, a concatenation part by part, or a copy of what a slice, reshape or
+transpose reads, which an output that views an input is copied out by anyway. A convolution is
+written into its range by cuDNN on a card; on the CPU, where torch's convolutions take no tensor to
+write into, it is computed and copied into the range, which allocates what an unplaced run
+allocates there and frees it at once. An operator with no such form is not placed. Each computes
+exactly what an unplaced run computes. Where the values go is planned per run signature, for up to
+8 of them, and not for a model over 16 MiB, a graph of over 20 000 nodes, or a run of a graph not
+compiled. Every output a run wrote into one input stands on that input's memory, which torch frees
+with the last of them.
 
-**Intermediate values.** A run releases each value after its last reader (in function, branch
-and loop bodies too), so its peak is what is live at once. In a training step whose gradient
-torch takes, autograd keeps what the backward pass needs until the gradient is taken.
+**Intermediate values.** A run computes the graph's nodes in the order ONNX Runtime would — the
+order a training step's memory-aware pass plans for — and reads each value's shape (`Shape`,
+`Size`) as soon as the value is made, so no value is held only for its shape. It releases each
+value after its last reader (in function, branch and loop bodies too), so its peak is what is
+live at once. Where nothing reads an operand after a node, the node's result is written over that
+operand rather than into memory of its own: an element-wise operator, `Clip`, `Gelu`, `Where`,
+`Softmax`, `LogSoftmax`, `LayerNormalization` or `BatchNormalization` over an operand of the
+result's type and shape that the run made itself, or that it consumed — a chain of such nodes
+holds one value at a time. In a training step whose gradient torch takes, autograd keeps what the
+backward pass needs until the gradient is taken, and nothing is written over.
 
 **Device memory on CUDA.** torch has one caching allocator per device for the whole process,
 so the per-session settings map only partly:

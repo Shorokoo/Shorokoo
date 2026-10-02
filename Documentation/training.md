@@ -640,6 +640,11 @@ It applies:
   reads it after its update, or when the pass declines to order the update. For a stack of `Linear`
   layers under AdamW every weight, bias and moment is written over.
 
+On PyTorch the step goes further: the element-wise arithmetic leading to each new state value —
+AdamW's chain to a new moment, say — is written over the consumed state it reads last, so the
+optimizer's temporaries take no memory of their own either
+([pytorch-backend.md](pytorch-backend.md#runs)).
+
 Results are bit-identical with or without it, and there is nothing to configure. On a card a
 resident run thus holds its state once rather than twice; under a device-memory budget the state
 is counted once — see [inference.md](inference.md#a-contexts-device-memory-budget).

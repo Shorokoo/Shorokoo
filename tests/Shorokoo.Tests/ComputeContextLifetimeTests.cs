@@ -951,6 +951,63 @@ public class ComputeContextLifetimeCoverageTests
         Assert.True(block.IsReleased);
     }
 
+    /// <summary>
+    /// Two consumed inputs A and B of one shape; A's first half and B's second half sliced out by
+    /// bounds the run computes; a fill of 2s shaped like a half, through Neg, Abs and Sigmoid;
+    /// concatenated with B's half, through Sigmoid, Neg and Abs. Outputs that, and the two halves.
+    /// </summary>
+    internal static InternalComputationGraph TwoHalves()
+    {
+        var a = InputTensor<float32>("A", rank: 2);
+        var b = InputTensor<float32>("B", rank: 2);
+        var zero = OnnxOp.Constant((long[])[0L]);
+        var rows = OnnxOp.Shape(a, end: 1, start: 0);
+        var half = OnnxOp.Div(rows, OnnxOp.Constant((long[])[2L]));
+        var aHalf = OnnxOp.Slice(a, zero, half, zero);
+        var bHalf = OnnxOp.Slice(b, half, rows, zero);
+        var c = OnnxOp.ConstantOfShape(OnnxOp.Shape(aHalf), TensorAttribute.Create(new Shape(1L), (float[])[2f]));
+        var l0 = OnnxOp.Concat([OnnxOp.Sigmoid(OnnxOp.Abs(OnnxOp.Neg(c))), bHalf], 0);
+        return new InternalComputationGraph([a, b], [OnnxOp.Abs(OnnxOp.Neg(OnnxOp.Sigmoid(l0))), aHalf, bHalf]);
+    }
+
+    internal static (float[] A, float[] B, float[] L) TwoHalvesValues(int rows, int columns)
+    {
+        float[] a = [.. Enumerable.Range(0, rows * columns).Select(i => (i % 1013) * 0.001f)];
+        float[] b = [.. Enumerable.Range(0, rows * columns).Select(i => 0.5f - (i % 997) * 0.002f)];
+        static float Sigmoid(float x) => 1f / (1f + MathF.Exp(-x));
+        var half = rows / 2 * columns;
+        float[] l = [.. Enumerable.Range(0, rows * columns).Select(i => i < half ? Sigmoid(Sigmoid(2f)) : Sigmoid(b[i]))];
+        return (a, b, l);
+    }
+
+    [Fact]
+    public void TestTheTwoHalvesScenarioRunsWithNothingAllocatedBeyondWhatItConsumesAndItsOutputsOutliveTheSession()
+    {
+        const int Rows = 512, Columns = 1024;
+        var (a, b, l) = TwoHalvesValues(Rows, Columns);
+        NamedModelParam[] outputs = [];
+        using (var context = new ComputeContext())
+        {
+            var compiled = context.Compile(TwoHalves());
+            for (int run = 0; run < 3; run++)
+            {
+                outputs = compiled.Execute(TensorData([(long)Rows, Columns], a), TensorData([(long)Rows, Columns], b));
+                Assert.True(l.Zip(Floats(outputs[0].ToTensorData()), (x, y) => MathF.Abs(x - y) < 1e-5f).All(x => x));
+                Assert.Equal(a[..(Rows / 2 * Columns)], Floats(outputs[1].ToTensorData()));
+                Assert.Equal(b[(Rows / 2 * Columns)..], Floats(outputs[2].ToTensorData()));
+            }
+            var entry = Assert.Single(((OrtSession)compiled.Session).Placements!.Entries);
+            Assert.Equal(OrtPlacements.Stage.Adopted, entry.Stage);
+            Assert.True(entry.PlacedPeak < 1L << 20);
+            Assert.All(outputs, o => Assert.NotNull(o.ToTensorData().Block));
+            Assert.Same(outputs[1].ToTensorData().Block, outputs[2].ToTensorData().Block);
+        }
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        Assert.True(l.Zip(Floats(outputs[0].ToTensorData()), (x, y) => MathF.Abs(x - y) < 1e-5f).All(x => x));
+        Assert.Equal(b[(Rows / 2 * Columns)..], Floats(outputs[2].ToTensorData()));
+    }
+
     [Fact]
     public void TestASerializedModelProvesWhatItsGraphProvesAndOneWithoutAGraphProvesNothing()
     {

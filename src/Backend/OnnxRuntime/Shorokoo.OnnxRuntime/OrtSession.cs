@@ -64,6 +64,11 @@ internal sealed class OrtSession : IShorokooSession
     /// <c>OrtBackend.Supply</c>), which ONNX Runtime requires to outlive it: released after it.</summary>
     internal IReadOnlyList<OrtValue> SuppliedViews { get; init; } = [];
 
+    /// <summary>Where this session's runs that consume inputs place their values in the memory of
+    /// what they consume (see <see cref="OrtPlacements"/>), or null for a session that places
+    /// nothing. Set once, as the backend builds the session.</summary>
+    internal OrtPlacements? Placements { get; set; }
+
     private readonly object _profileGate = new();
     private NodePlacement? _nodePlacement;
     private bool _profilingEnded;
@@ -255,23 +260,38 @@ internal sealed class OrtSession : IShorokooSession
     {
         ArgumentNullException.ThrowIfNull(consumed);
         aliasedInputs = [];
+        HashSet<IShorokooTensorValue>? kept = null;
         try
         {
-            if (OutputsIntoConsumed(inputs, consumed, outputNames) is not { } into)
-                return Run(inputs, outputNames, runSettings);
-
-            var results = RunBound(inputs, outputNames, into, runSettings);
-            var aliased = new string?[outputNames.Count];
-            for (int i = 0; i < outputNames.Count; i++)
-                if (into.TryGetValue(outputNames[i], out var target)) aliased[i] = target.Input;
-            aliasedInputs = aliased;
+            var into = OutputsIntoConsumed(inputs, consumed, outputNames);
+            IReadOnlyList<IShorokooTensorValue> results;
+            var blocks = Placements is null || consumed.Count == 0
+                ? null
+                : OrtPlacements.Blocks(inputs, consumed, into?.Values.Select(t => t.Input).ToHashSet(StringComparer.Ordinal) ?? []);
+            if (Placements is { } placements && blocks is not null && placements.EntryFor(inputs, blocks, outputNames) is { } entry)
+                results = placements.Run(
+                    this, entry, inputs, blocks, outputNames,
+                    () => RunBound(inputs, outputNames, into, runSettings),
+                    (variant, placed) => variant.RunBound(inputs, outputNames, into, runSettings, placed),
+                    out kept);
+            else
+                results = RunBound(inputs, outputNames, into, runSettings);
+            if (into is not null)
+            {
+                var aliased = new string?[outputNames.Count];
+                for (int i = 0; i < outputNames.Count; i++)
+                    if (into.TryGetValue(outputNames[i], out var target)) aliased[i] = target.Input;
+                aliasedInputs = aliased;
+            }
             return results;
         }
         finally
         {
             // Through the backend, which is the one release path for memory it allocated. Its
-            // release is a disposal, which does not throw, so none of them can be skipped.
-            foreach (var value in consumed) ((IShorokooBackend)_backend).Release(value);
+            // release is a disposal, which does not throw, so none of them can be skipped. A value an
+            // output was placed in is the block's to release, with the last output standing on it.
+            foreach (var value in consumed)
+                if (kept is null || !kept.Contains(value)) ((IShorokooBackend)_backend).Release(value);
         }
     }
 
@@ -351,15 +371,16 @@ internal sealed class OrtSession : IShorokooSession
         IReadOnlyDictionary<string, IShorokooTensorValue> inputs,
         IReadOnlyList<string> outputNames,
         Dictionary<string, AliasTarget>? into,
-        RunSettings runSettings)
+        RunSettings runSettings,
+        IReadOnlyDictionary<string, PlacedBinding>? placed = null)
     {
         ArgumentNullException.ThrowIfNull(runSettings);
         runSettings.CancellationToken.ThrowIfCancellationRequested();
         try
         {
-            var outputs = into is null && _cardMemory is null
+            var outputs = into is null && _cardMemory is null && placed is null
                 ? RunPlain(inputs, outputNames, runSettings)
-                : RunThroughABinding(inputs, outputNames, into, runSettings);
+                : RunThroughABinding(inputs, outputNames, into, runSettings, placed);
             if (_cardAccount?.Limit is not null) HandOver(outputs);
             return outputs;
         }
@@ -372,6 +393,26 @@ internal sealed class OrtSession : IShorokooSession
             }
         }
     }
+
+    /// <summary>
+    /// What <paramref name="run"/> answers, with <paramref name="peak"/> the most it asked of this
+    /// session's allocator beyond what the session held as it started — on its card for a CUDA
+    /// session, of host memory otherwise — its outputs included.
+    /// </summary>
+    internal T Measured<T>(Func<T> run, out long peak)
+    {
+        var account = _cardAccount ?? _hostAccount;
+        account.BeginPeak();
+        var result = run();
+        peak = account.Peak;
+        return result;
+    }
+
+    /// <summary>What this session holds of its allocators' memory now: what it was built with and
+    /// what its callers keep of its runs.</summary>
+    internal long HeldBytes
+        => _hostAccount.Allocator.Statistics(_hostAccount).InUseBytes
+           + (_cardAccount is { } card ? card.Allocator.Statistics(card).InUseBytes : 0);
 
     /// <summary>Hands the outputs this session's allocator gave the run on the card over to the
     /// caller, as far as its limit is concerned (<see cref="CachingAllocator.HandOver"/>).</summary>
@@ -692,6 +733,7 @@ internal sealed class OrtSession : IShorokooSession
     {
         if (_cardAccount is not { } card) return false;
         card.Limit = limitBytes;
+        Placements?.LimitDeviceMemory(limitBytes);
         return true;
     }
 
@@ -786,6 +828,7 @@ internal sealed class OrtSession : IShorokooSession
             _pinnedAllocator.Value?.Dispose();
             _ownedPinnedMemoryInfo?.Dispose();
         }
+        Placements?.Dispose();
         _session.Dispose();
         // After the session, whose release lets go of its weights through them.
         _accounts.Close();

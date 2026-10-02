@@ -193,6 +193,35 @@ public class GpuExecutionTests
     }
 
     [CudaFact]
+    public void CudaProvider_TheTwoHalvesScenarioRunsWithNothingAllocatedBeyondWhatItConsumesAndItsOutputsOutliveTheSession()
+    {
+        const int Rows = 512, Columns = 1024;
+        var (a, b, l) = ComputeContextLifetimeCoverageTests.TwoHalvesValues(Rows, Columns);
+        NamedModelParam[] outputs = [];
+        static float[] Read(NamedModelParam p) => [.. p.ToTensorData().ToHost().As<float32>().AccessMemory<float>()];
+        using (var context = new ComputeContext())
+        {
+            var compiled = context.Compile(ComputeContextLifetimeCoverageTests.TwoHalves());
+            for (int run = 0; run < 3; run++)
+            {
+                outputs = compiled.Execute(TensorData([(long)Rows, Columns], a).CopyTo(context), TensorData([(long)Rows, Columns], b).CopyTo(context));
+                Assert.True(l.Zip(Read(outputs[0]), (x, y) => MathF.Abs(x - y) < 1e-5f).All(x => x));
+                Assert.Equal(a[..(Rows / 2 * Columns)], Read(outputs[1]));
+                Assert.Equal(b[(Rows / 2 * Columns)..], Read(outputs[2]));
+            }
+            var entry = Assert.Single(((OrtSession)compiled.Session).Placements!.Entries);
+            Assert.Equal(OrtPlacements.Stage.Adopted, entry.Stage);
+            Assert.True(entry.PlacedPeak < 1L << 20);
+            Assert.All(outputs, o => Assert.False(o.ToTensorData().IsHostResident));
+            Assert.Same(outputs[1].ToTensorData().Block, outputs[2].ToTensorData().Block);
+        }
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        Assert.True(l.Zip(Read(outputs[0]), (x, y) => MathF.Abs(x - y) < 1e-5f).All(x => x));
+        Assert.Equal(b[(Rows / 2 * Columns)..], Read(outputs[2]));
+    }
+
+    [CudaFact]
     public void CudaProvider_ABudgetCountsABlockOnceWholeForAsLongAsAnyTensorOnItIsAttached()
     {
         const long MiB = 1024 * 1024;

@@ -130,6 +130,9 @@ namespace Shorokoo.Runtime
             _outputAliases = outputAliases ?? [];
         }
 
+        /// <summary>The session the graph runs on now (test hook).</summary>
+        internal IShorokooSession Session => _built.Session;
+
         /// <summary>The outputs the lowering marked as ones a run may write into the memory of an
         /// input it consumed, by position: which output, into which input (test hook).</summary>
         internal IReadOnlyList<(int Output, int Input)> MarkedPairs()

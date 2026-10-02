@@ -339,7 +339,23 @@ public abstract class OrtBackend : IShorokooBackend
         BuiltSession New(string? optimizedDirectory) => NewSession(
             model, graphOptimization, logSeverity, deviceMemory, diagnostics, optimizedDirectory, intraOpThreads,
             suppliedInitializers, precision);
-        if (outputAliases is null) return Wrap(New(optimizedDirectory: null), []);
+        var session = BuildSession(model, New, outputAliases);
+        // A session of a stock provider over a model small enough to keep can place the values of a
+        // run that consumes inputs in the memory of what it consumes (see OrtPlacements), through
+        // sessions of its own built over the same model the same way, with the memory pattern off.
+        if (_stockProvider && model.Length <= OrtPlacements.ModelBytesKept)
+            session.Placements = new OrtPlacements(
+                model,
+                (variant, directory) => Wrap(NewSession(
+                    variant, graphOptimization, logSeverity, deviceMemory, diagnostics with { TraceNodePlacement = false },
+                    directory, intraOpThreads, suppliedInitializers, precision, memoryPattern: false), []),
+                this);
+        return session;
+    }
+
+    private OrtSession BuildSession(byte[] model, Func<string?, BuiltSession> New, IReadOnlyList<OutputAlias>? outputAliases)
+    {
+        if (outputAliases is null) return Wrap(New(null), []);
 
         var optimizedDirectory = TempDirectory("shorokoo-optimized-");
         try
@@ -357,7 +373,7 @@ public abstract class OrtBackend : IShorokooBackend
             }
             catch (Exception unwritable) when (unwritable is IOException or UnauthorizedAccessException)
             {
-                return Wrap(New(optimizedDirectory: null), []);
+                return Wrap(New(null), []);
             }
 
             BuiltSession built;
@@ -375,14 +391,14 @@ public abstract class OrtBackend : IShorokooBackend
             // and without a word.
             catch (OnnxRuntimeException refusal) when (RefusesToWriteCompiledNodes(refusal))
             {
-                return Wrap(New(optimizedDirectory: null), []);
+                return Wrap(New(null), []);
             }
 
             var (proved, initializerBytes) = ProvedAgain(optimizedDirectory, outputAliases);
             if (initializerBytes > InitializersKeptTwice && _stockProvider)
             {
                 Discard(built);
-                built = New(optimizedDirectory: null);
+                built = New(null);
             }
             return Wrap(built, proved);
         }
@@ -423,7 +439,8 @@ public abstract class OrtBackend : IShorokooBackend
         string? optimizedDirectory,
         int intraOpThreads,
         IReadOnlyList<SuppliedInitializer> suppliedInitializers,
-        PrecisionSettings precision)
+        PrecisionSettings precision,
+        bool memoryPattern = true)
     {
         // The `using` is load-bearing, not tidiness. SessionOptions is a SafeHandle, so it
         // carries a critical finalizer that calls OrtReleaseSessionOptions, and ORT takes its
@@ -435,6 +452,7 @@ public abstract class OrtBackend : IShorokooBackend
         // process. Disposing in a finally keeps them rooted across the constructor.
         using var options = new SessionOptions();
         Configure(options, graphOptimization, logSeverity);
+        if (!memoryPattern) options.EnableMemoryPattern = false;
         if (intraOpThreads > 0) options.IntraOpNumThreads = intraOpThreads;
         if (diagnostics.DeterministicCompute) UseDeterministicCompute(options);
         // Named before anything can throw, and made inside the try, by the call that points the
@@ -523,7 +541,7 @@ public abstract class OrtBackend : IShorokooBackend
     // What the optimized model is called inside the folder it is written to, and the file its
     // larger initializers go to beside it: they are the constants ORT folded, which the proof does
     // not read, so they are kept out of the model it parses.
-    private const string OptimizedModelFile = "optimized.onnx";
+    internal const string OptimizedModelFile = "optimized.onnx";
     private const string OptimizedInitializersFile = "initializers.bin";
 
     /// <summary>
@@ -1069,6 +1087,19 @@ public abstract class OrtBackend : IShorokooBackend
         {
             view.Dispose();
         }
+    }
+
+    /// <summary>An ORT value over <paramref name="bytes"/> bytes of <paramref name="owner"/>'s memory
+    /// from byte <paramref name="offset"/>, owning none of it and holding no lease: for a run to
+    /// write a value into, that nothing outlives the run.</summary>
+    internal static OrtValue Over(OrtTensorValue owner, long offset, ShorokooTensorElementType elementType, long[] shape, long bytes)
+    {
+        var inner = owner.Inner;
+        using var memory = inner.GetTensorMemoryInfo();
+        var view = OrtValue.CreateTensorValueWithData(
+            memory, (TensorElementType)(int)elementType, shape, (IntPtr)((long)AddressOf(inner) + offset), bytes);
+        GC.KeepAlive(owner);
+        return view;
     }
 
     /// <summary>

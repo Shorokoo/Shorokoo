@@ -55,6 +55,7 @@ internal sealed class PlacementProof
     private readonly Dictionary<string, List<(int Node, int Slot)>> _consumers = new(StringComparer.Ordinal);
     private readonly Dictionary<string, List<int>> _capturedBy = new(StringComparer.Ordinal);
     private readonly Dictionary<string, int> _outputs = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _readAfterRun;
     private readonly HashSet<string> _inputs = new(StringComparer.Ordinal);
     private readonly HashSet<string> _initializers = new(StringComparer.Ordinal);
     private readonly IReadOnlyDictionary<string, long> _blocks;
@@ -65,12 +66,16 @@ internal sealed class PlacementProof
     /// The proof over <paramref name="graph"/> for one run: <paramref name="blocks"/> names each
     /// input the run consumed — the memory it may place values in — with its size in bytes, and
     /// <paramref name="shapes"/> holds every value's shape for the run
-    /// (<see cref="PlacementShapes.Evaluate"/>).
+    /// (<see cref="PlacementShapes.Evaluate"/>). <paramref name="readAfterRun"/> names the graph
+    /// outputs the caller reads once the run is over, each of which nothing may overwrite; null for
+    /// every one of them. A graph output not named there is one a binding takes for the run alone,
+    /// as a placed value made an output only so it can be bound to its range.
     /// </summary>
     /// <exception cref="ArgumentException">The graph has more than <see cref="MostNodes"/> nodes,
     /// or is not in topological order.</exception>
     internal PlacementProof(
-        GraphProto graph, IReadOnlyDictionary<string, long> blocks, IReadOnlyDictionary<string, PlacementShapes.Value> shapes)
+        GraphProto graph, IReadOnlyDictionary<string, long> blocks, IReadOnlyDictionary<string, PlacementShapes.Value> shapes,
+        IReadOnlySet<string>? readAfterRun = null)
     {
         _nodes = graph.Nodes;
         if (_nodes.Count > MostNodes) throw new ArgumentException($"The graph has more than {MostNodes} nodes.", nameof(graph));
@@ -79,6 +84,9 @@ internal sealed class PlacementProof
         foreach (var input in graph.Inputs) _inputs.Add(input.Name);
         foreach (var initializer in graph.Initializers) _initializers.Add(initializer.Name);
         foreach (var output in graph.Outputs) _outputs[output.Name] = _outputs.GetValueOrDefault(output.Name) + 1;
+        _readAfterRun = readAfterRun is null
+            ? new HashSet<string>(_outputs.Keys, StringComparer.Ordinal)
+            : new HashSet<string>(readAfterRun.Where(_outputs.ContainsKey), StringComparer.Ordinal);
 
         var captured = new Dictionary<int, HashSet<string>>();
         for (int n = 0; n < _nodes.Count; n++)
@@ -201,7 +209,7 @@ internal sealed class PlacementProof
 
     /// <summary>Whether anything in <paramref name="chain"/> is read after the run: a graph
     /// output.</summary>
-    private bool ReadAfterRun(HashSet<string> chain) => chain.Any(_outputs.ContainsKey);
+    private bool ReadAfterRun(HashSet<string> chain) => chain.Any(_readAfterRun.Contains);
 
     /// <summary>The contiguous run, in elements, a <c>Slice</c> node takes of
     /// <paramref name="data"/>, or null.</summary>
@@ -414,8 +422,8 @@ internal sealed class PlacementProof
             foreach (var value in _nodes[n].Outputs)
                 if (value.Length > 0 && Unplaceable(value) is null && _shapes[value].Bytes >= smallest)
                     candidates.Add(value);
-        var outputs = candidates.Where(_outputs.ContainsKey).OrderByDescending(v => _shapes[v].Bytes).ToList();
-        var others = candidates.Where(v => !_outputs.ContainsKey(v)).ToList();
+        var outputs = candidates.Where(_readAfterRun.Contains).OrderByDescending(v => _shapes[v].Bytes).ToList();
+        var others = candidates.Where(v => !_readAfterRun.Contains(v)).ToList();
 
         var occupants = _blocks.Keys.Select(Content).ToList();
         var placed = new List<Placement>();
@@ -433,7 +441,7 @@ internal sealed class PlacementProof
         foreach (var value in outputs) Try(value);
 
         // An output that would keep more of its block idle than it uses goes back to the backend.
-        var idle = placed.Where(p => _outputs.ContainsKey(p.Value)).GroupBy(p => p.Block)
+        var idle = placed.Where(p => _readAfterRun.Contains(p.Value)).GroupBy(p => p.Block)
             .Where(g => _blocks[g.Key] - g.Sum(p => p.Bytes) > idleOutputBytes).Select(g => g.Key).ToHashSet();
         if (idle.Count > 0)
         {

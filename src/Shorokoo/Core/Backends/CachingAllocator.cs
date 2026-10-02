@@ -539,6 +539,16 @@ internal sealed unsafe class CachingAllocator
         Placements.BeginCall();
     }
 
+    /// <summary>One block handed out, or one taken back, as <see cref="Observer"/> is told of it:
+    /// whether it is handed out, on which device, at what address, of how many bytes asked for and
+    /// served, and whether the device gave it fresh rather than out of what was kept.</summary>
+    internal readonly record struct Event(bool Allocation, bool OnCard, IntPtr Address, long Requested, long Size, bool Fresh);
+
+    /// <summary>Told of every block every allocator hands out and takes back, under the allocator's
+    /// lock and on the thread making the call. Null tells nothing; the memory-reuse measurements
+    /// set it for the length of a run.</summary>
+    internal static Action<Event>? Observer;
+
     /// <summary>Where this allocator's memory is, as a refusal says it.</summary>
     private string Where => OnCard ? $"on CUDA device {_device}" : "of host memory";
 
@@ -551,6 +561,7 @@ internal sealed unsafe class CachingAllocator
     /// call it was last counted in).</summary>
     private IntPtr Hand(IntPtr block, long size, long requested, Account account, Source source, long call)
     {
+        Observer?.Invoke(new Event(true, OnCard, block, requested, size, Fresh: call < 0));
         if (call != account.CallNumber)
         {
             account.Used += size;
@@ -579,6 +590,7 @@ internal sealed unsafe class CachingAllocator
         using (_gate.Hold())
         {
             if (!_blocks.Remove(pointer, out var block)) return;
+            Observer?.Invoke(new Event(false, OnCard, pointer, block.Requested, block.Size, Fresh: false));
             var account = block.Account;
             account.InUse -= block.Size;
             account.Requested -= block.Requested;

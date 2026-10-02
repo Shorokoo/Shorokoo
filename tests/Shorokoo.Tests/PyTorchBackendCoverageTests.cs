@@ -1100,6 +1100,25 @@ public class PyTorchBackendCoverageTests
         Assert.Equal("[-1.0, -1.0] torch.float32", Evaluated("__import__('shorokoo_torch.runtime', fromlist=['_']).place_into(0, True, E.neg, torch.ones(2))"));
     }
 
+    [Fact]
+    public void TestARunWritesIntoAConsumedInputOnlyWhereItsBytesAreItsOwnContiguousAndOnTheRunsDevice()
+    {
+        Assert.Equal("0", Blocks("[t, t[2:]]"));
+        Assert.Equal("1", Blocks("[t[:2], t[2:]]"));
+        Assert.Equal("0", Blocks("[t, t]"));
+        Assert.Equal("0", Blocks("[t.reshape(2, 2).t()]"));
+        Assert.Equal("0", Blocks("[t]", moved: "[t.clone()]"));
+        Assert.Equal("0", Blocks("[t]", constants: "[t.untyped_storage().data_ptr()]"));
+        Assert.Equal("1", Blocks("[t]"));
+    }
+
+    /// <summary>How many of the inputs a run is handed may take placed values, of the first:
+    /// <paramref name="args"/> are the run's arguments, over a tensor <c>t</c> of four floats, and
+    /// <paramref name="moved"/> the values it computes on, the arguments themselves by default.</summary>
+    private static string Blocks(string args, string moved = "a", string constants = "[]")
+        => Evaluated($"(lambda rt, t: (lambda a: len(rt._Placing(a, {moved}, [(0, 0, 8, 1, [2], -1)], torch.device('cpu'), {constants}).blocks))({args}))"
+                     + "(__import__('shorokoo_torch.runtime', fromlist=['_']), torch.zeros(4))");
+
     private static GraphProto Graph(string outputs, params NodeProto[] nodes) => GraphOn("a:float[262144] b:float[262144]", outputs, nodes);
 
     private static GraphProto GraphOn(string inputs, string outputs, params NodeProto[] nodes) => ComputeContextLifetimeCoverageTests.GraphOf(inputs, outputs, nodes);

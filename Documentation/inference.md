@@ -680,21 +680,27 @@ a graph you compile yourself marks no output.
 alike — are written into ranges of the consumed inputs' memory where the graph the backend runs
 proves a range free for the value:
 
-- everything that reads what the range held runs before the value is written, by the graph's
-  own edges, so it holds whatever order the runtime picks;
+- everything that reads what the range held runs before the value is written: by the graph's own
+  edges, or on ONNX Runtime in the order the session runs its nodes — one at a time, in the order
+  of the graph it writes out, which on a card holds for the nodes the CUDA provider runs;
 - nothing reads it after the run: an output, or a view of one, is never written over;
 - an operator that reads what it overwrites reads each element where it writes it — an
   element-wise operator in place, a slice at its own offset, a part of a concatenation already in
-  its slot.
+  its slot, a fused normalization's sum over its own input;
+- on a card, the value is computed on the card: a node the CUDA provider has no kernel for runs on
+  the host, and what it computes is not placed.
 
 Where the values go is planned the first time a run *signature* — which inputs are consumed, the
 shape of every input, the outputs asked for — runs, and kept for it.
 
 | | ONNX Runtime | PyTorch |
 |---|---|---|
-| **How** | a second session over the model, its placed values bound to their ranges | a translation writing each placed value with torch's own operator: an `out=` form, a fill, a concatenation part by part, or a copy of what a view reads |
-| **When it applies** | the signature's first run runs as always and its second placed, each measured on the session's allocator; the placements are kept only where the placed run asked for less, by more than the larger of a mebibyte and a sixty-fourth of the plain run | from the first run: nothing placed allocates |
-| **Not used** | where binding the values changes the operators ONNX Runtime runs (a fusion they would block); on an execution provider other than ONNX Runtime's CPU and CUDA ones; for a model over 16 MiB; past 8 signatures | in a training step whose gradient torch takes; for a model over 16 MiB; past 8 signatures |
+| **How** | a second session, its placed values bound to their ranges: over the model, where that keeps the first session's order and can bind every placed value, and otherwise over the graph ONNX Runtime runs, its fusions made | a translation writing each placed value with torch's own operator: an `out=` form, a fill, a concatenation part by part, or a copy of what a view reads |
+| **When it applies** | from the signature's first run, where placing saves — by a model of what the run holds at each node, in the order the second session runs them, less what that session holds of its own (on a card, its copy of the model's weights) — more than the larger of a mebibyte and a sixty-fourth of the plain run. The first placed run is measured, and the runs after it run as always where it asked for more than the model said a plain run would | from the first run: nothing placed allocates |
+| **Not used** | where the second session would run other operators than the first; on an execution provider other than ONNX Runtime's CPU and CUDA ones; past 8 signatures | in a training step whose gradient torch takes; for a model over 16 MiB; past 8 signatures |
+
+On ONNX Runtime a session keeps the model it was built from to build the second session with: in
+memory up to 16 MiB, and a larger one in a temporary file of its own, deleted with the session.
 
 **Outputs on consumed memory.** An output written into an input stands on that input's memory —
 its **block** — as a `TensorData` of its own over its range, never overlapping another's. Several

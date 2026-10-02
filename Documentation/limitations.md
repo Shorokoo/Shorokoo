@@ -252,18 +252,35 @@ What that still leaves:
 
 - **A shared input** is resident for the whole run and written into by nothing.
 - **Values under a mebibyte** are left to the runtime.
-- **A value only a fusion makes** is not written into an input on ONNX Runtime:
-  making it a value the session binds stops the fusion, and a placement that changes
-  what runs is not used. A transformer layer's residual sum, which ONNX Runtime
-  folds into `SkipLayerNormalization`, is one.
-- **Order the graph does not state.** A value goes into a range only after
-  everything reading what the range held, by the graph's own edges; two independent
-  branches never share a range, whatever order the runtime would run them in.
+- **Order the graph does not state, on PyTorch.** A value goes into a range only
+  after everything reading what the range held, by the graph's own edges; two
+  independent branches never share a range. ONNX Runtime's own order is read from
+  the session that runs the graph, and a value goes in once the session has run
+  every reader.
+- **A node the card has no kernel for.** On a card, ONNX Runtime runs it on the
+  host, and its output is host memory: it is not written into an input on the card.
+- **The weights of a second session.** On ONNX Runtime the values are written by a
+  second session, which on a card holds its own copy of the weights the model
+  carries (weights loaded into the context's memory are shared): placing pays only
+  where it saves more than that copy.
 - **A training step.** The state it consumes it already writes over
   ([A step writes its state over the state it consumed](training.md#a-step-writes-its-state-over-the-state-it-consumed)),
   and a batch it consumes is read by the backward pass as well as the forward one —
   the first layer's weight gradient reads the input — so its memory is free only
   as the step ends.
+
+### A loop alternating between a compiled graph's signatures is slower on the host
+
+On ONNX Runtime each session keeps a thread pool of its own, whose threads spin a
+while after a run in case another comes. A run that writes into what it consumed
+runs on a second session over the graph, one per signature, so a loop alternating
+between runs that consume and runs that do not — or between two shapes that both
+consume — alternates between two sessions, and each run's threads contend with the
+other session's still spinning. Measured on the host, a two-layer encoder ran
+3–4× slower per run alternating between two sessions than on either alone; two
+plain compiles of the same graph alternate the same way. Runs of one signature
+are not slowed: on that encoder, consuming runs one after another took as long as
+plain ones, within 1%. Keep a loop's runs of one kind.
 
 ### Some outputs written into one consumed input are freed together
 

@@ -417,7 +417,14 @@ public class MemoryReuseScenarioTests
 
         /// <summary>Whether the three outputs, at those addresses, hold what the scenario computes
         /// from A and B as they were filled.</summary>
-        internal bool Correct(IntPtr l, IntPtr aHalf, IntPtr bHalf)
+        internal bool Intact()
+            => Read(A, WholeCount).AsSpan().SequenceEqual(APattern) && Read(B, WholeCount).AsSpan().SequenceEqual(BPattern);
+
+        internal bool Correct(IntPtr l, IntPtr aHalf, IntPtr bHalf) => Mismatch(l, aHalf, bHalf) is null;
+
+        /// <summary>The first value of the three outputs that is not what the scenario computes, in
+        /// words, or null where every one is.</summary>
+        internal string? Mismatch(IntPtr l, IntPtr aHalf, IntPtr bHalf)
         {
             var lValues = Read(l, WholeCount);
             var aValues = Read(aHalf, HalfCount);
@@ -425,11 +432,13 @@ public class MemoryReuseScenarioTests
             var c = Sigmoid(Sigmoid(2f));
             for (long i = 0; i < HalfCount; i++)
             {
-                if (aValues[i] != APattern[i] || bValues[i] != BPattern[HalfCount + i]) return false;
-                if (MathF.Abs(lValues[i] - c) > 1e-4f) return false;
-                if (MathF.Abs(lValues[HalfCount + i] - Sigmoid(BPattern[HalfCount + i])) > 1e-4f) return false;
+                if (aValues[i] != APattern[i]) return $"A_half[{i}] = {aValues[i]}, not {APattern[i]}";
+                if (bValues[i] != BPattern[HalfCount + i]) return $"B_half[{i}] = {bValues[i]}, not {BPattern[HalfCount + i]}";
+                if (MathF.Abs(lValues[i] - c) > 1e-4f) return $"L[{i}] = {lValues[i]}, not {c}";
+                var expected = Sigmoid(BPattern[HalfCount + i]);
+                if (MathF.Abs(lValues[HalfCount + i] - expected) > 1e-4f) return $"L[{HalfCount + i}] = {lValues[HalfCount + i]}, not {expected}";
             }
-            return true;
+            return null;
         }
     }
 
@@ -524,7 +533,15 @@ public class MemoryReuseScenarioTests
         Dictionary<string, IntPtr> Outputs,
         bool Correct,
         Dictionary<string, string>? ArenaBefore,
-        Dictionary<string, string>? ArenaAfter);
+        Dictionary<string, string>? ArenaAfter)
+    {
+        /// <summary>Whether A and B still held what they were filled with once the run was over,
+        /// where that was asked.</summary>
+        internal bool? InputsIntact { get; init; }
+
+        /// <summary>The first output value that was wrong, in words.</summary>
+        internal string? Mismatch { get; init; }
+    }
 
     /// <summary>The kernels of one run as ONNX Runtime profiled them: microseconds from the run's
     /// start, and the run's length.</summary>
@@ -624,6 +641,8 @@ public class MemoryReuseScenarioTests
                 sequence.Add($"-{Mib(e.Requested)} block from before the run{Kernel(at, false)}");
         }
         if (small > 0) sequence.Add($"({small} requests under 1 MiB)");
+        if (raw.InputsIntact is { } intact) sequence.Add($"(A and B {(intact ? "intact" : "written")} after the run)");
+        if (raw.Mismatch is { } wrong) sequence.Add($"(wrong: {wrong})");
         var places = outputs.ToDictionary(o => o.Key, o =>
         {
             var where = inputs.Where(o.Value);
@@ -655,8 +674,10 @@ public class MemoryReuseScenarioTests
         List<ConfigRecord> records = [];
         using (var inputs = new Inputs(card))
         {
+            var only = Environment.GetEnvironmentVariable("SHOROKOO_MEMORY_REUSE_ONLY");
             foreach (var config in Configurations(card))
             {
+                if (only is not null && !config.ToString().Contains(only, StringComparison.Ordinal)) continue;
                 try
                 {
                     var model = Scenario(config.Shapes, exposeIntermediates: config.Approach == Approach.BindAll);
@@ -829,8 +850,12 @@ public class MemoryReuseScenarioTests
             for (int i = 0; i < Outputs.Length; i++) addresses[Outputs[i]] = OrtBackend.AddressOf(fetched[i]);
         else
             foreach (var (name, _, at) in views.Where(v => Outputs.Contains(v.Name))) addresses[name] = at;
-        var correct = inputs.Correct(addresses["L"], addresses["A_half"], addresses["B_half"]);
-        var raw = new RawRun(run, trace.Events, micros, addresses, correct, arenaBefore, arenaAfter);
+        var mismatch = inputs.Mismatch(addresses["L"], addresses["A_half"], addresses["B_half"]);
+        var raw = new RawRun(run, trace.Events, micros, addresses, mismatch is null, arenaBefore, arenaAfter)
+        {
+            InputsIntact = config.Approach == Approach.Plain ? inputs.Intact() : null,
+            Mismatch = mismatch,
+        };
 
         fetched?.Dispose();
         foreach (var (_, view, _) in views) view.Dispose();
@@ -914,8 +939,8 @@ public class MemoryReuseScenarioTests
                 {
                     ["L"] = inputs.B, ["A_half"] = inputs.A, ["B_half"] = inputs.A + (nint)HalfBytes,
                 };
-                var correct = inputs.Correct(inputs.B, inputs.A, inputs.A + (nint)HalfBytes);
-                runs.Add(Summarize(new RawRun(run, trace.Events, micros, addresses, correct, arenaBefore, arenaAfter), inputs, null));
+                var mismatch = inputs.Mismatch(inputs.B, inputs.A, inputs.A + (nint)HalfBytes);
+                runs.Add(Summarize(new RawRun(run, trace.Events, micros, addresses, mismatch is null, arenaBefore, arenaAfter) { Mismatch = mismatch }, inputs, null));
                 foreach (var view in views) view.Dispose();
             }
         }

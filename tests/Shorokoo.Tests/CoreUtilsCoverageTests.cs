@@ -944,6 +944,24 @@ public class CoreUtilsCoverageTests
         Assert.Equal((2L, 0L, 0L), (gone.ArenaShrinkageCount, gone.ArenaExtensionCount, gone.TotalAllocatedBytes));
     }
 
+    [Fact]
+    public void TestABlockTheHostAllocatorHandsBackIsNoLongerTheProcesssMemory()
+    {
+        var host = RuntimeAllocator.ForHost();
+        IntPtr HandedBack(long floats)
+        {
+            var account = host.Shared.Open("probe");
+            IntPtr address;
+            using (CachingAllocator.Charge(account, null))
+            using (var value = OrtValue.CreateAllocatedTensorValue(host.Managed, Microsoft.ML.OnnxRuntime.Tensors.TensorElementType.Float, [floats]))
+                address = OrtBackend.AddressOf(value);
+            host.Shared.Close(account);
+            return address;
+        }
+
+        Assert.Equal([false, false, false], ((long[])[1L << 20, 64L << 10, 16L << 10]).Select(floats => ProcessMemory.Holds(HandedBack(floats))));
+    }
+
     /// <summary>
     /// A session's own arena, read back through the public surface: zeroed before it has run, and
     /// carrying what the run took afterwards — the product the run negates, its output being memory
@@ -2782,4 +2800,39 @@ internal static class ArenaProbeModels
     /// <summary>What a run of <see cref="Filled"/> summed.</summary>
     internal static float Sum(NamedModelParam[] outputs)
         => outputs[0].ToTensorData().As<float32>().ValueAt<float>(0);
+}
+
+/// <summary>Whether the process holds the memory at an address: committed on Windows, mapped on
+/// Linux.</summary>
+internal static class ProcessMemory
+{
+    internal static bool Holds(IntPtr address)
+    {
+        if (OperatingSystem.IsWindows())
+            return VirtualQuery(address, out var info, (nuint)Marshal.SizeOf<MemoryBasicInformation>()) != 0
+                && info.State == MemCommit;
+        var page = (nint)Environment.SystemPageSize;
+        return mincore(address & ~(page - 1), (nuint)page, new byte[1]) == 0;
+    }
+
+    private const uint MemCommit = 0x1000;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MemoryBasicInformation
+    {
+        public IntPtr BaseAddress;
+        public IntPtr AllocationBase;
+        public uint AllocationProtect;
+        public ushort PartitionId;
+        public nuint RegionSize;
+        public uint State;
+        public uint Protect;
+        public uint Type;
+    }
+
+    [DllImport("kernel32")]
+    private static extern nuint VirtualQuery(IntPtr address, out MemoryBasicInformation info, nuint length);
+
+    [DllImport("libc")]
+    private static extern int mincore(IntPtr address, nuint length, byte[] pages);
 }

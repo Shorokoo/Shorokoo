@@ -27,10 +27,10 @@ Related: [core-types.md](core-types.md) · [defining-models.md](defining-models.
   card's — and nothing moves them afterwards. Reading one's values copies them to the host and
   leaves it there; fed to a run on another context, it is placed there by that run —
   [Where a run's inputs and outputs are](#where-a-runs-inputs-and-outputs-are).
-- On a GPU backend a context's `DeviceMemory` settings are a budget on what it holds on the card
-  and the arena settings of the sessions it compiles —
+- On a GPU backend a context's `DeviceMemory` settings are a budget on what it holds on the card,
+  which the allocator its sessions allocate through holds each run to —
   [Device memory](#device-memory-gpu-backends). Diagnostics start at
-  [What one session's arena did](#what-one-sessions-arena-did).
+  [What one session's allocator did](#what-one-sessions-allocator-did).
 
 ## Workflow: one-shot evaluation
 
@@ -609,8 +609,8 @@ before the run with the backend's own move there
 ([Where a run's inputs and outputs are](#where-a-runs-inputs-and-outputs-are)):
 
 - **Consumed**: the tensor is dead and its memory released at the feed; the run consumes the
-  copy. On a card, the copy is made on the card, outside the session's arena, and a budget
-  counts it ([A context's device-memory budget](#a-contexts-device-memory-budget)).
+  copy. On a card, the copy is made on the card, outside what the session allocates, and a
+  budget counts it ([A context's device-memory budget](#a-contexts-device-memory-budget)).
 - **Read**: the copy is made on first read and kept — a `TensorData` held by the source,
   attached to the reading context (visible in `context.Tensors`), and reused by later shared
   reads for as long as the source lives. Deleting or consuming the source retires it, and so
@@ -634,13 +634,12 @@ where they share a runtime.
   afterwards. Reading its values copies them to the host and leaves it on the card; `ToHost()`
   makes a copy of it in host memory, `To(context)` puts it on another context, and a run on
   another context that is fed it places it there as one of its inputs.
-- **An output holds only its own bytes.** It is memory of its own, not a block of the arena the
-  run computed in, so keeping it keeps nothing of the session alive — the session may run on,
-  sit idle or be disposed. On ONNX Runtime, an output whose shape the runtime settled when it
-  built the session is written straight into memory handed to the run before it starts, and any
-  other is made in the arena and copied out as the run returns; both come from an allocator the
-  runtime keeps outside every session, one per device, which keeps the blocks of outputs that are
-  gone until a run asks to hand its arena's unused blocks back (`RunSettings.ShrinkArenaAfterRun`).
+- **An output holds only its own bytes.** On ONNX Runtime a session allocates through an
+  allocator of Shorokoo's in which every block is an allocation of its own, never a piece of a
+  larger arena, and an output is the block its run wrote it into: keeping it keeps nothing else of
+  the session's memory alive — the session may run on, sit idle or be disposed — and nothing
+  copies it after the run. [Device memory](#device-memory-gpu-backends) says what the allocator
+  keeps between runs.
 
 ```csharp
 var compiled = cuda.Compile(graph);
@@ -922,19 +921,31 @@ executable.
 
 ### Device memory (GPU backends)
 
-ONNX Runtime allocates device memory from an arena that grows in blocks and, unless asked to
-shrink, never returns them. The *extend strategy* sets each block's size:
+On ONNX Runtime every session allocates through an allocator of Shorokoo's — one per device, the
+host or a card, and per runtime — rather than through an arena of its own, and the tensors a
+context places on a card come from the same one. Every block it hands out is an allocation of its
+own, never a piece of a larger one, its request rounded up to a size class: a multiple of 512
+bytes up to a mebibyte, and of an eighth of the power of two below it above that.
 
-- **`NextPowerOfTwo`** (ORT's default) grows by at least the arena's current size — good for
-  unpredictable allocation sizes, wasteful once sizes settle.
-- **`SameAsRequested`** grows by exactly the request — tight when sizes settle, but a session
-  whose input shapes keep growing strands every region it outgrows.
+- **What a session lets go of is kept for its next runs**, so a loop's runs find their blocks
+  waiting, as they would in an arena. It goes back to the device when a run asks for that
+  (`RunSettings.ShrinkArenaAfterRun`, always on under a budget), and everything kept on a device
+  goes back before the device would refuse a request for want of room. What a disposed session
+  kept goes back with the next run that hands its memory back.
+- **A request that cannot be served fails the call that made it**, as ONNX Runtime's own
+  allocators fail one: a block the budget leaves no room for, or one the device does not have,
+  fails the run — or the placing of the tensor — with an allocation failure, and leaves the
+  device as usable as it was for the next one. The text names the memory:
 
-`ArenaExtend` defaults to `Auto`: `SameAsRequested`, except for a session Shorokoo knows is
-fed differing shapes — a training rig's shared fallback step, used once it has seen more
-distinct input shapes than its per-shape limit — which gets `NextPowerOfTwo`. **If your own
-session is fed growing shapes, set `NextPowerOfTwo`.** Settings apply to the sessions the
-context compiles; `CompiledGraph.DeviceMemory` reports what a graph got:
+  ```
+  [ErrorCode:RuntimeException] Non-zero status code returned while running Expand node. Name:'N3'
+  Status Message: Failed to allocate 4503599627370496 bytes on CUDA device 0: the card has no such
+  block free (cudaMalloc refused it), with everything Shorokoo's cuda_allocator kept for reuse
+  handed back.
+  ```
+
+Settings apply to the sessions the context compiles; `CompiledGraph.DeviceMemory` reports what a
+graph got:
 
 ```csharp
 using Shorokoo.Core.Backends;
@@ -944,49 +955,35 @@ var ctx = new ComputeContext
 {
     DeviceMemory = new DeviceMemorySettings
     {
-        ArenaExtend = ArenaExtendStrategy.NextPowerOfTwo,   // ORT's doubling
-        LimitBytes = 16L * 1024 * 1024 * 1024,              // a 16 GiB budget on what ctx holds on the card
+        LimitBytes = 16L * 1024 * 1024 * 1024,   // a 16 GiB budget on what ctx holds on the card
     },
 };
 
 var compiled = ctx.Compile(graph);
 compiled.Execute([batch1]);
 
-Console.WriteLine(compiled.DeviceMemory.ArenaExtend);              // what this session was built with
-Console.WriteLine(compiled.DeviceMemory.LimitBytes);               // the arena limit the budget left it
+Console.WriteLine(compiled.DeviceMemory.LimitBytes);   // what the budget left the session's last run
 ```
 
-| setting | on | ORT option | default | read |
+| setting | on | what it does | default | read |
 |---|---|---|---|---|
-| `LimitBytes` | `DeviceMemorySettings` | each session's `gpu_mem_limit` is the budget less what the context holds on the card | `null` — no budget | on every transfer onto the context and every run of it — see [A context's device-memory budget](#a-contexts-device-memory-budget) |
-| `ArenaExtend` | `DeviceMemorySettings` | `arena_extend_strategy` | `Auto` — `SameAsRequested`, except ORT's `NextPowerOfTwo` for a session Shorokoo knows is reused across differing shapes | when a session is built |
-| `ShrinkArenaAfterRun` | `RunSettings` | `memory.enable_memory_arena_shrinkage` | `false` — and forced on under a budget | on every run |
+| `LimitBytes` | `DeviceMemorySettings` | the most the context holds on the card; a run's session may allocate the budget less what the context holds there | `null` — no budget | on every transfer onto the context and every run of it — see [A context's device-memory budget](#a-contexts-device-memory-budget) |
+| `ShrinkArenaAfterRun` | `RunSettings` | as the run ends, its session's allocator hands back to the device what it keeps for the session, and what it keeps of tensors that are gone | `false` — and forced on under a budget | on every run |
 
-- A training step's arena can take one large extra block after step 0 and keep it; on one
-  large model it grew 1.75–1.9x between steps 0 and 1 under either strategy. An arena limit
-  near the step's real use prevents that block, and the steps still fit in what the arena
-  already holds: size a context budget as what the step uses plus what the rig keeps on the
-  card.
-- `ShrinkArenaAfterRun` costs a synchronizing allocation every step; outside a budget, use it
-  only when the card is shared. It also has the allocator the run's outputs come from — on a card,
-  the one tensors placed there come from too — hand back the blocks no tensor is using, as the run
-  starts, before any of its outputs is placed there. On the CPU
-  backend it shrinks the host arena the run's intermediates live in, and the next run takes those
-  blocks from the host again. ORT rejects it where the device has no arena (e.g.
-  `ORT_DISABLE_ARENA`), failing the run, so try it on a short run first.
-- `LimitBytes` is hard: exceeding work is refused or fails with ORT's `BFCArena ... Failed to
-  allocate memory for requested buffer`, so a figure set too low fails work that would fit.
-- `ArenaExtend` is read **when a session is built** (the first call, or a rig's first
-  `TrainStep` per input shape); `CompiledGraph.DeviceMemory` reports the resolved strategy,
-  not `Auto`. Context settings are `init`-only. `CompiledGraph.Execute` / `Run` can override
+- `ShrinkArenaAfterRun` makes the next run take its blocks from the device again — on a card a
+  `cudaMalloc` each, and handing a block back waits for the work the card has in hand — so outside
+  a budget use it only when the card is shared. On the CPU backend it hands the session's host
+  blocks back the same way.
+- `LimitBytes` is hard: a run that needs more fails with an allocation failure naming the limit,
+  so a figure set too low fails work that would fit.
+- Context settings are `init`-only. `CompiledGraph.Execute` / `Run` can override
   `ShrinkArenaAfterRun` per call on an unbudgeted context; the context's one-shot entry points
   and a rig's `TrainStep` use the context's.
-- **Scope is the context, never the process.** Each session keeps its arena settings for life;
-  two contexts may differ and never affect each other's sessions. To use different settings,
-  compile on another context — e.g. one for a training loop, one for variable-shape inference.
-  Tensors a context places on the card, and its runs' outputs there, come from a separate
-  per-card, per-runtime allocator held for the process's life; the budget counts them by
-  attachment.
+- **Scope is the context, never the process.** Two contexts may have different budgets and never
+  affect each other's sessions; to use different settings, compile on another context — e.g. one
+  for a training loop, one for variable-shape inference. Every session on a card, and every tensor
+  placed there, allocates through that card's allocator, held for the process's life; each
+  session's figures and limit are its own, and the budget counts placed tensors by attachment.
 
 The static `DeviceMemory` class reports what the card is doing:
 
@@ -1007,7 +1004,7 @@ Console.WriteLine($"the card at its peak {DeviceMemory.PeakUsedBytes / (1024 * 1
 
 - `UsedBytes`, `FreeBytes` and `TotalBytes` are the **device's**, including other processes.
 - `ProcessBytes` is **this process's** share: everything it holds on the card — weights and
-  optimizer state, every session's arena, the CUDA context and its libraries' workspaces — and
+  optimizer state, every session's memory, the CUDA context and its libraries' workspaces — and
   nothing another process holds. `PeakProcessBytes` is therefore the one figure for "the most this
   run held on the card". It is the figure Task Manager shows per process on Windows, and
   `nvidia-smi` lists per process where it can.
@@ -1030,7 +1027,7 @@ Console.WriteLine($"the card at its peak {DeviceMemory.PeakUsedBytes / (1024 * 1
 
 `DeviceMemorySettings.LimitBytes`, on a context whose memory is a card's, budgets
 **everything that context holds there**: its attached tensors in card memory and, during a run,
-that run's arena. It is per context, not per arena or process:
+what that run's session allocates. It is per context, not per session or process:
 
 ```csharp
 using var ctx = new ComputeContext(gpu)
@@ -1064,48 +1061,51 @@ context there, in 1 tensor(s), leaving 16777216. Delete what the context no long
 the context a larger budget.
 ```
 
-**A run's arena gets what the context leaves it.** A session's `gpu_mem_limit` is the budget
-less the *discount*: what the context holds on the card outside the arena during the run —
-attached tensors, those the run reads or copies there (for a tensor another runtime holds
-on the same card, both it and its copy), and the memory the run is handed for its outputs
-before it starts (each output whose shape the session settled, unless the run
-[writes it into consumed memory](#a-run-that-writes-an-output-into-what-it-consumed)). A tensor
-already on the card is read in place and never enters the arena. A host tensor fed to a card run
-is copied onto the card before the run, outside the arena, and counted in the discount:
+**A run's session gets what the context leaves it.** What a run's session may allocate on the
+card is the budget less the *discount*: what the context holds on the card apart from the session
+for the length of the run — attached tensors, and those the run reads or copies there (for a
+tensor another runtime holds on the same card, both it and its copy). A tensor already on the card
+is read in place and never counts against the session. A host tensor fed to a card run is copied
+onto the card before the run, outside the session, and counted in the discount:
 
 - `.Shared()`: the copy is kept for later reads;
 - consumed: the copy is the run's, and goes when the run no longer reads it. A tensor fed to
   several inputs is copied once, and counted once.
 
-A run whose discount leaves its arena nothing is refused before taking anything; one whose arena
-needs more than it was left fails with ORT's `BFCArena` error.
-
-**When a session is rebuilt.** The limit is fixed when a session is built, and building is
-costly for large graphs, so a session is built with the budget less the discount, rounded up
-to the next sixty-fourth of the budget, and rebuilt (before taking anything) only when the
-discount grows past that. So:
-
-- the limit only comes down — at most sixty-four times over a compiled graph's life, plus once
-  each time the remainder halves within its last sixty-fourth; a loop holding the same things
-  never rebuilds;
-- releasing what the context held does not restore room; compile the graph again;
-- `CompiledGraph.DeviceMemory.LimitBytes` is the current limit, and `ReadArenaStatistics()` and
-  `ReadNodePlacement()` restart for a rebuilt session;
-- a rig's step can rebuild in its first steps as state arrives on the card.
-
-No output is in an arena: every output on the card is memory of its own, counted in the
-discount of every later run until it goes, so delete each output once you are done with it. An
-output [written into consumed memory](#a-run-that-writes-an-output-into-what-it-consumed) is
+What the session allocates is its weights, everything the run computes, and the run's outputs
+until it returns. From then on every output on the card is counted with the attached tensors, in
+the discount of every later run until it goes, so delete each output once you are done with it.
+An output [written into consumed memory](#a-run-that-writes-an-output-into-what-it-consumed) is
 counted once, where that memory is.
 
+A run whose discount leaves its session nothing is refused before taking anything; one whose
+session needs more than it was left fails with an allocation failure naming the limit:
+
+```
+[ErrorCode:RuntimeException] Non-zero status code returned while running Expand node. Name:'N3'
+Status Message: Failed to allocate 167772160 bytes on CUDA device 0: Shorokoo's cuda_allocator may
+hold 163577848 bytes there for this session, what the device-memory budget
+(DeviceMemorySettings.LimitBytes) leaves its run, and it holds 512.
+```
+
+**The limit follows the discount, run by run.** On ONNX Runtime a session's allocator holds it to
+its limit as each block is asked for, so the session takes the limit each run is left without
+being built again, and what the context frees is the next run's room.
+`CompiledGraph.DeviceMemory.LimitBytes` is the limit its last run was given. A backend whose
+sessions take a limit only when they are built (PyTorch) builds one with the budget less the
+discount, rounded up to the next sixty-fourth of the budget, and builds it again, before taking
+anything, only when the discount grows past that: at most sixty-four times over a compiled
+graph's life, plus once each time the remainder halves within its last sixty-fourth. Its limit
+only comes down, until the graph is compiled again, and its statistics restart with each build.
+
 **One at a time.** Under a budget the context's runs, transfers onto it and compiles on it are
-serialized, and every run returns its arena's unused blocks as it ends, whatever
-`ShrinkArenaAfterRun` says. None of this applies without `LimitBytes`.
+serialized, and every run hands back what its session's allocator keeps for it as it ends,
+whatever `ShrinkArenaAfterRun` says. None of this applies without `LimitBytes`.
 
 What the budget does *not* count is in
-[Known limitations](limitations.md#a-device-memory-budget-counts-tensors-not-arenas).
+[Known limitations](limitations.md#a-device-memory-budget-counts-tensors-not-what-the-allocator-keeps).
 
-### What one session's arena did
+### What one session's allocator did
 
 To read **one session's own allocator** (CPU or GPU), ask the compiled graph:
 
@@ -1116,29 +1116,31 @@ using Shorokoo.Runtime;
 var compiled = ctx.Compile(graph);
 compiled.Execute(inputs);
 
-if (compiled.ReadArenaStatistics() is { } arena)
-    Console.WriteLine($"{arena.InUseBytes} in use, {arena.MaxInUseBytes} at its highest, "
-                    + $"{arena.TotalAllocatedBytes} taken from the device");
+if (compiled.ReadArenaStatistics() is { } allocated)
+    Console.WriteLine($"{allocated.InUseBytes} in use, {allocated.MaxInUseBytes} at its highest, "
+                    + $"{allocated.TotalAllocatedBytes} taken from the device");
 ```
 
 `ArenaStatistics` has ten figures: `InUseBytes`, `RequestedInUseBytes`, `MaxInUseBytes`,
-`MaxAllocSizeBytes`, `TotalAllocatedBytes`, `LimitBytes` (the session's arena limit; `-1` with
-no budget), `AllocationCount`, `ArenaExtensionCount`, `ArenaShrinkageCount` and
+`MaxAllocSizeBytes`, `TotalAllocatedBytes`, `LimitBytes` (the most the session may allocate; `-1`
+with no budget), `AllocationCount`, `ArenaExtensionCount`, `ArenaShrinkageCount` and
 `ReserveCount`. It is `null` on a backend that reports none.
 
+- On ONNX Runtime they are the session's own figures in the allocator it allocates through: on the
+  card for a CUDA session, in host memory otherwise. `ArenaExtensionCount` is the blocks the
+  session holds from the device now, in use or kept, and falls as they go back;
+  `ArenaShrinkageCount` is the blocks it has handed back; `ReserveCount` is zero.
 - `RequestedInUseBytes` is the part of `InUseBytes` the callers asked for; the rest is what the
-  arena added to round each allocation up to its block sizes. A backend whose allocator does not
+  allocator added to round each request up to its size class. A backend whose allocator does not
   report what was requested (JAX) reports `InUseBytes` here, rounding included.
-- `TotalAllocatedBytes` is not a bound on card usage — it can exceed the card's capacity; use
-  `DeviceMemory.Read()` for that.
-- `MaxInUseBytes` is a lifetime high-water mark; it cannot be reset and shrinkage does not
-  lower it. For per-run figures use [`RunStats`](#per-run-statistics-on-the-context).
-- A session's weights live in this arena, so it is non-zero before the first run, and the first
-  run's peak includes them. `ReserveCount` and `ArenaExtensionCount` do not compare across
-  devices.
-- A run's outputs do not stay in it: `InUseBytes` after a run is the weights alone. An output
-  whose shape the session settled is never in it; one made in it as the run goes counts in the
-  run's peak, and its block is free once the run returns.
+- `TotalAllocatedBytes` is what the session holds from the device, in use or kept for its next
+  runs. It is not a bound on card usage; use `DeviceMemory.Read()` for that.
+- `MaxInUseBytes` is a lifetime high-water mark; it cannot be reset and handing memory back does
+  not lower it. For per-run figures use [`RunStats`](#per-run-statistics-on-the-context).
+- A session's weights are among what it allocates, so it is non-zero before the first run, and the
+  first run's peak includes them.
+- A run's outputs are blocks of their session's: `InUseBytes` after a run is the weights and the
+  outputs a caller still holds, and an output's block leaves it when the output goes.
 
 ### What crossed the bus
 
@@ -1170,11 +1172,11 @@ for (int step = 0; step < steps; step++)
 
 var stats = ctx.RunStats;
 Console.WriteLine($"{stats.RunCount} runs, peak {stats.PeakBytes / (1024 * 1024)} MiB, "
-                + $"{stats.ArenaExtensionCount} arena extensions");
+                + $"{stats.ArenaExtensionCount} blocks taken from the device");
 
 foreach (var run in stats.RecentRuns.TakeLast(5))
     Console.WriteLine($"run {run.RunNumber}: {run.PeakBytes} ({run.PeakKind}), "
-                    + $"arena stood at {run.PriorPeakBytes} before it");
+                    + $"its session stood at {run.PriorPeakBytes} before it");
 ```
 
 `RunStats` covers every run of the context across **all** its sessions.
@@ -1183,13 +1185,13 @@ foreach (var run in stats.RecentRuns.TakeLast(5))
   `AllocationCount`, `ArenaExtensionCount`, `ArenaShrinkageCount`, `LargestAllocationBytes` and
   `ArenaBytes` cover the whole history. `RecentRuns` keeps the last
   `DiagnosticSettings.RecentRunCapacity` records (1000 by default; zero keeps none).
-- **`PeakKind`**: a run that raised the arena's high-water mark is
+- **`PeakKind`**: a run that raised its session's high-water mark is
   `MemoryFigureKind.Measured`; one that stayed below an earlier mark is
   `MemoryFigureKind.UpperBound` (it used at most that).
 - **`PriorPeakBytes`** is the mark the run found. On the first run it is the weights, so
   `PeakBytes - PriorPeakBytes` is the run's own use; later it is how far the run exceeded the
   record (zero for `UpperBound` runs).
-- `PeakBytes` is the largest mark of any one arena, not a sum across sessions.
+- `PeakBytes` is the largest mark of any one session, not a sum across sessions.
 - `ArenaBytes` (taken from the device) is usually above `PeakBytes`, but shrinking runs —
   every run under a budget — can leave it below; compare ordering, not figures.
   `ArenaExtensionCount` counts blocks held, so it undercounts after shrinkage.
@@ -1244,10 +1246,10 @@ second read returns the same trace. `Nodes` is in execution order; inserted `Mem
 | what | where | cost | null / none when |
 |---|---|---|---|
 | `DeviceMemory.Read()` | static, the whole card, and this process's share of it | about a microsecond through DXGI; about 120 microseconds through NVML | no CUDA runtime; `ProcessBytes` alone is null where the driver attributes no memory to this process |
-| `CompiledGraph.ReadArenaStatistics()` | one session's allocator | a call into the backend | the backend reports no arena |
+| `CompiledGraph.ReadArenaStatistics()` | one session's allocator | a call into the backend | the backend reports none |
 | `CompiledGraph.ReadPinnedArenaStatistics()` | one session's pinned host arena | a call into the backend | the backend stages nothing (every CPU one) |
 | `ComputeContext.ReadDeviceMemoryUse()` | what the context holds in its memory, against its budget | a walk over its list | never null; `LimitBytes` is null with no budget in force |
-| `ComputeContext.RunStats` | every run of the context | two arena reads per run, once switched on | `CollectRunStatistics` is off |
+| `ComputeContext.RunStats` | every run of the context | two allocator reads per run, once switched on | `CollectRunStatistics` is off |
 | `CompiledGraph.OutputPlacement` | one session | nothing | the backend does not report it (`Unknown`) |
 | `CompiledGraph.ReadNodePlacement()` | one session, per node | a profiler on every run of that session | `TraceNodePlacement` is off |
 

@@ -232,8 +232,7 @@ so the per-session settings map only partly:
   blocks are released first). A run that needs more fails with an `InvalidOperationException`
   naming the limit. The cap is process-wide, so other torch runs on that device wait for a
   capped run to finish.
-- `ArenaExtend` has no counterpart; configure torch's allocator with `PYTORCH_CUDA_ALLOC_CONF`
-  before the backend starts.
+- Configure torch's allocator itself with `PYTORCH_CUDA_ALLOC_CONF` before the backend starts.
 - `ReadArenaStatistics` reads `torch.cuda.memory_stats` for the whole device, not one session:
   `InUseBytes`, `MaxInUseBytes`, `TotalAllocatedBytes`, `AllocationCount`,
   `ArenaExtensionCount` (segments held), `ArenaShrinkageCount` (segments released),

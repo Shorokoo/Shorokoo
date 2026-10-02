@@ -689,8 +689,7 @@ a per-call override, so all share one set of compiled sessions (one per input sh
 derivations keep both. The rig's `TrainingBackend`, also never persisted, decides who computes the
 gradient — see [training-backends.md](training-backends.md).
 
-Each context carries its backend, its `DeviceMemory` (a device-memory budget and arena settings)
-and `RunSettings` — see [Device memory](inference.md#device-memory-gpu-backends). So a rig can
+Each context carries its backend, its `DeviceMemory` (a device-memory budget) and `RunSettings` — see [Device memory](inference.md#device-memory-gpu-backends). So a rig can
 build on one device and train on another:
 
 ```csharp
@@ -709,14 +708,11 @@ Split only when the build does not fit on the card; leaving both `null` is norma
 [Which device am I on?](inference.md#which-device-am-i-on).
 
 On GPU backends the runtime context's budget covers the state and batches it holds on the card plus
-the running step's arena; a step that would exceed it is rebuilt with a smaller arena — see
-[A context's device-memory budget](inference.md#a-contexts-device-memory-budget). The default arena
-strategy `Auto` uses exact-size extension for a step compiled for one shape. The rig keeps a
-compiled step for up to four input shapes; further shapes share one shape-generic step, which `Auto`
-gives ORT's doubling. Feed a few stable batch shapes to stay on the tighter arena.
+what the running step's session allocates, which is held to what the state and batches leave it —
+see [A context's device-memory budget](inference.md#a-contexts-device-memory-budget). The rig keeps a
+compiled step for up to four input shapes; further shapes share one shape-generic step.
 
-A context's settings are fixed at construction: budget, arena strategy, `ShrinkArenaAfterRun`
-(implied by a budget), and the `CancellationToken` that abandons the step running — see
+A context's settings are fixed at construction: budget, `ShrinkArenaAfterRun` (implied by a budget), and the `CancellationToken` that abandons the step running — see
 [Stopping a run](inference.md#stopping-a-run); to stop a `Fit` or `Train` and keep its progress, pass
 its own `cancellationToken` instead ([Stopping and watching a run](#stopping-and-watching-a-run)). Put them on the `runtimeContext` you pass to
 `FromScratch`. To watch a run near the card's limit, read the static `DeviceMemory` class and the
@@ -870,25 +866,27 @@ streams coherently, or `RngConfig.NonDeterministic()` for per-run variation.
 An allocation failure in a step is rethrown as a `ComputeContextException` with code `CR009`
 reporting:
 
-- **Which pool**: `HOST memory` (a failed C++ allocation; a bare `bad allocation` is host even on a
-  GPU) or `DEVICE memory` (the accelerator's arena). ORT's arena message is the same for the CPU
-  arena, so on a CPU-only session it reads as host. Where the backend names no allocator on a
+- **Which pool**: `HOST memory` (a failed host allocation; a bare `bad allocation` is host even on
+  a GPU) or `DEVICE memory` (the accelerator's own). ONNX Runtime's own arena words a failure the
+  same on the host as on a card, so on a CPU-only session such a failure reads as host. Where the backend names no allocator on a
   session with device memory, the report says so.
 - **What the step held**: trainable parameters, model state, optimizer state and the batch, each
   with tensor count and size, plus the five largest tensors.
 - **The card's figures** (where a CUDA runtime is installed; `DeviceMemory.Read()`): used, free and
-  total across processes, how much of it is this process's, and this session's arena cap if set.
+  total across processes, how much of it is this process's, and the most this session may allocate
+  where a budget limits it.
 - **This process's memory**: working set, commit charge and managed heap against the limit in force
   (cgroup/container, Job Object, or machine RAM).
 
 On Windows/WDDM, device allocations count against system commit, so a process memory limit also
 caps device memory and fails with the same message as a full card. The report distinguishes three
 cases: the device is full; the device has room but the process is at its limit (raise the limit);
-or both have room and the arena could not extend by the block it wanted.
+or both have room and the session was held to less than it asked for — by a budget, or by an
+allocator keeping blocks it is not using.
 
 ```
 [CR009] Compute context operation failed in TrainingRig.TrainStep: allocating memory for the training
-step at step 1 failed. The failing allocation was for DEVICE memory — the accelerator's arena (backend
+step at step 1 failed. The failing allocation was for DEVICE memory — the accelerator's own (backend
 'Shorokoo.WinGPU'). Training state held for this operation: 296 tensor(s), 1.83 GiB in total (...).
 Device: 12.59 GiB of 23.99 GiB in use across all processes, 11.9 GiB of it this process's, 11.4 GiB
 free. Host process: working set
@@ -896,7 +894,8 @@ free. Host process: working set
 used). The device has room, yet this process is close to its own memory limit — and on Windows/WDDM a
 device allocation is backed by system commit, so a limit meant to bound HOST memory bounds DEVICE
 memory too ... This is the limit, not the model: re-run with it raised or removed. Underlying failure:
-[ErrorCode:Fail] ...bfc_arena.cc:358 ...
+[ErrorCode:RuntimeException] ... Failed to allocate 2359296 bytes on CUDA device 0: the card has no
+such block free (cudaMalloc refused it) ...
 ```
 
 The backend's text is kept verbatim at the end and the original exception as `InnerException`.
@@ -917,8 +916,8 @@ A process's private bytes (its commit charge) are more than what it holds:
   commit as native. Under a container's or a Job Object's memory limit the runtime caps its heap
   below the limit (at 75% of it by default) and collects harder as it nears the cap.
 - **On Windows, a card's memory is commit too.** Under WDDM every allocation on the card is backed
-  by system commit, so a GPU process's private bytes include its arenas on the card, which keep the
-  most they have held (see above).
+  by system commit, so a GPU process's private bytes include what it holds on the card, the blocks
+  its allocator keeps for reuse among it (see above).
 
 What a rig itself holds is the model's state once over at most. A rig built from scratch keeps its
 initial values — parameters, model state and optimizer state — for `CreateInitialCheckpoint`, where

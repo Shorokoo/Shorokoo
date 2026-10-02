@@ -17,7 +17,8 @@ namespace Shorokoo.Core.Utils
     /// </summary>
     /// <param name="HasDeviceMemory">Whether the failing session produces outputs in device memory.</param>
     /// <param name="Reading">The card's memory right now, or <c>null</c> where no CUDA runtime answers.</param>
-    /// <param name="ArenaLimitBytes">The failing session's arena cap, or <c>null</c> when uncapped.</param>
+    /// <param name="ArenaLimitBytes">The most the failing session may allocate, or <c>null</c> when
+    /// it has no limit.</param>
     /// <param name="BackendAssemblyName">The loaded backend assembly, for display only.</param>
     internal readonly record struct DeviceFacts(
         bool HasDeviceMemory,
@@ -31,7 +32,7 @@ namespace Shorokoo.Core.Utils
         /// <summary>A host (CPU) allocation — the C++ runtime's <c>new</c>, or a managed out-of-memory.</summary>
         Host,
 
-        /// <summary>A device (accelerator) allocation — the CUDA execution provider's arena.</summary>
+        /// <summary>A device (accelerator) allocation — the accelerator's own memory.</summary>
         Device,
 
         /// <summary>The text names no allocator, and the backend in use could be either.</summary>
@@ -308,10 +309,10 @@ namespace Shorokoo.Core.Utils
                        + (d.ProcessBytes is long own ? $"processes, {Bytes(own)} of it this process's" : "processes")
                        + $", {Bytes(d.FreeBytes)} free";
             if (device.ArenaLimitBytes is long limit)
-                text += $"; this session's arena is capped at {Bytes(limit)} — what its context's "
+                text += $"; this session may allocate at most {Bytes(limit)} there — what its context's "
                       + "device-memory budget (DeviceMemorySettings.LimitBytes) left it once the "
                       + "tensors the context holds on the card were counted — and every other live "
-                      + "session holds an arena of its own on top";
+                      + "session holds memory of its own on top";
             return text + ".";
         }
 
@@ -322,10 +323,10 @@ namespace Shorokoo.Core.Utils
             return pool switch
             {
                 AllocationPool.Device =>
-                    $"The failing allocation was for DEVICE memory — the accelerator's arena{where}.",
+                    $"The failing allocation was for DEVICE memory — the accelerator's own{where}.",
                 AllocationPool.Host when gpu =>
                     "The failing allocation was for HOST memory — a C++ allocation the process could "
-                    + $"not commit, not the accelerator's arena{where}.",
+                    + $"not commit, not the accelerator's{where}.",
                 AllocationPool.Host =>
                     $"The failing allocation was for HOST memory{where}.",
                 _ =>
@@ -391,7 +392,7 @@ namespace Shorokoo.Core.Utils
             bool gpu = device.HasDeviceMemory;
             bool nearLimit = Utilisation(m) is double u && u >= 0.85;
             // "Room left on the card" is only meaningful against the request that was refused; a
-            // tenth of the device is far more than any single arena block, so free space above that
+            // tenth of the device is far more than any single block, so free space above that
             // means the refusal did not come from the card being out of memory.
             bool deviceHasRoom = device.Reading is DeviceMemoryReading d
                                  && d.TotalBytes > 0 && d.FreeBytes > d.TotalBytes / 10;
@@ -399,14 +400,14 @@ namespace Shorokoo.Core.Utils
             if (gpu && deviceHasRoom && nearLimit)
                 return "The device has room, yet this process is close to its own memory limit — and "
                      + "on Windows/WDDM a device allocation is backed by system commit, so a limit "
-                     + "meant to bound HOST memory bounds DEVICE memory too, and an arena expansion "
+                     + "meant to bound HOST memory bounds DEVICE memory too, and a device allocation "
                      + "past it fails with the same message a genuinely full accelerator produces. "
                      + "This is the limit, not the model: re-run with it raised or removed.";
 
             if (gpu && nearLimit)
                 return "This process is close to its memory limit, and on Windows/WDDM a device "
                      + "allocation is backed by system commit — so a limit meant to bound HOST memory "
-                     + "bounds DEVICE memory too, and an arena expansion past it fails with the same "
+                     + "bounds DEVICE memory too, and a device allocation past it fails with the same "
                      + "message a genuinely full accelerator produces. Rule the limit out first: "
                      + "re-run with it raised or removed. If the failure moves, it was the limit, not "
                      + "the model.";
@@ -417,9 +418,11 @@ namespace Shorokoo.Core.Utils
 
             if (pool == AllocationPool.Device && deviceHasRoom)
                 return "The device still reports free memory, so the refusal is not the card being "
-                     + "out of memory: the arena could not extend by the block it wanted. Turn on "
-                     + "RunSettings.ShrinkArenaAfterRun so the arena stops ratcheting, or cap it "
-                     + "with DeviceMemorySettings.LimitBytes so it asks for less at a time.";
+                     + "out of memory: the session was held to less than it asked for — by a "
+                     + "device-memory budget (DeviceMemorySettings.LimitBytes) where one is set, so "
+                     + "raise it or delete what the context holds on the card; or by an allocator "
+                     + "keeping blocks it is not using, so turn on RunSettings.ShrinkArenaAfterRun to "
+                     + "have them handed back between runs.";
 
             if (pool == AllocationPool.Device)
                 return "The process is well inside its host memory limit, so this is the accelerator "

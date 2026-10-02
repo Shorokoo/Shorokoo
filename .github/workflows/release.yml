@@ -25,7 +25,28 @@ permissions:
   packages: write       # mirror the packages to GitHub Packages
 
 jobs:
+  # Shorokoo.OnnxRuntime carries a native library of its own, the allocator it hands ONNX Runtime
+  # (src/Backend/OnnxRuntime/Shorokoo.OnnxRuntime/native), for every platform the backends target.
+  # A build makes only its own platform's, so the Windows one is built here and handed to the
+  # publish job, which builds the Linux one as part of its own build and packs both.
+  native-allocator-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the native allocator (win-x64)
+        run: |
+          cmake -S src/Backend/OnnxRuntime/Shorokoo.OnnxRuntime/native -B build/allocator -DSHOROKOO_OUTPUT_DIR="${{ github.workspace }}/artifacts/native/win-x64"
+          cmake --build build/allocator --config Release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-allocator-win-x64
+          path: artifacts/native/win-x64/shorokoo_ort_allocator.dll
+          if-no-files-found: error
+
   publish:
+    needs: native-allocator-windows
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -54,6 +75,28 @@ jobs:
           dotnet test tests/Shorokoo.Tests/Shorokoo.Tests.csproj
           --filter "Purpose=Coverage"
           -c Release --logger "console;verbosity=minimal"
+
+      # The runner's C and C++ runtimes are newer than the oldest Linux ONNX Runtime runs on, and a
+      # library built here could ask for a symbol version only they have. Nothing the native
+      # allocator needs may be newer than what ONNX Runtime's own library needs.
+      - name: Check the native allocator asks no more of Linux than ONNX Runtime does
+        run: |
+          lib=src/Backend/OnnxRuntime/Shorokoo.OnnxRuntime/obj/native/linux-x64/libshorokoo_ort_allocator.so
+          ort=$(ls ~/.nuget/packages/microsoft.ml.onnxruntime/*/runtimes/linux-x64/native/libonnxruntime.so | head -1)
+          newest() { objdump -T "$1" | grep -oE "\($2_[0-9.]+\)" | tr -d '()' | sort -V | tail -1; }
+          for family in GLIBC GLIBCXX CXXABI GCC; do
+            mine=$(newest "$lib" "$family"); theirs=$(newest "$ort" "$family")
+            [ -z "$mine" ] && continue
+            if [ -z "$theirs" ] || [ "$(printf '%s\n%s\n' "$mine" "$theirs" | sort -V | tail -1)" != "$theirs" ]; then
+              echo "::error::$lib needs $mine, and ONNX Runtime needs no newer than ${theirs:-none of $family}"
+              exit 1
+            fi
+          done
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-allocator-win-x64
+          path: artifacts/native/win-x64
 
       # Each Purpose=Benchmark check measures the machine — wall clock, process-wide
       # memory growth, or both — so each gets a process of its own. Anything sharing
@@ -106,7 +149,9 @@ jobs:
           -c Release --logger "console;verbosity=minimal" --no-build
 
       - name: Pack
-        run: dotnet pack Shorokoo.sln -c Release -o artifacts/nupkgs
+        run: >
+          dotnet pack Shorokoo.sln -c Release -o artifacts/nupkgs
+          -p:ShorokooNativeAllocators=${{ github.workspace }}/artifacts/native
 
       # OIDC -> short-lived nuget.org API key (~1h). No stored API key.
       - name: NuGet login (Trusted Publishing)

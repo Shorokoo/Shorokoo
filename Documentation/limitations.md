@@ -196,47 +196,45 @@ already taken consumed. The arrangement in
 batch while the other device reads the last one, is where this is easy to hit.
 Give the concurrent run its own tensor (`CopyTo`) or wait for it to return.
 
-### A device-memory budget counts tensors, not arenas
+### A device-memory budget counts tensors, not what the allocator keeps
 
 A context's `DeviceMemorySettings.LimitBytes` counts the bytes of the tensors
-attached to it on the card, plus the arena limit of its executing run; see
+attached to it on the card, plus what the session of its executing run
+allocates; see
 [A context's device-memory budget](inference.md#a-contexts-device-memory-budget).
 That count is exact, but the card also holds:
 
-- **The allocator tensors are placed from.** Tensors put on a card (by `To`,
-  `CopyTo`, or a run copying a host input there) and every run's outputs there
-  come from one allocator per card and runtime, shared by every context over that
-  runtime and kept for the life of the process. It keeps the most ever allocated
-  through it at once until a run that hands its arena's unused blocks back
-  (`ShrinkArenaAfterRun`, always on under a budget) has it hand back the blocks
-  no tensor is using as it starts; a block that still holds one tensor stays
-  whole.
-- **What an arena keeps spare.** An arena holds blocks, and a partly used block
-  cannot be returned, so a session's arena can hold more than is in use.
+- **What the allocator keeps for reuse.** Every session on a card and runtime,
+  and every tensor placed there, allocates through one allocator, held for the
+  life of the process. A block a session lets go of is kept for that session's
+  next runs, and one a placed tensor lets go of for the next tensor placed,
+  until a run hands memory back (`ShrinkArenaAfterRun`, always on under a
+  budget) or the card has no room for a request. Between a budgeted context's
+  runs that is what its tensors let go of since the last one; an unbudgeted
+  context's sessions keep every block their runs let go of.
+- **Rounding.** A block is its request rounded up to a size class — a multiple
+  of 512 bytes up to a mebibyte, of an eighth of the power of two below it
+  above that — so a tensor holds up to an eighth more than its bytes. A
+  session's limit counts its blocks whole; the budget counts a tensor by its
+  bytes.
 - **A session's weights between its runs.** Each compiled graph's weights stay in
-  its session's arena and count only against that session's runs, so several
+  its session's memory and count only against that session's runs, so several
   compiled graphs hold all their weights at once while the budget sees one at a
   time.
-- **An output while it is copied out of its arena.** An output whose shape is
-  known only once its run is under way is made in the run's arena and copied
-  into memory of its own as the run returns, so for that moment it is on the card
-  twice. Its block in the arena is free from then on, and goes back to the card
-  when the session's next run hands its unused blocks back, or when the session
-  is disposed.
 - **Memory a dead tensor still holds.** A tensor leaves the books when it dies,
   possibly before its memory returns: one deleted with `DeleteAsync` while a run
   reads it, or consumed by another context's run, holds its memory until that run
   finishes. A budgeted context's own runs cannot cause this; another context's run
   reading or consuming a tensor on this context's books can.
+- **What the CUDA runtime holds for itself**: each process's CUDA context, and
+  what the libraries the execution provider calls allocate on their own.
 
 Leave headroom, and read `DeviceMemory.Read()` for what the card is carrying.
 
-Two costs follow. A session's arena limit only decreases: after a context frees
-memory, its graphs keep the smaller arenas until recompiled. And a budgeted
-context does one thing at a time (a transfer onto it waits for its run in flight),
-so staging the next batch onto it from another thread does not overlap the
-current step. Staging through a second context over the same backend keeps the
-overlap.
+A budgeted context also does one thing at a time (a transfer onto it waits for
+its run in flight), so staging the next batch onto it from another thread does
+not overlap the current step. Staging through a second context over the same
+backend keeps the overlap.
 
 ### A fed input's buffer is not recycled inside the run
 
@@ -287,7 +285,7 @@ context element by element.
 Device-memory configuration is per context, session and run
 (`ComputeContext.DeviceMemory`, `RunSettings`; see
 [Device memory](inference.md#device-memory-gpu-backends)), so two models on one
-host can have separate budgets and arena strategies.
+host can have separate budgets.
 
 Reporting is process-wide. `DeviceMemory.Read()` and `Sample()` query the CUDA
 device current for the calling thread (device 0, which the shipped GPU backends
@@ -295,9 +293,9 @@ use) and return the whole device's usage, including other processes, and this
 process's share of it (`ProcessBytes`). `PeakUsedBytes` and `PeakProcessBytes`
 are one record each for the process: two contexts training side by side in one
 process share them, and neither can be split between contexts.
-`CompiledGraph.ReadArenaStatistics()` reads one session's arena and
+`CompiledGraph.ReadArenaStatistics()` reads one session's allocator and
 `ComputeContext.ReadDeviceMemoryUse()` what a context holds against its budget
-(see [What one session's arena did](inference.md#what-one-sessions-arena-did)).
+(see [What one session's allocator did](inference.md#what-one-sessions-allocator-did)).
 
 ### Backprop through dynamic loops
 

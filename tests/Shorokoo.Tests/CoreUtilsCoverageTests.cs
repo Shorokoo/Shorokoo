@@ -2296,7 +2296,7 @@ public class CoreUtilsCoverageTests
 
         Assert.DoesNotContain("Device:", Report(ArenaFailure, Facts(12, 128), "Shorokoo.LinuxCPU"));
 
-        Assert.Contains("arena is capped at 8 GiB", AllocationFailureReport.Render(
+        Assert.Contains("may allocate at most 8 GiB", AllocationFailureReport.Render(
             "the training step at step 1", AllocationPool.Device,
             new DeviceFacts(true, roomy, 8L << 30, "Shorokoo.WinGPU"), [],
             Facts(12, 128), ArenaFailure));

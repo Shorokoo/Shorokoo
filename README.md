@@ -133,6 +133,19 @@ dotnet add package Shorokoo.LinuxCPU      # or Shorokoo.LinuxGPU / Shorokoo.WinC
 (The backends share an infrastructure package, `Shorokoo.OnnxRuntime`, that
 they pull in themselves — you never install it directly.)
 
+## Building from source
+
+Building the repository takes the .NET 10 SDK and, for the native library the
+ONNX Runtime backends allocate through, CMake and a C++ compiler:
+
+- **Windows:** Visual Studio 2019 or later — the Build Tools will do — with the
+  *Desktop development with C++* workload, which brings both. The build finds the
+  CMake it installs; nothing needs to be on the `PATH`.
+- **Linux:** `cmake` and `g++` (on Ubuntu, `sudo apt install cmake g++`).
+
+`dotnet build` then builds the native library with everything else, and
+`-p:ShorokooCMake=<path>` names a CMake of your choosing.
+
 ## Samples
 
 - [`samples/RetinaNet`](samples/RetinaNet) — ResNet backbones and a RetinaNet detector

@@ -318,7 +318,7 @@ def load_model(source, filename, constants):
     else:
         _compiled.move_to_end(filename)
     namespace = {"__name__": "shorokoo_model", "_C": constants, "_stop": stop_point, "_alias_write": alias_write,
-                 "_into": place_into}
+                 "_into": place_into, "_over": write_over}
     exec(code, namespace)
     return namespace["main"]
 
@@ -694,6 +694,21 @@ def _write_copy(target, value):
         return False
     target.copy_(value)
     return True
+
+
+def write_over(target, function, *args, **kwargs):
+    """`function(*args, **kwargs)` -- an element-wise node of the translated graph -- written over
+    `target`, an operand of it that nothing reads after it, and returned there, where torch writes the
+    result into it (_fast_writers) and the run computes no gradient; elsewhere, or where the result
+    is not of the operand's type and shape, the result as computed."""
+    if (isinstance(target, torch.Tensor) and not torch.is_grad_enabled() and not target.requires_grad
+            and target.is_contiguous() and target.numel() > 0):
+        fast = _fast_writers().get(function)
+        if fast is not None and fast[0] != "own" and _write_fast(fast, target, args, kwargs):
+            return target
+        if fast is not None and fast[0] == "own":
+            return function(*args, _out=target, **kwargs)
+    return function(*args, **kwargs)
 
 
 def place_into(slot, own, function, *args, **kwargs):

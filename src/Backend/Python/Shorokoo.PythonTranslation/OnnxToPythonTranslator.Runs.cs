@@ -49,6 +49,7 @@ internal sealed partial class OnnxToPythonTranslator
 
     private AliasPlan? _aliasPlan;
     private IReadOnlyDictionary<string, PlacedValue>? _placed;
+    private IReadOnlyDictionary<string, int>? _over;
     private Scope? _mainScope;
 
     /// <summary>
@@ -70,9 +71,13 @@ internal sealed partial class OnnxToPythonTranslator
     /// caller's to prove (<see cref="PlacementProof"/>); a run that hands over no range for a slot
     /// computes the value as the plain translation does.
     /// </summary>
+    /// <para>A node of the top-level graph <paramref name="over"/> names, with the operand slot it
+    /// gives, is written over that operand where a run computes without gradients (the support
+    /// package's <c>_over</c>): an element-wise operator whose operand nothing reads after it, which
+    /// the caller has made sure of.</para>
     internal static TranslatedModel Translate(
         ModelProto model, IReadOnlyList<OutputAlias> outputAliases, PythonDialect dialect,
-        IReadOnlyDictionary<string, PlacedValue>? placed)
+        IReadOnlyDictionary<string, PlacedValue>? placed, IReadOnlyDictionary<string, int>? over = null)
     {
         ArgumentNullException.ThrowIfNull(model);
         ArgumentNullException.ThrowIfNull(outputAliases);
@@ -80,7 +85,7 @@ internal sealed partial class OnnxToPythonTranslator
         var graph = model.Graph ?? throw dialect.Unsupported(
             UnsupportedReason.UnsupportedModel, null, null, "The model has no graph.");
         var plan = AliasPlan.For(graph, outputAliases);
-        var translator = new OnnxToPythonTranslator(dialect) { _aliasPlan = plan, _placed = placed };
+        var translator = new OnnxToPythonTranslator(dialect) { _aliasPlan = plan, _placed = placed, _over = over };
         var translated = translator.Run(model, graph);
         return translated with { Aliases = plan?.Slots(translated.InputNames) ?? [] };
     }
@@ -100,6 +105,24 @@ internal sealed partial class OnnxToPythonTranslator
             || !_placed.TryGetValue(node.Outputs[0], out var placed))
             return expression;
         return $"_into({placed.Slot}, {(placed.OwnMemory ? "True" : "False")}, {function}, {expression[(function.Length + 1)..]}";
+    }
+
+    /// <summary>
+    /// <paramref name="expression"/>, the call of <paramref name="function"/> a node of the top-level
+    /// graph evaluates to, as a write over the operand <see cref="_over"/> names for the node's one
+    /// output: the same call made through <c>_over</c>, which writes the result over that operand
+    /// where torch can and the run computes no gradient, and computes it as the call does
+    /// elsewhere.
+    /// </summary>
+    private string Over(NodeProto node, Scope scope, string? function, string expression)
+    {
+        if (_over is null || !ReferenceEquals(scope, _mainScope) || function is null
+            || !expression.StartsWith(function + "(", StringComparison.Ordinal)
+            || node.Outputs.Count(o => o.Length > 0) != 1 || node.Outputs[0].Length == 0
+            || _placed?.ContainsKey(node.Outputs[0]) == true
+            || !_over.TryGetValue(node.Outputs[0], out var slot) || slot >= node.Inputs.Count || node.Inputs[slot].Length == 0)
+            return expression;
+        return $"_over({scope.Lookup(node.Inputs[slot], node)}, {function}, {expression[(function.Length + 1)..]}";
     }
 
     /// <summary>

@@ -1144,12 +1144,28 @@ public class PyTorchBackendCoverageTests
     }
 
     /// <summary>The support functions the translation of <paramref name="graph"/> calls, in the order
-    /// it calls them.</summary>
-    private static string Calls(GraphProto graph)
+    /// it calls them, each one written over an operand of it marked so.</summary>
+    private static string Calls(GraphProto graph, bool over = false)
     {
         var model = ProtoBuf.Serializer.Deserialize<ModelProto>(new MemoryStream(Serialize(graph)));
-        var source = Shorokoo.PythonTranslation.OnnxToPythonTranslator.Translate(model, [], TorchDialect.Instance).Source;
-        return string.Join(" ", System.Text.RegularExpressions.Regex.Matches(source, @"ops_\w+\.(\w+)\(").Select(m => m.Groups[1].Value));
+        var source = Shorokoo.PythonTranslation.OnnxToPythonTranslator.Translate(model, [], TorchDialect.Instance, null,
+            over ? TorchInPlace.Plan(model.Graph) : null).Source;
+        return string.Join(" ", System.Text.RegularExpressions.Regex.Matches(source, @"(_over\(\w+, )?ops_\w+\.(\w+)[(,]")
+            .Select(m => (m.Groups[1].Success ? "over:" : "") + m.Groups[2].Value));
+    }
+
+    [Fact]
+    public void TestAnElementWiseNodeIsWrittenOverAnOperandOfItsOwnMemoryThatNothingReadsAfterIt()
+    {
+        Assert.Equal("neg over:exp", Calls(GraphOn("x:float[4]", "c", Op("Neg", "x", "b"), Op("Exp", "b", "c")), over: true));
+        Assert.Equal("exp", Calls(GraphOn("x:float[4]", "c", Op("Exp", "x", "c")), over: true));
+        Assert.Equal("neg exp over:abs_", Calls(GraphOn("x:float[4]", "c d", Op("Neg", "x", "b"), Op("Exp", "b", "c"), Op("Abs", "b", "d")), over: true));
+        Assert.Equal("neg exp", Calls(GraphOn("x:float[4]", "b c", Op("Neg", "x", "b"), Op("Exp", "b", "c")), over: true));
+        Assert.Equal("neg over:exp shape", Calls(GraphOn("x:float[4]", "c s", Op("Neg", "x", "b"), Op("Exp", "b", "c"), Op("Shape", "c", "s")), over: true));
+        Assert.Equal("neg over:add over:mul", Calls(GraphOn("x:float[4]", "d", Op("Neg", "x", "b"), Op("Add", "x b", "c"), Op("Mul", "c c", "d")), over: true));
+        Assert.Equal("neg softmax", Calls(GraphOn("x:float[4]", "c", Op("Neg", "x", "b"), Op("Softmax", "b", "c")), over: true));
+        Assert.Equal("neg identity exp abs_", Calls(GraphOn("x:float[4]", "c d", Op("Neg", "x", "b"), Op("Identity", "b", "r"), Op("Exp", "b", "c"), Op("Abs", "r", "d")), over: true));
+        Assert.Equal("neg transpose mul", Calls(GraphOn("x:float[2,2]", "c", Op("Neg", "x", "b"), Op("Transpose", "b", "t"), Op("Mul", "b t", "c")), over: true));
     }
 
     [Fact]
@@ -1248,6 +1264,20 @@ public class PyTorchBackendCoverageTests
         var placed = Run(consume);
         Assert.Equal(plain.Values, placed.Values);
         return placed.Where + (backend.OnCuda && placed.Allocated + placed.Bytes > plain.Allocated ? " allocating" : "");
+    }
+
+    /// <summary>What <paramref name="run"/> answers, and the most torch's CUDA allocator held at once
+    /// beyond what it held as the run began.</summary>
+    internal static (long Peak, T Result) CardPeak<T>(Func<T> run)
+    {
+        using (PythonRuntime.Gil())
+        {
+            using var scope = Py.CreateScope();
+            scope.Exec("import torch\ntorch.cuda.synchronize()\ntorch.cuda.reset_peak_memory_stats()\nbefore = torch.cuda.memory_allocated()");
+            var result = run();
+            scope.Exec("torch.cuda.synchronize()\npeak = torch.cuda.max_memory_allocated() - before");
+            return (scope.Get<long>("peak"), result);
+        }
     }
 
     /// <summary>Every byte torch's CUDA allocator has handed out in this process, or 0 off a card.</summary>

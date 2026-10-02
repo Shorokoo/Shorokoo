@@ -127,7 +127,8 @@ internal sealed class TorchSession : IShorokooSession
             proto = ProtoBuf.Serializer.Deserialize<ModelProto>(stream);
         // Translated before torch is started, so that a model this backend cannot run is refused
         // without first provisioning an environment to not run it in.
-        var model = OnnxToPythonTranslator.Translate(proto, outputAliases, TorchDialect.Instance);
+        var model = OnnxToPythonTranslator.Translate(proto, outputAliases, TorchDialect.Instance, null,
+            proto.Graph is { } graph ? TorchInPlace.Plan(graph) : null);
         // The translation's own hash names its compiled code: what it writes depends on the pairs the
         // session was asked for as well as on the model.
         var hash = Convert.ToHexStringLower(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(model.Source)))[..32];

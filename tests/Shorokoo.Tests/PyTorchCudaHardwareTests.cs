@@ -155,7 +155,7 @@ public class PyTorchCudaHardwareTests
     public void TestARunAskedToShrinkHandsTheCardsCachedBlocksBack()
     {
         using var session = Cuda.Value.CreateSession(PyTorchBackendCoverageTests.Serialize(
-            ComputeContextLifetimeCoverageTests.GraphOf("x", "y", Op("Neg", "x", "n"), Op("Neg", "n", "m"), Op("Neg", "m", "y"))),
+            ComputeContextLifetimeCoverageTests.GraphOf("x", "y", Op("Neg", "x", "n"), Op("Neg", "n", "m"), Op("Add", "n m", "y"))),
             default, default, DeviceMemorySettings.Default);
         using var x = Cuda.Value.CreateUninitializedTensorInBackendMemory(ShorokooTensorElementType.Float, [4L << 20]);
         var feeds = new Dictionary<string, IShorokooTensorValue> { ["x"] = x };
@@ -260,6 +260,23 @@ public class PyTorchCudaHardwareTests
     [TorchCudaFact]
     public void TestARunWritesSoftmaxesNormalizationsClipsConvolutionsAndGemmsIntoTheMemoryItConsumesOnTheCardAllocatingNoneOfThem()
         => PyTorchBackendCoverageTests.SoftmaxesNormalizationsClipsConvolutionsAndGemmsArePlaced(Cuda.Value);
+
+    [TorchCudaFact]
+    public void TestAnElementWiseChainOnTheCardHoldsOneOfItsValuesAtATime()
+    {
+        const long Count = 1L << 22;
+        var graph = ComputeContextLifetimeCoverageTests.GraphOf($"x:float[{Count}]", "d",
+            ComputeContextLifetimeCoverageTests.Op("Neg", "x", "b"), ComputeContextLifetimeCoverageTests.Op("Abs", "b", "c"),
+            ComputeContextLifetimeCoverageTests.Op("Sigmoid", "c", "d"));
+        using var session = Cuda.Value.CreateSession(PyTorchBackendCoverageTests.Serialize(graph), default, default, DeviceMemorySettings.Default);
+        using var x = Cuda.Value.CreateTensorInBackendMemory(ShorokooTensorElementType.Float, new byte[Count * 4], [Count]);
+        var feeds = new Dictionary<string, IShorokooTensorValue> { ["x"] = x };
+        session.Run(feeds, ["d"], RunSettings.Default)[0].Dispose();
+        var (peak, d) = PyTorchBackendCoverageTests.CardPeak(() => session.Run(feeds, ["d"], RunSettings.Default)[0]);
+        Assert.Equal([.. MemoryMarshal.AsBytes<float>([0.5f, 0.5f])], Cuda.Value.CopyTensorToHost(d)[..8]);
+        d.Dispose();
+        Assert.Equal(Count * 4, peak);
+    }
 
     [TorchCudaFact]
     public void TestClipHandsBackAZeroInsideItsBoundsAndTheLowerOfTwoEqualZeroBoundsBelowThemSignAndAllOnTheCard()

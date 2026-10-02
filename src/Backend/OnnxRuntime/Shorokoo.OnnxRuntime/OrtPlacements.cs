@@ -13,8 +13,7 @@ namespace Shorokoo.OnnxRuntime;
 /// of every input, which only a run knows, so placements are planned per signature — those, and the
 /// outputs asked for — and kept: a session of its own (a <i>variant</i>) for each signature that
 /// places anything, built over the model with every placed value made a graph output, so a binding can
-/// hand ONNX Runtime the range each one goes to, and with the memory pattern off, since the pattern
-/// would hold a block for the whole run beside the placed values.</para>
+/// hand ONNX Runtime the range each one goes to, and charging the session's own allocator accounts.</para>
 ///
 /// <para><b>Proved over the graph that runs.</b> The plan is made over the graph ONNX Runtime runs
 /// for this session (written out by a probe build of the model), and proved again over the graph the
@@ -36,8 +35,8 @@ internal sealed class OrtPlacements : IDisposable
     /// <summary>How many signatures a session plans for; a run of any other runs unplaced.</summary>
     private const int MostSignatures = 8;
 
-    /// <summary>Builds a session over a model, with the memory pattern off, writing the graph it will
-    /// run into the folder named where one is.</summary>
+    /// <summary>Builds a session over a model, charging the session's own allocator accounts, writing
+    /// the graph it will run into the folder named where one is.</summary>
     internal delegate OrtSession VariantBuilder(byte[] model, string? optimizedDirectory);
 
     private readonly byte[] _model;

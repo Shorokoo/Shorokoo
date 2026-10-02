@@ -342,17 +342,17 @@ public abstract class OrtBackend : IShorokooBackend
         var session = BuildSession(model, New, outputAliases);
         // A session of a stock provider over a model small enough to keep can place the values of a
         // run that consumes inputs in the memory of what it consumes (see OrtPlacements), through
-        // sessions of its own built over the same model the same way, with the memory pattern off.
-        // They charge the session's own allocator accounts, so that what a run of the session takes is
-        // read, budgeted and limited as one session's, whichever of them ran it.
-        // Not where its sessions allocate through ONNX Runtime's own arena, a comparison's alone:
-        // what a placed run saves is measured on Shorokoo's allocator.
+        // sessions of its own built over the same model the same way. They charge the session's own
+        // allocator accounts, so that what a run of the session takes is read, budgeted and limited
+        // as one session's, whichever of them ran it. Not where its sessions allocate through ONNX
+        // Runtime's own arena, a comparison's alone: what a placed run saves is measured on
+        // Shorokoo's allocator.
         if (_stockProvider && !SessionsUseOrtArena && model.Length <= OrtPlacements.ModelBytesKept)
             session.Placements = new OrtPlacements(
                 model,
                 (variant, directory) => Wrap(NewSession(
                     variant, graphOptimization, logSeverity, deviceMemory, diagnostics with { TraceNodePlacement = false },
-                    directory, intraOpThreads, suppliedInitializers, precision, memoryPattern: false,
+                    directory, intraOpThreads, suppliedInitializers, precision,
                     accounts: (session.HostAccount, session.CardAccount)), []),
                 this,
                 () => session.HeldBytes);
@@ -449,7 +449,6 @@ public abstract class OrtBackend : IShorokooBackend
         int intraOpThreads,
         IReadOnlyList<SuppliedInitializer> suppliedInitializers,
         PrecisionSettings precision,
-        bool memoryPattern = true,
         (CachingAllocator.Account Host, CachingAllocator.Account? Card)? accounts = null)
     {
         // The `using` is load-bearing, not tidiness. SessionOptions is a SafeHandle, so it
@@ -462,7 +461,6 @@ public abstract class OrtBackend : IShorokooBackend
         // process. Disposing in a finally keeps them rooted across the constructor.
         using var options = new SessionOptions();
         Configure(options, graphOptimization, logSeverity);
-        if (!memoryPattern) options.EnableMemoryPattern = false;
         if (intraOpThreads > 0) options.IntraOpNumThreads = intraOpThreads;
         if (diagnostics.DeterministicCompute) UseDeterministicCompute(options);
         // Named before anything can throw, and made inside the try, by the call that points the

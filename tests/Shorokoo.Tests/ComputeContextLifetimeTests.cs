@@ -929,7 +929,7 @@ public class ComputeContextLifetimeCoverageTests
     }
 
     [Fact]
-    public void TestAPlacementsShapesFollowTheShapeArithmeticAndTheFusedAndTransposedConvolutionsOfATrainingStep()
+    public void TestAPlacementsShapesFollowTheShapeArithmeticFusedOperatorsAndTransposedConvolutionsOfATrainingStep()
     {
         Assert.Equal("4:7=1,4,2,1", ShapeOf(WithInts(GraphOf("a:float[4,2]", "O", Op("Shape", "a", "s"), Op("Pad", "s pads one", "O")), "pads", 1, 1), "O"));
         Assert.Equal("1:7=4", ShapeOf(GraphOf("a:float[4,2]", "O", Op("Shape", "a", "s"), Op("Greater", "s two", "g"), Op("Compress", "s g", "O")), "O"));
@@ -938,6 +938,7 @@ public class ComputeContextLifetimeCoverageTests
         Assert.Equal("1x3x8x8", ShapeOf(GraphOf("x:float[1,4,4,4] w:float[4,3,2,2]", "O", With(Op("ConvTranspose", "x w", "O"), "strides", 2, 2)), "O"));
         Assert.Equal("1x4x8x8", ShapeOf(GraphOf("x:float[1,3,8,8] w:float[4,3,3,3]", "O", With(Op("FusedConv", "x w", "O", domain: "com.microsoft"), "pads", 1, 1, 1, 1)), "O"));
         Assert.Equal("8x16", ShapeOf(GraphOf("a:float[8,4] b:float[4,16]", "O", Op("FusedGemm", "a b", "O", domain: "com.microsoft")), "O"));
+        Assert.Equal("4x2x8x8", ShapeOf(GraphOf("x:float[4,2,8,8] m:float[8,8]", "O", Op("BiasSoftmax", "x m", "O", domain: "com.microsoft")), "O"));
         Assert.Equal("4x2", ShapeOf(GraphOf("a:float[4,2] c:bool[1]", "t", PyTorchBackendCoverageTests.Branch("c", GraphOf("", "t", Op("Neg", "a", "t")), GraphOf("", "t", Op("Abs", "a", "t")))), "t"));
         Assert.Equal("unknown", ShapeOf(GraphOf("a:float[4,2] c:bool[1]", "t", PyTorchBackendCoverageTests.Branch("c", GraphOf("", "t", Op("Neg", "a", "t")), GraphOf("", "t", Op("Shape", "a", "t")))), "t"));
         Assert.Equal("2:7=4,2", ShapeOf(GraphOf("a:float[4,2]", "t", Op("Greater", "two one", "c"),

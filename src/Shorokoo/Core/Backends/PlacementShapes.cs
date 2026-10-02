@@ -189,7 +189,7 @@ internal static class PlacementShapes
         "Atan", "Sinh", "Cosh", "Asinh", "Acosh", "Atanh", "Reciprocal", "Floor", "Ceil", "Round", "Sign",
         "Erf", "Softplus", "Softsign", "Elu", "Selu", "LeakyRelu", "ThresholdedRelu", "HardSigmoid",
         "HardSwish", "Celu", "Mish", "Gelu", "FastGelu", "QuickGelu", "BiasGelu", "Clip", "Identity",
-        "MemcpyFromHost", "MemcpyToHost", "Softmax",
+        "MemcpyFromHost", "MemcpyToHost", "Softmax", "BiasSoftmax",
         "LogSoftmax", "Hardmax", "Not", "BitwiseNot", "Shrink", "LpNormalization", "CumSum", "Trilu",
         "InstanceNormalization", "LayerNormalization", "SimplifiedLayerNormalization",
         "BatchNormalization", "Dropout",

@@ -20,31 +20,42 @@ namespace Shorokoo.Core.Backends;
 ///
 /// <para><b>Why the session's allocator is Shorokoo's.</b> ONNX Runtime writes a run's every output
 /// into memory its session's allocator gives it — an output whose shape only the run learns
-/// included — and has no hook for one output's memory apart from the rest. An arena's tensor keeps
-/// the arena alive, so an output kept alive would keep the run's every block alive. Here every
-/// block is one allocation of its own, never a piece of a larger one: a kept output holds its own
-/// block and nothing else, and is never copied after its run.</para>
+/// included — and has no hook for one output's memory apart from the rest. An arena whose regions go
+/// back only whole lets a kept output hold its region, and everything carved from it, alive. Here a
+/// kept output holds its own pages and no other memory: an output is never copied after its run, and
+/// nothing it holds stops the rest from going back.</para>
 ///
-/// <para><b>Caching.</b> A block that is let go of is kept for the next request of its size class
-/// rather than handed back, so a loop's runs find their blocks waiting, as they would in an arena.
-/// Sizes are rounded up to a class — to 512 bytes up to a mebibyte, to an eighth of the power of
-/// two above — so a block is reused across requests that differ a little. An account never holds
-/// from the device more than the most one of its calls has used: the blocks it had in use as the
-/// call began and every block the call was handed, each counted once (<see cref="Account.MaxUsed"/>)
-/// — for the device's own account, the tensors placed between one session call's end on the device
-/// and the next. A request no kept block serves hands back the blocks kept longest, as many as the
-/// new block takes the account past that mark — on a card as the call that asked ends, since
-/// handing a block back there waits for the card. So a loop whose calls repeat finds every block it
-/// needs kept, and an account fed one shape after another holds what its busiest call used rather
-/// than a block of every class it ever saw. The price is a block from the device for each request
-/// of a shape it no longer keeps blocks for, where an arena would carve one out of a larger free
-/// region. On the host, where a fresh block would take the account past its mark, a kept block of
-/// pages larger than the request serves it instead, the pages past the request going back to the
-/// system (<see cref="HostPages.Trim"/>): what it keeps is warm, where a fresh block's pages are each
-/// zeroed as they are first touched. What is kept also goes back when a run that
-/// hands back its memory ends (<see cref="ReleaseCached(Account)"/>), when a session closes,
-/// before an account would refuse an allocation for want of room, before the device would refuse
-/// one, and when the program asks (<see cref="ReleaseEverywhere"/>).</para>
+/// <para><b>Where a block's memory comes from.</b> A request is rounded up to a size class
+/// (<see cref="ClassOf"/>), and the class decides:</para>
+/// <list type="bullet">
+/// <item>on the host, a block under 64 KiB is an allocation of its own from the C runtime's heap; a
+/// larger one, a multiple of 64 KiB, is carved from its account's <see cref="Arena"/> of host pages
+/// (<see cref="HostMemory"/>);</item>
+/// <item>on a card whose driver offers virtual memory management, a block under a mebibyte is carved
+/// from the card's arena of small blocks, which every account shares, packed into the card's 2 MiB
+/// granules as the CUDA runtime packs small blocks into its pages; a larger one, a whole number of
+/// granules, from its account's arena of granules (<see cref="CardMemory"/>);</item>
+/// <item>on a card whose driver does not, every block is a <c>cudaMalloc</c> of its own.</item>
+/// </list>
+/// <para>An account's arena reserves address space with no memory behind it and commits a granule as
+/// a block is carved over it. A block let go of stays carved and is kept for the next request of its
+/// class, so a loop's runs find their blocks waiting with no work at all; a request of a class no
+/// kept block serves is carved from what the arena keeps committed, whatever block it was carved for
+/// before, so a session fed one shape after another reuses warm memory as an arena does, rather than
+/// taking every new size from the system. No two blocks of an account's arena share a granule, so a
+/// block kept alive holds its own granules and nothing else of the arena's.</para>
+///
+/// <para><b>What an account keeps.</b> An account never holds from the device more than the most
+/// one of its calls has used: the blocks it had in use as the call began and every block the call
+/// was handed, each counted once (<see cref="Account.MaxUsed"/>) — for the device's own account, the
+/// tensors placed between one session call's end on the device and the next. Where a request would
+/// take it past that mark, the kept blocks give way first, longest kept first, their memory staying
+/// committed for the request to be carved from; what is still over the mark is shed, the granules
+/// idle longest handed back first — at once on the host, and on a card as the call that asked ends,
+/// since a granule must not go back while work the card has in hand may read it. What is kept also
+/// goes back when a run that hands back its memory ends (<see cref="ReleaseCached(Account)"/>), when
+/// a session closes, before an account would refuse an allocation for want of room, before the
+/// device would refuse one, and when the program asks (<see cref="ReleaseEverywhere"/>).</para>
 ///
 /// <para><b>Accounts.</b> What a session allocates is charged to its <see cref="Account"/>: the
 /// thread building or running it charges that account for the length of the call
@@ -74,6 +85,13 @@ internal sealed unsafe class CachingAllocator
     /// <summary>The key the host's allocator is held under, beside the CUDA devices'.</summary>
     private const int Host = -1;
 
+    /// <summary>On the host, the smallest class carved from an account's arena: its granule.</summary>
+    private const long HostArenaFrom = 64L << 10;
+
+    /// <summary>On a card, the smallest class carved from an account's arena of whole granules
+    /// rather than the card's arena of small blocks.</summary>
+    private const long CardArenaFrom = 1L << 20;
+
     private static readonly object _registryGate = new();
     private static readonly Dictionary<int, CachingAllocator> _byDevice = [];
 
@@ -94,24 +112,130 @@ internal sealed unsafe class CachingAllocator
 
     private readonly int _device;
     private readonly object _gate = new();
-    private readonly Dictionary<IntPtr, Block> _blocks = [];
+    private readonly BlockTable _blocks = new();
     private readonly HashSet<IntPtr> _runtimes = [];
 
+    // What the device's arenas are backed by -- host pages, or the card's granules -- or null on a
+    // card whose driver offers no virtual memory management; and on such a card, the arena of small
+    // blocks every account carves from.
+    private readonly ArenaBacking? _backing;
+    private readonly Arena? _small;
+
+    /// <summary>Where a block's memory came from, which is where it goes back to.</summary>
+    internal enum Source : byte
+    {
+        /// <summary>An allocation of its own: the C runtime's heap, or <c>cudaMalloc</c>.</summary>
+        Own,
+
+        /// <summary>Carved from its account's arena.</summary>
+        Arena,
+
+        /// <summary>Carved from the card's arena of small blocks.</summary>
+        Small,
+    }
+
     /// <summary>What a block is: its size class, what was asked for, the account it is charged to,
-    /// and whether that account has handed it over (<see cref="HandOver"/>).</summary>
+    /// where its memory came from, the account's call it was last counted in, and whether that
+    /// account has handed it over (<see cref="HandOver"/>).</summary>
     private struct Block
     {
         internal long Size;
         internal long Requested;
         internal Account Account;
+        internal long Call;
+        internal Source Source;
         internal bool HandedOver;
+    }
+
+    /// <summary>
+    /// The blocks out, by address: open addressing with linear probing and backward-shift deletion,
+    /// which hands a block in and out with a hash and a probe or two and no allocation.
+    /// </summary>
+    private sealed class BlockTable
+    {
+        private IntPtr[] _keys = new IntPtr[256];
+        private Block[] _values = new Block[256];
+        private int _count;
+
+        private int Slot(IntPtr key) => (int)(((ulong)key >> 6) * 0x9E3779B97F4A7C15UL >> 40) & (_keys.Length - 1);
+
+        internal void Add(IntPtr key, in Block value)
+        {
+            if ((_count + 1) * 2 > _keys.Length) Grow();
+            var mask = _keys.Length - 1;
+            var i = Slot(key);
+            while (_keys[i] != IntPtr.Zero && _keys[i] != key) i = (i + 1) & mask;
+            if (_keys[i] == IntPtr.Zero) _count++;
+            _keys[i] = key;
+            _values[i] = value;
+        }
+
+        internal ref Block Find(IntPtr key)
+        {
+            var mask = _keys.Length - 1;
+            for (var i = Slot(key); _keys[i] != IntPtr.Zero; i = (i + 1) & mask)
+                if (_keys[i] == key) return ref _values[i];
+            return ref Unsafe.NullRef<Block>();
+        }
+
+        internal bool Remove(IntPtr key, out Block value)
+        {
+            var mask = _keys.Length - 1;
+            var i = Slot(key);
+            while (_keys[i] != key)
+            {
+                if (_keys[i] == IntPtr.Zero)
+                {
+                    value = default;
+                    return false;
+                }
+                i = (i + 1) & mask;
+            }
+            value = _values[i];
+            // Each later entry of the run that could no longer be found moves into the gap.
+            for (var j = (i + 1) & mask; _keys[j] != IntPtr.Zero; j = (j + 1) & mask)
+            {
+                var home = Slot(_keys[j]);
+                var reachable = i <= j ? home > i && home <= j : home > i || home <= j;
+                if (reachable) continue;
+                _keys[i] = _keys[j];
+                _values[i] = _values[j];
+                i = j;
+            }
+            _keys[i] = IntPtr.Zero;
+            _values[i] = default;
+            _count--;
+            return true;
+        }
+
+        private void Grow()
+        {
+            var keys = _keys;
+            var values = _values;
+            _keys = new IntPtr[keys.Length * 2];
+            _values = new Block[keys.Length * 2];
+            _count = 0;
+            for (var i = 0; i < keys.Length; i++)
+                if (keys[i] != IntPtr.Zero) Add(keys[i], values[i]);
+        }
     }
 
     private CachingAllocator(int device)
     {
         _device = device;
+        if (device == Host)
+            _backing = HostMemory.Supported ? HostMemory.Instance : null;
+        else if (CardMemory.For(device) is { } card)
+        {
+            _backing = card;
+            _small = new Arena(card, unit: 512, chunkBytes: 256L << 20);
+        }
         Placements = new Account(this, "placements");
-        State = GCHandle.ToIntPtr(GCHandle.Alloc(this));
+        lock (_registryGate)
+        {
+            _states.Add(this);
+            State = _states.Count;
+        }
     }
 
     /// <summary>The handle the native allocator passes back to the entry points, naming this
@@ -147,7 +271,19 @@ internal sealed unsafe class CachingAllocator
 
     // ---- the entry points the native allocator forwards to ----
 
-    private static CachingAllocator Of(IntPtr state) => (CachingAllocator)GCHandle.FromIntPtr(state).Target!;
+    // Every allocator made, the one a native allocator names by its state at index state - 1: an
+    // index rather than a handle, so the entry points find it with one read.
+    private static readonly List<CachingAllocator> _states = [];
+    private static CachingAllocator[] _byState = [];
+
+    private static CachingAllocator Of(IntPtr state)
+    {
+        var all = Volatile.Read(ref _byState);
+        var index = (int)state - 1;
+        if ((uint)index < (uint)all.Length) return all[index];
+        lock (_registryGate) Volatile.Write(ref _byState, [.. _states]);
+        return _byState[index];
+    }
 
     /// <summary>
     /// A block of <paramref name="size"/> bytes, or null with the reason written into
@@ -197,13 +333,33 @@ internal sealed unsafe class CachingAllocator
 
     // ---- sizes ----
 
-    /// <summary>The size class <paramref name="bytes"/> is served from: a multiple of 512 bytes up
-    /// to a mebibyte, and above it a multiple of an eighth of the power of two below.</summary>
+    /// <summary>The size class <paramref name="bytes"/> is served from on the host: a multiple of
+    /// 512 bytes under 64 KiB, and of 64 KiB, the host arena's granule, from there.</summary>
     internal static long SizeClass(long bytes)
+        => bytes < HostArenaFrom ? (bytes + 511) & ~511L : (bytes + HostArenaFrom - 1) & ~(HostArenaFrom - 1);
+
+    /// <summary>
+    /// The size class <paramref name="bytes"/> is served from on this device: on the host
+    /// <see cref="SizeClass"/>; on a card with arenas a multiple of 512 bytes under a mebibyte, and a
+    /// whole number of granules from there; on a card without, a multiple of 512 bytes up to a
+    /// mebibyte, and above it of an eighth of the power of two below.
+    /// </summary>
+    internal long ClassOf(long bytes)
     {
+        if (!OnCard) return SizeClass(bytes);
+        if (_backing is { } card)
+            return bytes < CardArenaFrom ? (bytes + 511) & ~511L : (bytes + card.Granule - 1) / card.Granule * card.Granule;
         if (bytes <= 1L << 20) return (bytes + 511) & ~511L;
         var step = 1L << (63 - BitOperations.LeadingZeroCount((ulong)bytes) - 3);
         return (bytes + step - 1) & ~(step - 1);
+    }
+
+    /// <summary>Where a block of class <paramref name="size"/> comes from on this device.</summary>
+    private Source SourceOf(long size)
+    {
+        if (_backing is null) return Source.Own;
+        if (!OnCard) return size < HostArenaFrom ? Source.Own : Source.Arena;
+        return size < CardArenaFrom ? Source.Small : Source.Arena;
     }
 
     // ---- allocation ----
@@ -225,36 +381,26 @@ internal sealed unsafe class CachingAllocator
         if (bytes <= 0) return IntPtr.Zero;
         var scope = t_scope;
         var account = scope?.AccountOn(this) ?? Placements;
-        var size = SizeClass(bytes);
+        var size = ClassOf(bytes);
+        var source = SourceOf(size);
         List<(IntPtr, long)>? release = null;
-        long trimmed = 0;
-        IntPtr block = IntPtr.Zero;
+        var carved = IntPtr.Zero;
         lock (_gate)
         {
-            if ((scope is not null && scope.TakeHeld(account, size, out var held)) || account.TakeCached(size, out held))
-                return Hand(held, size, bytes, account);
             if (account == Placements) BeginPlacementsCall();
-            // What a fresh block would take the account past the most one of its calls has used,
-            // this one with the block included.
-            var excess = account.InUse + account.Cached + account.Held + size
-                         - Math.Max(account.MaxUsed, account.Used + size);
-            // On the host, where it would, a kept block of pages larger than asked serves the request
-            // instead: the pages past the request go back to the system, and those it keeps are the
-            // process's already, warm, where a fresh block's would each be zeroed as first touched.
-            if (excess > 0 && !OnCard && HostPages.Serve(size) && account.TakeLarger(size, out held, out trimmed))
-                block = Hand(held, size, bytes, account);
-            // A fresh block: what the account kept longest goes back, as much as the excess. On a
-            // card, as the call charging the account ends (Scope.End), where one does: handing a
-            // block back waits for the card, which mid-run would stall the run's queued work.
-            else
-                release = OnCard && scope is not null && scope.Charges(account) ? [] : account.Shed(excess);
-            if (block == IntPtr.Zero && account.LimitUnderLock is { } limit && account.Charged + account.Cached + account.Held + size > limit)
+            if (scope is not null && scope.TakeHeld(account, size, out var held, out var call))
+                return Hand(held, size, bytes, account, source, call);
+            if (account.TakeKept(size, out held, out call))
+                return Hand(held, size, bytes, account, source, call);
+            // What the account would hold from the device with one more block of this class.
+            var excess = account.HeldBytes + size - Math.Max(account.MaxUsed, account.Used + size);
+            if (account.LimitUnderLock is { } limit && account.Charged + account.KeptBytes + size > limit)
             {
-                // What it keeps goes back first -- cached, and on a card what this call let go of,
-                // which handing back waits for the stream to be done with -- and then only what it
-                // has out counts.
-                release!.AddRange(account.EmptyCache());
-                if (scope is not null) release.AddRange(scope.EmptyHeld(account));
+                // Under a budget what it keeps goes back first -- kept, and on a card what this call
+                // let go of, which handing back waits for the card to be done with -- and then only
+                // what it has out counts.
+                if (OnCard) CudaRuntime.Synchronize(_device);
+                release = ShedAll(account, scope);
                 if (account.Charged + size > limit)
                 {
                     account.Refusals++;
@@ -263,38 +409,87 @@ internal sealed unsafe class CachingAllocator
                         + $"(DeviceMemorySettings.LimitBytes) leaves its run, and it holds {account.Charged}.";
                 }
             }
-        }
-        if (block != IntPtr.Zero)
-        {
-            HostPages.Trim(block, size, trimmed);
-            return block;
+            if (refusal is null && source != Source.Own)
+            {
+                carved = CarveFor(account, size, source, excess);
+                if (carved == IntPtr.Zero)
+                {
+                    // The device is full: what is kept anywhere on it goes back -- on a card once the
+                    // card is done with it -- and the request is tried once more.
+                    if (OnCard) CudaRuntime.Synchronize(_device);
+                    ReleaseEverythingCachedUnderLock(release ??= []);
+                    carved = CarveFor(account, size, source, excess: 0);
+                }
+                if (carved == IntPtr.Zero)
+                {
+                    account.Refusals++;
+                    refusal = Refusal(bytes);
+                }
+                else
+                {
+                    account.Blocks++;
+                    Hand(carved, size, bytes, account, source, call: -1);
+                    // On the host what is over the account's mark goes back at once; on a card as the
+                    // call charging the account ends (Scope.End), where one does.
+                    if (!OnCard || scope is null || !scope.Charges(account))
+                        (release ??= []).AddRange(Shed(account, account.HeldBytes - account.Bound));
+                }
+            }
+            else if (refusal is null && (!OnCard || scope is null || !scope.Charges(account)))
+                (release ??= []).AddRange(Shed(account, excess));
         }
         Release(release);
+        if (carved != IntPtr.Zero) return carved;
         if (refusal is not null) return IntPtr.Zero;
-        block = Fresh(size);
-        if (block == IntPtr.Zero)
+        var own = Fresh(size);
+        if (own == IntPtr.Zero)
         {
             // The device is full: what is kept anywhere on it goes back, and the request is tried
             // once more.
             ReleaseEverythingCached();
-            block = Fresh(size);
-            if (block == IntPtr.Zero)
+            own = Fresh(size);
+            if (own == IntPtr.Zero)
             {
                 lock (_gate) account.Refusals++;
-                refusal = OnCard
-                    ? $"Failed to allocate {bytes} bytes {Where}: the card has no such block free "
-                      + $"(cudaMalloc refused it), with everything {Allocator} kept for reuse handed back."
-                    : $"Failed to allocate {bytes} bytes {Where}: the process could not commit that much "
-                      + "more (a bad allocation).";
+                refusal = Refusal(bytes);
                 return IntPtr.Zero;
             }
         }
         lock (_gate)
         {
             account.Blocks++;
-            return Hand(block, size, bytes, account);
+            return Hand(own, size, bytes, account, Source.Own, call: -1);
         }
     }
+
+    /// <summary>
+    /// A block of class <paramref name="size"/> carved from where <paramref name="source"/> says: the
+    /// card's arena of small blocks, or the account's own arena — from what it keeps committed where
+    /// that fits; where nothing does and a new granule would take the account past its mark
+    /// (<paramref name="excess"/> over zero), from what its kept blocks of that arena give way to,
+    /// longest kept first; and only then over granules committed for it. Zero where the device has no
+    /// memory for it.
+    /// </summary>
+    private IntPtr CarveFor(Account account, long size, Source source, long excess)
+    {
+        if (source == Source.Small) return _small!.Carve(size, mayCommit: true);
+        var arena = account.Arena ??= new Arena(_backing!, unit: OnCard ? _backing!.Granule : HostArenaFrom,
+            chunkBytes: OnCard ? 1L << 30 : 256L << 20);
+        var block = arena.Carve(size, mayCommit: false);
+        while (block == IntPtr.Zero && excess > 0 && account.GiveWayOldest(Source.Arena, out var kept, out var keptSize))
+        {
+            Uncarved(account, kept, keptSize, Source.Arena);
+            block = arena.Carve(size, mayCommit: false);
+        }
+        return block != IntPtr.Zero ? block : arena.Carve(size, mayCommit: true);
+    }
+
+    /// <summary>The words a request the device has no memory for is refused in.</summary>
+    private string Refusal(long bytes) => OnCard
+        ? $"Failed to allocate {bytes} bytes {Where}: the card has no such block free "
+          + $"(cudaMalloc refused it), with everything {Allocator} kept for reuse handed back."
+        : $"Failed to allocate {bytes} bytes {Where}: the process could not commit that much "
+          + "more (a bad allocation).";
 
     // How many session calls on this device have ended, which divides what is placed on it into
     // calls of its own (BeginPlacementsCall).
@@ -320,12 +515,16 @@ internal sealed unsafe class CachingAllocator
     private string Allocator => OnCard ? "Shorokoo's cuda_allocator" : "Shorokoo's host allocator";
 
     /// <summary>Records <paramref name="block"/> as handed to <paramref name="account"/>, and as used
-    /// by the account's call.</summary>
-    private IntPtr Hand(IntPtr block, long size, long requested, Account account)
+    /// by the account's call where it was not counted in it already (<paramref name="call"/> is the
+    /// call it was last counted in).</summary>
+    private IntPtr Hand(IntPtr block, long size, long requested, Account account, Source source, long call)
     {
-        _blocks[block] = new Block { Size = size, Requested = requested, Account = account };
-        if (account == Placements) BeginPlacementsCall();
-        account.Use(block, size);
+        if (call != account.CallNumber)
+        {
+            account.Used += size;
+            if (account.Used > account.MaxUsed) account.MaxUsed = account.Used;
+        }
+        _blocks.Add(block, new Block { Size = size, Requested = requested, Account = account, Source = source, Call = account.CallNumber });
         account.InUse += size;
         account.Requested += requested;
         account.Allocations++;
@@ -335,19 +534,19 @@ internal sealed unsafe class CachingAllocator
     }
 
     /// <summary>
-    /// Takes <paramref name="pointer"/> back from whoever had it: into the cache of the account it
-    /// was charged to, or, on a card, held for the call this thread is making for that account,
-    /// whose stream may still read it, until the call ends. A block of an account that has closed
-    /// goes back to the device: nothing is left to reuse it.
+    /// Takes <paramref name="pointer"/> back from whoever had it: kept for its account's next request
+    /// of its class, or, on a card, held for the call this thread is making for that account, whose
+    /// stream may still read it, until the call ends. A block of an account that has closed goes back:
+    /// nothing is left to reuse it.
     /// </summary>
     internal void Free(IntPtr pointer)
     {
         if (pointer == IntPtr.Zero) return;
         var scope = t_scope;
-        Block block;
+        List<(IntPtr, long)>? release = null;
         lock (_gate)
         {
-            if (!_blocks.Remove(pointer, out block)) return;
+            if (!_blocks.Remove(pointer, out var block)) return;
             var account = block.Account;
             account.InUse -= block.Size;
             account.Requested -= block.Requested;
@@ -355,15 +554,38 @@ internal sealed unsafe class CachingAllocator
             if (!account.Closed)
             {
                 if (OnCard && scope is not null && scope.Charges(account))
-                    scope.Hold(account, pointer, block.Size);
+                    scope.Hold(account, pointer, block.Size, block.Source, block.Call);
                 else
-                    account.Cache(pointer, block.Size);
+                    account.Keep(pointer, block.Size, block.Source, block.Call);
                 return;
             }
             account.Blocks--;
-            account.Shrinkages++;
+            release = GoneFromClosed(account, pointer, block.Size, block.Source);
         }
-        Release([(pointer, block.Size)]);
+        Release(release);
+    }
+
+    /// <summary>A block of closed <paramref name="account"/> let go of: back where it came from, and
+    /// the account's arena released once it holds nothing. Under the lock; what is of its own is
+    /// answered for the caller to release outside it.</summary>
+    private List<(IntPtr, long)>? GoneFromClosed(Account account, IntPtr block, long size, Source source)
+    {
+        switch (source)
+        {
+            case Source.Own:
+                account.Shrinkages++;
+                return [(block, size)];
+            case Source.Small:
+                _small!.Uncarve(block, size);
+                ShedSmall();
+                return null;
+            default:
+                account.Arena!.Uncarve(block, size);
+                account.Shrinkages++;
+                if (account.Arena.IsEmpty) account.Arena.ReleaseEmptyChunks();
+                else account.Arena.DecommitAll(out _);
+                return null;
+        }
     }
 
     /// <summary>
@@ -376,7 +598,7 @@ internal sealed unsafe class CachingAllocator
     {
         lock (_gate)
         {
-            ref var block = ref CollectionsMarshal.GetValueRefOrNullRef(_blocks, pointer);
+            ref var block = ref _blocks.Find(pointer);
             if (Unsafe.IsNullRef(ref block) || block.Account != account || block.HandedOver) return false;
             block.HandedOver = true;
             account.HandedOver += block.Size;
@@ -384,17 +606,11 @@ internal sealed unsafe class CachingAllocator
         }
     }
 
-    /// <summary>
-    /// A block from the device itself, or null where it has not that much free. On the host, a
-    /// block of <see cref="HostPages.From"/> or more is pages of its own from the operating system,
-    /// which go back to it whole when the block is handed back: a C runtime's heap serves such a
-    /// block out of memory it keeps for itself once the block is freed, so the process would go on
-    /// holding what this allocator had handed back.
-    /// </summary>
+    /// <summary>A block of its own from the device itself, or null where it has not that much
+    /// free.</summary>
     private IntPtr Fresh(long size)
     {
         if (OnCard) return CudaRuntime.Allocate(_device, size);
-        if (HostPages.Serve(size)) return HostPages.Allocate(size);
         try
         {
             // Sixty-four bytes, as ONNX Runtime aligns its own host blocks for its kernels.
@@ -406,46 +622,133 @@ internal sealed unsafe class CachingAllocator
         }
     }
 
-    /// <summary>Hands <paramref name="blocks"/>, each with its size class, back to the device.
-    /// Outside the lock: on a card each waits for the work the card has in hand.</summary>
+    /// <summary>Hands <paramref name="blocks"/> of their own, each with its size class, back to the
+    /// device. Outside the lock: on a card each waits for the work the card has in hand.</summary>
     private void Release(List<(IntPtr Block, long Size)>? blocks)
     {
         if (blocks is null) return;
-        foreach (var (block, size) in blocks)
+        foreach (var (block, _) in blocks)
         {
             if (OnCard) CudaRuntime.Release(_device, block);
-            else if (HostPages.Serve(size)) HostPages.Release(block, size);
             else NativeMemory.AlignedFree((void*)block);
         }
     }
 
+    // ---- shedding ----
+
     /// <summary>
-    /// Hands back to the device what <paramref name="account"/> and <see cref="Placements"/> hold
-    /// cached: what a run that hands its memory back does as it ends.
+    /// Brings what <paramref name="account"/> holds from the device down by <paramref name="excess"/>
+    /// where it can: the granules of its arena no block is over, idle longest first; then its kept
+    /// blocks, longest kept first, their granules handed back as they come free. Under the lock;
+    /// blocks of their own are answered for the caller to release outside it.
+    /// </summary>
+    private List<(IntPtr, long)> Shed(Account account, long excess)
+    {
+        List<(IntPtr, long)> release = [];
+        if (excess <= 0) return release;
+        if (account.Arena is { } arena)
+        {
+            excess -= arena.Decommit(excess, out var runs);
+            account.Shrinkages += runs;
+        }
+        while (excess > 0 && account.GiveWayOldest(null, out var block, out var size, out var from))
+        {
+            switch (from)
+            {
+                case Source.Own:
+                    release.Add((block, size));
+                    account.Shrinkages++;
+                    excess -= size;
+                    break;
+                case Source.Small:
+                    Uncarved(account, block, size, from);
+                    excess -= size;
+                    break;
+                default:
+                    Uncarved(account, block, size, from);
+                    excess -= account.Arena!.Decommit(excess, out var runs);
+                    account.Shrinkages += runs;
+                    break;
+            }
+        }
+        if (account.Arena is { } shed && excess > 0)
+        {
+            excess -= shed.Decommit(excess, out var runs);
+            account.Shrinkages += runs;
+        }
+        ShedSmall();
+        return release;
+    }
+
+    /// <summary>Everything <paramref name="account"/> keeps, and on a card what the call
+    /// <paramref name="scope"/> holds for it, back to the device. Under the lock.</summary>
+    private List<(IntPtr, long)> ShedAll(Account account, Scope? scope)
+    {
+        if (scope is not null)
+            foreach (var (block, size, source, call) in scope.TakeAllHeld(account))
+                account.Keep(block, size, source, call);
+        var release = Shed(account, long.MaxValue);
+        account.Arena?.DecommitAll(out _);
+        return release;
+    }
+
+    /// <summary>A kept block of <paramref name="account"/>'s carved back into the arena it came from,
+    /// its memory staying committed there.</summary>
+    private void Uncarved(Account account, IntPtr block, long size, Source source)
+    {
+        if (source == Source.Small) _small!.Uncarve(block, size);
+        else account.Arena!.Uncarve(block, size);
+    }
+
+    /// <summary>The card's arena of small blocks keeps at most a few granules no block is over.</summary>
+    private void ShedSmall()
+    {
+        if (_small is null) return;
+        var spare = _small.IdleBytes - 2 * _small.Granule;
+        if (spare > 0) _small.Decommit(spare, out _);
+    }
+
+    /// <summary>
+    /// Hands back to the device what <paramref name="account"/> and <see cref="Placements"/> keep:
+    /// what a run that hands its memory back does as it ends.
     /// </summary>
     internal void ReleaseCached(Account account)
     {
         List<(IntPtr, long)> release;
         lock (_gate)
         {
-            release = account.EmptyCache();
-            release.AddRange(Placements.EmptyCache());
+            release = ShedAll(account, scope: null);
+            release.AddRange(ShedAll(Placements, scope: null));
+            _small?.DecommitAll(out _);
         }
         Release(release);
     }
 
-    /// <summary>Hands back everything cached on the device, in every account still open, and
-    /// answers how many bytes that was.</summary>
+    /// <summary>Hands back everything kept on the device, in every account still open, and answers
+    /// how many bytes that was.</summary>
     private long ReleaseEverythingCached()
     {
         List<(IntPtr Block, long Size)> release = [];
-        lock (_gate)
-        {
-            foreach (var account in _accounts)
-                release.AddRange(account.EmptyCache());
-        }
+        long bytes;
+        lock (_gate) bytes = ReleaseEverythingCachedUnderLock(release);
         Release(release);
-        return release.Sum(block => block.Size);
+        return bytes;
+    }
+
+    /// <summary><see cref="ReleaseEverythingCached"/>, under the lock, blocks of their own added to
+    /// <paramref name="release"/>.</summary>
+    private long ReleaseEverythingCachedUnderLock(List<(IntPtr, long)> release)
+    {
+        long before = 0, after = 0;
+        foreach (var account in _accounts)
+        {
+            before += account.HeldBytes - account.InUse;
+            release.AddRange(ShedAll(account, scope: null));
+            after += account.HeldBytes - account.InUse;
+        }
+        var smallBefore = _small?.IdleBytes ?? 0;
+        _small?.DecommitAll(out _);
+        return before - after + smallBefore;
     }
 
     /// <summary>
@@ -476,7 +779,8 @@ internal sealed unsafe class CachingAllocator
             if (account.Closed) return;
             account.Closed = true;
             _accounts.Remove(account);
-            release = account.EmptyCache();
+            release = ShedAll(account, scope: null);
+            if (account.Arena is { IsEmpty: true } arena) arena.ReleaseEmptyChunks();
         }
         Release(release);
     }
@@ -496,7 +800,7 @@ internal sealed unsafe class CachingAllocator
                 ArenaExtensionCount: account.Blocks,
                 ArenaShrinkageCount: account.Shrinkages,
                 ReserveCount: 0,
-                TotalAllocatedBytes: account.InUse + account.Cached + account.Held,
+                TotalAllocatedBytes: account.HeldBytes,
                 RequestedInUseBytes: account.Requested);
         }
     }
@@ -519,7 +823,7 @@ internal sealed unsafe class CachingAllocator
         internal string Name { get; }
 
         /// <summary>
-        /// The most this account may have out and cached, not counting what it has handed over; null
+        /// The most this account may have out and kept, not counting what it has handed over; null
         /// for no limit. Set before a run by the device-memory budget the run is under.
         /// </summary>
         internal long? Limit
@@ -546,6 +850,24 @@ internal sealed unsafe class CachingAllocator
         internal long Refusals;
         internal bool Closed;
 
+        /// <summary>The account's own arena, made as its first block of an arena's class is asked
+        /// for.</summary>
+        internal Arena? Arena;
+
+        /// <summary>What counts against <see cref="Limit"/> of what is out: all of it but what was
+        /// handed over.</summary>
+        internal long Charged => InUse - HandedOver;
+
+        /// <summary>What the account keeps beyond what it has out: kept blocks, blocks a call holds,
+        /// and its arena's committed granules no block is over.</summary>
+        internal long KeptBytes => Cached + Held + (Arena?.IdleBytes ?? 0);
+
+        /// <summary>What the account holds from the device: what it has out, and what it keeps.</summary>
+        internal long HeldBytes => InUse + KeptBytes;
+
+        /// <summary>The most it may hold from the device: the most one of its calls has used.</summary>
+        internal long Bound => MaxUsed;
+
         /// <summary>What the account's current call has used: what it had in use as the call
         /// began, and every block the call was handed, each counted once.</summary>
         internal long Used;
@@ -556,103 +878,138 @@ internal sealed unsafe class CachingAllocator
         /// </summary>
         internal long MaxUsed;
 
-        // The blocks counted in Used, the calls charging the account now, and for the device's own
-        // account how many session calls had ended on the device when its call began.
-        private readonly HashSet<IntPtr> _used = [];
+        /// <summary>The number of the account's current call: a block handed to it carries the
+        /// call it was counted in, so it is counted in a call once.</summary>
+        internal long CallNumber;
+
+        // The calls charging the account now, and for the device's own account how many session calls
+        // had ended on the device when its call began.
         internal int Calls;
         internal long CallsSeen;
 
         /// <summary>A call begins: what is in use now is what it starts out using.</summary>
         internal void BeginCall()
         {
+            CallNumber++;
             Used = InUse;
-            _used.Clear();
         }
 
-        /// <summary><paramref name="block"/>, of <paramref name="size"/>, is handed to the account's
-        /// call.</summary>
-        internal void Use(IntPtr block, long size)
-        {
-            if (!_used.Add(block)) return;
-            Used += size;
-            if (Used > MaxUsed) MaxUsed = Used;
-        }
-
-        /// <summary>What counts against <see cref="Limit"/> of what is out: all of it but what was
-        /// handed over.</summary>
-        internal long Charged => InUse - HandedOver;
-
-        // The blocks kept for reuse, by size class, each list oldest first; a class with none is
-        // not here. Each block carries when it was kept, by _clock.
-        private readonly Dictionary<long, LinkedList<(IntPtr Block, long Kept)>> _kept = [];
+        // The blocks kept for reuse, by size class -- those up to 64 KiB by the class's index, the rest
+        // by size; each class's oldest first, each block with when it was kept (_clock), where its
+        // memory came from, and the call it was last counted in.
+        private readonly Kept?[] _small = new Kept?[129];
+        private readonly Dictionary<long, Kept> _kept = [];
         private long _clock;
+        private long _keptCount;
 
-        internal void Cache(IntPtr block, long size)
+        /// <summary>The blocks of one size class kept for reuse, in the order they were kept.</summary>
+        private sealed class Kept
         {
-            if (!_kept.TryGetValue(size, out var blocks)) _kept[size] = blocks = new();
-            blocks.AddLast((block, ++_clock));
-            Cached += size;
+            internal (IntPtr Block, long Since, long Call, Source Source)[] Items = new (IntPtr, long, long, Source)[4];
+            internal int Head;
+            internal int Count;
+
+            internal void Push((IntPtr, long, long, Source) item)
+            {
+                if (Count == Items.Length)
+                {
+                    var grown = new (IntPtr, long, long, Source)[Items.Length * 2];
+                    for (var i = 0; i < Count; i++) grown[i] = Items[(Head + i) & (Items.Length - 1)];
+                    Items = grown;
+                    Head = 0;
+                }
+                Items[(Head + Count) & (Items.Length - 1)] = item;
+                Count++;
+            }
+
+            internal (IntPtr Block, long Since, long Call, Source Source) PopNewest()
+            {
+                Count--;
+                return Items[(Head + Count) & (Items.Length - 1)];
+            }
+
+            internal (IntPtr Block, long Since, long Call, Source Source) PopOldest()
+            {
+                var item = Items[Head];
+                Head = (Head + 1) & (Items.Length - 1);
+                Count--;
+                return item;
+            }
+
+            internal long OldestSince => Items[Head].Since;
         }
 
-        /// <summary>The block of <paramref name="size"/> kept last, if one is kept.</summary>
-        internal bool TakeCached(long size, out IntPtr block)
+        /// <summary>The kept blocks of class <paramref name="size"/>, made where
+        /// <paramref name="make"/> asks and there are none yet.</summary>
+        private Kept? ClassOf(long size, bool make)
         {
-            if (_kept.TryGetValue(size, out var blocks))
+            if (size <= 64L << 10)
             {
-                block = blocks.Last!.Value.Block;
-                blocks.RemoveLast();
-                if (blocks.Count == 0) _kept.Remove(size);
+                var index = (int)(size >> 9);
+                return _small[index] ?? (make ? _small[index] = new Kept() : null);
+            }
+            if (_kept.TryGetValue(size, out var kept)) return kept;
+            return make ? _kept[size] = new Kept() : null;
+        }
+
+        internal void Keep(IntPtr block, long size, Source source, long call)
+        {
+            var kept = ClassOf(size, make: true)!;
+            kept.Push((block, ++_clock, call, source));
+            Cached += size;
+            _keptCount++;
+        }
+
+        /// <summary>The block of <paramref name="size"/> kept last, if one is kept, and the call it was
+        /// last counted in.</summary>
+        internal bool TakeKept(long size, out IntPtr block, out long call)
+        {
+            if (ClassOf(size, make: false) is { Count: > 0 } kept)
+            {
+                (block, _, call, _) = kept.PopNewest();
                 Cached -= size;
+                _keptCount--;
                 return true;
             }
             block = IntPtr.Zero;
+            call = -1;
             return false;
         }
 
-        /// <summary>The smallest kept block of pages larger than <paramref name="size"/>, if one is
-        /// kept, taken out of the cache with its size class in <paramref name="larger"/>.</summary>
-        internal bool TakeLarger(long size, out IntPtr block, out long larger)
+        /// <summary>The block kept longest — of <paramref name="source"/>, or of any where it is
+        /// null — taken out to give way, with its class and where its memory came from.</summary>
+        internal bool GiveWayOldest(Source? source, out IntPtr block, out long size, out Source from)
         {
-            larger = 0;
-            foreach (var kept in _kept.Keys)
-                if (kept > size && HostPages.Serve(kept) && (larger == 0 || kept < larger)) larger = kept;
-            if (larger != 0) return TakeCached(larger, out block);
             block = IntPtr.Zero;
-            return false;
-        }
-
-        /// <summary>The blocks kept longest, taken out of the cache until they come to at least
-        /// <paramref name="bytes"/> or none is left, for the caller to hand back.</summary>
-        internal List<(IntPtr, long)> Shed(long bytes)
-        {
-            List<(IntPtr, long)> blocks = [];
-            while (bytes > 0 && _kept.Count > 0)
+            size = 0;
+            from = Source.Own;
+            if (_keptCount == 0) return false;
+            Kept? oldest = null;
+            long oldestSize = 0;
+            void Consider(long classSize, Kept? kept)
             {
-                var (size, oldest) = _kept.MinBy(kept => kept.Value.First!.Value.Kept);
-                blocks.Add((oldest.First!.Value.Block, size));
-                oldest.RemoveFirst();
-                if (oldest.Count == 0) _kept.Remove(size);
-                Cached -= size;
-                bytes -= size;
+                if (kept is null || kept.Count == 0 || (source is { } wanted && kept.Items[kept.Head].Source != wanted)) return;
+                if (oldest is null || kept.OldestSince < oldest.OldestSince)
+                {
+                    oldest = kept;
+                    oldestSize = classSize;
+                }
             }
-            Shrinkages += blocks.Count;
-            Blocks -= blocks.Count;
-            return blocks;
+            for (var index = 1; index < _small.Length; index++) Consider((long)index << 9, _small[index]);
+            foreach (var (classSize, kept) in _kept) Consider(classSize, kept);
+            size = oldestSize;
+            if (oldest is null) return false;
+            (block, _, _, from) = oldest.PopOldest();
+            Cached -= size;
+            _keptCount--;
+            Blocks--;
+            return true;
         }
 
-        /// <summary>Every cached block, taken out of the cache, for the caller to hand back.</summary>
-        internal List<(IntPtr, long)> EmptyCache()
-        {
-            List<(IntPtr, long)> blocks = [];
-            foreach (var (size, kept) in _kept)
-                foreach (var (block, _) in kept)
-                    blocks.Add((block, size));
-            _kept.Clear();
-            Shrinkages += blocks.Count;
-            Blocks -= blocks.Count;
-            Cached = 0;
-            return blocks;
-        }
+        /// <summary><see cref="GiveWayOldest(Source?, out IntPtr, out long, out Source)"/> for blocks of
+        /// <paramref name="source"/>.</summary>
+        internal bool GiveWayOldest(Source source, out IntPtr block, out long size)
+            => GiveWayOldest(source, out block, out size, out _);
     }
 
     // ---- what a thread is charging ----
@@ -699,7 +1056,7 @@ internal sealed unsafe class CachingAllocator
     {
         internal Scope? Outer { get; } = outer;
 
-        private Dictionary<long, Stack<IntPtr>>? _held;
+        private Dictionary<long, Stack<(IntPtr Block, Source Source, long Call)>>? _held;
 
         internal Account? AccountOn(CachingAllocator allocator)
             => card is not null && card.Allocator == allocator ? card
@@ -710,50 +1067,51 @@ internal sealed unsafe class CachingAllocator
 
         /// <summary>Holds <paramref name="block"/>, which this call let go of, for its own reuse.
         /// Under the allocator's lock.</summary>
-        internal void Hold(Account account, IntPtr block, long size)
+        internal void Hold(Account account, IntPtr block, long size, Source source, long call)
         {
             _held ??= [];
-            if (!_held.TryGetValue(size, out var blocks)) _held[size] = blocks = new Stack<IntPtr>();
-            blocks.Push(block);
+            if (!_held.TryGetValue(size, out var blocks)) _held[size] = blocks = new();
+            blocks.Push((block, source, call));
             account.Held += size;
         }
 
         /// <summary>Every block this call let go of for <paramref name="account"/>, taken out of its
-        /// hold for the caller to hand back. Under the allocator's lock.</summary>
-        internal List<(IntPtr, long)> EmptyHeld(Account account)
+        /// hold. Under the allocator's lock.</summary>
+        internal List<(IntPtr Block, long Size, Source Source, long Call)> TakeAllHeld(Account account)
         {
-            List<(IntPtr, long)> blocks = [];
+            List<(IntPtr, long, Source, long)> blocks = [];
             if (account != card || _held is null) return blocks;
             foreach (var (size, held) in _held)
             {
-                foreach (var block in held)
+                foreach (var (block, source, call) in held)
                 {
-                    blocks.Add((block, size));
+                    blocks.Add((block, size, source, call));
                     account.Held -= size;
                 }
                 held.Clear();
             }
-            account.Shrinkages += blocks.Count;
-            account.Blocks -= blocks.Count;
             return blocks;
         }
 
         /// <summary>A block of <paramref name="size"/> this call let go of, if it holds one. Under the
         /// allocator's lock.</summary>
-        internal bool TakeHeld(Account account, long size, out IntPtr block)
+        internal bool TakeHeld(Account account, long size, out IntPtr block, out long call)
         {
-            if (account == card && _held is not null && _held.TryGetValue(size, out var blocks) && blocks.TryPop(out block))
+            if (account == card && _held is not null && _held.TryGetValue(size, out var blocks) && blocks.TryPop(out var held))
             {
                 account.Held -= size;
+                block = held.Block;
+                call = held.Call;
                 return true;
             }
             block = IntPtr.Zero;
+            call = -1;
             return false;
         }
 
-        /// <summary>The call is over, its stream done with what it held: into the cache, or back to
-        /// the device where the account has closed meanwhile; and each account sheds what it keeps
-        /// beyond the most one of its calls has used.</summary>
+        /// <summary>The call is over, its stream done with what it held: kept, or back to the device
+        /// where the account has closed meanwhile; and each account sheds what it holds beyond the
+        /// most one of its calls has used.</summary>
         internal void End()
         {
             if (card is not null) EndOn(card);
@@ -770,97 +1128,22 @@ internal sealed unsafe class CachingAllocator
                 allocator._callsEnded++;
                 if (account == card && _held is not null)
                 {
-                    foreach (var (size, blocks) in _held)
-                        foreach (var block in blocks)
+                    foreach (var (block, size, source, call) in TakeAllHeld(account))
+                    {
+                        if (!account.Closed)
                         {
-                            account.Held -= size;
-                            if (!account.Closed)
-                            {
-                                account.Cache(block, size);
-                                continue;
-                            }
-                            account.Blocks--;
-                            account.Shrinkages++;
-                            release.Add((block, size));
+                            account.Keep(block, size, source, call);
+                            continue;
                         }
+                        account.Blocks--;
+                        if (allocator.GoneFromClosed(account, block, size, source) is { } own) release.AddRange(own);
+                    }
                     _held = null;
                 }
                 if (!account.Closed)
-                    release.AddRange(account.Shed(account.InUse + account.Cached + account.Held - account.MaxUsed));
+                    release.AddRange(allocator.Shed(account, account.HeldBytes - account.Bound));
             }
             allocator.Release(release);
         }
     }
-}
-
-/// <summary>
-/// Host memory as pages of its own from the operating system, for the blocks of the host's
-/// <see cref="CachingAllocator"/> of <see cref="From"/> bytes or more: <c>VirtualAlloc</c> on
-/// Windows, <c>mmap</c> on Linux, each handed back whole. The pages are zeroed on their first touch.
-/// </summary>
-internal static partial class HostPages
-{
-    /// <summary>The smallest block served this way: the granularity Windows reserves address space
-    /// in, below which a C runtime's heap serves a block out of its own pages anyway.</summary>
-    internal const long From = 64L << 10;
-
-    /// <summary>Whether a block of <paramref name="size"/> is pages of its own.</summary>
-    internal static bool Serve(long size) => size >= From && (OperatingSystem.IsWindows() || OperatingSystem.IsLinux());
-
-    /// <summary><paramref name="size"/> bytes of fresh pages, or null where the system has not that
-    /// much to commit.</summary>
-    internal static IntPtr Allocate(long size)
-    {
-        if (OperatingSystem.IsWindows()) return VirtualAlloc(IntPtr.Zero, (nuint)size, MemCommit | MemReserve, PageReadWrite);
-        var pages = mmap(IntPtr.Zero, (nuint)size, ProtRead | ProtWrite, MapPrivate | MapAnonymous, -1, 0);
-        return pages == MapFailed ? IntPtr.Zero : pages;
-    }
-
-    /// <summary>
-    /// Hands back to the system the pages of the <paramref name="size"/>-byte block at
-    /// <paramref name="block"/> past its first <paramref name="kept"/> bytes, so that it is a block
-    /// of <paramref name="kept"/> from then on. On Windows its address range stays reserved, and goes
-    /// with it as <see cref="Release"/> releases the block.
-    /// </summary>
-    internal static void Trim(IntPtr block, long kept, long size)
-    {
-        var page = (long)Environment.SystemPageSize;
-        var keep = (kept + page - 1) / page * page;
-        var end = (size + page - 1) / page * page;
-        if (end <= keep) return;
-        if (OperatingSystem.IsWindows()) VirtualFree(block + (nint)keep, (nuint)(end - keep), MemDecommit);
-        else munmap(block + (nint)keep, (nuint)(end - keep));
-    }
-
-    /// <summary>Hands the <paramref name="size"/> bytes at <paramref name="block"/>, which
-    /// <see cref="Allocate"/> answered, back to the system.</summary>
-    internal static void Release(IntPtr block, long size)
-    {
-        if (OperatingSystem.IsWindows()) VirtualFree(block, 0, MemRelease);
-        else munmap(block, (nuint)size);
-    }
-
-    private const uint MemCommit = 0x1000;
-    private const uint MemReserve = 0x2000;
-    private const uint MemRelease = 0x8000;
-    private const uint MemDecommit = 0x4000;
-    private const uint PageReadWrite = 0x04;
-    private const int ProtRead = 0x1;
-    private const int ProtWrite = 0x2;
-    private const int MapPrivate = 0x02;
-    private const int MapAnonymous = 0x20;
-    private static readonly IntPtr MapFailed = -1;
-
-    [LibraryImport("kernel32")]
-    private static partial IntPtr VirtualAlloc(IntPtr address, nuint size, uint allocationType, uint protection);
-
-    [LibraryImport("kernel32")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static partial bool VirtualFree(IntPtr address, nuint size, uint freeType);
-
-    [LibraryImport("libc")]
-    private static partial IntPtr mmap(IntPtr address, nuint length, int protection, int flags, int descriptor, nint offset);
-
-    [LibraryImport("libc")]
-    private static partial int munmap(IntPtr address, nuint length);
 }

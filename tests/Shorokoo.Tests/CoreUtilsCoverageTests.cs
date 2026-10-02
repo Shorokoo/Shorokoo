@@ -983,7 +983,7 @@ public class CoreUtilsCoverageTests
     }
 
     [Fact]
-    public void TestASmallerHostRequestTakesAKeptLargerBlockAndHandsBackItsTail()
+    public void TestASmallerHostRequestIsCarvedFromThePagesALargerBlockLeftAndNothingStaysOnceTheAccountCloses()
     {
         var host = RuntimeAllocator.ForHost();
         var account = host.Shared.Open("probe");
@@ -996,10 +996,10 @@ public class CoreUtilsCoverageTests
 
         var large = Take(1L << 20);
         var small = Take(64L << 10);
-
-        Assert.Equal((large.Address, 256L << 10), small);
-        Assert.Equal((true, false), (ProcessMemory.Holds(small.Address), ProcessMemory.Holds(small.Address + (512 << 10))));
         host.Shared.Close(account);
+
+        Assert.Equal((large.Address, 4L << 20), small);
+        Assert.False(ProcessMemory.Holds(large.Address));
     }
 
     /// <summary>

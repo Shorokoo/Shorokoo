@@ -41,8 +41,11 @@ internal static class CudaRuntime
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate int GetLastError();
 
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate int DeviceSynchronize();
+
     /// <summary>The runtime's allocation entry points, bound together or not at all.</summary>
-    private sealed record Allocation(Malloc Malloc, Free Free, GetDevice GetDevice, SetDevice SetDevice, GetLastError Clear);
+    private sealed record Allocation(Malloc Malloc, Free Free, GetDevice GetDevice, SetDevice SetDevice, GetLastError Clear, DeviceSynchronize Synchronize);
 
     private static readonly object _gate = new();
     private static MemGetInfo? _memGetInfo;
@@ -121,6 +124,36 @@ internal static class CudaRuntime
     }
 
     /// <summary>
+    /// Waits for the work CUDA device <paramref name="deviceId"/> has in hand, as handing back memory
+    /// some of that work may still read must. False where there is no runtime to ask.
+    /// </summary>
+    internal static bool Synchronize(int deviceId)
+    {
+        if (BindAllocation() is not { } cuda) return false;
+        return OnDevice(cuda, deviceId, () => cuda.Synchronize() == 0 ? (IntPtr)1 : IntPtr.Zero) != IntPtr.Zero;
+    }
+
+    /// <summary>
+    /// <paramref name="call"/> with CUDA device <paramref name="deviceId"/> current on this thread —
+    /// its primary context, which the runtime makes on first use — and the device that was current
+    /// before it current again after: how the driver's own entry points are called for the device.
+    /// <paramref name="call"/> runs regardless where there is no runtime to make it current.
+    /// </summary>
+    internal static T OnDevice<T>(int deviceId, Func<T> call)
+    {
+        if (BindAllocation() is not { } cuda) return call();
+        var switched = cuda.GetDevice(out var current) == 0 && current != deviceId && cuda.SetDevice(deviceId) == 0;
+        try
+        {
+            return call();
+        }
+        finally
+        {
+            if (switched) cuda.SetDevice(current);
+        }
+    }
+
+    /// <summary>
     /// <paramref name="call"/> with CUDA device <paramref name="deviceId"/> current on this thread,
     /// and the device that was current before it current again after. A failure is cleared once
     /// answered: left as the thread's last CUDA error, it would be read by the execution provider
@@ -167,13 +200,15 @@ internal static class CudaRuntime
                         && NativeLibrary.TryGetExport(library, "cudaMalloc", out var malloc)
                         && NativeLibrary.TryGetExport(library, "cudaFree", out var free)
                         && NativeLibrary.TryGetExport(library, "cudaSetDevice", out var setDevice)
-                        && NativeLibrary.TryGetExport(library, "cudaGetLastError", out var lastError))
+                        && NativeLibrary.TryGetExport(library, "cudaGetLastError", out var lastError)
+                        && NativeLibrary.TryGetExport(library, "cudaDeviceSynchronize", out var synchronize))
                         _allocation = new Allocation(
                             Marshal.GetDelegateForFunctionPointer<Malloc>(malloc),
                             Marshal.GetDelegateForFunctionPointer<Free>(free),
                             current,
                             Marshal.GetDelegateForFunctionPointer<SetDevice>(setDevice),
-                            Marshal.GetDelegateForFunctionPointer<GetLastError>(lastError));
+                            Marshal.GetDelegateForFunctionPointer<GetLastError>(lastError),
+                            Marshal.GetDelegateForFunctionPointer<DeviceSynchronize>(synchronize));
                 }
                 else
                     NativeLibrary.Free(library);

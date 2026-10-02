@@ -121,10 +121,12 @@ the CUDA environment's PyTorch carries — see
 When the CUDA environment is provisioned, or first used, its copies of those libraries become
 hard links to the shared cache's, filling the cache from them if it is empty, so nothing more is
 downloaded and PyTorch loads the very same files as the other backends. An environment you name
-is never modified: one whose PyTorch bundles the pinned release runs beside another CUDA backend
-on its own copy of that release; one whose PyTorch bundles another release cannot load it into a
-process that already holds the pinned one, and starting it there fails with
-`PythonEnvironmentFailure.CudaLibraryConflict`, naming the copies held.
+is never modified: one whose PyTorch carries the pinned release runs beside another CUDA backend
+on its own copy of that release. On Windows, one whose PyTorch bundles another release cannot load
+it into a process that already holds the pinned one, and starting it there fails with
+`PythonEnvironmentFailure.CudaLibraryConflict`, naming the copies held; on Linux its PyTorch binds
+to the pinned copy already loaded, and runs where that release is at least the one it was built
+against.
 
 ## The Python environment
 

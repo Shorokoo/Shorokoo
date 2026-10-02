@@ -895,10 +895,10 @@ every file is in place and checked; one left half-filled is filled again. It is 
    release, a build for another CUDA major, a file that differs — is ignored, never mixed in.
 2. **Otherwise the release's wheel from PyPI**, checked against the SHA-256 the pin records.
 
-With neither available — offline, no copy that matches — the first CUDA session
-fails with an `InvalidOperationException` naming the library, where it looked and the size of
-the download. To run offline, fill the cache once while online, copy the folders from a machine
-that has them, or install exactly the pinned release. `CudaLibraries.Prepare()` (in
+With neither available — offline, no copy that matches — the first CUDA session fails with an
+`InvalidOperationException` naming the library, where it looked and the size of the download. To
+run offline, fill the cache once while online, copy the folders from a machine that has them, or
+install exactly the pinned release. `CudaLibraries.Prepare()` (in
 `Shorokoo.Core.Backends`) fills the cache and loads the libraries at a moment of your choosing,
 at startup rather than on the first CUDA run; it is also what a backend of your own that loads
 CUDA libraries calls first.

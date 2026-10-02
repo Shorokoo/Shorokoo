@@ -71,6 +71,16 @@ internal sealed class Arena
     /// <summary>The bytes of the committed granules no block is over.</summary>
     internal long IdleBytes => _idle.Count * _granule;
 
+    /// <summary>The most bytes of committed granules blocks have been over at once: the arena's
+    /// busiest moment.</summary>
+    internal long MaxBusyBytes { get; private set; }
+
+    private void NoteBusy()
+    {
+        var busy = CommittedBytes - IdleBytes;
+        if (busy > MaxBusyBytes) MaxBusyBytes = busy;
+    }
+
     /// <summary>The bytes carved into blocks now.</summary>
     internal long CarvedBytes { get; private set; }
 
@@ -249,6 +259,7 @@ internal sealed class Arena
         Carved(chunk, span.Start, units, +1);
         chunk.CarvedUnits += units;
         CarvedBytes += units * _unit;
+        NoteBusy();
         return chunk.Base + (nint)(span.Start * _unit);
     }
 

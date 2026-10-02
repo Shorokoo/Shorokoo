@@ -476,7 +476,7 @@ internal sealed unsafe class CachingAllocator
         var arena = account.Arena ??= new Arena(_backing!, unit: OnCard ? _backing!.Granule : HostArenaFrom,
             chunkBytes: OnCard ? 1L << 30 : 256L << 20);
         var block = arena.Carve(size, mayCommit: false);
-        while (block == IntPtr.Zero && excess > 0 && account.GiveWayOldest(Source.Arena, out var kept, out var keptSize))
+        while (block == IntPtr.Zero && excess > 0 && account.GiveWayOldest(fromArena: true, out var kept, out var keptSize, out _))
         {
             Uncarved(account, kept, keptSize, Source.Arena);
             block = arena.Carve(size, mayCommit: false);
@@ -646,39 +646,36 @@ internal sealed unsafe class CachingAllocator
     {
         List<(IntPtr, long)> release = [];
         if (excess <= 0) return release;
+        // What is cheapest to have again goes first: kept blocks of their own, and kept small blocks,
+        // which go back to the card's arena of small blocks still committed -- longest kept first.
+        while (excess > 0 && account.GiveWayOldest(fromArena: false, out var block, out var size, out var from))
+        {
+            if (from == Source.Own)
+            {
+                release.Add((block, size));
+                account.Shrinkages++;
+            }
+            else
+                Uncarved(account, block, size, from);
+            excess -= size;
+        }
+        // Then the account's arena: its granules no block is over, idle longest first, and then its
+        // kept blocks, longest kept first, each one's granules handed back as it gives way.
         if (account.Arena is { } arena)
         {
             excess -= arena.Decommit(excess, out var runs);
             account.Shrinkages += runs;
-        }
-        while (excess > 0 && account.GiveWayOldest(null, out var block, out var size, out var from))
-        {
-            switch (from)
+            while (excess > 0 && account.GiveWayOldest(fromArena: true, out var block, out var size, out _))
             {
-                case Source.Own:
-                    release.Add((block, size));
-                    account.Shrinkages++;
-                    excess -= size;
-                    break;
-                case Source.Small:
-                    Uncarved(account, block, size, from);
-                    excess -= size;
-                    break;
-                default:
-                    Uncarved(account, block, size, from);
-                    excess -= account.Arena!.Decommit(excess, out var runs);
-                    account.Shrinkages += runs;
-                    break;
+                arena.Uncarve(block, size);
+                excess -= arena.Decommit(excess, out runs);
+                account.Shrinkages += runs;
             }
-        }
-        if (account.Arena is { } shed && excess > 0)
-        {
-            excess -= shed.Decommit(excess, out var runs);
-            account.Shrinkages += runs;
         }
         ShedSmall();
         return release;
     }
+
 
     /// <summary>Everything <paramref name="account"/> keeps, and on a card what the call
     /// <paramref name="scope"/> holds for it, back to the device. Under the lock.</summary>
@@ -704,7 +701,7 @@ internal sealed unsafe class CachingAllocator
     private void ShedSmall()
     {
         if (_small is null) return;
-        var spare = _small.IdleBytes - 2 * _small.Granule;
+        var spare = _small.CommittedBytes - _small.MaxBusyBytes;
         if (spare > 0) _small.Decommit(spare, out _);
     }
 
@@ -976,9 +973,10 @@ internal sealed unsafe class CachingAllocator
             return false;
         }
 
-        /// <summary>The block kept longest — of <paramref name="source"/>, or of any where it is
-        /// null — taken out to give way, with its class and where its memory came from.</summary>
-        internal bool GiveWayOldest(Source? source, out IntPtr block, out long size, out Source from)
+        /// <summary>The block kept longest — carved from the account's arena where
+        /// <paramref name="fromArena"/>, of any other source where not — taken out to give way, with
+        /// its class and where its memory came from.</summary>
+        internal bool GiveWayOldest(bool fromArena, out IntPtr block, out long size, out Source from)
         {
             block = IntPtr.Zero;
             size = 0;
@@ -988,7 +986,7 @@ internal sealed unsafe class CachingAllocator
             long oldestSize = 0;
             void Consider(long classSize, Kept? kept)
             {
-                if (kept is null || kept.Count == 0 || (source is { } wanted && kept.Items[kept.Head].Source != wanted)) return;
+                if (kept is null || kept.Count == 0 || (kept.Items[kept.Head].Source == Source.Arena) != fromArena) return;
                 if (oldest is null || kept.OldestSince < oldest.OldestSince)
                 {
                     oldest = kept;
@@ -1006,10 +1004,6 @@ internal sealed unsafe class CachingAllocator
             return true;
         }
 
-        /// <summary><see cref="GiveWayOldest(Source?, out IntPtr, out long, out Source)"/> for blocks of
-        /// <paramref name="source"/>.</summary>
-        internal bool GiveWayOldest(Source source, out IntPtr block, out long size)
-            => GiveWayOldest(source, out block, out size, out _);
     }
 
     // ---- what a thread is charging ----

@@ -239,6 +239,19 @@ public class GpuExecutionTests
     }
 
     [CudaFact]
+    public void CudaProvider_OutputsOnOneBlockOfASessionsMemoryEachFreeTheirOwnPagesAndWhatNoneStandsOnGoesWithTheRun()
+    {
+        const long MiB = 1024 * 1024;
+        using var context = new ComputeContext { DeviceMemory = new DeviceMemorySettings { LimitBytes = 512 * MiB } };
+        var both = ComputeContextLifetimeCoverageTests.OutputsOnABlockEnding(context, ComputeContextLifetimeCoverageTests.TwoHalves(), 4096, 1024);
+        var one = ComputeContextLifetimeCoverageTests.OutputsOnABlockEnding(context, ComputeContextLifetimeCoverageTests.TwoHalves(oneHalf: true), 4096, 1024);
+        Assert.Equal([0, 0, 8 * MiB, 16 * MiB], both.Select(s => both[0].InUse - s.InUse));
+        Assert.Equal([16 * MiB, 32 * MiB, 24 * MiB, 16 * MiB], both.Select(s => s.Books));
+        Assert.Equal([0, 8 * MiB, 16 * MiB], one.Select(s => one[0].InUse - s.InUse));
+        Assert.Equal([32 * MiB, 40 * MiB, 32 * MiB], one.Select(s => s.Books));
+    }
+
+    [CudaFact]
     public void CudaProvider_ABudgetCountsABlockOnceWholeForAsLongAsAnyTensorOnItIsAttached()
     {
         const long MiB = 1024 * 1024;

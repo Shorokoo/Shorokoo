@@ -1036,9 +1036,10 @@ public class ComputeContextLifetimeCoverageTests
     /// <summary>
     /// Two consumed inputs A and B of one shape; A's first half and B's second half sliced out by
     /// bounds the run computes; a fill of 2s shaped like a half, through Neg, Abs and Sigmoid;
-    /// concatenated with B's half, through Sigmoid, Neg and Abs. Outputs that, and the two halves.
+    /// concatenated with B's half, through Sigmoid, Neg and Abs. Outputs that, and the two halves —
+    /// or A's half alone where <paramref name="oneHalf"/>.
     /// </summary>
-    internal static InternalComputationGraph TwoHalves()
+    internal static InternalComputationGraph TwoHalves(bool oneHalf = false)
     {
         var a = InputTensor<float32>("A", rank: 2);
         var b = InputTensor<float32>("B", rank: 2);
@@ -1049,7 +1050,8 @@ public class ComputeContextLifetimeCoverageTests
         var bHalf = OnnxOp.Slice(b, half, rows, zero);
         var c = OnnxOp.ConstantOfShape(OnnxOp.Shape(aHalf), TensorAttribute.Create(new Shape(1L), (float[])[2f]));
         var l0 = OnnxOp.Concat([OnnxOp.Sigmoid(OnnxOp.Abs(OnnxOp.Neg(c))), bHalf], 0);
-        return new InternalComputationGraph([a, b], [OnnxOp.Abs(OnnxOp.Neg(OnnxOp.Sigmoid(l0))), aHalf, bHalf]);
+        var l = OnnxOp.Abs(OnnxOp.Neg(OnnxOp.Sigmoid(l0)));
+        return new InternalComputationGraph([a, b], oneHalf ? [l, aHalf] : [l, aHalf, bHalf]);
     }
 
     internal static (float[] A, float[] B, float[] L) TwoHalvesValues(int rows, int columns)
@@ -1088,6 +1090,41 @@ public class ComputeContextLifetimeCoverageTests
         GC.WaitForPendingFinalizers();
         Assert.True(l.Zip(Floats(outputs[0].ToTensorData()), (x, y) => MathF.Abs(x - y) < 1e-5f).All(x => x));
         Assert.Equal(b[(Rows / 2 * Columns)..], Floats(outputs[2].ToTensorData()));
+    }
+
+    /// <summary>
+    /// What the session that made A has in use, and what <paramref name="context"/>'s books hold, as
+    /// <paramref name="graph"/> consumes A — a value of that session's memory — and B, and as each
+    /// output after the first is deleted in turn: before the run, after it, and after each deletion.
+    /// </summary>
+    internal static (long InUse, long Books)[] OutputsOnABlockEnding(ComputeContext context, InternalComputationGraph graph, int rows, int columns)
+    {
+        var (a, b, _) = TwoHalvesValues(rows, columns);
+        var x = InputTensor<float32>("x", rank: 2);
+        var made = context.Compile(new InternalComputationGraph([x], [x + 1f]));
+        var consumed = made.Execute(TensorData([(long)rows, columns], a).Shared()).Single().ToTensorData();
+        List<(long, long)> stages = [];
+        void Stage() => stages.Add((made.ReadArenaStatistics()!.Value.InUseBytes, context.ReadDeviceMemoryUse().AttachedBytes));
+        Stage();
+        var outputs = context.Compile(graph).Execute(consumed, TensorData([(long)rows, columns], b).CopyTo(context));
+        Stage();
+        foreach (var output in outputs.Skip(1))
+        {
+            output.ToTensorData().Delete();
+            Stage();
+        }
+        return [.. stages];
+    }
+
+    [Fact]
+    public void TestOutputsOnOneBlockOfASessionsMemoryEachFreeTheirOwnPagesAndWhatNoneStandsOnGoesWithTheRun()
+    {
+        const long Half = 2L << 20;
+        using var context = new ComputeContext();
+        var both = OutputsOnABlockEnding(context, TwoHalves(), 1024, 1024);
+        var one = OutputsOnABlockEnding(context, TwoHalves(oneHalf: true), 1024, 1024);
+        Assert.Equal([0, 0, Half, 2 * Half], both.Select(s => both[0].InUse - s.InUse));
+        Assert.Equal([0, Half, 2 * Half], one.Select(s => one[0].InUse - s.InUse));
     }
 
     [Fact]

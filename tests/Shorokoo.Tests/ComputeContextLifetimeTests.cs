@@ -1155,6 +1155,47 @@ public class ComputeContextLifetimeCoverageTests
         Assert.Equal(expected, Floats(output));
     }
 
+    /// <summary>
+    /// A run of <c>y = -Relu(x) + x·W</c> consuming x, through a session of
+    /// <paramref name="backend"/>: the matrix product reads x on a branch of its own, which the
+    /// session runs before the other. The plan it settled on, the output, and what it should be.
+    /// </summary>
+    internal static (OrtPlacements.Entry Entry, float[] Output, float[] Expected) BranchesRun(IShorokooBackend backend)
+    {
+        const int N = 512;
+        var graph = GraphOf($"x:float[{N},{N}]", $"y:float[{N},{N}]",
+            Op("Relu", "x", "a"), Op("Neg", "a", "n"), Op("MatMul", "x W", "b"), Op("Add", "n b", "y"));
+        float[] w = [.. Enumerable.Range(0, N * N).Select(i => (i * 7 % 3) - 1f)];
+        float[] x = [.. Enumerable.Range(0, N * N).Select(i => (i % 5) - 2f)];
+        var raw = new byte[w.Length * 4];
+        Buffer.BlockCopy(w, 0, raw, 0, raw.Length);
+        graph.Initializers.Add(new TensorProto { Name = "W", data_type = 1, Dims = [N, N], RawData = raw });
+        using var session = (OrtSession)backend.CreateSession(
+            ModelOf(graph), ShorokooGraphOptimization.EnableAll, ShorokooLogSeverity.Fatal, new DeviceMemorySettings(), DiagnosticSettings.Default);
+        var input = backend.CreateTensorInBackendMemory(ShorokooTensorElementType.Float, MemoryMarshal.AsBytes(x.AsSpan()).ToArray(), [N, N]);
+        var output = session.RunConsuming(new Dictionary<string, IShorokooTensorValue> { ["x"] = input }, [input], ["y"], RunSettings.Default, out _).Single();
+        var bytes = backend.CopyTensorToHost(output);
+        output.Dispose();
+        var expected = new float[N * N];
+        for (int i = 0; i < N; i++)
+            for (int k = 0; k < N; k++)
+            {
+                var xik = x[i * N + k];
+                for (int j = 0; j < N; j++) expected[i * N + j] += xik * w[k * N + j];
+            }
+        for (int i = 0; i < expected.Length; i++) expected[i] -= MathF.Max(x[i], 0f);
+        return (Assert.Single(session.Placements!.Entries), MemoryMarshal.Cast<byte, float>(bytes).ToArray(), expected);
+    }
+
+    [Fact]
+    public void TestARunPlacesAValueOverAnInputABranchItNeedNotFollowReadsWhereTheSessionRunsThatBranchFirst()
+    {
+        var (entry, output, expected) = BranchesRun(DefaultBackend.Instance);
+        Assert.Equal(OrtPlacements.Stage.Adopted, entry.Stage);
+        Assert.Contains("a", entry.Plan.Select(p => p.Value));
+        Assert.Equal(expected, output);
+    }
+
     [Fact]
     public void TestASerializedModelProvesWhatItsGraphProvesAndOneWithoutAGraphProvesNothing()
     {

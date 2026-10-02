@@ -572,6 +572,7 @@ internal sealed unsafe class CachingAllocator
         account.Requested += requested;
         account.Allocations++;
         if (account.InUse > account.MaxInUse) account.MaxInUse = account.InUse;
+        if (account.InUse > account.SpanPeak) account.SpanPeak = account.InUse;
         if (requested > account.MaxAllocSize) account.MaxAllocSize = requested;
         return block;
     }
@@ -880,6 +881,8 @@ internal sealed unsafe class CachingAllocator
         internal long? LimitUnderLock => _limit;
 
         internal long InUse;
+        internal long SpanPeak;
+        internal long SpanStart;
         internal long Requested;
         internal long HandedOver;
         internal long Cached;
@@ -947,6 +950,20 @@ internal sealed unsafe class CachingAllocator
         private readonly Dictionary<long, Kept> _kept = [];
         private long _clock;
         private long _keptCount;
+
+        /// <summary>Starts measuring the most this account has out beyond what it has out now
+        /// (<see cref="Peak"/>): what a run asks of it, its outputs included.</summary>
+        internal void BeginPeak()
+        {
+            using (Allocator._gate.Hold()) SpanStart = SpanPeak = InUse;
+        }
+
+        /// <summary>The most this account has had out since <see cref="BeginPeak"/>, beyond what it
+        /// had out then.</summary>
+        internal long Peak
+        {
+            get { using (Allocator._gate.Hold()) return SpanPeak - SpanStart; }
+        }
 
         /// <summary>The blocks of one size class kept for reuse, in the order they were kept.</summary>
         private sealed class Kept

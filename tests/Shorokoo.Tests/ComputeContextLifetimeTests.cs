@@ -932,6 +932,26 @@ public class ComputeContextLifetimeCoverageTests
     }
 
     [Fact]
+    public void TestAnOutputWrittenIntoAConsumedTensorStandingOnABlockHoldsALeaseOnTheBlock()
+    {
+        var backend = DefaultBackend.Instance;
+        var owner = (OrtTensorValue)backend.CreateTensor((float[])[1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f], [8L]);
+        var block = new SharedBlock(32, () => backend.Release(owner));
+        var a = OrtBackend.View(owner, 0, ShorokooTensorElementType.Float, [4], 16, block, 0);
+        var second = TensorData.Create((long[])[4], DType.Float32, OrtBackend.View(owner, 16, ShorokooTensorElementType.Float, [4], 16, block, 16), backend);
+        using var session = Aliasing(backend, GraphOf("a:float[4] b:float[4]", "O:float[4]", Op("Sub", "a b", "O")));
+        var outputs = session.RunConsuming(
+            new Dictionary<string, IShorokooTensorValue> { ["a"] = a, ["b"] = DefaultBackend.Instance.CreateTensor((float[])[1f, 1f, 1f, 1f], [4L]) },
+            [a], ["O"], RunSettings.Default, out var aliased);
+        Assert.Equal(["a"], aliased);
+        second.Delete();
+        Assert.False(block.IsReleased);
+        Assert.Equal([0f, 1f, 2f, 3f], outputs[0].GetTensorDataAsSpan<float>().ToArray());
+        outputs[0].Dispose();
+        Assert.True(block.IsReleased);
+    }
+
+    [Fact]
     public void TestASerializedModelProvesWhatItsGraphProvesAndOneWithoutAGraphProvesNothing()
     {
         OutputAlias[] pair = [new("O", "a")];

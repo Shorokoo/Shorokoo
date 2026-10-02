@@ -1074,6 +1074,23 @@ public class CoreUtilsCoverageTests
         Assert.True(held.TotalAllocatedBytes <= held.MaxInUseBytes);
     }
 
+    [Fact]
+    public void TestReleasingWhatTheAllocatorsKeepLeavesASessionHoldingWhatItUsesAndRunningOn()
+    {
+        using var context = new ComputeContext();
+        var filled = ArenaProbeModels.Filled(context);
+        ArenaStatistics Held() => Assert.IsType<ArenaStatistics>(filled.ReadArenaStatistics());
+        ComputeContext.ReleaseOutputs(filled.Execute(ArenaProbeModels.FilledShape(1 << 20)));
+        var kept = Held().TotalAllocatedBytes - Held().InUseBytes;
+
+        var released = DeviceMemory.ReleaseCached();
+
+        Assert.True(kept >= 4 << 20);
+        Assert.True(released >= kept);
+        Assert.Equal(Held().InUseBytes, Held().TotalAllocatedBytes);
+        Assert.Equal(1048576f, ArenaProbeModels.Sum(filled.Execute(ArenaProbeModels.FilledShape(1 << 20))));
+    }
+
     /// <summary>
     /// An output whose shape only the run learns is the block its session's run wrote it into: its
     /// session's allocator holds exactly the output's bytes more while the caller keeps it, and

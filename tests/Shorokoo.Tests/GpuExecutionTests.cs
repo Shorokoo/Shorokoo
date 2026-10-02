@@ -857,10 +857,11 @@ public class GpuExecutionTests
     /// <summary>
     /// The card's allocator — the one tensors placed on the card and everything a session allocates
     /// there come from — keeps the blocks of tensors that are gone, through a run that keeps what it
-    /// has, and hands them back to the card as a run that hands back its memory ends.
+    /// has, and hands them back to the card as a run that hands back its memory ends, or as the
+    /// program asks.
     /// </summary>
     [CudaFact]
-    public void CudaProvider_TheCardsAllocatorHandsBackWhatNoTensorUsesAsARunThatHandsBackItsMemoryEnds()
+    public void CudaProvider_TheCardsAllocatorHandsBackWhatNoTensorUsesAsARunThatHandsBackItsMemoryEndsOrTheProgramAsks()
     {
         const long MiB = 1024 * 1024;
         using var ctx = new ComputeContext();
@@ -872,13 +873,24 @@ public class GpuExecutionTests
         HeldOnTheCard();
         Run(shrink: true);
         var before = HeldOnTheCard();
-        foreach (var placed in Enumerable.Range(0, 8).Select(_ => TensorData([8L << 20], new float[8 << 20]).CopyTo(ctx)).ToList())
-            placed.Delete();
+        void PlaceAndDelete()
+        {
+            foreach (var placed in Enumerable.Range(0, 8).Select(_ => TensorData([8L << 20], new float[8 << 20]).CopyTo(ctx)).ToList())
+                placed.Delete();
+        }
+        PlaceAndDelete();
         Run(shrink: false);
         var kept = HeldOnTheCard() - before;
         Run(shrink: true);
+        var shrunk = HeldOnTheCard() - before;
+        PlaceAndDelete();
+        var keptAgain = HeldOnTheCard() - before;
+        var released = DeviceMemory.ReleaseCached();
 
         Assert.True(kept >= 256 * MiB);
+        Assert.True(shrunk < 16 * MiB);
+        Assert.True(keptAgain >= 256 * MiB);
+        Assert.True(released >= 256 * MiB);
         Assert.True(HeldOnTheCard() - before < 16 * MiB);
     }
 

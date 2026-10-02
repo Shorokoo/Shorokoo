@@ -932,10 +932,27 @@ block of 64 KiB or more is pages of its own from the operating system (`VirtualA
 C runtime's heap, which may keep its pages for the process's next allocations.
 
 - **What a session lets go of is kept for its next runs**, so a loop's runs find their blocks
-  waiting, as they would in an arena. It goes back to the device when a run asks for that
-  (`RunSettings.ShrinkArenaAfterRun`, always on under a budget), and everything kept on a device
-  goes back before the device would refuse a request for want of room. A disposed session's goes
-  back as it is disposed, and a block it still has out — an output a caller keeps — as that goes.
+  waiting, as they would in an arena. A session never holds more than the most it has had in use
+  at once: a request no kept block serves first hands back the blocks it kept longest, as many as
+  the new block would take it past that mark. So a session fed one shape after another holds what
+  its busiest run needed, not a block of every size it has seen; the price is that a run of a
+  shape it has not kept blocks for takes them from the device, handing older ones back, where an
+  arena would carve them out of what it holds. What the tensors placed on a card let go of is
+  kept the same way, for the next tensor placed there.
+- **What is kept goes back to the system**:
+  - at the end of a run that asks for it (`RunSettings.ShrinkArenaAfterRun`, always on under a
+    budget): what its session keeps, and what the placed tensors left on that device;
+  - as a session is disposed, or collected undisposed: everything it keeps, and each block it
+    still has out — an output a caller keeps — as that goes;
+  - before a session's budget, or the device itself, would refuse a request for want of room;
+  - when the program calls `DeviceMemory.ReleaseCached()`: everything kept on every device, for
+    every session and every placed tensor, with no run to make. It returns the bytes it handed back.
+
+  Nothing else returns it. A long-lived program doing varied work holds, besides what is in use,
+  up to the busiest moment of each session it keeps alive and of the tensors it placed on each
+  card, and nothing of a session it disposed. ONNX Runtime's own arena, where a session uses one,
+  keeps a session's busiest run too, rounded up to the regions it grows by, until the session is
+  disposed or a run asks it to shrink.
 - **A request that cannot be served fails the call that made it**, as ONNX Runtime's own
   allocators fail one: a block the budget leaves no room for, or one the device does not have,
   fails the run — or the placing of the tensor — with an allocation failure, and leaves the

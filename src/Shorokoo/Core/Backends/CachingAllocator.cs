@@ -27,11 +27,17 @@ namespace Shorokoo.Core.Backends;
 ///
 /// <para><b>Caching.</b> A block that is let go of is kept for the next request of its size class
 /// rather than handed back, so a loop's runs find their blocks waiting, as they would in an arena.
-/// What is kept is handed back to the device when a run that hands back its memory ends
-/// (<see cref="ReleaseCached"/>), when a session closes with nothing more to ask, and before an
-/// account would refuse an allocation for want of room. Sizes are rounded up to a class — to 512
-/// bytes up to a mebibyte, to an eighth of the power of two above — so a block is reused across
-/// requests that differ a little.</para>
+/// Sizes are rounded up to a class — to 512 bytes up to a mebibyte, to an eighth of the power of
+/// two above — so a block is reused across requests that differ a little. An account never holds
+/// from the device more than the most it has ever had in use at once: a request no kept block
+/// serves hands back the blocks kept longest, as many as the new block takes it past that mark —
+/// on a card as the call that asked ends, since handing a block back there waits for the card — so
+/// an account fed one shape after another holds what its busiest moment needed rather than a block
+/// of every class it ever used. The price is a block from the device for each request of a shape
+/// it no longer keeps blocks for, where an arena would carve one out of a larger free region. What is kept also goes back when a run that
+/// hands back its memory ends (<see cref="ReleaseCached(Account)"/>), when a session closes,
+/// before an account would refuse an allocation for want of room, before the device would refuse
+/// one, and when the program asks (<see cref="ReleaseEverywhere"/>).</para>
 ///
 /// <para><b>Accounts.</b> What a session allocates is charged to its <see cref="Account"/>: the
 /// thread building or running it charges that account for the length of the call
@@ -218,12 +224,20 @@ internal sealed unsafe class CachingAllocator
         {
             if ((scope is not null && scope.TakeHeld(account, size, out var held)) || account.TakeCached(size, out held))
                 return Hand(held, size, bytes, account);
+            // A fresh block: what the account kept longest goes back, as much as the block takes
+            // what it holds from the device past the most it has had in use at once. On a card, as
+            // the call charging the account ends (Scope.End), where one does: handing a block back
+            // waits for the card, which mid-run would stall the run's queued work.
+            release = OnCard && scope is not null && scope.Charges(account)
+                ? []
+                : account.Shed(account.InUse + account.Cached + account.Held + size
+                               - Math.Max(account.MaxInUse, account.InUse + size));
             if (account.LimitUnderLock is { } limit && account.Charged + account.Cached + account.Held + size > limit)
             {
                 // What it keeps goes back first -- cached, and on a card what this call let go of,
                 // which handing back waits for the stream to be done with -- and then only what it
                 // has out counts.
-                release = account.EmptyCache();
+                release.AddRange(account.EmptyCache());
                 if (scope is not null) release.AddRange(scope.EmptyHeld(account));
                 if (account.Charged + size > limit)
                 {
@@ -380,16 +394,30 @@ internal sealed unsafe class CachingAllocator
         Release(release);
     }
 
-    /// <summary>Hands back everything cached on the device, in every account still open.</summary>
-    private void ReleaseEverythingCached()
+    /// <summary>Hands back everything cached on the device, in every account still open, and
+    /// answers how many bytes that was.</summary>
+    private long ReleaseEverythingCached()
     {
-        List<(IntPtr, long)> release = [];
+        List<(IntPtr Block, long Size)> release = [];
         lock (_gate)
         {
             foreach (var account in _accounts)
                 release.AddRange(account.EmptyCache());
         }
         Release(release);
+        return release.Sum(block => block.Size);
+    }
+
+    /// <summary>
+    /// Hands back to every device — the host and each card this process has allocated on —
+    /// everything every account keeps there for reuse, and answers how many bytes that was. Nothing
+    /// in use is touched, nor what a call on a card is still holding for its own reuse.
+    /// </summary>
+    internal static long ReleaseEverywhere()
+    {
+        CachingAllocator[] allocators;
+        lock (_registryGate) allocators = [.. _byDevice.Values];
+        return allocators.Sum(allocator => allocator.ReleaseEverythingCached());
     }
 
     // Every account opened and not yet closed, for a device that has run out.
@@ -482,19 +510,26 @@ internal sealed unsafe class CachingAllocator
         /// handed over.</summary>
         internal long Charged => InUse - HandedOver;
 
-        internal readonly Dictionary<long, Stack<IntPtr>> Free = [];
+        // The blocks kept for reuse, by size class, each list oldest first; a class with none is
+        // not here. Each block carries when it was kept, by _clock.
+        private readonly Dictionary<long, LinkedList<(IntPtr Block, long Kept)>> _kept = [];
+        private long _clock;
 
         internal void Cache(IntPtr block, long size)
         {
-            if (!Free.TryGetValue(size, out var blocks)) Free[size] = blocks = new Stack<IntPtr>();
-            blocks.Push(block);
+            if (!_kept.TryGetValue(size, out var blocks)) _kept[size] = blocks = new();
+            blocks.AddLast((block, ++_clock));
             Cached += size;
         }
 
+        /// <summary>The block of <paramref name="size"/> kept last, if one is kept.</summary>
         internal bool TakeCached(long size, out IntPtr block)
         {
-            if (Free.TryGetValue(size, out var blocks) && blocks.TryPop(out block))
+            if (_kept.TryGetValue(size, out var blocks))
             {
+                block = blocks.Last!.Value.Block;
+                blocks.RemoveLast();
+                if (blocks.Count == 0) _kept.Remove(size);
                 Cached -= size;
                 return true;
             }
@@ -502,15 +537,33 @@ internal sealed unsafe class CachingAllocator
             return false;
         }
 
+        /// <summary>The blocks kept longest, taken out of the cache until they come to at least
+        /// <paramref name="bytes"/> or none is left, for the caller to hand back.</summary>
+        internal List<(IntPtr, long)> Shed(long bytes)
+        {
+            List<(IntPtr, long)> blocks = [];
+            while (bytes > 0 && _kept.Count > 0)
+            {
+                var (size, oldest) = _kept.MinBy(kept => kept.Value.First!.Value.Kept);
+                blocks.Add((oldest.First!.Value.Block, size));
+                oldest.RemoveFirst();
+                if (oldest.Count == 0) _kept.Remove(size);
+                Cached -= size;
+                bytes -= size;
+            }
+            Shrinkages += blocks.Count;
+            Blocks -= blocks.Count;
+            return blocks;
+        }
+
         /// <summary>Every cached block, taken out of the cache, for the caller to hand back.</summary>
         internal List<(IntPtr, long)> EmptyCache()
         {
             List<(IntPtr, long)> blocks = [];
-            foreach (var (size, cached) in Free)
-            {
-                foreach (var block in cached) blocks.Add((block, size));
-                cached.Clear();
-            }
+            foreach (var (size, kept) in _kept)
+                foreach (var (block, _) in kept)
+                    blocks.Add((block, size));
+            _kept.Clear();
             Shrinkages += blocks.Count;
             Blocks -= blocks.Count;
             Cached = 0;
@@ -605,29 +658,40 @@ internal sealed unsafe class CachingAllocator
         }
 
         /// <summary>The call is over, its stream done with what it held: into the cache, or back to
-        /// the device where the account has closed meanwhile.</summary>
+        /// the device where the account has closed meanwhile; and each account sheds what it keeps
+        /// beyond the most it has had in use at once.</summary>
         internal void End()
         {
-            if (_held is null || card is null) return;
-            var allocator = card.Allocator;
+            if (card is not null) EndOn(card);
+            if (host is not null) EndOn(host);
+        }
+
+        private void EndOn(Account account)
+        {
+            var allocator = account.Allocator;
             List<(IntPtr, long)> release = [];
             lock (allocator._gate)
             {
-                foreach (var (size, blocks) in _held)
-                    foreach (var block in blocks)
-                    {
-                        card.Held -= size;
-                        if (!card.Closed)
+                if (account == card && _held is not null)
+                {
+                    foreach (var (size, blocks) in _held)
+                        foreach (var block in blocks)
                         {
-                            card.Cache(block, size);
-                            continue;
+                            account.Held -= size;
+                            if (!account.Closed)
+                            {
+                                account.Cache(block, size);
+                                continue;
+                            }
+                            account.Blocks--;
+                            account.Shrinkages++;
+                            release.Add((block, size));
                         }
-                        card.Blocks--;
-                        card.Shrinkages++;
-                        release.Add((block, size));
-                    }
+                    _held = null;
+                }
+                if (!account.Closed)
+                    release.AddRange(account.Shed(account.InUse + account.Cached + account.Held - account.MaxInUse));
             }
-            _held = null;
             allocator.Release(release);
         }
     }

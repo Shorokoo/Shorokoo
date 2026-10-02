@@ -1129,6 +1129,33 @@ public class ComputeContextLifetimeCoverageTests
         Assert.Equal([0, Half, 2 * Half], one.Select(s => one[0].InUse - s.InUse));
     }
 
+    /// <summary>
+    /// A model carrying <paramref name="n"/> floats of its own, added across each row of its consumed
+    /// input past a Relu; its output, the session that ran it, and the output it should have.
+    /// </summary>
+    internal static (TensorData Output, OrtSession Session, float[] Expected) LargeModelRun(ComputeContext context, int n)
+    {
+        float[] b = [.. Enumerable.Range(0, n).Select(i => (i % 7) * 0.5f)];
+        float[] x = [.. Enumerable.Range(0, 2 * n).Select(i => (i % 5) - 2f)];
+        var input = InputTensor<float32>("x", rank: 2);
+        var compiled = context.Compile(new InternalComputationGraph(
+            [input], [OnnxOp.Add(OnnxOp.Relu(input), OnnxOp.Constant(TensorAttribute.Create(new Shape(1L, n), b)))]));
+        var output = compiled.Execute(TensorData([2L, n], x).CopyTo(context)).Single().ToTensorData();
+        return (output, (OrtSession)compiled.Session, [.. x.Select((v, i) => MathF.Max(v, 0f) + b[i % n])]);
+    }
+
+    [Fact]
+    public void TestAModelOverSixteenMebibytesPlacesARunsValuesWhereThatPaysForTheVariantsOwnCopyOfItsWeights()
+    {
+        using var context = new ComputeContext();
+        var (output, session, expected) = LargeModelRun(context, 9 << 19);
+        var entry = Assert.Single(Assert.IsType<OrtPlacements>(session.Placements).Entries);
+        Assert.Equal(OrtPlacements.Stage.Adopted, entry.Stage);
+        Assert.True(entry.VariantHeld >= 18L << 20);
+        Assert.NotNull(output.Block);
+        Assert.Equal(expected, Floats(output));
+    }
+
     [Fact]
     public void TestASerializedModelProvesWhatItsGraphProvesAndOneWithoutAGraphProvesNothing()
     {

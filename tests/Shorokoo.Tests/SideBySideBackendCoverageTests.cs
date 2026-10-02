@@ -618,6 +618,40 @@ public class SideBySideBackendCoverageTests
     }
 
     [Fact]
+    public void TestAProvisionedEnvironmentsCopiesFillTheCacheWithNoDownloadAndAnotherReleaseIsRefused()
+    {
+        using var scratch = new CudaScratch();
+        var pin = scratch.Pin("cudnn", 13, ("cudnn_graph64_9.dll", [1, 2, 3]), ("cudnn64_9.dll", [4, 5]));
+        File.Delete(pin.Wheel.LocalPath);
+        foreach (var windows in (bool[])[true, false])
+        {
+            string TorchLib(string home, string environment, byte last)
+            {
+                var sitePackages = windows
+                    ? Path.Combine(home, "shorokoo", "python-envs", environment, "Lib", "site-packages")
+                    : Path.Combine(home, "shorokoo", "python-envs", environment, "lib", "python3.12", "site-packages");
+                var torchLib = Directory.CreateDirectory(Path.Combine(sitePackages, "torch", "lib")).FullName;
+                File.WriteAllBytes(Path.Combine(torchLib, "cudnn_graph64_9.dll"), [1, 2, 3]);
+                File.WriteAllBytes(Path.Combine(torchLib, "cudnn64_9.dll"), [4, last]);
+                return torchLib;
+            }
+            IReadOnlyList<string> Candidates(string home)
+                => CudaLibraryCache.InstalledCandidates(pin, name => name == (windows ? "LOCALAPPDATA" : "XDG_CACHE_HOME") ? home : null, windows);
+            var matching = Path.Combine(scratch.Root, $"matching-{windows}");
+            var mismatched = Path.Combine(scratch.Root, $"mismatched-{windows}");
+            var torchLib = TorchLib(matching, "cu13-0123456789abcdef", 5);
+            TorchLib(matching, "cpu-0123456789abcdef", 5);
+            TorchLib(mismatched, "cu13-fedcba9876543210", 6);
+
+            Assert.Equal(torchLib, Assert.Single(Candidates(matching), folder => folder.StartsWith(matching) && Directory.Exists(folder)));
+            Assert.Throws<InvalidOperationException>(() => CudaLibraryCache.Provision(pin, Path.Combine(scratch.Root, $"refused-{windows}"), Candidates(mismatched), TimeSpan.FromSeconds(30)));
+            var cache = CudaLibraryCache.Provision(pin, Path.Combine(scratch.Root, $"cache-{windows}"), Candidates(matching), TimeSpan.FromSeconds(30));
+            File.AppendAllText(Path.Combine(cache, "cudnn64_9.dll"), "+");
+            Assert.Equal(3, new FileInfo(Path.Combine(torchLib, "cudnn64_9.dll")).Length);
+        }
+    }
+
+    [Fact]
     public void TestTheCacheAndTheCopiesLookedForAreWhereEachSystemKeepsThem()
     {
         var cudnn = new CudaLibraryPin("cudnn", "9.24.0.43", 13, "nvidia-cudnn-cu13", new Uri("https://example.invalid/cudnn.whl"), "", 0,

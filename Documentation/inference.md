@@ -973,8 +973,9 @@ a smaller one shares a page with other small blocks; on the host a block shares 
   on take their planned tensors as one block laid out by the first run; that block came out larger
   than what the runs have in use at once with a block per tensor on every graph measured — 33–50%
   on a scenario of slices, fills and concatenations, 3–24% on training steps, 7–37% on inference —
-  for fewer allocations, which cost about half a microsecond each. So `AllocationCount` counts a
-  run's tensors one by one.
+  for fewer allocations, which cost little: training steps measured without the pattern ran within
+  2% of their time with it on the host and on a card, the smallest, a 4×2 linear, within the 8% its
+  own runs vary by. So `AllocationCount` counts a run's tensors one by one.
 - **A request that cannot be served fails the call that made it**, as ONNX Runtime's own
   allocators fail one: a block the budget leaves no room for, or one the device does not have,
   fails the run — or the placing of the tensor — with an allocation failure, and leaves the

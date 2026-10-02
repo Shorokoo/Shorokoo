@@ -692,9 +692,10 @@ public abstract class OrtBackend : IShorokooBackend
     /// 160–192 without it; training steps of the 12-layer, MLP, convolution, encoder and LSTM
     /// families 3–24% higher; inference graphs with symbolic shapes 29–37% higher, and with static ones
     /// 7–13%. What the pattern saves is allocations — a step of the 12-layer stack makes 2 rather than
-    /// 282 on the host — at about half a microsecond each through Shorokoo's allocator: the step times
-    /// measured agree within the noise of the machine, with the smallest models (a 4×2 linear, a
-    /// two-layer MLP) 3–10% slower on the host without it.</para>
+    /// 282 on the host — and an allocation and its free cost Shorokoo's allocator under 200 cycles:
+    /// training steps of the linear, MLP, 12-layer and encoder families measured without the pattern
+    /// within 2% of their time with it, on the host and on a card, the 4×2 linear's within the 8% its
+    /// own runs vary by.</para>
     ///
     /// <para>For <see cref="ShorokooGraphOptimization.TrainingStep"/>:
     /// <c>optimization.disable_specified_optimizers</c> = CommonSubexpressionElimination;

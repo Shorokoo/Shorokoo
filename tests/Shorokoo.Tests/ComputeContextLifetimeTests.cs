@@ -898,6 +898,8 @@ public class ComputeContextLifetimeCoverageTests
         Assert.False(PlacesOnTorch(GraphOf("a:float[128] b:float[128]", "O", Op("Clip", "a", "O")), "b", At("O", "b", 0)));
         Assert.False(PlacesOnTorch(GraphOf("a:float[128] b:float[128]", "O", Op("Softmax", "a", "O")), "b", At("O", "b", 0)));
         Assert.True(PlacesOnTorch(GraphOf("a:float[8,16] b:float[16,8]", "O", Op("Transpose", "a", "O")), "b", At("O", "b", 0)));
+        Assert.True(PlacesOnTorch(GraphOf("a:float[8,16] b:float[16,8] c:float[8,8]", "O", Op("MatMul", "a b", "O")), "c", At("O", "c", 0, 256)));
+        Assert.False(PlacesOnTorch(GraphOf("a:float[8,8] b:float[8,8]", "O", Op("MatMul", "a b", "O")), "a", At("O", "a", 0, 256)));
         Assert.True(PlacesOnTorch(WithInts(GraphOf("a:float[128]", "O", Op("Reshape", "a s", "O")), "s", 2, 64), "a", At("O", "a", 0)));
         Assert.False(PlacesOnTorch(WithInts(GraphOf("a:float[8,16]", "O", Op("Transpose", "a", "t"), Op("Reshape", "t s", "O")), "s", 128), "a", At("O", "a", 0)));
     }

@@ -582,11 +582,12 @@ def _overlap(a, b):
 def _fast_writers():
     """Per support function, how it writes its result into a tensor it is handed allocating nothing,
     exactly as it computes it: ("out", f) for torch's f taking out=, over floating-point operands;
-    ("relu", None) for the activation torch has only an in-place form of; ("fill", None) for
+    ("relu", None) for the activation torch has only an in-place form of; ("matmul", f) for a
+    product of two matrices or stacks of them, over floating-point operands; ("fill", None) for
     constant_of_shape; ("cat", None) for concat, part by part."""
     global _fast
     if _fast is None:
-        from . import ops_elementwise as e, ops_shape as s
+        from . import ops_elementwise as e, ops_linalg as la, ops_shape as s
         table = {function: ("out", op) for function, op in [
             (e.neg, torch.neg), (e.abs_, torch.abs), (e.sigmoid, torch.sigmoid), (e.exp, torch.exp),
             (e.log, torch.log), (e.sqrt, torch.sqrt), (e.tanh, torch.tanh), (e.sin, torch.sin),
@@ -598,6 +599,7 @@ def _fast_writers():
             (e.pow_, torch.pow), (e.max_, torch.maximum), (e.min_, torch.minimum), (e.sum_, torch.add),
         ]}
         table[e.relu] = ("relu", None)
+        table[la.matmul] = ("matmul", torch.matmul)
         table[s.constant_of_shape] = ("fill", None)
         table[s.concat] = ("cat", None)
         _fast = table
@@ -635,6 +637,19 @@ def _write_fast(fast, target, args, kwargs):
             if length and not _same_memory(part, destination):
                 destination.copy_(part)
             start += length
+        return True
+    if kind == "matmul":
+        if kwargs or len(args) != 2 or dtype not in _FLOATING:
+            return False
+        a, b = args
+        if not all(isinstance(t, torch.Tensor) and t.dtype == dtype and t.device == target.device and t.dim() >= 2 for t in args):
+            return False
+        if a.shape[-1] != b.shape[-2]:
+            return False
+        expected = tuple(torch.broadcast_shapes(a.shape[:-2], b.shape[:-2])) + (a.shape[-2], b.shape[-1])
+        if expected != tuple(target.shape):
+            return False
+        op(a, b, out=target)
         return True
     if dtype not in _FLOATING or kwargs or not args:
         return False

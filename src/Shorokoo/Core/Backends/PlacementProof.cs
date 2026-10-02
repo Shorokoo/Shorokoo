@@ -52,7 +52,8 @@ internal sealed record PlacementMemory(
     };
 
     /// <summary>The element-wise operators PyTorch writes into a given range of a floating-point
-    /// value as the translation computes them: those of one input, and those of two.</summary>
+    /// value as the translation computes them: those of one input, and those of two. A floating-point
+    /// <c>MatMul</c> of two matrices or stacks of them is written there too.</summary>
     internal static readonly HashSet<string> TorchElementWise = new(StringComparer.Ordinal)
     {
         "Neg", "Abs", "Sigmoid", "Relu", "Exp", "Log", "Sqrt", "Tanh", "Sin", "Cos", "Tan", "Asin", "Acos",
@@ -77,7 +78,7 @@ internal sealed record PlacementMemory(
     private static bool TorchWrites(NodeProto node, int elementType)
     {
         if (!OutputAliasProof.IsStandard(node) || node.Outputs.Count(o => o.Length > 0) != 1) return false;
-        if (TorchElementWise.Contains(node.OpType))
+        if (TorchElementWise.Contains(node.OpType) || node.OpType == "MatMul")
             return elementType is 1 or 10 or 11 or 16
                    && (PlacementProof.InPlaceUnary.Contains(node.OpType) ? node.Inputs.Count == 1 : node.Inputs.Count == 2);
         return node.OpType is "ConstantOfShape" or "Concat" || TorchCopies.Contains(node.OpType);

@@ -1089,6 +1089,7 @@ public class PyTorchBackendCoverageTests
         Assert.Equal("x@a+1048576 O@a+0", Placed(Halved("x O", Op("Slice", "a half end zero", "x"), Op("Exp", "b", "e"), Op("Slice", "e zero half zero", "s"), Op("Neg", "s", "O"))));
         Assert.Equal("O@- Z@-", Placed(GraphOn("a:float[262144]", "O Z", ComputeContextLifetimeCoverageTests.Op("Cast", "a", "y", attribute: ("to", 1)), Op("Neg", "y", "O"), Op("Exp", "y", "Z"))));
         Assert.Equal("O@b+0", Placed(GraphOn("a:float[512,512] b:float[512,512]", "O", Op("Transpose", "a", "O"))));
+        Assert.Equal("O@b+0", Placed(GraphOn("a:float[512,512] b:float[512,512] w:float[512,512]", "O", Op("MatMul", "a w", "O"))));
         Assert.Equal("O@a+0 Z@b+0", Placed(Graph("O Z", Op("Exp", "a", "e"), Op("Neg", "e", "O"), Op("Sigmoid", "b", "s"), Op("Add", "s e", "Z"))));
     }
 

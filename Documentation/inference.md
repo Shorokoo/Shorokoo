@@ -694,7 +694,7 @@ shape of every input, the outputs asked for — runs, and kept for it.
 |---|---|---|
 | **How** | a second session over the model, its placed values bound to their ranges | a translation writing each placed value with torch's own operator: an `out=` form, a fill, a concatenation part by part, or a copy of what a view reads |
 | **When it applies** | the signature's first run runs as always and its second placed, each measured on the session's allocator; the placements are kept only where the placed run asked for less, by more than the larger of a mebibyte and a sixty-fourth of the plain run | from the first run: nothing placed allocates |
-| **Not used** | where binding the values changes the operators ONNX Runtime runs (a fusion they would block); for a model over 16 MiB; past 8 signatures | in a training step whose gradient torch takes; for a model over 16 MiB; past 8 signatures |
+| **Not used** | where binding the values changes the operators ONNX Runtime runs (a fusion they would block); on an execution provider other than ONNX Runtime's CPU and CUDA ones; for a model over 16 MiB; past 8 signatures | in a training step whose gradient torch takes; for a model over 16 MiB; past 8 signatures |
 
 **Outputs on consumed memory.** An output written into an input stands on that input's memory —
 its **block** — as a `TensorData` of its own over its range, never overlapping another's. Several

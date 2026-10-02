@@ -1351,7 +1351,7 @@ public class ComputeContextLifetimeCoverageTests
     }
 
     /// <summary>The model a lowering hands a backend for <paramref name="graph"/>.</summary>
-    private static byte[] ModelOf(GraphProto graph)
+    internal static byte[] ModelOf(GraphProto graph)
     {
         var model = new ModelProto { IrVersion = 8, Graph = graph };
         model.OpsetImports.Add(new OperatorSetIdProto { Domain = "", Version = 17 });

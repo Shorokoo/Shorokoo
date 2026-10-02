@@ -1,4 +1,5 @@
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using Microsoft.ML.OnnxRuntime;
 using Shorokoo.Core.Backends;
 using Shorokoo.Core.Factory;
@@ -275,6 +276,28 @@ public class GpuExecutionTests
         Assert.Equal(OrtPlacements.Stage.Adopted, entry.Stage);
         Assert.Contains("a", entry.Plan.Select(p => p.Value));
         Assert.Equal(expected, output);
+    }
+
+    [CudaFact]
+    public void CudaProvider_ARunWithANodeTheCardHasNoKernelForComputesWhatItComputesUnplaced()
+    {
+        const int N = 1024;
+        var backend = DefaultBackend.Instance;
+        var model = ComputeContextLifetimeCoverageTests.ModelOf(ComputeContextLifetimeCoverageTests.GraphOf($"x:float[{N},{N}]", $"z:float[{N},{N}]",
+            ComputeContextLifetimeCoverageTests.Op("Relu", "x", "r"), ComputeContextLifetimeCoverageTests.Op("Hardmax", "r", "y"),
+            ComputeContextLifetimeCoverageTests.Op("Neg", "y", "z")));
+        byte[] x = [.. MemoryMarshal.AsBytes(Enumerable.Range(0, N * N).Select(i => (i % 13) * 0.25f - 1.5f).ToArray().AsSpan())];
+        byte[] Run(bool consume)
+        {
+            using var session = backend.CreateSession(model, ShorokooGraphOptimization.EnableAll, ShorokooLogSeverity.Fatal, new DeviceMemorySettings(), DiagnosticSettings.Default);
+            var input = backend.CreateTensorInBackendMemory(ShorokooTensorElementType.Float, x, [N, N]);
+            var feeds = new Dictionary<string, IShorokooTensorValue> { ["x"] = input };
+            using var output = consume ? session.RunConsuming(feeds, [input], ["z"], RunSettings.Default, out _).Single() : session.Run(feeds, ["z"], RunSettings.Default).Single();
+            if (!consume) input.Dispose();
+            return backend.CopyTensorToHost(output);
+        }
+
+        Assert.Equal(Run(consume: false), Run(consume: true));
     }
 
     [CudaFact]

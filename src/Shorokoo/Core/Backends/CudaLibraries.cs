@@ -18,11 +18,12 @@ namespace Shorokoo.Core.Backends;
 /// One copy, because a process holding the same release twice holds every page of it twice.</para>
 ///
 /// <para>The copy is the release's folder in a per-user cache, <c>%LOCALAPPDATA%\shorokoo\cuda\</c>
-/// on Windows and <c>~/.cache/shorokoo/cuda/</c> elsewhere. <see cref="Prepare"/> fills it the first time it is needed — from an installed
-/// copy that matches the pin exactly, or else from the release's wheel on PyPI — and loads it, by
-/// full path, before a backend loads anything by name. The ONNX Runtime CUDA backend calls it before
-/// its provider loads; a provisioned Python environment's own copies are hard links to the cache's
-/// files, so PyTorch, loading them by path, loads the very same files.</para>
+/// on Windows and <c>$XDG_CACHE_HOME/shorokoo/cuda/</c> (or <c>~/.cache/…</c>) elsewhere.
+/// <see cref="Prepare"/> fills it the first time it is needed — from a copy that matches the pin
+/// exactly, a provisioned Python environment's or an installed one, or else from the release's wheel
+/// on PyPI — and loads it, by full path, before a backend loads anything by name. The ONNX Runtime
+/// CUDA backend calls it before its provider loads; a provisioned Python environment's own copies are
+/// hard links to the cache's files, so PyTorch, loading them by path, loads the very same files.</para>
 /// </summary>
 public static class CudaLibraries
 {
@@ -35,9 +36,12 @@ public static class CudaLibraries
     /// CUDA backend calls it before its execution provider loads. Call it yourself at startup to fetch
     /// them then rather than on the first CUDA run, or before a backend of your own loads them.
     /// </summary>
-    /// <exception cref="InvalidOperationException">A pinned library is in neither the cache nor an
-    /// exactly matching installed copy, and its wheel could not be fetched; the message names the
-    /// library, where it was looked for and the size of the download.</exception>
+    /// <exception cref="InvalidOperationException">A pinned library is in neither the cache nor a copy
+    /// that matches it exactly, and its wheel could not be fetched; the message names the library,
+    /// where it was looked for and the size of the download.</exception>
+    /// <exception cref="InvalidDataException">The wheel fetched is not the one pinned.</exception>
+    /// <exception cref="TimeoutException">Another process has been filling the cache folder for longer
+    /// than an hour.</exception>
     public static void Prepare()
     {
         if (CudaLibraryPins.Current is not { } pins) return;

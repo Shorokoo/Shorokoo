@@ -54,7 +54,8 @@ internal sealed record CudaLibraryPins(
         : OperatingSystem.IsLinux() ? ForPlatform("linux-x64")
         : null);
 
-    /// <summary>A text every pin set has its own of, which changes whenever any pinned file does.</summary>
+    /// <summary>Each release's cache folder and wheel digest: text that differs between any two pin
+    /// sets, which an environment's link marker records.</summary>
     public string Identity => string.Join('\n', Libraries.Select(l => $"{l.CacheKey} {l.WheelSha256}"));
 
     /// <summary>The pins for <paramref name="platform"/>, one of <see cref="Platforms"/>.</summary>

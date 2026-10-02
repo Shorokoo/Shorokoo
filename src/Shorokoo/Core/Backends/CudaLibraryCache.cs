@@ -53,10 +53,10 @@ internal static partial class CudaLibraryCache
 
     /// <summary>The cache folder, reading environment variables through <paramref name="variables"/>,
     /// on Windows or not as <paramref name="windows"/> says.</summary>
-    internal static string Root(Func<string, string?> variables, bool windows) => Path.Combine(Shorokoo(variables, windows), "cuda");
+    internal static string Root(Func<string, string?> variables, bool windows) => Path.Combine(UserCache(variables, windows), "cuda");
 
     /// <summary>The user cache folder Shorokoo keeps its NVIDIA libraries and Python environments in.</summary>
-    private static string Shorokoo(Func<string, string?> variables, bool windows)
+    private static string UserCache(Func<string, string?> variables, bool windows)
     {
         var root = windows
             ? variables("LOCALAPPDATA") is { Length: > 0 } local ? local : Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData)
@@ -114,7 +114,7 @@ internal static partial class CudaLibraryCache
         IEnumerable<string> SitePackages(string environment) => windows
             ? [Path.Combine(environment, "Lib", "site-packages")]
             : Each(Path.Combine(environment, "lib"), "python3.*", lib => [Path.Combine(lib, "site-packages")]);
-        var environments = Each(Path.Combine(Shorokoo(variables, windows), "python-envs"), $"cu{pin.CudaMajor}-*",
+        var environments = Each(Path.Combine(UserCache(variables, windows), "python-envs"), $"cu{pin.CudaMajor}-*",
             environment => SitePackages(environment)
                 .SelectMany(sitePackages => pin.Files.SelectMany(file => EnvironmentFiles(sitePackages, file)))
                 .Select(path => Path.GetDirectoryName(path)!)
@@ -241,10 +241,21 @@ internal static partial class CudaLibraryCache
             {
                 try
                 {
-                    using var source = pin.Wheel.IsFile
-                        ? File.OpenRead(pin.Wheel.LocalPath)
-                        : Http.Value.GetStreamAsync(pin.Wheel).GetAwaiter().GetResult();
-                    source.CopyTo(target);
+                    if (pin.Wheel.IsFile)
+                    {
+                        using var source = File.OpenRead(pin.Wheel.LocalPath);
+                        source.CopyTo(target);
+                    }
+                    else
+                    {
+                        // The synchronous send: this runs inside a backend's own synchronous call, and
+                        // blocking on an asynchronous one there could wait on the caller's context.
+                        using var request = new HttpRequestMessage(HttpMethod.Get, pin.Wheel);
+                        using var response = Http.Value.Send(request, HttpCompletionOption.ResponseHeadersRead);
+                        response.EnsureSuccessStatusCode();
+                        using var source = response.Content.ReadAsStream();
+                        source.CopyTo(target);
+                    }
                 }
                 catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException
                                                or IOException or UnauthorizedAccessException)

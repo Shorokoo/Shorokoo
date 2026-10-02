@@ -29,12 +29,12 @@ namespace Shorokoo.Core.Backends;
 /// (<see cref="ClassOf"/>), and the class decides:</para>
 /// <list type="bullet">
 /// <item>on the host, a block under 64 KiB is an allocation of its own from the C runtime's heap; a
-/// larger one, a multiple of 64 KiB, is carved from its account's <see cref="Arena"/> of host pages
-/// (<see cref="HostMemory"/>);</item>
-/// <item>on a card whose driver offers virtual memory management, a block under a mebibyte is carved
-/// from the card's arena of small blocks, which every account shares, packed into the card's 2 MiB
-/// granules as the CUDA runtime packs small blocks into its pages; a larger one, a whole number of
-/// granules, from its account's arena of granules (<see cref="CardMemory"/>);</item>
+/// larger one, a whole number of 4 KiB pages, is carved from its account's <see cref="Arena"/> of
+/// host pages, committed 64 KiB at a time (<see cref="HostMemory"/>);</item>
+/// <item>on a card whose driver offers virtual memory management, a block of up to a mebibyte is
+/// carved from the card's arena of small blocks, which every account shares, packed into the card's
+/// 2 MiB granules as the CUDA runtime packs small blocks into its pages; a larger one, a whole number
+/// of granules, from its account's arena of granules (<see cref="CardMemory"/>);</item>
 /// <item>on a card whose driver does not, every block is a <c>cudaMalloc</c> of its own.</item>
 /// </list>
 /// <para>An account's arena reserves address space with no memory behind it and commits a granule as
@@ -42,8 +42,10 @@ namespace Shorokoo.Core.Backends;
 /// class, so a loop's runs find their blocks waiting with no work at all; a request of a class no
 /// kept block serves is carved from what the arena keeps committed, whatever block it was carved for
 /// before, so a session fed one shape after another reuses warm memory as an arena does, rather than
-/// taking every new size from the system. No two blocks of an account's arena share a granule, so a
-/// block kept alive holds its own granules and nothing else of the arena's.</para>
+/// taking every new size from the system. On a card no two blocks of an account's arena share a
+/// granule, so a block kept alive holds its own granules and nothing else of the arena's; on the host
+/// a block kept alive holds its own pages, and at most the rest of the two granules its ends lie
+/// in.</para>
 ///
 /// <para><b>What an account keeps.</b> An account never holds from the device more than the most
 /// one of its calls has used: the blocks it had in use as the call began and every block the call
@@ -88,9 +90,14 @@ internal sealed unsafe class CachingAllocator
     /// <summary>On the host, the smallest class carved from an account's arena: its granule.</summary>
     private const long HostArenaFrom = 64L << 10;
 
-    /// <summary>On a card, the smallest class carved from an account's arena of whole granules
-    /// rather than the card's arena of small blocks.</summary>
-    private const long CardArenaFrom = 1L << 20;
+    /// <summary>On the host, what a block carved from an account's arena is a whole number of: a
+    /// page, so a block holds its own pages and less than one more.</summary>
+    private const long HostPage = 4L << 10;
+
+    /// <summary>On a card, the largest class packed into the card's arena of small blocks rather than
+    /// carved from an account's arena of whole granules: a mebibyte, the most the CUDA runtime packs
+    /// two to its 2 MiB page.</summary>
+    private const long CardSmallTo = 1L << 20;
 
     private static readonly object _registryGate = new();
     private static readonly Dictionary<int, CachingAllocator> _byDevice = [];
@@ -334,21 +341,21 @@ internal sealed unsafe class CachingAllocator
     // ---- sizes ----
 
     /// <summary>The size class <paramref name="bytes"/> is served from on the host: a multiple of
-    /// 512 bytes under 64 KiB, and of 64 KiB, the host arena's granule, from there.</summary>
+    /// 512 bytes under 64 KiB, and of a 4 KiB page from there.</summary>
     internal static long SizeClass(long bytes)
-        => bytes < HostArenaFrom ? (bytes + 511) & ~511L : (bytes + HostArenaFrom - 1) & ~(HostArenaFrom - 1);
+        => bytes < HostArenaFrom ? (bytes + 511) & ~511L : (bytes + HostPage - 1) & ~(HostPage - 1);
 
     /// <summary>
     /// The size class <paramref name="bytes"/> is served from on this device: on the host
-    /// <see cref="SizeClass"/>; on a card with arenas a multiple of 512 bytes under a mebibyte, and a
-    /// whole number of granules from there; on a card without, a multiple of 512 bytes up to a
+    /// <see cref="SizeClass"/>; on a card with arenas a multiple of 512 bytes up to a mebibyte, and a
+    /// whole number of granules above it; on a card without, a multiple of 512 bytes up to a
     /// mebibyte, and above it of an eighth of the power of two below.
     /// </summary>
     internal long ClassOf(long bytes)
     {
         if (!OnCard) return SizeClass(bytes);
         if (_backing is { } card)
-            return bytes < CardArenaFrom ? (bytes + 511) & ~511L : (bytes + card.Granule - 1) / card.Granule * card.Granule;
+            return bytes <= CardSmallTo ? (bytes + 511) & ~511L : (bytes + card.Granule - 1) / card.Granule * card.Granule;
         if (bytes <= 1L << 20) return (bytes + 511) & ~511L;
         var step = 1L << (63 - BitOperations.LeadingZeroCount((ulong)bytes) - 3);
         return (bytes + step - 1) & ~(step - 1);
@@ -359,7 +366,7 @@ internal sealed unsafe class CachingAllocator
     {
         if (_backing is null) return Source.Own;
         if (!OnCard) return size < HostArenaFrom ? Source.Own : Source.Arena;
-        return size < CardArenaFrom ? Source.Small : Source.Arena;
+        return size <= CardSmallTo ? Source.Small : Source.Arena;
     }
 
     // ---- allocation ----
@@ -411,14 +418,14 @@ internal sealed unsafe class CachingAllocator
             }
             if (refusal is null && source != Source.Own)
             {
-                carved = CarveFor(account, size, source, excess);
+                carved = CarveFor(account, size, source, excess, out var counted);
                 if (carved == IntPtr.Zero)
                 {
                     // The device is full: what is kept anywhere on it goes back -- on a card once the
                     // card is done with it -- and the request is tried once more.
                     if (OnCard) CudaRuntime.Synchronize(_device);
                     ReleaseEverythingCachedUnderLock(release ??= []);
-                    carved = CarveFor(account, size, source, excess: 0);
+                    carved = CarveFor(account, size, source, excess: 0, out counted);
                 }
                 if (carved == IntPtr.Zero)
                 {
@@ -428,7 +435,7 @@ internal sealed unsafe class CachingAllocator
                 else
                 {
                     account.Blocks++;
-                    Hand(carved, size, bytes, account, source, call: -1);
+                    Hand(carved, size, bytes, account, source, counted);
                     // On the host what is over the account's mark goes back at once; on a card as the
                     // call charging the account ends (Scope.End), where one does.
                     if (!OnCard || scope is null || !scope.Charges(account))
@@ -466,19 +473,30 @@ internal sealed unsafe class CachingAllocator
     /// A block of class <paramref name="size"/> carved from where <paramref name="source"/> says: the
     /// card's arena of small blocks, or the account's own arena — from what it keeps committed where
     /// that fits; where nothing does and a new granule would take the account past its mark
-    /// (<paramref name="excess"/> over zero), from what its kept blocks of that arena give way to,
-    /// longest kept first; and only then over granules committed for it. Zero where the device has no
-    /// memory for it.
+    /// (<paramref name="excess"/> over zero), from the memory of the smallest larger block it keeps,
+    /// or else of what its kept blocks of that arena give way to, longest kept first, until as much as
+    /// the excess has; and only then over granules committed for it, what is over the mark going back
+    /// as the caller sheds it. Zero where the device has no memory for it.
+    /// <paramref name="counted"/> is the call the block's memory was last counted in: that of the
+    /// larger kept block it takes the place of, so a call that lets a block go and asks for a smaller
+    /// one counts the memory once.
     /// </summary>
-    private IntPtr CarveFor(Account account, long size, Source source, long excess)
+    private IntPtr CarveFor(Account account, long size, Source source, long excess, out long counted)
     {
+        counted = -1;
         if (source == Source.Small) return _small!.Carve(size, mayCommit: true);
-        var arena = account.Arena ??= new Arena(_backing!, unit: OnCard ? _backing!.Granule : HostArenaFrom,
+        var arena = account.Arena ??= new Arena(_backing!, unit: OnCard ? _backing!.Granule : HostPage,
             chunkBytes: OnCard ? 1L << 30 : 256L << 20);
         var block = arena.Carve(size, mayCommit: false);
-        while (block == IntPtr.Zero && excess > 0 && account.GiveWayOldest(fromArena: true, out var kept, out var keptSize, out _))
+        if (block == IntPtr.Zero && excess > 0 && account.TakeKeptLarger(size, out var larger, out var largerSize, out var call))
         {
-            Uncarved(account, kept, keptSize, Source.Arena);
+            arena.Uncarve(larger, largerSize);
+            block = arena.Carve(size, mayCommit: false);
+            counted = call;
+        }
+        for (long givenWay = 0; block == IntPtr.Zero && givenWay < excess && account.GiveWayOldest(fromArena: true, out var kept, out var keptSize, out _); givenWay += keptSize)
+        {
+            arena.Uncarve(kept, keptSize);
             block = arena.Carve(size, mayCommit: false);
         }
         return block != IntPtr.Zero ? block : arena.Carve(size, mayCommit: true);
@@ -577,6 +595,7 @@ internal sealed unsafe class CachingAllocator
                 return [(block, size)];
             case Source.Small:
                 _small!.Uncarve(block, size);
+                account.Shrinkages++;
                 ShedSmall();
                 return null;
             default:
@@ -650,13 +669,9 @@ internal sealed unsafe class CachingAllocator
         // which go back to the card's arena of small blocks still committed -- longest kept first.
         while (excess > 0 && account.GiveWayOldest(fromArena: false, out var block, out var size, out var from))
         {
-            if (from == Source.Own)
-            {
-                release.Add((block, size));
-                account.Shrinkages++;
-            }
-            else
-                Uncarved(account, block, size, from);
+            if (from == Source.Own) release.Add((block, size));
+            else Uncarved(account, block, size, from);
+            account.Shrinkages++;
             excess -= size;
         }
         // Then the account's arena: its granules no block is over, idle longest first, and then its
@@ -685,7 +700,11 @@ internal sealed unsafe class CachingAllocator
             foreach (var (block, size, source, call) in scope.TakeAllHeld(account))
                 account.Keep(block, size, source, call);
         var release = Shed(account, long.MaxValue);
-        account.Arena?.DecommitAll(out _);
+        if (account.Arena is { } arena)
+        {
+            arena.DecommitAll(out var runs);
+            account.Shrinkages += runs;
+        }
         return release;
     }
 
@@ -697,7 +716,7 @@ internal sealed unsafe class CachingAllocator
         else account.Arena!.Uncarve(block, size);
     }
 
-    /// <summary>The card's arena of small blocks keeps at most a few granules no block is over.</summary>
+    /// <summary>The card's arena of small blocks keeps no more committed than at its busiest.</summary>
     private void ShedSmall()
     {
         if (_small is null) return;
@@ -971,6 +990,35 @@ internal sealed unsafe class CachingAllocator
             block = IntPtr.Zero;
             call = -1;
             return false;
+        }
+
+        /// <summary>The block of the smallest class larger than <paramref name="size"/> carved from the
+        /// account's arena, the one of it kept last, taken out to give way, with its class and the
+        /// call it was last counted in.</summary>
+        internal bool TakeKeptLarger(long size, out IntPtr block, out long larger, out long call)
+        {
+            block = IntPtr.Zero;
+            call = -1;
+            Kept? best = null;
+            long bestSize = 0;
+            void Consider(long classSize, Kept? kept)
+            {
+                if (kept is null || kept.Count == 0 || classSize <= size || kept.Items[kept.Head].Source != Source.Arena) return;
+                if (best is null || classSize < bestSize)
+                {
+                    best = kept;
+                    bestSize = classSize;
+                }
+            }
+            Consider(64L << 10, _small[^1]);
+            foreach (var (classSize, kept) in _kept) Consider(classSize, kept);
+            larger = bestSize;
+            if (best is null) return false;
+            (block, _, call, _) = best.PopNewest();
+            Cached -= larger;
+            _keptCount--;
+            Blocks--;
+            return true;
         }
 
         /// <summary>The block kept longest — carved from the account's arena where

@@ -641,10 +641,14 @@ internal sealed class OrtSession : IShorokooSession
     /// session, the host's otherwise.</summary>
     private ArenaStatistics? ReadOrtArenaStatistics()
     {
-        using var card = _cudaDeviceId is { } device
-            ? new OrtMemoryInfo(OrtMemoryInfo.allocatorCUDA, OrtAllocatorType.ArenaAllocator, device, OrtMemType.Default)
-            : null;
-        using var allocator = new OrtAllocator(_session, card ?? OrtMemoryInfo.DefaultInstance);
+        if (_cudaDeviceId is not { } device) return ReadOrtArenaStatistics(OrtMemoryInfo.DefaultInstance);
+        using var card = new OrtMemoryInfo(OrtMemoryInfo.allocatorCUDA, OrtAllocatorType.ArenaAllocator, device, OrtMemType.Default);
+        return ReadOrtArenaStatistics(card);
+    }
+
+    private ArenaStatistics? ReadOrtArenaStatistics(OrtMemoryInfo memory)
+    {
+        using var allocator = new OrtAllocator(_session, memory);
         return OrtArenaStats.Read(allocator);
     }
 

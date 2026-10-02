@@ -12,6 +12,8 @@ using Shorokoo.OnnxRuntime;
 using Shorokoo.PythonHost;
 using Shorokoo.PythonTranslation;
 using Shorokoo.PyTorch;
+using Python.Runtime;
+using Shorokoo.Runtime;
 using OrtElementType = Microsoft.ML.OnnxRuntime.Tensors.TensorElementType;
 
 namespace Shorokoo.Tests.Benchmarks;
@@ -57,6 +59,7 @@ public class MemoryReuseScenarioTests
     private const long WholeBytes = WholeCount * sizeof(float);
     private const long Big = 1L << 20;
     private const int Runs = 3;
+    private const int TimedRuns = 30;
 
     private static readonly string[] Outputs = ["L", "A_half", "B_half"];
     private static readonly string[] Intermediates = ["C0", "C1", "C2", "C3", "L0", "L1", "L2"];
@@ -74,6 +77,148 @@ public class MemoryReuseScenarioTests
 
     [CudaFact]
     public void RecordTheScenarioOnTheCard() => Record(card: true, "card");
+
+    /// <summary>
+    /// The scenario through Shorokoo's public API — a compute context compiling the scenario's graph
+    /// and executing it — on the backend <c>$SHOROKOO_MEMORY_REUSE_BACKEND</c> names: <c>ort</c> (the
+    /// default; the host, or the card in a <c>-p:ShorokooGpuTests=true</c> build), <c>torch-cpu</c> or
+    /// <c>torch-cuda</c>, each in a process of its own, since a process has one Python environment.
+    /// Every run is measured twice over: fed inputs it may not consume (shared), which runs the way a
+    /// run always ran, and fed inputs it consumes, which places. What is measured beyond the inputs is
+    /// what the run asked of the backend's allocator: the ONNX Runtime session's allocator account,
+    /// torch's CPU allocations as its profiler records them, or torch's CUDA allocator's peak.
+    /// </summary>
+    [Fact]
+    public void RecordTheScenarioThroughTheComputeContext()
+    {
+        var backend = Environment.GetEnvironmentVariable("SHOROKOO_MEMORY_REUSE_BACKEND") ?? "ort";
+        var rows = (int)(2 * N);
+        var columns = (int)M;
+        var a = new float[rows * columns];
+        var b = new float[rows * columns];
+        for (int i = 0; i < a.Length; i++)
+        {
+            a[i] = (i % 1000) * 0.001f;
+            b[i] = -((i % 777) * 0.001f);
+        }
+        using var context = backend switch
+        {
+            "torch-cpu" => new ComputeContext(new Shorokoo.PyTorch.Cpu.TorchCpuBackend()),
+            "torch-cuda" => new ComputeContext(new Shorokoo.PyTorch.Cuda.TorchCudaBackend()),
+            _ => new ComputeContext(),
+        };
+        var compiled = context.Compile(ComputeContextLifetimeCoverageTests.TwoHalves());
+        var lines = new List<string> { $"# The scenario through the compute context: {backend}, A and B [{rows}, {columns}] float", "",
+            "| run | inputs | beyond the inputs | allocated | outputs on blocks |", "|---|---|---|---|---|" };
+        (NamedModelParam[] Outputs, double Milliseconds, long Peak, long Allocated) Run(bool consume, bool measure)
+        {
+            var x = TensorData([(long)rows, columns], a).To(context);
+            var y = TensorData([(long)rows, columns], b).To(context);
+            NamedModelParam[] Execute() => consume ? compiled.Execute(x, y) : compiled.Execute(x.Shared(), y.Shared());
+            var watch = Stopwatch.StartNew();
+            var (outputs, peak, allocated) = measure ? Measured(backend, compiled, Execute) : (Execute(), 0L, 0L);
+            if (backend == "torch-cuda") Synchronize();
+            watch.Stop();
+            if (!consume)
+            {
+                x.Delete();
+                y.Delete();
+            }
+            return (outputs, watch.Elapsed.TotalMilliseconds, peak, allocated);
+        }
+        for (int run = 0; run < 2 * Runs; run++)
+        {
+            var consume = run % 2 == 1;
+            var (outputs, _, peak, allocated) = Run(consume, measure: true);
+            lines.Add($"| {run / 2 + 1} | {(consume ? "consumed" : "shared")} | {Mib(peak)} | {(allocated < 0 ? "-" : Mib(allocated))} | {outputs.Count(o => o.ToTensorData().Block is not null)}/{outputs.Length} |");
+            foreach (var output in outputs) output.ToTensorData().Delete();
+        }
+        var times = new Dictionary<bool, List<double>> { [false] = [], [true] = [] };
+        for (int run = 0; run < 2 * TimedRuns; run++)
+        {
+            var consume = run % 2 == 1;
+            var (outputs, milliseconds, _, _) = Run(consume, measure: false);
+            times[consume].Add(milliseconds);
+            foreach (var output in outputs) output.ToTensorData().Delete();
+        }
+        foreach (var (consume, each) in times)
+            lines.Add($"{(consume ? "consumed" : "shared")}: median {Median(each):0.00} ms, tenth percentile {each.Order().ElementAt(each.Count / 10):0.00} ms, least {each.Min():0.00} ms over {each.Count} runs");
+        if (compiled.Session is OrtSession { Placements: { } placements })
+            foreach (var entry in placements.Entries)
+                lines.Add($"ONNX Runtime signature: {entry.Stage}, plain {Mib(entry.PlainPeak)}, placed {Mib(entry.PlacedPeak)}, {entry.Plan.Count} placed{(entry.Refusal is null ? "" : ", " + entry.Refusal)}");
+        if (compiled.Session is TorchSession { Placements: { } torch })
+            foreach (var entry in torch.Entries)
+                lines.Add($"torch signature: {entry.Plan.Count} placed{(entry.Refusal is null ? "" : ", " + entry.Refusal)}");
+        File.WriteAllText(Path.Combine(OutputDirectory(), $"through-the-compute-context-{backend}.md"), string.Join("\n", lines) + "\n");
+    }
+
+    private static double Median(List<double> values)
+    {
+        var sorted = values.Order().ToList();
+        return sorted[sorted.Count / 2];
+    }
+
+    private static void Synchronize()
+    {
+        using (PythonRuntime.Gil())
+        {
+            using var torch = Py.Import("torch");
+            using var cuda = torch.GetAttr("cuda");
+            cuda.InvokeMethod("synchronize").Dispose();
+        }
+    }
+
+    /// <summary>What <paramref name="run"/> returned, the most it held at once beyond what was
+    /// allocated as it began, and everything it allocated, as the backend's allocator records them.</summary>
+    private static (NamedModelParam[] Outputs, long Peak, long Allocated) Measured(string backend, CompiledGraph compiled, Func<NamedModelParam[]> run)
+    {
+        if (compiled.Session is OrtSession session)
+        {
+            var outputs = session.Measured(run, out var peak);
+            return (outputs, peak, -1L);
+        }
+        using (PythonRuntime.Gil())
+        {
+            using var scope = Py.CreateScope();
+            scope.Exec(backend == "torch-cuda"
+                ? """
+                  import torch
+                  torch.cuda.synchronize()
+                  torch.cuda.reset_peak_memory_stats()
+                  before = torch.cuda.memory_allocated()
+                  allocated_before = torch.cuda.memory_stats().get("allocated_bytes.all.allocated", 0)
+                  """
+                : """
+                  import torch
+                  from torch.profiler import profile, ProfilerActivity
+                  prof = profile(activities=[ProfilerActivity.CPU], profile_memory=True, with_stack=True)
+                  prof.__enter__()
+                  """);
+            var outputs = run();
+            scope.Exec(backend == "torch-cuda"
+                ? """
+                  torch.cuda.synchronize()
+                  peak = torch.cuda.max_memory_allocated() - before
+                  allocated = torch.cuda.memory_stats().get("allocated_bytes.all.allocated", 0) - allocated_before
+                  """
+                : """
+                  prof.__exit__(None, None, None)
+                  def transfer(e):
+                      while e is not None:
+                          if "from_host" in e.name:
+                              return True
+                          e = e.cpu_parent
+                      return False
+                  events = sorted((e for e in prof.events() if not transfer(e)), key=lambda e: e.time_range.start)
+                  allocated = sum(e.self_cpu_memory_usage for e in events if e.self_cpu_memory_usage > 0)
+                  running = peak = 0
+                  for e in events:
+                      running += e.self_cpu_memory_usage
+                      peak = max(peak, running)
+                  """);
+            return (outputs, scope.Get<long>("peak"), scope.Get<long>("allocated"));
+        }
+    }
 
     /// <summary>
     /// The scenario on PyTorch, eagerly on the card and the CPU, and on JAX/XLA on the CPU — each way

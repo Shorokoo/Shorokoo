@@ -530,7 +530,7 @@ class _Placing:
             if any(other != index and lo < end and start < hi for other, (lo, hi) in extents):
                 continue
             try:
-                self.blocks[index] = arg.detach().reshape(-1).view(torch.uint8)
+                self.blocks[index] = (arg.detach().reshape(-1).view(torch.uint8), end - start)
             except RuntimeError:
                 continue
 
@@ -542,9 +542,9 @@ class _Placing:
         if target is None:
             index, offset, count, code, shape, _ = self.slots[slot]
             block = self.blocks.get(index)
-            if block is None or offset < 0 or offset + count > block.numel():
+            if block is None or offset < 0 or offset + count > block[1]:
                 return None
-            target = block[offset:offset + count].view(torch_dtype(code)).view(list(shape))
+            target = block[0][offset:offset + count].view(_DTYPES[code]).view(shape)
             self.targets[slot] = target
         return target
 
@@ -638,9 +638,12 @@ def _write_fast(fast, target, args, kwargs):
         return True
     if dtype not in _FLOATING or kwargs or not args:
         return False
-    if not all(isinstance(a, torch.Tensor) and a.dtype == dtype and (a.device == target.device or a.dim() == 0) for a in args):
-        return False
-    if tuple(torch.broadcast_shapes(*(a.shape for a in args))) != tuple(target.shape):
+    device, shape, whole = target.device, target.shape, True
+    for a in args:
+        if not isinstance(a, torch.Tensor) or a.dtype != dtype or (a.device != device and a.dim()):
+            return False
+        whole = whole and a.shape == shape
+    if not whole and torch.broadcast_shapes(*(a.shape for a in args)) != shape:
         return False
     if kind == "relu":
         if not _same_memory(args[0], target):

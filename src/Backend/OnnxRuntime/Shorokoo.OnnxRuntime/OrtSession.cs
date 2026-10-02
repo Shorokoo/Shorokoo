@@ -437,31 +437,49 @@ internal sealed class OrtSession : IShorokooSession
         return wrapped;
     }
 
+    /// <summary>
+    /// What a value placed in the memory of an input the run consumed is bound to for one run:
+    /// <see cref="Bound"/>, an ORT value over its range, and, where the caller asked for it as an
+    /// output, <see cref="Returned"/>, the value handed back for it — a view over the same range
+    /// holding a lease on the block (see <see cref="SharedBlock"/>). An intermediate is bound to be
+    /// written there and handed back to nobody.
+    /// </summary>
+    internal readonly record struct PlacedBinding(OrtValue Bound, OrtTensorValue? Returned);
+
     /// <summary>A run through an I/O binding: each output bound to the consumed value
-    /// <paramref name="into"/> names for it, and otherwise to the memory it is left in.</summary>
+    /// <paramref name="into"/> names for it, or to the range <paramref name="placed"/> gives it, and
+    /// otherwise to the memory it is left in. A placed value the caller did not ask for is bound
+    /// as well, and what the run hands back for it let go of.</summary>
     private IReadOnlyList<IShorokooTensorValue> RunThroughABinding(
         IReadOnlyDictionary<string, IShorokooTensorValue> inputs,
         IReadOnlyList<string> outputNames,
         Dictionary<string, AliasTarget>? into,
-        RunSettings runSettings)
+        RunSettings runSettings,
+        IReadOnlyDictionary<string, PlacedBinding>? placed = null)
     {
         using var binding = _session.CreateIoBinding();
         foreach (var (k, v) in inputs)
             binding.BindInput(k, Fed(k, v));
 
         // An output bound to a value is written into that value's memory by the node that produces
-        // it -- a consumed input's, for an aliased one, which was checked to fit before it got here.
-        // An output bound to a memory is allocated there by ORT, from this session's allocator for
-        // it, copied there by ORT where the node that produces it ran elsewhere
-        // (Shorokoo/Shorokoo#493); ORT sizes those itself, so a shape it only learns while running is
-        // fine. A string tensor and a sequence are left in host memory: ORT keeps strings there
-        // whatever its provider, and reads a sequence's elements one by one through its host
-        // allocator, which reads an element left in device memory as though it were host memory, and
-        // the process faults.
+        // it -- a consumed input's, for an aliased one, which was checked to fit before it got here,
+        // or a range of one, for a placed one, which the placement proof put there. An output bound
+        // to a memory is allocated there by ORT, from this session's allocator for it, copied there
+        // by ORT where the node that produces it ran elsewhere (Shorokoo/Shorokoo#493); ORT sizes
+        // those itself, so a shape it only learns while running is fine. A string tensor and a
+        // sequence are left in host memory: ORT keeps strings there whatever its provider, and reads a
+        // sequence's elements one by one through its host allocator, which reads an element left in
+        // device memory as though it were host memory, and the process faults.
         var hostMemoryInfo = OrtMemoryInfo.DefaultInstance;
-        foreach (var name in outputNames)
+        List<string> bound = [.. outputNames];
+        if (placed is not null)
+            foreach (var name in placed.Keys)
+                if (!bound.Contains(name)) bound.Add(name);
+        foreach (var name in bound)
         {
-            if (into is not null && into.TryGetValue(name, out var target))
+            if (placed is not null && placed.TryGetValue(name, out var place))
+                binding.BindOutput(name, place.Bound);
+            else if (into is not null && into.TryGetValue(name, out var target))
                 binding.BindOutput(name, target.Value.Inner);
             else
                 binding.BindOutputToDevice(name, OnTheCard(name) ? _cardMemory! : hostMemoryInfo);
@@ -479,45 +497,58 @@ internal sealed class OrtSession : IShorokooSession
         // which are what this returns -- so anything that goes wrong between here and the return
         // leaks an allocation apiece. Establish the shape first, and dispose the lot if it is not
         // what it must be.
-        if (boundNames.Length != results.Count || results.Count != outputNames.Count)
+        if (boundNames.Length != results.Count || results.Count != bound.Count)
         {
             foreach (var value in results) value.Dispose();
             throw new InvalidOperationException(
                 $"The run bound {boundNames.Length} outputs and returned {results.Count} values for "
-                + $"{outputNames.Count} requested names; they must agree one for one.");
+                + $"{bound.Count} bound names; they must agree one for one.");
         }
 
-        // Bound in the caller's order, they come back in it; each is looked up by name where it does
-        // not.
-        Dictionary<string, OrtValue>? byName = null;
-        var wrapped = new IShorokooTensorValue[outputNames.Count];
-        for (int i = 0; i < wrapped.Length; i++)
-        {
-            if (string.Equals(boundNames[i], outputNames[i], StringComparison.Ordinal))
-            {
-                wrapped[i] = new OrtTensorValue(results[i]);
-                continue;
-            }
-            if (byName is null)
-            {
-                byName = new Dictionary<string, OrtValue>(results.Count, StringComparer.Ordinal);
-                for (int b = 0; b < boundNames.Length; b++)
-                    byName[boundNames[b]] = results[b];
-            }
-            // Same reason as the count check above, and the same handling: a name that does not come
-            // back is a bad run, not an excuse to drop every allocation it made.
-            if (!byName.TryGetValue(outputNames[i], out var value))
+        var byName = new Dictionary<string, OrtValue>(results.Count, StringComparer.Ordinal);
+        for (int b = 0; b < boundNames.Length; b++) byName[boundNames[b]] = results[b];
+        // Same reason as the count check above, and the same handling: a name that does not come
+        // back is a bad run, not an excuse to drop every allocation it made.
+        foreach (var name in outputNames)
+            if (!byName.ContainsKey(name))
             {
                 foreach (var orphan in results) orphan.Dispose();
                 throw new InvalidOperationException(
-                    $"The run bound no output named '{outputNames[i]}'; it bound "
-                    + $"{string.Join(", ", boundNames)}.");
+                    $"The run bound no output named '{name}'; it bound {string.Join(", ", boundNames)}.");
             }
-            wrapped[i] = new OrtTensorValue(value);
+
+        var wrapped = new IShorokooTensorValue[outputNames.Count];
+        var handed = new HashSet<OrtValue>(ReferenceEqualityComparer.Instance);
+        for (int i = 0; i < wrapped.Length; i++)
+        {
+            var value = byName[outputNames[i]];
+            if (placed is not null && placed.TryGetValue(outputNames[i], out var place) && place.Returned is { } view)
+            {
+                // The view over the range, which holds the lease, is what is handed back; the value
+                // the run returned for it holds nothing.
+                wrapped[i] = view;
+                continue;
+            }
+            handed.Add(value);
+            // An output written into a consumed value that stands on a block stands on it too, over
+            // the same range: it takes a lease of its own, since the consumed value's goes as the
+            // consumed value is released.
+            wrapped[i] = into is not null && into.TryGetValue(outputNames[i], out var target) && target.Value.Range is { } range
+                ? Leased(value, range)
+                : new OrtTensorValue(value);
         }
+        foreach (var value in results)
+            if (!handed.Contains(value)) value.Dispose();
         return wrapped;
     }
 
+    /// <summary><paramref name="value"/>, which stands on <paramref name="range"/>, holding a lease
+    /// of its own there.</summary>
+    private static OrtTensorValue Leased(OrtValue value, BlockRange range)
+    {
+        range.Block.Lease();
+        return new OrtTensorValue(value, range);
+    }
 
     /// <summary>Whether output <paramref name="name"/> is left on this session's card: on a CUDA
     /// session, every tensor output but a string one.</summary>

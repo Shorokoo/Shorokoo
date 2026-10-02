@@ -895,7 +895,7 @@ used). The device has room, yet this process is close to its own memory limit â€
 device allocation is backed by system commit, so a limit meant to bound HOST memory bounds DEVICE
 memory too ... This is the limit, not the model: re-run with it raised or removed. Underlying failure:
 [ErrorCode:RuntimeException] ... Failed to allocate 2359296 bytes on CUDA device 0: the card has no
-such block free (cudaMalloc refused it) ...
+such block free (CUDA refused it) ...
 ```
 
 The backend's text is kept verbatim at the end and the original exception as `InnerException`.

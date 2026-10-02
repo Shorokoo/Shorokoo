@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -51,10 +52,14 @@ namespace Shorokoo.Core.Backends;
 /// one of its calls has used: the blocks it had in use as the call began and every block the call
 /// was handed, each counted once (<see cref="Account.MaxUsed"/>) — for the device's own account, the
 /// tensors placed between one session call's end on the device and the next. Where a request would
-/// take it past that mark, the kept blocks give way first, longest kept first, their memory staying
-/// committed for the request to be carved from; what is still over the mark is shed, the granules
-/// idle longest handed back first — at once on the host, and on a card as the call that asked ends,
-/// since a granule must not go back while work the card has in hand may read it. What is kept also
+/// take it past that mark and nothing committed fits it, the smallest larger block the account keeps
+/// in its arena gives way to it, its memory counted once in the call; or else kept blocks give way,
+/// longest kept first, their memory staying committed for the request to be carved from — until the
+/// request fits where it would take the account over by half itself or more, and otherwise only as
+/// much as it would, the request then committing fresh memory. What is still over the mark is shed —
+/// kept blocks of their own and small ones first, then the granules idle longest, then kept blocks
+/// of the arena — at once on the host, and on a card as the call that asked ends, since a granule
+/// must not go back while work the card has in hand may read it. What is kept also
 /// goes back when a run that hands back its memory ends (<see cref="ReleaseCached(Account)"/>), when
 /// a session closes, before an account would refuse an allocation for want of room, before the
 /// device would refuse one, and when the program asks (<see cref="ReleaseEverywhere"/>).</para>
@@ -118,7 +123,7 @@ internal sealed unsafe class CachingAllocator
     }
 
     private readonly int _device;
-    private readonly object _gate = new();
+    private Gate _gate;
     private readonly BlockTable _blocks = new();
     private readonly HashSet<IntPtr> _runtimes = [];
 
@@ -264,7 +269,7 @@ internal sealed unsafe class CachingAllocator
     /// </summary>
     internal bool ClaimRuntime(IntPtr environment)
     {
-        lock (_gate) return _runtimes.Add(environment);
+        using (_gate.Hold()) return _runtimes.Add(environment);
     }
 
     /// <summary>Whether this is a card's allocator.</summary>
@@ -392,7 +397,7 @@ internal sealed unsafe class CachingAllocator
         var source = SourceOf(size);
         List<(IntPtr, long)>? release = null;
         var carved = IntPtr.Zero;
-        lock (_gate)
+        using (_gate.Hold())
         {
             if (account == Placements) BeginPlacementsCall();
             if (scope is not null && scope.TakeHeld(account, size, out var held, out var call))
@@ -457,12 +462,12 @@ internal sealed unsafe class CachingAllocator
             own = Fresh(size);
             if (own == IntPtr.Zero)
             {
-                lock (_gate) account.Refusals++;
+                using (_gate.Hold()) account.Refusals++;
                 refusal = Refusal(bytes);
                 return IntPtr.Zero;
             }
         }
-        lock (_gate)
+        using (_gate.Hold())
         {
             account.Blocks++;
             return Hand(own, size, bytes, account, Source.Own, call: -1);
@@ -474,9 +479,12 @@ internal sealed unsafe class CachingAllocator
     /// card's arena of small blocks, or the account's own arena — from what it keeps committed where
     /// that fits; where nothing does and a new granule would take the account past its mark
     /// (<paramref name="excess"/> over zero), from the memory of the smallest larger block it keeps,
-    /// or else of what its kept blocks of that arena give way to, longest kept first, until as much as
-    /// the excess has; and only then over granules committed for it, what is over the mark going back
-    /// as the caller sheds it. Zero where the device has no memory for it.
+    /// or else of what its kept blocks of that arena give way to, longest kept first; and only then
+    /// over granules committed for it, what is over the mark going back as the caller sheds it. Kept
+    /// blocks give way until the request fits where the excess is half the request or more, its
+    /// memory having to come from what is kept anyway; where it is less, only as much as the excess,
+    /// since committing the request and shedding the excess costs less than giving way blocks the
+    /// call may yet ask for again. Zero where the device has no memory for it.
     /// <paramref name="counted"/> is the call the block's memory was last counted in: that of the
     /// larger kept block it takes the place of, so a call that lets a block go and asks for a smaller
     /// one counts the memory once.
@@ -494,7 +502,8 @@ internal sealed unsafe class CachingAllocator
             block = arena.Carve(size, mayCommit: false);
             counted = call;
         }
-        for (long givenWay = 0; block == IntPtr.Zero && givenWay < excess && account.GiveWayOldest(fromArena: true, out var kept, out var keptSize, out _); givenWay += keptSize)
+        var giveWay = excess * 2 >= size ? long.MaxValue : excess;
+        for (long givenWay = 0; block == IntPtr.Zero && givenWay < giveWay && account.GiveWayOldest(fromArena: true, out var kept, out var keptSize, out _); givenWay += keptSize)
         {
             arena.Uncarve(kept, keptSize);
             block = arena.Carve(size, mayCommit: false);
@@ -505,7 +514,7 @@ internal sealed unsafe class CachingAllocator
     /// <summary>The words a request the device has no memory for is refused in.</summary>
     private string Refusal(long bytes) => OnCard
         ? $"Failed to allocate {bytes} bytes {Where}: the card has no such block free "
-          + $"(cudaMalloc refused it), with everything {Allocator} kept for reuse handed back."
+          + $"(CUDA refused it), with everything {Allocator} kept for reuse handed back."
         : $"Failed to allocate {bytes} bytes {Where}: the process could not commit that much "
           + "more (a bad allocation).";
 
@@ -562,7 +571,7 @@ internal sealed unsafe class CachingAllocator
         if (pointer == IntPtr.Zero) return;
         var scope = t_scope;
         List<(IntPtr, long)>? release = null;
-        lock (_gate)
+        using (_gate.Hold())
         {
             if (!_blocks.Remove(pointer, out var block)) return;
             var account = block.Account;
@@ -615,7 +624,7 @@ internal sealed unsafe class CachingAllocator
     /// </summary>
     internal bool HandOver(Account account, IntPtr pointer)
     {
-        lock (_gate)
+        using (_gate.Hold())
         {
             ref var block = ref _blocks.Find(pointer);
             if (Unsafe.IsNullRef(ref block) || block.Account != account || block.HandedOver) return false;
@@ -731,7 +740,7 @@ internal sealed unsafe class CachingAllocator
     internal void ReleaseCached(Account account)
     {
         List<(IntPtr, long)> release;
-        lock (_gate)
+        using (_gate.Hold())
         {
             release = ShedAll(account, scope: null);
             release.AddRange(ShedAll(Placements, scope: null));
@@ -746,7 +755,7 @@ internal sealed unsafe class CachingAllocator
     {
         List<(IntPtr Block, long Size)> release = [];
         long bytes;
-        lock (_gate) bytes = ReleaseEverythingCachedUnderLock(release);
+        using (_gate.Hold()) bytes = ReleaseEverythingCachedUnderLock(release);
         Release(release);
         return bytes;
     }
@@ -790,7 +799,7 @@ internal sealed unsafe class CachingAllocator
     internal void Close(Account account)
     {
         List<(IntPtr, long)> release;
-        lock (_gate)
+        using (_gate.Hold())
         {
             if (account.Closed) return;
             account.Closed = true;
@@ -805,7 +814,7 @@ internal sealed unsafe class CachingAllocator
     /// allocator's.</summary>
     internal ArenaStatistics Statistics(Account account)
     {
-        lock (_gate)
+        using (_gate.Hold())
         {
             return new ArenaStatistics(
                 InUseBytes: account.InUse,
@@ -831,7 +840,7 @@ internal sealed unsafe class CachingAllocator
         {
             Allocator = allocator;
             Name = name;
-            lock (allocator._gate) allocator._accounts.Add(this);
+            using (allocator._gate.Hold()) allocator._accounts.Add(this);
         }
 
         internal CachingAllocator Allocator { get; }
@@ -844,8 +853,8 @@ internal sealed unsafe class CachingAllocator
         /// </summary>
         internal long? Limit
         {
-            get { lock (Allocator._gate) return _limit; }
-            set { lock (Allocator._gate) _limit = value; }
+            get { using (Allocator._gate.Hold()) return _limit; }
+            set { using (Allocator._gate.Hold()) _limit = value; }
         }
 
         private long? _limit;
@@ -1079,7 +1088,7 @@ internal sealed unsafe class CachingAllocator
     /// under way, begins what the account's call uses.</summary>
     private static void Begin(Account account)
     {
-        lock (account.Allocator._gate)
+        using (account.Allocator._gate.Hold())
             if (account.Calls++ == 0) account.BeginCall();
     }
 
@@ -1164,7 +1173,7 @@ internal sealed unsafe class CachingAllocator
         {
             var allocator = account.Allocator;
             List<(IntPtr, long)> release = [];
-            lock (allocator._gate)
+            using (allocator._gate.Hold())
             {
                 account.Calls--;
                 allocator._callsEnded++;
@@ -1186,6 +1195,43 @@ internal sealed unsafe class CachingAllocator
                     release.AddRange(allocator.Shed(account, account.HeldBytes - account.Bound));
             }
             allocator.Release(release);
+        }
+    }
+
+    /// <summary>
+    /// The allocator's lock, taken by every allocation and every free: one compare-and-swap to take
+    /// it and a store to let it go, where a monitor costs two such swaps. Taken as
+    /// <c>using (_gate.Hold())</c>; a struct, so that <c>lock</c> cannot be written over it by
+    /// mistake. Not reentrant — nothing done under it takes it again — and a thread finding it taken
+    /// spins, then yields, until it is let go of.
+    /// </summary>
+    internal struct Gate
+    {
+        private int _taken;
+
+        [UnscopedRef]
+        internal Held Hold()
+        {
+            if (Interlocked.CompareExchange(ref _taken, 1, 0) != 0) Wait();
+            return new Held(ref _taken);
+        }
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private void Wait()
+        {
+            var spin = new SpinWait();
+            do spin.SpinOnce();
+            while (Volatile.Read(ref _taken) != 0 || Interlocked.CompareExchange(ref _taken, 1, 0) != 0);
+        }
+
+        /// <summary>The lock taken, let go of as this is disposed.</summary>
+        internal readonly ref struct Held
+        {
+            private readonly ref int _taken;
+
+            internal Held(ref int taken) => _taken = ref taken;
+
+            public void Dispose() => Volatile.Write(ref _taken, 0);
         }
     }
 }

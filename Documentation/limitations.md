@@ -214,9 +214,11 @@ That count is exact, but the card also holds:
   request. Between a budgeted context's runs that is what its tensors let go of
   since the last one; an unbudgeted context's live sessions keep up to what
   their busiest runs used.
-- **Rounding.** A block is its request rounded up to a size class — a multiple
-  of 512 bytes up to a mebibyte, of an eighth of the power of two below it
-  above that — so a tensor holds up to an eighth more than its bytes. A
+- **Rounding.** A block on a card is its request rounded up to a multiple of
+  512 bytes up to a mebibyte, and to whole 2 MiB pages above that — so a tensor
+  over a mebibyte holds up to just under 2 MiB more than its bytes. On a driver
+  without CUDA's virtual memory management a block over a mebibyte is rounded
+  to an eighth of the power of two below it instead, up to an eighth more. A
   session's limit counts its blocks whole; the budget counts a tensor by its
   bytes.
 - **A session's weights between its runs.** Each compiled graph's weights stay in

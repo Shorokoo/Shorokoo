@@ -635,11 +635,10 @@ where they share a runtime.
   makes a copy of it in host memory, `To(context)` puts it on another context, and a run on
   another context that is fed it places it there as one of its inputs.
 - **An output holds only its own bytes.** On ONNX Runtime a session allocates through an
-  allocator of Shorokoo's in which every block is an allocation of its own, never a piece of a
-  larger arena, and an output is the block its run wrote it into: keeping it keeps nothing else of
-  the session's memory alive — the session may run on, sit idle or be disposed — and nothing
-  copies it after the run. [Device memory](#device-memory-gpu-backends) says what the allocator
-  keeps between runs.
+  allocator of Shorokoo's, and an output is the block its run wrote it into: keeping it keeps that
+  block's memory and nothing else of the session's alive — the session may run on, sit idle or be
+  disposed — and nothing copies it after the run. [Device memory](#device-memory-gpu-backends) says
+  how blocks are laid out and what the allocator keeps between runs.
 
 ```csharp
 var compiled = cuda.Compile(graph);
@@ -924,26 +923,38 @@ executable.
 On ONNX Runtime every session allocates through an allocator of Shorokoo's — one per device, the
 host or a card, for the whole process, whichever runtime or backend built the session — rather
 than through an arena of its own, and the tensors a context places on a card come from the same
-one. Every block it hands out is an allocation of its
-own, never a piece of a larger one, its request rounded up to a size class: a multiple of 512
-bytes up to a mebibyte, and of an eighth of the power of two below it above that. On the host a
-block of 64 KiB or more is pages of its own from the operating system (`VirtualAlloc` on Windows,
-`mmap` on Linux), so one the allocator hands back leaves the process; a smaller one comes from the
-C runtime's heap, which may keep its pages for the process's next allocations.
+one. A session's blocks are carved from address space reserved for it with no memory behind it:
+memory is committed under a block as it is carved, and handed back to the system as the session
+lets it go. Each request is rounded up and served by its size:
+
+- **On the host**, a block under 64 KiB is an allocation of its own from the C runtime's heap,
+  which may keep its pages for the process's next allocations; a larger one is a whole number of
+  4 KiB pages, its memory committed 64 KiB at a time (`VirtualAlloc` on Windows, `mmap` and
+  `mprotect` on Linux) and handed back the same way (`VirtualFree`, `madvise`).
+- **On a card**, a block of up to a mebibyte is carved from memory every session on the card
+  shares, packed into the card's 2 MiB pages as the CUDA runtime packs small allocations; a larger
+  one is a whole number of 2 MiB pages of its own, mapped into one contiguous range with CUDA's
+  virtual memory management (`cuMemCreate`, `cuMemMap`). Where the driver does not offer it, every
+  block is a `cudaMalloc` of its own, a multiple of 512 bytes up to a mebibyte and of an eighth of
+  the power of two below it above that.
+
+So a block holds its own memory: on a card a block over a mebibyte has its pages to itself, and
+a smaller one shares a page with other small blocks; on the host a block shares at most the
+64 KiB at each of its ends with its neighbours.
 
 - **What a session lets go of is kept for its next runs**, so a loop's runs find their blocks
-  waiting, as they would in an arena. A session never holds more than the most one of its runs
-  has used — what it had in use as the run began, and every block the run was handed, each
-  counted once: a request no kept block serves hands back the blocks kept longest, as many as the
-  new block would take it past that mark. So a loop whose runs repeat finds every block it needs,
-  and a session fed one shape after another holds what its busiest run used, not a block of every
-  size it has seen; the price is that a run of a shape it has not kept blocks for takes them from
-  the device, handing older ones back, where an arena would carve them out of what it holds. On
-  the host a kept block of 64 KiB or more that is larger than a request serves it, where a fresh
-  block would take the session past that mark, its pages past the request going back to the
-  system — so only the pages a larger request adds come fresh. What
-  the tensors placed on a card let go of is kept the same way, for the next tensor placed there,
-  counting what is placed between two runs on the card as one run.
+  waiting. A request no kept block serves is carved from the memory the session has committed,
+  whichever block it last belonged to, so a session fed one shape after another reuses its warm
+  memory as an arena does rather than taking each new size from the system. A session never holds
+  more than the most one of its runs has used — what it had in use as the run began, and every
+  block the run was handed, each counted once: where a request would take it past that mark, the
+  smallest larger block it keeps serves it, or the blocks it kept longest give way to it, and what
+  is still over the mark goes back to the system — on the host at once, on a card as the run ends.
+  So a loop whose runs repeat finds every block it needs, and a session fed varied shapes holds
+  what its busiest run used, not a block of every size it has seen. What the tensors placed on a
+  card let go of is kept the same way, for the next tensor placed there, counting what is placed
+  between two runs on the card as one run; the small blocks every session on the card shares keep
+  no more memory committed than they had in use at their busiest.
 - **What is kept goes back to the system**:
   - at the end of a run that asks for it (`RunSettings.ShrinkArenaAfterRun`, always on under a
     budget): what its session keeps, and what the placed tensors left on that device;
@@ -972,7 +983,7 @@ C runtime's heap, which may keep its pages for the process's next allocations.
   ```
   [ErrorCode:RuntimeException] Non-zero status code returned while running Expand node. Name:'N3'
   Status Message: Failed to allocate 4503599627370496 bytes on CUDA device 0: the card has no such
-  block free (cudaMalloc refused it), with everything Shorokoo's cuda_allocator kept for reuse
+  block free (CUDA refused it), with everything Shorokoo's cuda_allocator kept for reuse
   handed back.
   ```
 
@@ -1002,10 +1013,10 @@ Console.WriteLine(compiled.DeviceMemory.LimitBytes);   // what the budget left t
 | `LimitBytes` | `DeviceMemorySettings` | the most the context holds on the card; a run's session may allocate the budget less what the context holds there | `null` — no budget | on every transfer onto the context and every run of it — see [A context's device-memory budget](#a-contexts-device-memory-budget) |
 | `ShrinkArenaAfterRun` | `RunSettings` | as the run ends, its session's allocator hands back to the device what it keeps for the session, and what it keeps of tensors that are gone | `false` — and forced on under a budget | on every run |
 
-- `ShrinkArenaAfterRun` makes the next run take its blocks from the device again — on a card a
-  `cudaMalloc` each, and handing a block back waits for the work the card has in hand — so outside
-  a budget use it only when the card is shared. On the CPU backend it hands the session's host
-  blocks back the same way.
+- `ShrinkArenaAfterRun` makes the next run commit its memory again — on a card mapping each 2 MiB
+  page anew, which costs tens of microseconds a block on Windows — so outside a budget use it only
+  when the card is shared. On the CPU backend it hands the session's host memory back the same
+  way, and the next run's pages are each zeroed by the system as they are first touched.
 - `LimitBytes` is hard: a run that needs more fails with an allocation failure naming the limit,
   so a figure set too low fails work that would fit.
 - Context settings are `init`-only. `CompiledGraph.Execute` / `Run` can override

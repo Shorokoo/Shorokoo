@@ -87,6 +87,8 @@ public class MemoryReuseScenarioTests
     /// run always ran, and fed inputs it consumes, which places. What is measured beyond the inputs is
     /// what the run asked of the backend's allocator: the ONNX Runtime session's allocator account,
     /// torch's CPU allocations as its profiler records them, or torch's CUDA allocator's peak.
+    /// With <c>$SHOROKOO_MEMORY_REUSE_LOG</c> set, every block of a mebibyte or more Shorokoo's
+    /// allocator hands out or takes back during a measured run is logged, in order.
     /// </summary>
     [Fact]
     public void RecordTheScenarioThroughTheComputeContext()
@@ -116,7 +118,14 @@ public class MemoryReuseScenarioTests
             var y = TensorData([(long)rows, columns], b).To(context);
             NamedModelParam[] Execute() => consume ? compiled.Execute(x, y) : compiled.Execute(x.Shared(), y.Shared());
             var watch = Stopwatch.StartNew();
+            var log = new List<CachingAllocator.Event>();
+            if (measure && Environment.GetEnvironmentVariable("SHOROKOO_MEMORY_REUSE_LOG") is not null)
+                CachingAllocator.Observer = e => { lock (log) log.Add(e); };
             var (outputs, peak, allocated) = measure ? Measured(backend, compiled, Execute) : (Execute(), 0L, 0L);
+            CachingAllocator.Observer = null;
+            if (log.Count > 0)
+                File.AppendAllText(Path.Combine(OutputDirectory(), $"allocations-{backend}.txt"),
+                    $"{(consume ? "consumed" : "shared")}: " + string.Join(" ", log.Where(e => e.Size >= Big).Select(e => $"{(e.Allocation ? "+" : "-")}{Mib(e.Size)}{(e.Allocation && !e.Fresh ? "(kept)" : "")}")) + Environment.NewLine);
             if (backend == "torch-cuda") Synchronize();
             watch.Stop();
             if (!consume)

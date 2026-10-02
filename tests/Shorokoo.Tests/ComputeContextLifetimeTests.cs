@@ -903,6 +903,46 @@ public class ComputeContextLifetimeCoverageTests
     }
 
     [Fact]
+    public void TestAPlacementsShapesFollowTheShapeArithmeticConvolutionsPoolsAndRecurrencesAGraphRuns()
+    {
+        Assert.Equal("2:7=4,2", ShapeOf(GraphOf("a:float[2,4]", "O", Op("Shape", "a", "s"), Op("Gather", "s one", "c"), Op("Unsqueeze", "c zero", "u"),
+            Op("ReduceProd", "s", "p", attribute: ("keepdims", 0)), Op("Div", "p c", "q"), Op("Unsqueeze", "q zero", "v"), Op("Concat", "u v", "t", attribute: ("axis", 0)), Op("Reshape", "a t", "O")), "t"));
+        Assert.Equal("4x2", ShapeOf(GraphOf("a:float[2,4]", "O", Op("Shape", "a", "s"), Op("Gather", "s one", "c"), Op("Unsqueeze", "c zero", "u"),
+            Op("ReduceProd", "s", "p", attribute: ("keepdims", 0)), Op("Div", "p c", "q"), Op("Unsqueeze", "q zero", "v"), Op("Concat", "u v", "t", attribute: ("axis", 0)), Op("Reshape", "a t", "O")), "O"));
+        Assert.Equal("3:7=1,2,3", ShapeOf(GraphOf("a:float[4]", "O", Op("Size", "a", "n"), Op("Range", "one n one", "O")), "O"));
+        Assert.Equal(":7=1", ShapeOf(GraphOf("a:float[4]", "O", Op("Size", "a", "n"), Op("Equal", "n four", "e"), Op("Not", "e", "f"), Op("Cast", "f", "c", attribute: ("to", 7)),
+            Op("Where", "e one zero", "w"), Op("Add", "w c", "O")), "O"));
+        Assert.Equal("unknown", ShapeOf(GraphOf("a:float[4]", "O", Op("Size", "a", "n"), Op("Cast", "n", "u", attribute: ("to", 13)), Op("Sub", "u five", "d"), Op("Range", "zero d one", "O")), "O"));
+        Assert.Equal("1x4x8x8", ShapeOf(GraphOf("x:float[1,3,8,8] w:float[4,3,3,3]", "O", With(Op("Conv", "x w", "O"), "pads", 1, 1, 1, 1)), "O"));
+        Assert.Equal("1x4x4x4", ShapeOf(GraphOf("x:float[1,3,8,8] w:float[4,3,3,3]", "O", With(With(Op("Conv", "x w", "O"), "pads", 1, 1, 1, 1), "strides", 2, 2)), "O"));
+        Assert.Equal("1x3x4x4:7", ShapeOf(GraphOf("x:float[1,3,8,8]", "O I", With(With(Op("MaxPool", "x", "O I"), "kernel_shape", 2, 2), "strides", 2, 2)), "I"));
+        Assert.Equal("1x3x1x1", ShapeOf(GraphOf("x:float[1,3,8,8]", "O", Op("GlobalAveragePool", "x", "O")), "O"));
+        Assert.Equal("5x1x2x4 1x2x4", ShapeOf(GraphOf("x:float[5,2,3] w:float[1,16,3] r:float[1,16,4]", "Y H C", Op("LSTM", "x w r", "Y H C", attribute: ("hidden_size", 4))), "Y", "H"));
+    }
+
+    /// <summary>The shapes <see cref="PlacementShapes"/> evaluates for <paramref name="values"/> of
+    /// <paramref name="graph"/>, with the small integers zero to five as initializers it may read,
+    /// as <c>4x2</c> for a float value, <c>4x2:7</c> for another type, <c>=4,2</c> after it for
+    /// known contents, and <c>unknown</c>.</summary>
+    private static string ShapeOf(GraphProto graph, params string[] values)
+    {
+        foreach (var (name, value) in (ReadOnlySpan<(string, long)>)[("zero", 0), ("one", 1), ("two", 2), ("four", 4), ("five", 5)])
+            graph.Initializers.Add(new TensorProto { Name = name, data_type = (int)TensorProto.DataType.Int64, Dims = [], Int64Datas = [value] });
+        var inputs = graph.Inputs.Where(i => i.Type?.TensorType?.Shape is not null).ToDictionary(
+            i => i.Name, i => (i.Type.TensorType.Shape.Dims.Select(d => d.DimValue).ToArray(), i.Type.TensorType.ElemType));
+        var shapes = PlacementShapes.Evaluate(graph, inputs);
+        return string.Join(" ", values.Select(v => shapes.TryGetValue(v, out var x)
+            ? string.Join("x", x.Shape) + (x.ElementType == 1 ? "" : $":{x.ElementType}") + (x.Ints is { } ints ? "=" + string.Join(",", ints) : "")
+            : "unknown"));
+    }
+
+    private static NodeProto With(NodeProto node, string name, params long[] ints)
+    {
+        node.Attributes.Add(new AttributeProto { Name = name, Type = AttributeProto.AttributeType.Ints, Ints = ints });
+        return node;
+    }
+
+    [Fact]
     public void TestThePlannerPlacesTheTwoHalvesScenarioWithNothingLeftToAllocate()
     {
         var graph = ProtoBuf.Serializer.Deserialize<ModelProto>(new MemoryStream(

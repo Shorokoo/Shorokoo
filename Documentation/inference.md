@@ -882,19 +882,20 @@ Python environments — `cudnn-9.24.0.43-cu13\`, `cublas-13.0.0.19-cu13\`. A fol
 the first time a CUDA backend needs it, under a lock file beside it, and marked complete only once
 every file is in place and checked; one left half-filled is filled again. It is filled from:
 
-1. **An installed copy, where one matches exactly**: every file of the release present, each with
-   the SHA-256 its PyPI wheel records. On Windows cuDNN is looked for on `PATH`, in `%CUDNN_PATH%`
-   and under `%ProgramFiles%\NVIDIA\CUDNN`, and cuBLAS on `PATH`, in `%CUDA_PATH%` and in the
-   CUDA 13 toolkits under `%ProgramFiles%\NVIDIA GPU Computing Toolkit\CUDA`; on Linux, on
-   `LD_LIBRARY_PATH`, in `$CUDNN_PATH`, `$CUDA_PATH` and `$CUDA_HOME`, in the CUDA 13 toolkits
-   under `/usr/local` and in the system's library folders. Its files are hard-linked into the
-   cache where the volume allows, and copied otherwise. Any other copy — another release, a build
-   for another CUDA major, a file that differs — is ignored, never mixed in.
-2. **A provisioned PyTorch CUDA environment's own copies**, which are that same release byte for
-   byte (see below), when PyTorch is the backend that gets there first.
-3. **Otherwise the release's wheel from PyPI**, checked against the SHA-256 the pin records.
+1. **A copy that matches exactly**: every file of the release present, each with the SHA-256 its
+   PyPI wheel records. The provisioned CUDA Python environments beside the cache are looked in
+   first — `torch\lib` on Windows, the NVIDIA wheels' own folders on Linux — since their PyTorch
+   carries the pinned release byte for byte, whichever backend runs first. Then, on Windows, cuDNN
+   is looked for on `PATH`, in `%CUDNN_PATH%` and under `%ProgramFiles%\NVIDIA\CUDNN`, and cuBLAS
+   on `PATH`, in `%CUDA_PATH%` and in the CUDA 13 toolkits under
+   `%ProgramFiles%\NVIDIA GPU Computing Toolkit\CUDA`; on Linux, on `LD_LIBRARY_PATH`, in
+   `$CUDNN_PATH`, `$CUDA_PATH` and `$CUDA_HOME`, in the CUDA 13 toolkits under `/usr/local` and in
+   the system's library folders. The copy's files are hard-linked into the cache where the volume
+   allows, so nothing is downloaded or stored twice, and copied otherwise. Any other copy — another
+   release, a build for another CUDA major, a file that differs — is ignored, never mixed in.
+2. **Otherwise the release's wheel from PyPI**, checked against the SHA-256 the pin records.
 
-With none of them available — offline, nothing installed that matches — the first CUDA session
+With neither available — offline, no copy that matches — the first CUDA session
 fails with an `InvalidOperationException` naming the library, where it looked and the size of
 the download. To run offline, fill the cache once while online, copy the folders from a machine
 that has them, or install exactly the pinned release. `CudaLibraries.Prepare()` (in

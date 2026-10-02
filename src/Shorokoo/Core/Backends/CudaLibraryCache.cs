@@ -53,12 +53,15 @@ internal static partial class CudaLibraryCache
 
     /// <summary>The cache folder, reading environment variables through <paramref name="variables"/>,
     /// on Windows or not as <paramref name="windows"/> says.</summary>
-    internal static string Root(Func<string, string?> variables, bool windows)
+    internal static string Root(Func<string, string?> variables, bool windows) => Path.Combine(Shorokoo(variables, windows), "cuda");
+
+    /// <summary>The user cache folder Shorokoo keeps its NVIDIA libraries and Python environments in.</summary>
+    private static string Shorokoo(Func<string, string?> variables, bool windows)
     {
         var root = windows
             ? variables("LOCALAPPDATA") is { Length: > 0 } local ? local : Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData)
             : variables("XDG_CACHE_HOME") is { Length: > 0 } xdg ? xdg : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".cache");
-        return Path.Combine(root, "shorokoo", "cuda");
+        return Path.Combine(root, "shorokoo");
     }
 
     /// <summary>Whether <paramref name="directory"/> is a filled folder of <paramref name="pin"/>.</summary>
@@ -76,12 +79,16 @@ internal static partial class CudaLibraryCache
     }
 
     /// <summary>
-    /// Where an installed copy of <paramref name="pin"/> is looked for, in order: the folders on
-    /// <c>PATH</c> (<c>LD_LIBRARY_PATH</c> elsewhere), then where NVIDIA's installers put the library.
-    /// For cuDNN that is <c>%CUDNN_PATH%</c> and every folder under <c>%ProgramFiles%\NVIDIA\CUDNN</c>;
-    /// for cuBLAS, the CUDA toolkit's <c>bin</c>: <c>%CUDA_PATH%</c>'s and every CUDA 13 toolkit's under
+    /// Where an installed copy of <paramref name="pin"/> is looked for, in order. First the provisioned
+    /// Python environments of the same CUDA major beside the cache, whose PyTorch carries the pinned
+    /// release — <c>torch\lib</c> on Windows, the NVIDIA wheels' own folders on Linux — and which, on
+    /// the cache's volume, fill it by hard link; then the folders on <c>PATH</c>
+    /// (<c>LD_LIBRARY_PATH</c> elsewhere); then where NVIDIA's installers put the library. For cuDNN that
+    /// is <c>%CUDNN_PATH%</c> and every folder under <c>%ProgramFiles%\NVIDIA\CUDNN</c>; for cuBLAS,
+    /// the CUDA toolkit's <c>bin</c>: <c>%CUDA_PATH%</c>'s and every CUDA 13 toolkit's under
     /// <c>%ProgramFiles%\NVIDIA GPU Computing Toolkit\CUDA</c>. Folders that are not there are left
-    /// in; they hold no match.
+    /// in; they hold no match. Reading the environments' folders starts no Python and depends on
+    /// nothing of the Python host: they are files, held to the pin like any other copy.
     /// </summary>
     internal static IReadOnlyList<string> InstalledCandidates(CudaLibraryPin pin, Func<string, string?> variables, bool windows)
     {
@@ -104,8 +111,17 @@ internal static partial class CudaLibraryCache
         IEnumerable<string> AllWithin(string folder)
             => [folder, .. Directory.EnumerateDirectories(folder, "*", SearchOption.AllDirectories).Order(StringComparer.Ordinal)];
 
+        IEnumerable<string> SitePackages(string environment) => windows
+            ? [Path.Combine(environment, "Lib", "site-packages")]
+            : Each(Path.Combine(environment, "lib"), "python3.*", lib => [Path.Combine(lib, "site-packages")]);
+        var environments = Each(Path.Combine(Shorokoo(variables, windows), "python-envs"), $"cu{pin.CudaMajor}-*",
+            environment => SitePackages(environment)
+                .SelectMany(sitePackages => pin.Files.SelectMany(file => EnvironmentFiles(sitePackages, file)))
+                .Select(path => Path.GetDirectoryName(path)!)
+                .Distinct());
+
         var programFiles = variables("ProgramFiles");
-        IEnumerable<string> candidates = (windows, pin.Name) switch
+        IEnumerable<string> installed = (windows, pin.Name) switch
         {
             (true, "cudnn") =>
             [
@@ -131,7 +147,7 @@ internal static partial class CudaLibraryCache
                 "/usr/local/cuda/lib64", "/usr/lib/x86_64-linux-gnu", "/usr/lib64",
             ],
         };
-        return [.. candidates.Distinct(windows ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal)];
+        return [.. environments.Concat(installed).Distinct(windows ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal)];
     }
 
     /// <summary>Whether <paramref name="directory"/> holds every file of <paramref name="pin"/>, each

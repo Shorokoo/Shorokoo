@@ -723,15 +723,15 @@ weights; the rest it maps from the files the graph was written into.
 its **block** — as a `TensorData` of its own over its range, never overlapping another's. Several
 outputs of one run may stand on one block. How the block is freed depends on whose memory it is:
 
-- **Memory of Shorokoo's allocator** — on ONNX Runtime every tensor over a mebibyte on a card,
-  and on the host what a session's run allocated, such as an earlier run's output: each
-  output frees its own range as it ends, and what of the block no output stands on is freed as
-  the run ends. The whole pages inside a range go back — 4 KiB on the host, 2 MiB on a card — to
-  the allocator, as a tensor's own memory does
+- **On ONNX Runtime**, where every tensor of 64 KiB or more is memory of Shorokoo's allocator —
+  on the host and on a card, made from your data or by a run: each output frees its own range as
+  it ends, and what of the block no output stands on is freed as the run ends. The whole pages
+  inside a range go back — 4 KiB on the host, 2 MiB on a card (512 bytes for a card block of a
+  mebibyte or less) — to the allocator, as a tensor's own memory does
   ([Device memory](#device-memory-gpu-backends)).
-- **Any other memory** — a host tensor made from host data, a card block of a mebibyte or less,
-  and every tensor on PyTorch — is freed when the last output on it ends, not before. A run places
-  outputs in such a block only where they leave at most a mebibyte of it unused.
+- **On PyTorch** the block is freed when the last output on it ends, not before: torch frees a
+  tensor's storage whole. A run places outputs in such a block only where they leave at most a
+  mebibyte of it unused.
 
 A device-memory budget counts a block once, for what of it is still held, for as long as any
 tensor on it is attached ([A tensor's lifetime](#a-tensors-lifetime-locks-and-deletion)).

@@ -660,24 +660,24 @@ public abstract class OrtBackend : IShorokooBackend
                 else options.AddSessionConfigEntry("session.model_external_initializers_file_folder_path", externalDataDirectory);
             }
             _configureExecutionProvider(options, deviceMemory, precision);
+            // Copies of the weights in this backend's memory, charged to the session as its own
+            // weights would be, which the session reads in place of copying the model's.
+            if (weightsToShare is not null)
+                using (CachingAllocator.Charge(host, card))
+                    foreach (var weight in weightsToShare)
+                    {
+                        var copy = (OrtTensorValue)CreateTensorInBackendMemory((ShorokooTensorElementType)weight.data_type, weight.RawData, weight.Dims);
+                        shared.Add(copy);
+                        using var memory = copy.Inner.GetTensorMemoryInfo();
+                        var view = OrtValue.CreateTensorValueWithData(
+                            memory, (TensorElementType)weight.data_type, weight.Dims, DevicePointer(copy), weight.RawData.Length);
+                        GC.KeepAlive(copy);
+                        views.Add(view);
+                        options.AddInitializer(weight.Name, view);
+                    }
             InferenceSession session;
             using (CachingAllocator.Charge(host, card))
-            {
-                // Copies of the weights in this backend's memory, charged to the session as its own
-                // weights would be, which the session reads in place of copying the model's.
-                foreach (var weight in weightsToShare ?? [])
-                {
-                    var copy = (OrtTensorValue)CreateTensorInBackendMemory((ShorokooTensorElementType)weight.data_type, weight.RawData, weight.Dims);
-                    shared.Add(copy);
-                    using var memory = copy.Inner.GetTensorMemoryInfo();
-                    var view = OrtValue.CreateTensorValueWithData(
-                        memory, (TensorElementType)weight.data_type, weight.Dims, DevicePointer(copy), weight.RawData.Length);
-                    GC.KeepAlive(copy);
-                    views.Add(view);
-                    options.AddInitializer(weight.Name, view);
-                }
                 session = new InferenceSession(model, options);
-            }
             // The values themselves are the caller's to keep alive for the session's life; this
             // keeps them reachable across the constructor, which takes them as bare handles.
             GC.KeepAlive(suppliedInitializers);
@@ -1585,13 +1585,16 @@ public abstract class OrtBackend : IShorokooBackend
         // backend allocating from the default allocator would hand back host memory wearing the
         // card's name, which the execution provider then copies over on every run.
         if (_cudaDeviceId is not { } deviceId)
-            return new(OrtValue.CreateAllocatedTensorValue(OrtAllocator.DefaultInstance, elementType, shape));
+            return new(OrtValue.CreateAllocatedTensorValue(RuntimeAllocator.ForHost().Managed, elementType, shape));
         return new(OrtValue.CreateAllocatedTensorValue(RuntimeAllocator.ForCard(deviceId).Managed, elementType, shape));
     }
 
     /// <summary>
-    /// Builds an ORT tensor on a buffer ORT itself allocates, in host memory, and copies
-    /// <paramref name="bytes"/> into it.
+    /// Builds an ORT tensor on a buffer of Shorokoo's host allocator, the memory a session's own
+    /// host tensors come from, and copies <paramref name="bytes"/> into it: a block whose part no
+    /// tensor stands on any more goes back on its own (<see cref="CachingAllocator.ReleaseRange"/>).
+    /// Measured against ONNX Runtime's default allocator, making and deleting a tensor of 256 bytes
+    /// to 64 MiB took as long either way.
     ///
     /// <para>The obvious alternative — <c>OrtValue.CreateTensorValueFromMemory</c> over a managed
     /// array — is why this is a copy. That API pins the array for the value's lifetime and releases
@@ -1607,7 +1610,7 @@ public abstract class OrtBackend : IShorokooBackend
     private static OrtTensorValue Allocate(TensorElementType elementType, ReadOnlySpan<byte> bytes, long[] shape)
     {
         var wrapped = new OrtTensorValue(
-            OrtValue.CreateAllocatedTensorValue(OrtAllocator.DefaultInstance, elementType, shape));
+            OrtValue.CreateAllocatedTensorValue(RuntimeAllocator.ForHost().Managed, elementType, shape));
         try
         {
             var destination = wrapped.Inner.GetTensorMutableRawData();

@@ -104,6 +104,9 @@ internal sealed unsafe class CachingAllocator
     /// two to its 2 MiB page.</summary>
     private const long CardSmallTo = 1L << 20;
 
+    /// <summary>What the card's arena of small blocks carves in.</summary>
+    private const long SmallUnit = 512;
+
     private static readonly object _registryGate = new();
     private static readonly Dictionary<int, CachingAllocator> _byDevice = [];
 
@@ -250,7 +253,7 @@ internal sealed unsafe class CachingAllocator
         else if (CardMemory.For(device) is { } card)
         {
             _backing = card;
-            _small = new Arena(card, unit: 512, chunkBytes: 256L << 20);
+            _small = new Arena(card, unit: SmallUnit, chunkBytes: 256L << 20);
         }
         Placements = new Account(this, "placements");
         lock (_registryGate)
@@ -607,14 +610,10 @@ internal sealed unsafe class CachingAllocator
                 // keep whole: it goes back to the arena as those parts did -- on a card once work
                 // this thread's call queued is done with it.
                 if (OnCard && scope is not null && scope.Charges(account)) CudaRuntime.Synchronize(_device);
-                foreach (var (from, to) in Outside(released, 0, block.Size)) account.Arena!.Uncarve(pointer + (nint)from, to - from);
+                var arena = ArenaOf(block.Source, account);
+                foreach (var (from, to) in Outside(released, 0, block.Size)) arena.Uncarve(pointer + (nint)from, to - from);
                 account.Blocks--;
-                if (account.Closed)
-                {
-                    account.Shrinkages++;
-                    if (account.Arena!.IsEmpty) account.Arena.ReleaseEmptyChunks();
-                    else account.Arena.DecommitAll(out _);
-                }
+                if (account.Closed) Emptied(account, block.Source);
                 return;
             }
             if (!account.Closed)
@@ -674,13 +673,14 @@ internal sealed unsafe class CachingAllocator
     }
 
     /// <summary>Whether <paramref name="pointer"/> is a block in use that hands back parts of itself
-    /// (<see cref="ReleaseRange"/>): one carved from its account's arena.</summary>
+    /// (<see cref="ReleaseRange"/>): one carved from an arena, its account's or the card's arena of
+    /// small blocks.</summary>
     internal bool ReleasesRanges(IntPtr pointer)
     {
         using (_gate.Hold())
         {
             ref var block = ref _blocks.Find(pointer);
-            return !Unsafe.IsNullRef(ref block) && block.Source == Source.Arena;
+            return !Unsafe.IsNullRef(ref block) && block.Source != Source.Own;
         }
     }
 
@@ -690,11 +690,12 @@ internal sealed unsafe class CachingAllocator
     /// <paramref name="toTheEnd"/> — which nothing reads any more while the rest of the block is
     /// still in use: the memory of an input a run consumed that none of the outputs standing on it
     /// covers. The whole units of the block's arena lying inside it — 4 KiB pages on the host,
-    /// granules on a card — go back to the arena as a block let go of does: still committed, for the
+    /// granules on a card, 512 bytes in the card's arena of small blocks — go back to the arena as a
+    /// block let go of does: still committed, for the
     /// account's next request to be carved from, and shed as what the account keeps is. On a card,
     /// where this thread's call charges the block's account, the card is waited for first: work the
-    /// call queued may still read the range. Answers the bytes handed back: none for a block not
-    /// carved from its account's arena, and none for a part handed back already.
+    /// call queued may still read the range. Answers the bytes handed back: none for a block of its
+    /// own from the device, and none for a part handed back already.
     /// </summary>
     internal long ReleaseRange(IntPtr pointer, long offset, long length, bool toTheEnd)
     {
@@ -703,9 +704,10 @@ internal sealed unsafe class CachingAllocator
         using (_gate.Hold())
         {
             ref var block = ref _blocks.Find(pointer);
-            if (Unsafe.IsNullRef(ref block) || block.Source != Source.Arena) return 0;
+            if (Unsafe.IsNullRef(ref block) || block.Source == Source.Own) return 0;
             var account = block.Account;
-            var unit = OnCard ? _backing!.Granule : HostPage;
+            var arena = ArenaOf(block.Source, account);
+            var unit = block.Source == Source.Small ? SmallUnit : OnCard ? _backing!.Granule : HostPage;
             var start = (offset + unit - 1) / unit * unit;
             var end = toTheEnd ? block.Size : Math.Min(block.Size, (offset + length) / unit * unit);
             if (end <= start) return 0;
@@ -715,7 +717,7 @@ internal sealed unsafe class CachingAllocator
             long released = 0;
             foreach (var (from, to) in pieces)
             {
-                account.Arena!.Uncarve(pointer + (nint)from, to - from);
+                arena.Uncarve(pointer + (nint)from, to - from);
                 released += to - from;
                 var asked = Math.Max(0, Math.Min(to, block.Requested) - from);
                 block.ReleasedRequested += asked;
@@ -725,15 +727,25 @@ internal sealed unsafe class CachingAllocator
             block.ReleasedBytes += released;
             account.InUse -= released;
             if (block.HandedOver) account.HandedOver -= released;
-            if (account.Closed)
-            {
-                // Nothing of a closed account's is kept: what went back to its arena goes back to the
-                // device.
-                account.Arena!.DecommitAll(out _);
-                account.Shrinkages++;
-            }
+            // Nothing of a closed account's is kept: what went back to its arena goes back to the
+            // device.
+            if (account.Closed) Emptied(account, block.Source);
             return released;
         }
+    }
+
+    /// <summary>The arena a block from <paramref name="source"/> of <paramref name="account"/>'s
+    /// was carved from: the card's arena of small blocks, or the account's own.</summary>
+    private Arena ArenaOf(Source source, Account account) => source == Source.Small ? _small! : account.Arena!;
+
+    /// <summary>What of closed <paramref name="account"/>'s went back to the arena of
+    /// <paramref name="source"/> goes back to the device. Under the lock.</summary>
+    private void Emptied(Account account, Source source)
+    {
+        account.Shrinkages++;
+        if (source == Source.Small) ShedSmall();
+        else if (account.Arena!.IsEmpty) account.Arena.ReleaseEmptyChunks();
+        else account.Arena.DecommitAll(out _);
     }
 
     /// <summary>The stretches of [<paramref name="start"/>, <paramref name="end"/>) outside every

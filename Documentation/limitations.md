@@ -274,18 +274,16 @@ What that still leaves:
 ### Some outputs written into one consumed input are freed together
 
 Outputs a run wrote into the memory of one input it consumed stand on that memory
-together. Where it is memory of Shorokoo's allocator, each frees its own pages as
-it ends; elsewhere it is freed only when the last of them ends
+together. On ONNX Runtime each frees its own pages as it ends; otherwise it is
+freed only when the last of them ends
 ([Outputs on consumed memory](inference.md#a-run-that-writes-into-what-it-consumed)):
 
-- **A host tensor made from host data** on ONNX Runtime is the runtime's default
-  allocator's memory, which goes back only whole.
-- **A card block of a mebibyte or less** shares its 2 MiB page with other small
-  blocks.
 - **On PyTorch** torch frees a tensor's storage whole, with the last tensor
-  reading it.
+  reading it, and has no call that frees part of one.
 - **Pages are whole.** A page two outputs' ranges share — a 2 MiB page on a card,
-  a 4 KiB one on the host — is held until both have ended.
+  a 4 KiB one on the host — is held until both have ended. CUDA maps a card's
+  memory 2 MiB at a time at the finest (the driver's minimum granularity for the
+  card).
 
 Copy an output out (`CopyTo`) to keep it apart from the others.
 

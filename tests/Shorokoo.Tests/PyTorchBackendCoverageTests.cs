@@ -282,6 +282,33 @@ public class PyTorchBackendCoverageTests
     }
 
     [Fact]
+    public void TestANoopSumOrMeanHandsBackEachElementAsItIsANegativeZeroIncludedOnTorchAsOnOnnxRuntime()
+    {
+        foreach (var backend in (IShorokooBackend[])[DefaultBackend.Instance, Torch])
+        {
+            Assert.Equal("-0 1 -2", NoopReduced(backend, "ReduceSum"));
+            Assert.Equal("-0 1 -2", NoopReduced(backend, "ReduceMean"));
+            Assert.Equal("-0 1 -2", NoopReduced(backend, "ReduceMax"));
+            Assert.Equal("+0 1 4", NoopReduced(backend, "ReduceSumSquare"));
+        }
+    }
+
+    /// <summary>What <paramref name="op"/> reducing no axis, <c>noop_with_empty_axes</c> set, makes of
+    /// -0, 1 and -2, a zero written with its sign.</summary>
+    private static string NoopReduced(IShorokooBackend backend, string op)
+    {
+        var graph = Graph(["x"], ["y"], Node(op, ["x", "axes"], ["y"], attributes: Int("noop_with_empty_axes", 1)));
+        graph.Inputs[0].Type = FloatTensor;
+        graph.Outputs[0].Type = FloatTensor;
+        graph.Initializers.Add(new TensorProto { Name = "axes", data_type = (int)TensorProto.DataType.Int64, Dims = [0] });
+        using var session = backend.CreateSession(Serialize(graph), default, default, DeviceMemorySettings.Default);
+        using var x = backend.CreateTensor([-0f, 1f, -2f], [3]);
+        using var y = session.Run(new Dictionary<string, IShorokooTensorValue> { ["x"] = x }, ["y"], RunSettings.Default)[0];
+        return string.Join(" ", MemoryMarshal.Cast<byte, float>(backend.CopyTensorToHost(y)).ToArray()
+            .Select(v => v == 0 ? (float.IsNegative(v) ? "-0" : "+0") : v.ToString(System.Globalization.CultureInfo.InvariantCulture)));
+    }
+
+    [Fact]
     public void TestANoopReductionReducesEachElementAloneOnTorch()
     {
         NoopReductionsReduceEachElementAlone(new ComputeContext(Torch));

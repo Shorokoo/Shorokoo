@@ -914,6 +914,23 @@ public class GpuExecutionTests
         Assert.Equal((11L, 6L), ArenaProbeModels.ReuseRun(ArenaProbeModels.ReuseShapes.Tracked));
     }
 
+    [CudaFact]
+    public void CudaProvider_TheReuseScenarioTakesWhatTheCardsArenaIsAskedForAndHoldsNoMoreThanItAtOnce()
+    {
+        var arena = new OrtArenaCardBackend();
+        foreach (var shapes in Enum.GetValues<ArenaProbeModels.ReuseShapes>())
+        {
+            var (ours, theirs) = (ArenaProbeModels.ReuseRun(shapes), ArenaProbeModels.ReuseRun(shapes, arena));
+            Assert.Equal(theirs.Allocations, ours.Allocations);
+            Assert.True(ours.Halves <= theirs.Halves);
+        }
+    }
+
+    private sealed class OrtArenaCardBackend : OrtBackend
+    {
+        public OrtArenaCardBackend() : base(cudaDeviceId: 0) => SessionsUseOrtArena = true;
+    }
+
     /// <summary>What this process holds on the card once every tensor nothing reaches any more is
     /// released: a released tensor's finalizer can leave another to the next collection.</summary>
     private static long HeldOnTheCard()

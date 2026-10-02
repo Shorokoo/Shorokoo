@@ -628,8 +628,24 @@ internal sealed class OrtSession : IShorokooSession
     /// </summary>
     public ArenaStatistics? ReadArenaStatistics()
     {
+        if (OnOrtArena) return ReadOrtArenaStatistics();
         var account = _cardAccount ?? _hostAccount;
         return account.Allocator.Statistics(account);
+    }
+
+    /// <summary>Whether this session allocates through the arena ONNX Runtime made for it rather than
+    /// Shorokoo's allocator (<see cref="OrtBackend.SessionsUseOrtArena"/>).</summary>
+    internal bool OnOrtArena { get; init; }
+
+    /// <summary>The figures of the arena ONNX Runtime made for this session: the card's for a CUDA
+    /// session, the host's otherwise.</summary>
+    private ArenaStatistics? ReadOrtArenaStatistics()
+    {
+        using var card = _cudaDeviceId is { } device
+            ? new OrtMemoryInfo(OrtMemoryInfo.allocatorCUDA, OrtAllocatorType.ArenaAllocator, device, OrtMemType.Default)
+            : null;
+        using var allocator = new OrtAllocator(_session, card ?? OrtMemoryInfo.DefaultInstance);
+        return OrtArenaStats.Read(allocator);
     }
 
     /// <summary>

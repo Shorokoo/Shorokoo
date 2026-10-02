@@ -1120,6 +1120,23 @@ public class CoreUtilsCoverageTests
     }
 
     [Fact]
+    public void TestTheReuseScenarioTakesWhatOnnxRuntimesArenaIsAskedForAndHoldsNoMoreThanItAtOnce()
+    {
+        var arena = new OrtArenaHostBackend();
+        foreach (var shapes in Enum.GetValues<ArenaProbeModels.ReuseShapes>())
+        {
+            var (ours, theirs) = (ArenaProbeModels.ReuseRun(shapes), ArenaProbeModels.ReuseRun(shapes, arena));
+            Assert.Equal(theirs.Allocations, ours.Allocations);
+            Assert.True(ours.Halves <= theirs.Halves);
+        }
+    }
+
+    private sealed class OrtArenaHostBackend : OrtBackend
+    {
+        public OrtArenaHostBackend() => SessionsUseOrtArena = true;
+    }
+
+    [Fact]
     public void TestReleasingWhatTheAllocatorsKeepLeavesASessionHoldingWhatItUsesAndRunningOn()
     {
         using var context = new ComputeContext();

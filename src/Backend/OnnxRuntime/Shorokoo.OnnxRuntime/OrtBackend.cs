@@ -277,6 +277,14 @@ public abstract class OrtBackend : IShorokooBackend
             outputAliases.Count == 0 ? null : outputAliases, intraOpThreads, suppliedInitializers);
     }
 
+    /// <summary>
+    /// For tests that hold Shorokoo's allocator to ONNX Runtime's own: every session this backend
+    /// builds allocates through the arena ONNX Runtime makes for it, as a session not handed the
+    /// environment's allocators does, and reports that arena's figures. A kept output then holds its
+    /// session's arena, so nothing but such a comparison builds one.
+    /// </summary>
+    internal bool SessionsUseOrtArena { get; init; }
+
     /// <summary>This backend's sessions take supplied initializers.</summary>
     public bool SuppliesInitializers => true;
 
@@ -413,7 +421,7 @@ public abstract class OrtBackend : IShorokooBackend
         var host = RuntimeAllocator.ForHost().Shared.Open("session");
         var card = _cudaDeviceId is { } device ? RuntimeAllocator.ForCard(device).Shared.Open("session") : null;
         if (card is not null) card.Limit = deviceMemory.LimitBytes;
-        options.AddSessionConfigEntry("session.use_env_allocators", "1");
+        if (!SessionsUseOrtArena) options.AddSessionConfigEntry("session.use_env_allocators", "1");
         try
         {
             if (profileDirectory is not null) EnableProfiling(options, profileDirectory);
@@ -454,7 +462,11 @@ public abstract class OrtBackend : IShorokooBackend
         {
             // The session keeps this backend to release what its runs consume through it, and to
             // name it in a refusal.
-            return new OrtSession(session, _cudaDeviceId, this, profileDirectory, outputAliases, host, card) { SuppliedViews = views };
+            return new OrtSession(session, _cudaDeviceId, this, profileDirectory, outputAliases, host, card)
+            {
+                SuppliedViews = views,
+                OnOrtArena = SessionsUseOrtArena,
+            };
         }
         catch
         {

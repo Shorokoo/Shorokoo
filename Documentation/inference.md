@@ -707,11 +707,17 @@ shape of every input, the outputs asked for — runs, and kept for it.
 | | ONNX Runtime | PyTorch |
 |---|---|---|
 | **How** | a second session, its placed values bound to their ranges: over the model, where that keeps the first session's order and can bind every placed value, and otherwise over the graph ONNX Runtime runs, its fusions made | a translation writing each placed value with torch's own operator: an `out=` form, a fill, a concatenation part by part, or a copy of what a view reads |
-| **When it applies** | from the signature's first run, where placing saves — by a model of what the run holds at each node, in the order the second session runs them, less what that session holds of its own (on a card, its copy of the model's weights) — more than the larger of a mebibyte and a sixty-fourth of the plain run. The first placed run is measured, and the runs after it run as always where it asked for more than the model said a plain run would | from the first run: nothing placed allocates |
+| **When it applies** | from the signature's first run, where placing saves — by a model of what the run holds at each node, in the order the second session runs them, less what that session holds of its own — more than the larger of a mebibyte and a sixty-fourth of the plain run. The first placed run is measured, and the runs after it run as always where it asked for more than the model said a plain run would | from the first run: nothing placed allocates |
 | **Not used** | where the second session would run other operators than the first; on an execution provider other than ONNX Runtime's CPU and CUDA ones; past 8 signatures | in a training step whose gradient torch takes; for a model over 16 MiB; past 8 signatures |
 
 On ONNX Runtime a session keeps the model it was built from to build the second session with: in
-memory up to 16 MiB, and a larger one in a temporary file of its own, deleted with the session.
+memory up to 16 MiB, and a larger one in a temporary file of its own, deleted with the session. The
+second session shares the weights loaded into the context's memory; on a card, a session over a
+model over 16 MiB reads the weights the model carries from copies in the card's memory, which the
+second session reads too, and writes out the graph it runs, which the second session is built from,
+into a temporary folder kept for its life. Otherwise the second session holds its own copy of the
+weights the model carries — on the host, only the packed copies ONNX Runtime makes of a product's
+weights; the rest it maps from the files the graph was written into.
 
 **Outputs on consumed memory.** An output written into an input stands on that input's memory —
 its **block** — as a `TensorData` of its own over its range, never overlapping another's. Several

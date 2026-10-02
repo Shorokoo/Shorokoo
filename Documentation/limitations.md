@@ -260,9 +260,11 @@ What that still leaves:
 - **A node the card has no kernel for.** On a card, ONNX Runtime runs it on the
   host, and its output is host memory: it is not written into an input on the card.
 - **The weights of a second session.** On ONNX Runtime the values are written by a
-  second session, which on a card holds its own copy of the weights the model
-  carries (weights loaded into the context's memory are shared): placing pays only
-  where it saves more than that copy.
+  second session, which holds its own copy of the weights the model carries where
+  it cannot share them: on a card a model's of 16 MiB or less, on the host the
+  packed copies ONNX Runtime makes of a product's weights (it keeps a weight it is
+  handed beside its packed copy, so handing it one saves nothing). Placing pays
+  only where it saves more than that copy.
 - **A training step.** The state it consumes it already writes over
   ([A step writes its state over the state it consumed](training.md#a-step-writes-its-state-over-the-state-it-consumed)),
   and a batch it consumes is read by the backward pass as well as the forward one —

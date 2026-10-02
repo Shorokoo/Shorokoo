@@ -55,14 +55,14 @@ namespace Shorokoo.Core.Backends;
 /// take it past that mark and nothing committed fits it, the smallest larger block the account keeps
 /// in its arena gives way to it, its memory counted once in the call; or else kept blocks give way,
 /// longest kept first, their memory staying committed for the request to be carved from — until the
-/// request fits where it would take the account over by half itself or more, and otherwise only as
-/// much as it would, the request then committing fresh memory. What is still over the mark is shed —
-/// kept blocks of their own and small ones first, then the granules idle longest, then kept blocks
-/// of the arena — at once on the host, and on a card as the call that asked ends, since a granule
-/// must not go back while work the card has in hand may read it. What is kept also
-/// goes back when a run that hands back its memory ends (<see cref="ReleaseCached(Account)"/>), when
-/// a session closes, before an account would refuse an allocation for want of room, before the
-/// device would refuse one, and when the program asks (<see cref="ReleaseEverywhere"/>).</para>
+/// request fits where it would take the account over by an eighth of itself or more, and otherwise
+/// only as much as it would, the request then committing fresh memory. What is still over the mark
+/// is shed — kept blocks of their own and small ones first, then the granules idle longest, then
+/// kept blocks of the arena — at once on the host, and on a card as the call that asked ends, since a
+/// granule must not go back while work the card has in hand may read it. What is kept also goes back
+/// when a run that hands back its memory ends (<see cref="ReleaseCached(Account)"/>), when a session
+/// closes, before an account would refuse an allocation for want of room, before the device would
+/// refuse one, and when the program asks (<see cref="ReleaseEverywhere"/>).</para>
 ///
 /// <para><b>Accounts.</b> What a session allocates is charged to its <see cref="Account"/>: the
 /// thread building or running it charges that account for the length of the call
@@ -161,74 +161,79 @@ internal sealed unsafe class CachingAllocator
 
     /// <summary>
     /// The blocks out, by address: open addressing with linear probing and backward-shift deletion,
-    /// which hands a block in and out with a hash and a probe or two and no allocation.
+    /// which hands a block in and out with a hash and a probe or two and no allocation, each address
+    /// beside its block so that a probe reads one entry.
     /// </summary>
     private sealed class BlockTable
     {
-        private IntPtr[] _keys = new IntPtr[256];
-        private Block[] _values = new Block[256];
+        private struct Entry
+        {
+            internal IntPtr Key;
+            internal Block Value;
+        }
+
+        private Entry[] _entries = new Entry[256];
         private int _count;
 
-        private int Slot(IntPtr key) => (int)(((ulong)key >> 6) * 0x9E3779B97F4A7C15UL >> 40) & (_keys.Length - 1);
+        private int Slot(IntPtr key) => (int)(((ulong)key >> 6) * 0x9E3779B97F4A7C15UL >> 40) & (_entries.Length - 1);
 
         internal void Add(IntPtr key, in Block value)
         {
-            if ((_count + 1) * 2 > _keys.Length) Grow();
-            var mask = _keys.Length - 1;
+            if ((_count + 1) * 2 > _entries.Length) Grow();
+            var entries = _entries;
+            var mask = entries.Length - 1;
             var i = Slot(key);
-            while (_keys[i] != IntPtr.Zero && _keys[i] != key) i = (i + 1) & mask;
-            if (_keys[i] == IntPtr.Zero) _count++;
-            _keys[i] = key;
-            _values[i] = value;
+            while (entries[i].Key != IntPtr.Zero && entries[i].Key != key) i = (i + 1) & mask;
+            if (entries[i].Key == IntPtr.Zero) _count++;
+            entries[i].Key = key;
+            entries[i].Value = value;
         }
 
         internal ref Block Find(IntPtr key)
         {
-            var mask = _keys.Length - 1;
-            for (var i = Slot(key); _keys[i] != IntPtr.Zero; i = (i + 1) & mask)
-                if (_keys[i] == key) return ref _values[i];
+            var entries = _entries;
+            var mask = entries.Length - 1;
+            for (var i = Slot(key); entries[i].Key != IntPtr.Zero; i = (i + 1) & mask)
+                if (entries[i].Key == key) return ref entries[i].Value;
             return ref Unsafe.NullRef<Block>();
         }
 
         internal bool Remove(IntPtr key, out Block value)
         {
-            var mask = _keys.Length - 1;
+            var entries = _entries;
+            var mask = entries.Length - 1;
             var i = Slot(key);
-            while (_keys[i] != key)
+            while (entries[i].Key != key)
             {
-                if (_keys[i] == IntPtr.Zero)
+                if (entries[i].Key == IntPtr.Zero)
                 {
                     value = default;
                     return false;
                 }
                 i = (i + 1) & mask;
             }
-            value = _values[i];
+            value = entries[i].Value;
             // Each later entry of the run that could no longer be found moves into the gap.
-            for (var j = (i + 1) & mask; _keys[j] != IntPtr.Zero; j = (j + 1) & mask)
+            for (var j = (i + 1) & mask; entries[j].Key != IntPtr.Zero; j = (j + 1) & mask)
             {
-                var home = Slot(_keys[j]);
+                var home = Slot(entries[j].Key);
                 var reachable = i <= j ? home > i && home <= j : home > i || home <= j;
                 if (reachable) continue;
-                _keys[i] = _keys[j];
-                _values[i] = _values[j];
+                entries[i] = entries[j];
                 i = j;
             }
-            _keys[i] = IntPtr.Zero;
-            _values[i] = default;
+            entries[i] = default;
             _count--;
             return true;
         }
 
         private void Grow()
         {
-            var keys = _keys;
-            var values = _values;
-            _keys = new IntPtr[keys.Length * 2];
-            _values = new Block[keys.Length * 2];
+            var entries = _entries;
+            _entries = new Entry[entries.Length * 2];
             _count = 0;
-            for (var i = 0; i < keys.Length; i++)
-                if (keys[i] != IntPtr.Zero) Add(keys[i], values[i]);
+            foreach (ref var entry in entries.AsSpan())
+                if (entry.Key != IntPtr.Zero) Add(entry.Key, entry.Value);
         }
     }
 
@@ -481,10 +486,10 @@ internal sealed unsafe class CachingAllocator
     /// (<paramref name="excess"/> over zero), from the memory of the smallest larger block it keeps,
     /// or else of what its kept blocks of that arena give way to, longest kept first; and only then
     /// over granules committed for it, what is over the mark going back as the caller sheds it. Kept
-    /// blocks give way until the request fits where the excess is half the request or more, its
-    /// memory having to come from what is kept anyway; where it is less, only as much as the excess,
-    /// since committing the request and shedding the excess costs less than giving way blocks the
-    /// call may yet ask for again. Zero where the device has no memory for it.
+    /// blocks give way until the request fits where the excess is an eighth of the request or more,
+    /// its memory having to come mostly from what is kept anyway; where it is less, only as much as
+    /// the excess, since committing the request and shedding that little costs less than giving way
+    /// blocks the call may yet ask for again. Zero where the device has no memory for it.
     /// <paramref name="counted"/> is the call the block's memory was last counted in: that of the
     /// larger kept block it takes the place of, so a call that lets a block go and asks for a smaller
     /// one counts the memory once.
@@ -502,7 +507,7 @@ internal sealed unsafe class CachingAllocator
             block = arena.Carve(size, mayCommit: false);
             counted = call;
         }
-        var giveWay = excess * 2 >= size ? long.MaxValue : excess;
+        var giveWay = excess * 8 >= size ? long.MaxValue : excess;
         for (long givenWay = 0; block == IntPtr.Zero && givenWay < giveWay && account.GiveWayOldest(fromArena: true, out var kept, out var keptSize, out _); givenWay += keptSize)
         {
             arena.Uncarve(kept, keptSize);
@@ -875,6 +880,10 @@ internal sealed unsafe class CachingAllocator
         internal long Refusals;
         internal bool Closed;
 
+        /// <summary>A store of held blocks a call of the account's has finished with, for the next
+        /// one to hold its blocks in.</summary>
+        internal HeldBlocks? SpareHeld;
+
         /// <summary>The account's own arena, made as its first block of an arena's class is asked
         /// for.</summary>
         internal Arena? Arena;
@@ -1107,7 +1116,7 @@ internal sealed unsafe class CachingAllocator
     {
         internal Scope? Outer { get; } = outer;
 
-        private Dictionary<long, Stack<(IntPtr Block, Source Source, long Call)>>? _held;
+        private HeldBlocks? _held;
 
         internal Account? AccountOn(CachingAllocator allocator)
             => card is not null && card.Allocator == allocator ? card
@@ -1120,9 +1129,12 @@ internal sealed unsafe class CachingAllocator
         /// Under the allocator's lock.</summary>
         internal void Hold(Account account, IntPtr block, long size, Source source, long call)
         {
-            _held ??= [];
-            if (!_held.TryGetValue(size, out var blocks)) _held[size] = blocks = new();
-            blocks.Push((block, source, call));
+            if (_held is null)
+            {
+                _held = account.SpareHeld ?? new HeldBlocks();
+                account.SpareHeld = null;
+            }
+            _held.Push(size, block, source, call);
             account.Held += size;
         }
 
@@ -1132,14 +1144,10 @@ internal sealed unsafe class CachingAllocator
         {
             List<(IntPtr, long, Source, long)> blocks = [];
             if (account != card || _held is null) return blocks;
-            foreach (var (size, held) in _held)
+            while (_held.TakeAny(out var block, out var size, out var source, out var call))
             {
-                foreach (var (block, source, call) in held)
-                {
-                    blocks.Add((block, size, source, call));
-                    account.Held -= size;
-                }
-                held.Clear();
+                blocks.Add((block, size, source, call));
+                account.Held -= size;
             }
             return blocks;
         }
@@ -1148,11 +1156,9 @@ internal sealed unsafe class CachingAllocator
         /// allocator's lock.</summary>
         internal bool TakeHeld(Account account, long size, out IntPtr block, out long call)
         {
-            if (account == card && _held is not null && _held.TryGetValue(size, out var blocks) && blocks.TryPop(out var held))
+            if (account == card && _held is not null && _held.Pop(size, out block, out call))
             {
                 account.Held -= size;
-                block = held.Block;
-                call = held.Call;
                 return true;
             }
             block = IntPtr.Zero;
@@ -1179,8 +1185,9 @@ internal sealed unsafe class CachingAllocator
                 allocator._callsEnded++;
                 if (account == card && _held is not null)
                 {
-                    foreach (var (block, size, source, call) in TakeAllHeld(account))
+                    while (_held.TakeAny(out var block, out var size, out var source, out var call))
                     {
+                        account.Held -= size;
                         if (!account.Closed)
                         {
                             account.Keep(block, size, source, call);
@@ -1189,12 +1196,91 @@ internal sealed unsafe class CachingAllocator
                         account.Blocks--;
                         if (allocator.GoneFromClosed(account, block, size, source) is { } own) release.AddRange(own);
                     }
+                    account.SpareHeld ??= _held;
                     _held = null;
                 }
                 if (!account.Closed)
                     release.AddRange(allocator.Shed(account, account.HeldBytes - account.Bound));
             }
             allocator.Release(release);
+        }
+    }
+
+    /// <summary>
+    /// The blocks a call on a card let go of, held for its own reuse until it ends: those of up to a
+    /// mebibyte by their class's index, larger ones by size, each class's newest on top; and the
+    /// classes holding any, so the call's end visits those alone. An account keeps one for its next
+    /// call, so a call holds blocks without allocating.
+    /// </summary>
+    internal sealed class HeldBlocks
+    {
+        private sealed class Pile(long size)
+        {
+            internal readonly long Size = size;
+            internal (IntPtr Block, Source Source, long Call)[] Items = new (IntPtr, Source, long)[4];
+            internal int Count;
+            internal bool Listed;
+        }
+
+        private readonly Pile?[] _small = new Pile?[(int)(CardSmallTo >> 9) + 1];
+        private readonly Dictionary<long, Pile> _large = [];
+        private readonly List<Pile> _listed = [];
+
+        private Pile? PileOf(long size, bool make)
+        {
+            if (size <= CardSmallTo)
+            {
+                var index = (int)(size >> 9);
+                return _small[index] ?? (make ? _small[index] = new Pile(size) : null);
+            }
+            if (_large.TryGetValue(size, out var pile)) return pile;
+            return make ? _large[size] = new Pile(size) : null;
+        }
+
+        internal void Push(long size, IntPtr block, Source source, long call)
+        {
+            var pile = PileOf(size, make: true)!;
+            if (!pile.Listed)
+            {
+                pile.Listed = true;
+                _listed.Add(pile);
+            }
+            if (pile.Count == pile.Items.Length) Array.Resize(ref pile.Items, pile.Count * 2);
+            pile.Items[pile.Count++] = (block, source, call);
+        }
+
+        internal bool Pop(long size, out IntPtr block, out long call)
+        {
+            if (PileOf(size, make: false) is { Count: > 0 } pile)
+            {
+                (block, _, call) = pile.Items[--pile.Count];
+                return true;
+            }
+            block = IntPtr.Zero;
+            call = -1;
+            return false;
+        }
+
+        /// <summary>Any block held, taken out, with its class.</summary>
+        internal bool TakeAny(out IntPtr block, out long size, out Source source, out long call)
+        {
+            while (_listed.Count > 0)
+            {
+                var pile = _listed[^1];
+                if (pile.Count > 0)
+                {
+                    (block, source, call) = pile.Items[--pile.Count];
+                    size = pile.Size;
+                    return true;
+                }
+                pile.Listed = false;
+                _listed.RemoveAt(_listed.Count - 1);
+            }
+            block = IntPtr.Zero;
+            size = 0;
+            source = Source.Own;
+            call = -1;
+            return false;
         }
     }
 

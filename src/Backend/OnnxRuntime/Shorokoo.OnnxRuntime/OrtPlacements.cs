@@ -32,6 +32,17 @@ namespace Shorokoo.OnnxRuntime;
 /// model is built from the graph that runs alone, which reads its weights from the files the probe
 /// wrote rather than from a copy of the model.</para>
 ///
+/// <para><b>In the order the session runs.</b> ONNX Runtime runs a session's nodes one at a time
+/// (<see cref="OrtBackend.Configure"/> asks for sequential execution), on each of its streams in the
+/// order of the graph the session writes out: the CPU provider's on one stream, and on a card every
+/// node of the CUDA provider's — every node that reads or writes the card's memory, a copy to or from
+/// the host included — on another, the provider's few host nodes on a stream of their own. A
+/// session's graph is read from what it wrote out, the variant's from its own build, so the proof
+/// takes a node listed before another as having run before it, and a value goes into a range once
+/// everything reading what the range held has run, whether or not the graph's edges order the two.
+/// The graph handed over is ordered afresh by ONNX Runtime and is planned over only to tell whether
+/// anything could be placed at all.</para>
+///
 /// <para><b>Decided before the first run.</b> Whether a plan pays is read off the proof's model of
 /// the memory a run holds (<see cref="PlacementProof.ModelledPeak"/>): with every placed value in its
 /// block against with none, less what the variant holds of its own. A signature's first run is
@@ -328,7 +339,8 @@ internal sealed class OrtPlacements : IDisposable
             // and a session builds nothing for such a run.
             if (original.Graph is not { } handed
                 || handed.Nodes.Count > PlacementProof.MostNodes
-                || new PlacementProof(handed, blockBytes, PlacementShapes.Evaluate(handed, given)).Plan(PlacementProof.Smallest, PlacementProof.IdleOutputBytes, givingBack).Count == 0)
+                || new PlacementProof(handed, blockBytes, PlacementShapes.Evaluate(handed, given), runsInOrder: true)
+                    .Plan(PlacementProof.Smallest, PlacementProof.IdleOutputBytes, givingBack).Count == 0)
             {
                 Refuse(entry, "nothing to place in the graph handed over");
                 return;
@@ -343,7 +355,7 @@ internal sealed class OrtPlacements : IDisposable
             }
             var shapes = PlacementShapes.Evaluate(runs, given);
             var runsOutputs = runs.Outputs.Select(o => o.Name).ToHashSet(StringComparer.Ordinal);
-            var proof = new PlacementProof(runs, blockBytes, shapes);
+            var proof = new PlacementProof(runs, blockBytes, shapes, runsInOrder: true);
             var plan = proof.Prove(proof.Plan(PlacementProof.Smallest, PlacementProof.IdleOutputBytes, givingBack)
                 .Where(p => !runsOutputs.Contains(p.Value) || outputNames.Contains(p.Value)));
             if (plan.Count == 0)
@@ -421,7 +433,7 @@ internal sealed class OrtPlacements : IDisposable
                 return (null, false);
             }
             var variantShapes = PlacementShapes.Evaluate(graph, given);
-            var variantProof = new PlacementProof(graph, blockBytes, variantShapes, runsOutputs);
+            var variantProof = new PlacementProof(graph, blockBytes, variantShapes, runsOutputs, runsInOrder: true);
             var proved = variantProof.Prove(plan
                 .Where(p => variantShapes.TryGetValue(p.Value, out var v) && v.Bytes == p.Bytes && StatedAgrees(graph, p.Value, v, given)));
             if (proved.Count == 0)

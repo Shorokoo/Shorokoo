@@ -426,7 +426,7 @@ public abstract class OrtBackend : IShorokooBackend
 
     /// <summary>An ONNX Runtime session, and the folder it writes its profile into, if it keeps
     /// one: what <see cref="OrtSession"/> is made of.</summary>
-    private readonly record struct BuiltSession(
+    internal readonly record struct BuiltSession(
         InferenceSession Session,
         string? ProfileDirectory,
         IReadOnlyList<OrtValue> SuppliedViews,
@@ -440,7 +440,7 @@ public abstract class OrtBackend : IShorokooBackend
     /// <paramref name="accounts"/> where they are given — another session's, which keeps them —
     /// or to accounts of its own.
     /// </summary>
-    private BuiltSession NewSession(
+    internal BuiltSession NewSession(
         byte[] model,
         ShorokooGraphOptimization graphOptimization,
         ShorokooLogSeverity logSeverity,
@@ -526,7 +526,7 @@ public abstract class OrtBackend : IShorokooBackend
 
     /// <summary><paramref name="built"/> as this backend's session, binding the pairs of
     /// <paramref name="outputAliases"/> it can.</summary>
-    private OrtSession Wrap(BuiltSession built, IReadOnlyList<OrtSession.ProvedAlias> outputAliases)
+    internal OrtSession Wrap(BuiltSession built, IReadOnlyList<OrtSession.ProvedAlias> outputAliases)
     {
         var (session, profileDirectory, views, host, card, owns) = built;
         try
@@ -752,8 +752,8 @@ public abstract class OrtBackend : IShorokooBackend
     /// <summary>
     /// Applies the settings every session this backend creates runs with — the log severity
     /// and the graph-optimization level, plus the session configuration entry that
-    /// <see cref="ShorokooGraphOptimization.TrainingStep"/> stands for, and ONNX Runtime's memory
-    /// pattern off — to <paramref name="options"/>. Public so a diagnostic can build an ORT session
+    /// <see cref="ShorokooGraphOptimization.TrainingStep"/> stands for, ONNX Runtime's memory pattern
+    /// off, and its nodes run one at a time — to <paramref name="options"/>. Public so a diagnostic can build an ORT session
     /// with exactly the product's configuration plus its own (profiling, an optimized-model dump).
     ///
     /// <para><b>The memory pattern is off</b> (<c>EnableMemoryPattern</c>). With it on, ONNX Runtime
@@ -770,6 +770,14 @@ public abstract class OrtBackend : IShorokooBackend
     /// training steps of the linear, MLP, 12-layer and encoder families measured without the pattern
     /// within 2% of their time with it, on the host and on a card, the 4×2 linear's within the 8% its
     /// own runs vary by.</para>
+    ///
+    /// <para><b>Sequential execution</b> (<c>ExecutionMode.ORT_SEQUENTIAL</c>, ONNX Runtime's
+    /// default, set so that nothing else can be): a session runs its nodes one at a time, on each of
+    /// its streams in the order of the graph it writes out (<c>OptimizedModelFilePath</c>) — measured
+    /// against the profiled kernel order of the memory-pass benchmark's families, on the host and on
+    /// a card, built from a model and from a graph ONNX Runtime wrote out alike. A run that places
+    /// its values in the memory it consumes is proved in that order (see <c>OrtPlacements</c>), which
+    /// parallel execution would not keep.</para>
     ///
     /// <para>For <see cref="ShorokooGraphOptimization.TrainingStep"/>:
     /// <c>optimization.disable_specified_optimizers</c> = CommonSubexpressionElimination;
@@ -793,6 +801,9 @@ public abstract class OrtBackend : IShorokooBackend
     {
         options.LogSeverityLevel = (OrtLoggingLevel)(int)logSeverity;
         options.EnableMemoryPattern = false;
+        // One node at a time, in the order of the graph the session writes out, on each stream:
+        // what a run placing its values relies on (see OrtPlacements).
+        options.ExecutionMode = ExecutionMode.ORT_SEQUENTIAL;
         if (graphOptimization == ShorokooGraphOptimization.TrainingStep)
         {
             options.GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL;

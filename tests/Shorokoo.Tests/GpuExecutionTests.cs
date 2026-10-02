@@ -243,12 +243,12 @@ public class GpuExecutionTests
     {
         const long MiB = 1024 * 1024;
         using var context = new ComputeContext { DeviceMemory = new DeviceMemorySettings { LimitBytes = 512 * MiB } };
-        var both = ComputeContextLifetimeCoverageTests.OutputsOnABlockEnding(context, ComputeContextLifetimeCoverageTests.TwoHalves(), 4096, 1024);
-        var one = ComputeContextLifetimeCoverageTests.OutputsOnABlockEnding(context, ComputeContextLifetimeCoverageTests.TwoHalves(oneHalf: true), 4096, 1024);
-        Assert.Equal([0, 0, 8 * MiB, 16 * MiB], both.Select(s => both[0].InUse - s.InUse));
-        Assert.Equal([16 * MiB, 32 * MiB, 24 * MiB, 16 * MiB], both.Select(s => s.Books));
-        Assert.Equal([0, 8 * MiB, 16 * MiB], one.Select(s => one[0].InUse - s.InUse));
-        Assert.Equal([32 * MiB, 40 * MiB, 32 * MiB], one.Select(s => s.Books));
+        var (both, together) = ComputeContextLifetimeCoverageTests.OutputsOnBlocksEnding(context, ComputeContextLifetimeCoverageTests.TwoHalves(), 4096, 1024);
+        var (one, _) = ComputeContextLifetimeCoverageTests.OutputsOnBlocksEnding(context, ComputeContextLifetimeCoverageTests.TwoHalves(oneHalf: true), 4096, 1024);
+        Assert.Equal(2, together);
+        Assert.True(one[0].OnBlocks > 0);
+        Assert.All(both, stage => Assert.Equal((stage.OnBlocks, stage.OnBlocks), (stage.InUse - both[^1].InUse, stage.Books)));
+        Assert.All(one, stage => Assert.Equal((stage.OnBlocks, stage.OnBlocks), (stage.InUse - one[^1].InUse, stage.Books)));
     }
 
     [CudaFact]
@@ -259,6 +259,22 @@ public class GpuExecutionTests
         Assert.Equal(OrtPlacements.Stage.Adopted, Assert.Single(Assert.IsType<OrtPlacements>(session.Placements).Entries).Stage);
         Assert.NotNull(output.Block);
         Assert.Equal(expected, [.. output.ToHost().As<float32>().AccessMemory<float>()]);
+    }
+
+    [CudaFact]
+    public void CudaProvider_ASessionRunsEachProvidersNodesInTheOrderOfTheGraphItWritesOutBuiltFromAModelOrFromAWrittenGraph()
+    {
+        foreach (var family in (string[])["encoder2", "attn-chunk4"])
+            Assert.All(ComputeContextLifetimeCoverageTests.RunOrders(family), order => Assert.Equal(order.Written, order.Ran));
+    }
+
+    [CudaFact]
+    public void CudaProvider_ARunPlacesAValueOverAnInputABranchItNeedNotFollowReadsWhereTheSessionRunsThatBranchFirst()
+    {
+        var (entry, output, expected) = ComputeContextLifetimeCoverageTests.BranchesRun(DefaultBackend.Instance);
+        Assert.Equal(OrtPlacements.Stage.Adopted, entry.Stage);
+        Assert.Contains("a", entry.Plan.Select(p => p.Value));
+        Assert.Equal(expected, output);
     }
 
     [CudaFact]

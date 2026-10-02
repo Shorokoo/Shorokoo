@@ -1093,40 +1093,48 @@ public class ComputeContextLifetimeCoverageTests
     }
 
     /// <summary>
-    /// What the session that made A has in use, and what <paramref name="context"/>'s books hold, as
-    /// <paramref name="graph"/> consumes A — a value of that session's memory — and B, and as each
-    /// output after the first is deleted in turn: before the run, after it, and after each deletion.
+    /// <paramref name="graph"/> run consuming A and B, each a value a session made in its own memory,
+    /// and its outputs deleted one by one: after the run and after each deletion, what that session
+    /// has in use, the bytes of the outputs still standing on a block, and what
+    /// <paramref name="context"/>'s books hold; and the most outputs that stood on one block.
     /// </summary>
-    internal static (long InUse, long Books)[] OutputsOnABlockEnding(ComputeContext context, InternalComputationGraph graph, int rows, int columns)
+    internal static ((long InUse, long OnBlocks, long Books)[] Stages, int MostOnABlock) OutputsOnBlocksEnding(
+        ComputeContext context, InternalComputationGraph graph, int rows, int columns)
     {
         var (a, b, _) = TwoHalvesValues(rows, columns);
         var x = InputTensor<float32>("x", rank: 2);
         var made = context.Compile(new InternalComputationGraph([x], [x + 1f]));
-        var source = TensorData([(long)rows, columns], a).CopyTo(context);
-        var consumed = made.Execute(source.Shared()).Single().ToTensorData();
-        source.Delete();
-        List<(long, long)> stages = [];
-        void Stage() => stages.Add((made.ReadArenaStatistics()!.Value.InUseBytes, context.ReadDeviceMemoryUse().AttachedBytes));
-        Stage();
-        var outputs = context.Compile(graph).Execute(consumed, TensorData([(long)rows, columns], b).CopyTo(context));
-        Stage();
-        foreach (var output in outputs.Skip(1))
+        TensorData Made(float[] values)
         {
-            output.ToTensorData().Delete();
+            var source = TensorData([(long)rows, columns], values).CopyTo(context);
+            var value = made.Execute(source.Shared()).Single().ToTensorData();
+            source.Delete();
+            return value;
+        }
+        var outputs = context.Compile(graph).Execute(Made(a), Made(b)).Select(o => o.ToTensorData()).ToList();
+        var most = outputs.Where(o => o.Block is not null).GroupBy(o => o.Block).Max(g => (int?)g.Count()) ?? 0;
+        List<(long, long, long)> stages = [];
+        void Stage() => stages.Add((made.ReadArenaStatistics()!.Value.InUseBytes,
+            outputs.Where(o => !o.IsDisposed && o.Block is not null).Sum(o => o.ByteCount), context.ReadDeviceMemoryUse().AttachedBytes));
+        Stage();
+        foreach (var output in outputs)
+        {
+            output.Delete();
             Stage();
         }
-        return [.. stages];
+        return ([.. stages], most);
     }
 
     [Fact]
     public void TestOutputsOnOneBlockOfASessionsMemoryEachFreeTheirOwnPagesAndWhatNoneStandsOnGoesWithTheRun()
     {
-        const long Half = 2L << 20;
         using var context = new ComputeContext();
-        var both = OutputsOnABlockEnding(context, TwoHalves(), 1024, 1024);
-        var one = OutputsOnABlockEnding(context, TwoHalves(oneHalf: true), 1024, 1024);
-        Assert.Equal([0, 0, Half, 2 * Half], both.Select(s => both[0].InUse - s.InUse));
-        Assert.Equal([0, Half, 2 * Half], one.Select(s => one[0].InUse - s.InUse));
+        var (both, together) = OutputsOnBlocksEnding(context, TwoHalves(), 1024, 1024);
+        var (one, _) = OutputsOnBlocksEnding(context, TwoHalves(oneHalf: true), 1024, 1024);
+        Assert.Equal(2, together);
+        Assert.True(one[0].OnBlocks > 0);
+        Assert.All(both, stage => Assert.Equal(stage.OnBlocks, stage.InUse - both[^1].InUse));
+        Assert.All(one, stage => Assert.Equal(stage.OnBlocks, stage.InUse - one[^1].InUse));
     }
 
     /// <summary>
@@ -1156,7 +1164,7 @@ public class ComputeContextLifetimeCoverageTests
     }
 
     /// <summary>
-    /// A run of <c>y = -Relu(x) + x·W</c> consuming x, through a session of
+    /// A run of <c>y = -Relu(x) * x·W</c> consuming x, through a session of
     /// <paramref name="backend"/>: the matrix product reads x on a branch of its own, which the
     /// session runs before the other. The plan it settled on, the output, and what it should be.
     /// </summary>
@@ -1164,7 +1172,7 @@ public class ComputeContextLifetimeCoverageTests
     {
         const int N = 512;
         var graph = GraphOf($"x:float[{N},{N}]", $"y:float[{N},{N}]",
-            Op("Relu", "x", "a"), Op("Neg", "a", "n"), Op("MatMul", "x W", "b"), Op("Add", "n b", "y"));
+            Op("Relu", "x", "a"), Op("Neg", "a", "n"), Op("MatMul", "x W", "b"), Op("Mul", "n b", "y"));
         float[] w = [.. Enumerable.Range(0, N * N).Select(i => (i * 7 % 3) - 1f)];
         float[] x = [.. Enumerable.Range(0, N * N).Select(i => (i % 5) - 2f)];
         var raw = new byte[w.Length * 4];
@@ -1183,7 +1191,7 @@ public class ComputeContextLifetimeCoverageTests
                 var xik = x[i * N + k];
                 for (int j = 0; j < N; j++) expected[i * N + j] += xik * w[k * N + j];
             }
-        for (int i = 0; i < expected.Length; i++) expected[i] -= MathF.Max(x[i], 0f);
+        for (int i = 0; i < expected.Length; i++) expected[i] *= -MathF.Max(x[i], 0f);
         return (Assert.Single(session.Placements!.Entries), MemoryMarshal.Cast<byte, float>(bytes).ToArray(), expected);
     }
 
@@ -1194,6 +1202,69 @@ public class ComputeContextLifetimeCoverageTests
         Assert.Equal(OrtPlacements.Stage.Adopted, entry.Stage);
         Assert.Contains("a", entry.Plan.Select(p => p.Value));
         Assert.Equal(expected, output);
+    }
+
+    /// <summary>
+    /// For a session over <paramref name="family"/>'s model built as a plain session is, and one
+    /// built as a variant is from the graph the first wrote out, each provider's nodes in the order
+    /// they ran and in the order of the graph the session wrote out.
+    /// </summary>
+    internal static List<(string[] Ran, string[] Written)> RunOrders(string family)
+    {
+        var backend = (OrtBackend)DefaultBackend.Instance;
+        var (_, modelOf, shape) = Benchmarks.MemoryPassBenchmarkTests.Suite.Single(s => s.Family == family);
+        var count = (int)shape.Aggregate(1L, (a, d) => a * d);
+        var sample = TensorData(shape, [.. Enumerable.Range(0, count).Select(i => (i % 101) / 101f - 0.5f)]);
+        using var context = new ComputeContext();
+        var model = ((OrtSession)context.Compile(modelOf().ToConcreteArchitecture([sample]).ToConcreteModel()).Session).Placements!.OriginalModel;
+        var stream = new MemoryStream();
+        ProtoBuf.Serializer.Serialize(stream, model);
+        var raw = MemoryMarshal.AsBytes(sample.As<float32>().AccessMemory<float>()).ToArray();
+        List<(string[], string[])> orders = [];
+        string[] directories = [.. Enumerable.Range(0, 2).Select(_ => Path.Combine(Path.GetTempPath(), $"run-order-{Guid.NewGuid():N}"))];
+        foreach (var directory in directories) Directory.CreateDirectory(directory);
+        try
+        {
+            for (int build = 0; build < 2; build++)
+            {
+                var built = backend.NewSession(
+                    build == 0 ? stream.ToArray() : File.ReadAllBytes(Path.Combine(directories[0], OrtBackend.OptimizedModelFile)),
+                    build == 0 ? ShorokooGraphOptimization.EnableAll : ShorokooGraphOptimization.DisableAll, ShorokooLogSeverity.Fatal,
+                    new DeviceMemorySettings(), new DiagnosticSettings { TraceNodePlacement = true }, directories[build], 0, [], PrecisionSettings.Default,
+                    externalDataDirectory: build == 0 ? null : directories[0]);
+                using var session = backend.Wrap(built, []);
+                var input = backend.CreateTensorInBackendMemory(ShorokooTensorElementType.Float, raw, shape);
+                foreach (var output in ((IShorokooSession)session).Run(
+                    new Dictionary<string, IShorokooTensorValue> { [model.Graph!.Inputs[0].Name] = input }, session.OutputNames, RunSettings.Default))
+                    output.Dispose();
+                input.Dispose();
+                using var profile = System.Text.Json.JsonDocument.Parse(File.ReadAllText(built.Session.EndProfiling()));
+                var ran = profile.RootElement.EnumerateArray()
+                    .Where(e => e.TryGetProperty("cat", out var cat) && cat.GetString() == "Node" && e.GetProperty("name").GetString()!.EndsWith("_kernel_time"))
+                    .Select(e => (Ts: e.GetProperty("ts").GetInt64(), Name: e.GetProperty("name").GetString()![..^"_kernel_time".Length],
+                        Provider: e.GetProperty("args").GetProperty("provider").GetString()!))
+                    .OrderBy(e => e.Ts).DistinctBy(e => e.Name).ToList();
+                using var written = File.OpenRead(Path.Combine(directories[build], OrtBackend.OptimizedModelFile));
+                var listed = ProtoBuf.Serializer.Deserialize<ModelProto>(written).Graph!.Nodes.Select(n => n.Name).ToList();
+                foreach (var provider in ran.Select(e => e.Provider).Distinct())
+                {
+                    var names = ran.Where(e => e.Provider == provider).Select(e => e.Name).ToHashSet();
+                    orders.Add(([.. ran.Where(e => e.Provider == provider).Select(e => e.Name)], [.. listed.Where(names.Contains)]));
+                }
+            }
+        }
+        finally
+        {
+            foreach (var directory in directories) Directory.Delete(directory, recursive: true);
+        }
+        return orders;
+    }
+
+    [Fact]
+    public void TestASessionRunsEachProvidersNodesInTheOrderOfTheGraphItWritesOutBuiltFromAModelOrFromAWrittenGraph()
+    {
+        foreach (var family in (string[])["encoder2", "attn-chunk4"])
+            Assert.All(RunOrders(family), order => Assert.Equal(order.Written, order.Ran));
     }
 
     [Fact]

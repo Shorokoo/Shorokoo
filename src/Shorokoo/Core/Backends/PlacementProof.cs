@@ -167,6 +167,7 @@ internal sealed class PlacementProof
     private readonly IReadOnlyDictionary<string, PlacementShapes.Value> _shapes;
     private readonly PlacementMemory _memory;
     private readonly ulong[][] _ancestors;
+    private readonly bool _runsInOrder;
 
     /// <summary>
     /// The proof over <paramref name="graph"/> for one run: <paramref name="blocks"/> names each
@@ -177,14 +178,19 @@ internal sealed class PlacementProof
     /// every one of them. A graph output not named there is one a binding takes for the run alone,
     /// as a placed value made an output only so it can be bound to its range.
     /// <paramref name="memory"/> is how the backend lays values out; ONNX Runtime's where null.
+    /// <paramref name="runsInOrder"/> says the backend runs the graph's nodes one at a time in the
+    /// order they are listed — on each of its streams, where every node that reads or writes a
+    /// block is on one — so that a node listed earlier has run before a later one starts; where
+    /// it does not, a node runs before another only where the graph's edges make it.
     /// </summary>
     /// <exception cref="ArgumentException">The graph has more than <see cref="MostNodes"/> nodes,
     /// or is not in topological order.</exception>
     internal PlacementProof(
         GraphProto graph, IReadOnlyDictionary<string, long> blocks, IReadOnlyDictionary<string, PlacementShapes.Value> shapes,
-        IReadOnlySet<string>? readAfterRun = null, PlacementMemory? memory = null)
+        IReadOnlySet<string>? readAfterRun = null, PlacementMemory? memory = null, bool runsInOrder = false)
     {
         _nodes = graph.Nodes;
+        _runsInOrder = runsInOrder;
         if (_nodes.Count > MostNodes) throw new ArgumentException($"The graph has more than {MostNodes} nodes.", nameof(graph));
         _blocks = blocks;
         _shapes = shapes;
@@ -258,9 +264,11 @@ internal sealed class PlacementProof
         return ancestors;
     }
 
-    /// <summary>Whether node <paramref name="before"/> runs before node <paramref name="node"/>
-    /// whatever order a runtime picks.</summary>
-    private bool Precedes(int before, int node) => (_ancestors[node][before >> 6] & (1UL << (before & 63))) != 0;
+    /// <summary>Whether node <paramref name="before"/> has run before node <paramref name="node"/>
+    /// starts: listed first, where the backend runs the nodes in their order, and otherwise an
+    /// ancestor of it, which runs first whatever order a runtime picks.</summary>
+    private bool Precedes(int before, int node)
+        => _runsInOrder ? before < node : (_ancestors[node][before >> 6] & (1UL << (before & 63))) != 0;
 
     // ---- memory chains ----
 

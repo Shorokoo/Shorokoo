@@ -318,12 +318,15 @@ public class PyTorchBackendCoverageTests
     /// its sign.</summary>
     private static string Clipped(IShorokooBackend backend, float x, float? lo, float? hi)
     {
-        var graph = Graph(["x", "lo", "hi"], ["y"], Node("Clip", ["x", lo is null ? "" : "lo", hi is null ? "" : "hi"], ["y"]));
+        string[] bounds = [lo is null ? "" : "lo", hi is null ? "" : "hi"];
+        var graph = Graph(["x", .. bounds.Where(b => b.Length > 0)], ["y"], Node("Clip", ["x", .. bounds], ["y"]));
         foreach (var value in graph.Inputs.Concat(graph.Outputs)) value.Type = FloatTensor;
         using var session = backend.CreateSession(Serialize(graph), default, default, DeviceMemorySettings.Default);
-        var feeds = new Dictionary<string, IShorokooTensorValue> { ["x"] = backend.CreateTensor(Enumerable.Repeat(x, 67).ToArray(), [67]) };
-        if (lo is { } l) feeds["lo"] = backend.CreateTensor([l], []);
-        if (hi is { } h) feeds["hi"] = backend.CreateTensor([h], []);
+        IShorokooTensorValue Tensor(float[] values, long[] shape)
+            => backend.CreateTensorInBackendMemory(ShorokooTensorElementType.Float, [.. MemoryMarshal.AsBytes<float>(values)], shape);
+        var feeds = new Dictionary<string, IShorokooTensorValue> { ["x"] = Tensor([.. Enumerable.Repeat(x, 67)], [67]) };
+        if (lo is { } l) feeds["lo"] = Tensor([l], []);
+        if (hi is { } h) feeds["hi"] = Tensor([h], []);
         using var y = session.Run(feeds, ["y"], RunSettings.Default)[0];
         foreach (var feed in feeds.Values) feed.Dispose();
         return string.Join(" ", MemoryMarshal.Cast<byte, float>(backend.CopyTensorToHost(y)).ToArray()
@@ -1132,6 +1135,27 @@ public class PyTorchBackendCoverageTests
     }
 
     [Fact]
+    public void TestARunWritesSoftmaxesNormalizationsClipsConvolutionsAndGemmsIntoTheMemoryItConsumesComputingWhatAPlainRunComputes()
+        => SoftmaxesNormalizationsClipsConvolutionsAndGemmsArePlaced(Torch);
+
+    internal static void SoftmaxesNormalizationsClipsConvolutionsAndGemmsArePlaced(TorchBackend backend)
+    {
+        string Placed(GraphProto graph) => PlacedOn(backend, graph);
+        Assert.Equal("O@b+0", Placed(Graph("O", Op("Softmax", "a", "O"))));
+        Assert.Equal("O@b+0", Placed(Graph("O", Op("LogSoftmax", "a", "O"))));
+        Assert.Equal("O@b+0", Placed(GraphOn("a:float[512,512] b:float[262144]", "O", ComputeContextLifetimeCoverageTests.Op("Softmax", "a", "O", attribute: ("axis", 0)))));
+        Assert.Equal("O@a+0", Placed(Graph("O", Op("Gelu", "a", "O"))));
+        Assert.Equal("O@a+0", Placed(GraphOn("a:float[262144] lo:float[1] hi:float[1]", "O", Op("Clip", "a lo hi", "O"))));
+        Assert.Equal("O@a+0", Placed(GraphOn("a:float[262144] hi:float[1]", "O", Node("Clip", ["a", "", "hi"], ["O"]))));
+        Assert.Equal("O@b+0", Placed(GraphOn("a:float[512,512] b:float[512,512] s:float[512] c:float[512]", "O", Op("LayerNormalization", "a s c", "O"))));
+        Assert.Equal("O@b+0", Placed(GraphOn("x:float[4,64,32,32] b:float[4,64,32,32] s:float[64] c:float[64] m:float[64] v:float[64]", "O",
+            Op("Abs", "v", "w"), Op("BatchNormalization", "x s c m w", "O"))));
+        Assert.Equal("O@b+0", Placed(GraphOn("x:float[2,32,64,64] b:float[2,32,64,64] w:float[32,32,3,3]", "O",
+            ComputeContextLifetimeCoverageTests.With(Op("Conv", "x w", "O"), "pads", 1, 1, 1, 1))));
+        Assert.Equal("O@b+0", Placed(GraphOn("a:float[512,512] b:float[512,512] w:float[512,512] c:float[512]", "O", Op("Gemm", "a w c", "O"))));
+    }
+
+    [Fact]
     public void TestAPlacedValueGivenNoRangeIsComputedAsItIsAndCopiedOutOfItsOperandsWhereItWasProvedOutOfThem()
     {
         Assert.Equal("False", Evaluated("(lambda t: __import__('shorokoo_torch.runtime', fromlist=['_']).place_into(0, True, S.identity, t).data_ptr() == t.data_ptr())(torch.ones(4))"));
@@ -1171,40 +1195,64 @@ public class PyTorchBackendCoverageTests
     /// <c>O@a+16</c> for 16 bytes into input a's memory, <c>O@-</c> for memory of its own — once the
     /// run is shown to compute what a run consuming nothing computes.
     /// </summary>
-    private static string Placed(GraphProto graph, bool consume = true, bool feedTwice = false)
+    private static string Placed(GraphProto graph, bool consume = true, bool feedTwice = false) => PlacedOn(Torch, graph, consume, feedTwice);
+
+    /// <summary>
+    /// <see cref="Placed"/> on <paramref name="backend"/>; on a card, with <c> allocating</c> after
+    /// it where the consuming run did not allocate at least its outputs' bytes less there than the
+    /// run consuming nothing.
+    /// </summary>
+    internal static string PlacedOn(TorchBackend backend, GraphProto graph, bool consume = true, bool feedTwice = false)
     {
-        using var session = Torch.CreateSession(Serialize(graph), default, default, DeviceMemorySettings.Default, DiagnosticSettings.Default, []);
+        using var session = backend.CreateSession(Serialize(graph), default, default, DeviceMemorySettings.Default, DiagnosticSettings.Default, []);
         var names = graph.Outputs.Select(o => o.Name).ToArray();
-        (string[] Values, string Where) Run(bool consuming)
+        (string[] Values, string Where, long Allocated, long Bytes) Run(bool consuming)
         {
             var feeds = new Dictionary<string, IShorokooTensorValue>(StringComparer.Ordinal);
             foreach (var input in graph.Inputs.Where(i => i.Type?.TensorType is not null))
-                feeds[input.Name] = feedTwice && feeds.Count > 0 ? feeds.Values.First() : Pattern(input, feeds.Count);
+                feeds[input.Name] = feedTwice && feeds.Count > 0 ? feeds.Values.First() : Pattern(backend, input, feeds.Count);
             var fed = feeds.Values.Distinct().Cast<TorchTensorValue>().ToArray();
             var at = feeds.ToDictionary(f => f.Key, f => (((TorchTensorValue)f.Value).Address, TorchPlacements.BytesOf((TorchTensorValue)f.Value)));
+            var before = CardAllocated(backend);
             var results = session.RunConsuming(feeds, consuming ? fed : [], names, RunSettings.Default);
+            var allocated = CardAllocated(backend) - before;
             if (!consuming) foreach (var value in fed) value.Dispose();
             var where = names.Select((name, i) => ((TorchTensorValue)results[i]).Range is null
                 ? $"{name}@-"
                 : at.Where(f => ((TorchTensorValue)results[i]).Address >= f.Value.Address && ((TorchTensorValue)results[i]).Address < f.Value.Address + (nint)f.Value.Item2)
                     .Select(f => $"{name}@{f.Key}+{((TorchTensorValue)results[i]).Address - f.Value.Address}").Single());
-            string[] values = [.. results.Select(r => Convert.ToBase64String(r.GetTensorDataAsSpan<byte>()))];
+            string[] values = [.. results.Select(r => Convert.ToBase64String(backend.CopyTensorToHost(r)))];
+            var bytes = results.Sum(r => TorchPlacements.BytesOf((TorchTensorValue)r));
             foreach (var result in results) result.Dispose();
-            return (values, string.Join(" ", where));
+            return (values, string.Join(" ", where), allocated, bytes);
         }
         var plain = Run(consuming: false);
         var placed = Run(consume);
         Assert.Equal(plain.Values, placed.Values);
-        return placed.Where;
+        return placed.Where + (backend.OnCuda && placed.Allocated + placed.Bytes > plain.Allocated ? " allocating" : "");
     }
 
-    private static IShorokooTensorValue Pattern(ValueInfoProto input, int seed)
+    /// <summary>Every byte torch's CUDA allocator has handed out in this process, or 0 off a card.</summary>
+    private static long CardAllocated(TorchBackend backend)
+    {
+        if (!backend.OnCuda) return 0;
+        using (PythonRuntime.Gil())
+        {
+            using var scope = Py.CreateScope();
+            scope.Exec("import torch\nallocated = torch.cuda.memory_stats().get('allocated_bytes.all.allocated', 0)");
+            return scope.Get<long>("allocated");
+        }
+    }
+
+    private static IShorokooTensorValue Pattern(TorchBackend backend, ValueInfoProto input, int seed)
     {
         var shape = input.Type.TensorType.Shape.Dims.Select(d => d.DimValue).ToArray();
         var count = (int)shape.Aggregate(1L, (a, d) => a * d);
         return input.Type.TensorType.ElemType == (int)TensorProto.DataType.Int64
-            ? Torch.CreateTensor([.. Enumerable.Range(0, count).Select(i => (long)((i * 7 + seed) % 1000))], shape)
-            : Torch.CreateTensor([.. Enumerable.Range(0, count).Select(i => ((i * 7 + seed) % 1000) * 0.001f - 0.4f)], shape);
+            ? backend.CreateTensorInBackendMemory(ShorokooTensorElementType.Int64,
+                [.. MemoryMarshal.AsBytes<long>([.. Enumerable.Range(0, count).Select(i => (long)((i * 7 + seed) % 1000))])], shape)
+            : backend.CreateTensorInBackendMemory(ShorokooTensorElementType.Float,
+                [.. MemoryMarshal.AsBytes<float>([.. Enumerable.Range(0, count).Select(i => ((i * 7 + seed) % 1000) * 0.001f - 0.4f)])], shape);
     }
 
     [Fact]

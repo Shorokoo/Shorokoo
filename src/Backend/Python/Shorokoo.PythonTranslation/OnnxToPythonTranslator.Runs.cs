@@ -89,14 +89,15 @@ internal sealed partial class OnnxToPythonTranslator
     /// <paramref name="expression"/>, the call of <paramref name="function"/> a node of the top-level
     /// graph evaluates to, as a write into its range where the node's one output is placed: the same
     /// call made through <c>_into</c>, which writes the result into the range a run hands over for
-    /// the slot and returns it there, or computes it as the call does where none is.
+    /// the slot and returns it there, or computes it as the call does where none is. A call returning
+    /// a tuple of the node's outputs is placed where its first output is the one the node uses.
     /// </summary>
     private string Placed(NodeProto node, Scope scope, string? function, string expression)
     {
         if (_placed is null || !ReferenceEquals(scope, _mainScope) || function is null
             || !expression.StartsWith(function + "(", StringComparison.Ordinal)
-            || node.Outputs.Count(o => o.Length > 0) != 1
-            || !_placed.TryGetValue(node.Outputs.First(o => o.Length > 0), out var placed))
+            || node.Outputs.Count(o => o.Length > 0) != 1 || node.Outputs[0].Length == 0
+            || !_placed.TryGetValue(node.Outputs[0], out var placed))
             return expression;
         return $"_into({placed.Slot}, {(placed.OwnMemory ? "True" : "False")}, {function}, {expression[(function.Length + 1)..]}";
     }

@@ -107,7 +107,8 @@ def _back(y, dtype):
 # ---- convolution -----------------------------------------------------------------------------
 
 def conv(x, w, b=None, /, *, auto_pad="NOTSET", dilations=None, group=1, kernel_shape=None, pads=None,
-         strides=None):
+         strides=None, _out=None):
+    """Conv; written into `_out` where `_cudnn_into` can write it there."""
     n = _rank_check(x, "Conv")
     x, dtype = _computable(x)
     w = w.to(x.dtype)
@@ -116,8 +117,39 @@ def conv(x, w, b=None, /, *, auto_pad="NOTSET", dilations=None, group=1, kernel_
     strides = list(strides) if strides else [1] * n
     dilations = list(dilations) if dilations else [1] * n
     begins, ends = _pads(list(x.shape[2:]), kernel, strides, dilations, pads, auto_pad)
-    y = _CONV[n](_pad_spatial(x, begins, ends), w, b, stride=strides, dilation=dilations, groups=group)
+    padded = _pad_spatial(x, begins, ends)
+    if _out is not None and dtype is None and _cudnn_into(padded, w, b, strides, dilations, group, _out):
+        return _out
+    y = _CONV[n](padded, w, b, stride=strides, dilation=dilations, groups=group)
     return _back(y, dtype)
+
+
+def _cudnn_into(x, w, b, strides, dilations, group, out):
+    """Whether the unpadded convolution of `x` by `w` and `b` is written into `out` -- by cuDNN, as
+    torch's own convolution computes it where it picks cuDNN: torch writes cuDNN's result into a
+    given tensor only through its cuDNN entry, which its convolution calls, then adds the bias in
+    place. That is where torch would pick cuDNN for these operands, of 2 or 3 spatial dimensions
+    (1 it reshapes first), laid out contiguously as cuDNN is handed them, `out` of the result's
+    exact layout; nowhere else, and on the CPU never: its convolutions take no tensor to write into
+    but by computing the result and copying it."""
+    n = x.dim() - 2
+    if not x.is_cuda or n not in (2, 3) or not torch.backends.cudnn.enabled:
+        return False
+    if not (x.is_contiguous() and w.is_contiguous() and out.is_contiguous()):
+        return False
+    zeros = [0] * n
+    if torch._C._select_conv_backend(x, w, b, strides, zeros, dilations, False, zeros, group, None) != torch._C._ConvBackend.Cudnn:
+        return False
+    sizes = [(size - ((k - 1) * d + 1)) // s + 1 for size, k, s, d in zip(x.shape[2:], w.shape[2:], strides, dilations)]
+    if out.dtype != x.dtype or out.device != x.device or list(out.shape) != [x.shape[0], w.shape[0], *sizes]:
+        return False
+    cudnn = torch.backends.cudnn
+    torch.ops.aten.cudnn_convolution.out(
+        x, w, zeros, strides, dilations, group, cudnn.benchmark,
+        cudnn.deterministic or torch.are_deterministic_algorithms_enabled(), cudnn.allow_tf32, out=out)
+    if b is not None:
+        out.add_(b.reshape([1, -1] + [1] * n))
+    return True
 
 
 def conv_integer(x, w, x_zero_point=None, w_zero_point=None, /, *, auto_pad="NOTSET", dilations=None,

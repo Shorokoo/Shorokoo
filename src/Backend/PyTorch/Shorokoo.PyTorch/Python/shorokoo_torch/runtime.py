@@ -579,15 +579,25 @@ def _overlap(a, b):
     return any(lo < end and start < hi for lo, hi in _extents(a) for start, end in _extents(b))
 
 
+def writes_into(out, like):
+    """Whether a support function handed `out` (its `_out`) for a result laid out as `like` -- the
+    result's type, shape and device -- writes the result there: `out` is a tensor of exactly that
+    layout. A function that does not computes its result as it would without one."""
+    return (isinstance(out, torch.Tensor) and isinstance(like, torch.Tensor) and out.dtype == like.dtype
+            and tuple(out.shape) == tuple(like.shape) and out.device == like.device)
+
+
 def _fast_writers():
     """Per support function, how it writes its result into a tensor it is handed allocating nothing,
     exactly as it computes it: ("out", f) for torch's f taking out=, over floating-point operands;
     ("relu", None) for the activation torch has only an in-place form of; ("matmul", f) for a
     product of two matrices or stacks of them, over floating-point operands; ("fill", None) for
-    constant_of_shape; ("cat", None) for concat, part by part."""
+    constant_of_shape; ("cat", None) for concat, part by part; ("own", None) for a function that
+    takes the tensor itself as `_out` and writes its result there, step by step, allocating nothing
+    a plain call does not allocate too (`writes_into`)."""
     global _fast
     if _fast is None:
-        from . import ops_elementwise as e, ops_linalg as la, ops_shape as s
+        from . import ops_conv_pool as cp, ops_elementwise as e, ops_linalg as la, ops_norm as n, ops_shape as s
         table = {function: ("out", op) for function, op in [
             (e.neg, torch.neg), (e.abs_, torch.abs), (e.sigmoid, torch.sigmoid), (e.exp, torch.exp),
             (e.log, torch.log), (e.sqrt, torch.sqrt), (e.tanh, torch.tanh), (e.sin, torch.sin),
@@ -599,6 +609,9 @@ def _fast_writers():
             (e.pow_, torch.pow), (e.max_, torch.maximum), (e.min_, torch.minimum), (e.sum_, torch.add),
         ]}
         table[e.relu] = ("relu", None)
+        for function in (e.clip, e.softmax, e.log_softmax, e.gelu, n.layer_normalization, n.batch_normalization,
+                         cp.conv, la.gemm):
+            table[function] = ("own", None)
         table[la.matmul] = ("matmul", torch.matmul)
         table[s.constant_of_shape] = ("fill", None)
         table[s.concat] = ("cat", None)
@@ -689,23 +702,32 @@ def place_into(slot, own, function, *args, **kwargs):
     result into it where `function` has a form that does (_fast_writers), else by copying the result
     in. Where the run hands over none, or the result cannot go there, the result as computed --
     copied into memory of its own where `own` says the placement was proved with the value out of
-    its operands' memory and it is still in it."""
+    its operands' memory and it is still in it. A function returning a tuple -- a node whose first
+    output alone is used -- has that first element placed, and the tuple returned."""
     state = _placing.get()
     target = state.target(slot) if state is not None else None
-    if target is not None:
-        fast = _fast_writers().get(function)
-        if fast is not None and _write_fast(fast, target, args, kwargs):
-            state.written[slot] = target
-            return target
-    value = function(*args, **kwargs)
-    if target is not None and _write_copy(target, value):
+    fast = _fast_writers().get(function) if target is not None else None
+    if fast is not None and fast[0] != "own" and _write_fast(fast, target, args, kwargs):
         state.written[slot] = target
         return target
-    if own and isinstance(value, torch.Tensor):
-        storage = _storage_of(value)
-        if storage is not None and storage in storages([a for a in args if isinstance(a, (torch.Tensor, list))]):
-            value = value.clone(memory_format=torch.contiguous_format)
-    return value
+    value = function(*args, _out=target, **kwargs) if fast is not None else function(*args, **kwargs)
+    rest = None
+    if isinstance(value, tuple):
+        value, rest = value[0], value[1:]
+    written = False
+    if target is not None:
+        if isinstance(value, torch.Tensor) and _same_memory(value, target):
+            written = True
+        elif _write_copy(target, value):
+            written, value = True, target
+        if written:
+            state.written[slot] = value
+    if not written:
+        if own and isinstance(value, torch.Tensor):
+            storage = _storage_of(value)
+            if storage is not None and storage in storages([a for a in args if isinstance(a, (torch.Tensor, list))]):
+                value = value.clone(memory_format=torch.contiguous_format)
+    return value if rest is None else (value,) + rest
 
 
 # ---- device memory ---------------------------------------------------------------------------

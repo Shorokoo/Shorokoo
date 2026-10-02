@@ -890,13 +890,18 @@ public class ComputeContextLifetimeCoverageTests
     }
 
     [Fact]
-    public void TestOnTorchOnlyWhatItWritesIntoAGivenRangeAllocatingNothingIsPlaced()
+    public void TestOnTorchOnlyWhatItWritesIntoAGivenRangeAllocatingNoMoreThanAPlainRunIsPlaced()
     {
         Assert.True(Places(GraphOf("a:int64[64]", "O", Op("Neg", "a", "O")), "a", At("O", "a", 0)));
         Assert.False(PlacesOnTorch(GraphOf("a:int64[64]", "O", Op("Neg", "a", "O")), "a", At("O", "a", 0)));
         Assert.True(PlacesOnTorch(GraphOf("a:float[128]", "O", Op("Neg", "a", "O")), "a", At("O", "a", 0)));
         Assert.False(PlacesOnTorch(GraphOf("a:float[128] b:float[128]", "O", Op("Clip", "a", "O")), "b", At("O", "b", 0)));
-        Assert.False(PlacesOnTorch(GraphOf("a:float[128] b:float[128]", "O", Op("Softmax", "a", "O")), "b", At("O", "b", 0)));
+        Assert.True(PlacesOnTorch(GraphOf("a:float[128] b:float[128] c:float[1]", "O", Op("Clip", "a c", "O")), "a", At("O", "a", 0)));
+        Assert.True(PlacesOnTorch(GraphOf("a:float[128] b:float[128]", "O", Op("Softmax", "a", "O")), "b", At("O", "b", 0)));
+        Assert.False(PlacesOnTorch(GraphOf("a:float[128] b:float[128]", "O", Op("Softmax", "a", "O")), "a", At("O", "a", 0)));
+        Assert.False(PlacesOnTorch(GraphOf("a:int64[128] b:float[128]", "O", Op("Softmax", "a", "O")), "b", At("O", "b", 0)));
+        Assert.True(PlacesOnTorch(GraphOf("a:float[2,64] s:float[64] b:float[128]", "O", Op("LayerNormalization", "a s", "O")), "b", At("O", "b", 0)));
+        Assert.False(PlacesOnTorch(GraphOf("a:float[2,64] s:float[64] b:float[128]", "O M", Op("LayerNormalization", "a s", "O M")), "b", At("O", "b", 0)));
         Assert.True(PlacesOnTorch(GraphOf("a:float[8,16] b:float[16,8]", "O", Op("Transpose", "a", "O")), "b", At("O", "b", 0)));
         Assert.True(PlacesOnTorch(GraphOf("a:float[8,16] b:float[16,8] c:float[8,8]", "O", Op("MatMul", "a b", "O")), "c", At("O", "c", 0, 256)));
         Assert.False(PlacesOnTorch(GraphOf("a:float[8,8] b:float[8,8]", "O", Op("MatMul", "a b", "O")), "a", At("O", "a", 0, 256)));
@@ -939,7 +944,7 @@ public class ComputeContextLifetimeCoverageTests
             : "unknown"));
     }
 
-    private static NodeProto With(NodeProto node, string name, params long[] ints)
+    internal static NodeProto With(NodeProto node, string name, params long[] ints)
     {
         node.Attributes.Add(new AttributeProto { Name = name, Type = AttributeProto.AttributeType.Ints, Ints = ints });
         return node;

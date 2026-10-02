@@ -258,6 +258,14 @@ public class PyTorchCudaHardwareTests
     }
 
     [TorchCudaFact]
+    public void TestARunWritesSoftmaxesNormalizationsClipsConvolutionsAndGemmsIntoTheMemoryItConsumesOnTheCardAllocatingNoneOfThem()
+        => PyTorchBackendCoverageTests.SoftmaxesNormalizationsClipsConvolutionsAndGemmsArePlaced(Cuda.Value);
+
+    [TorchCudaFact]
+    public void TestClipHandsBackAZeroInsideItsBoundsAndTheLowerOfTwoEqualZeroBoundsBelowThemSignAndAllOnTheCard()
+        => PyTorchBackendCoverageTests.ClipKeepsTheSignOfAZero(Cuda.Value);
+
+    [TorchCudaFact]
     public void TestARunOnTheCardIsStoppedWhenItsTokenIsCancelledAndItsNodesAreTracedOnTheCard()
     {
         using var session = Cuda.Value.CreateSession(PyTorchBackendCoverageTests.Serialize(PyTorchBackendCoverageTests.CountingLoop()),

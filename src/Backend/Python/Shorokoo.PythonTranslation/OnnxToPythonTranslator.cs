@@ -394,8 +394,8 @@ internal sealed partial class OnnxToPythonTranslator
                     throw context.Unsupported($"its attribute '{attribute.Name}' names element type {(ShorokooTensorElementType)attribute.I}, and {why}");
             expression = entry.Emit(context);
             returnsTuple = entry.ReturnsTuple;
+            expression = Placed(node, scope, entry.Function, expression);
             if (returnsTuple) expression += $"[:{outputs.Count}]";
-            else expression = Placed(node, scope, entry.Function, expression);
         }
         else
         {

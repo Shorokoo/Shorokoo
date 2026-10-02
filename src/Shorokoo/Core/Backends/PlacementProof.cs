@@ -33,22 +33,37 @@ internal sealed record PlacementMemory(
     /// PyTorch run eagerly from a translation of the graph. An output of anything but the operators
     /// known to compute into memory of their own (<see cref="TorchFresh"/>) may be its input's memory
     /// — a slice, a reshape, a transpose, an expansion, a split, a cast to the type it has, a
-    /// one-input <c>Max</c>, a branch handing back a value it captured — unless it is placed, and
-    /// then written into its range. It writes into a given range only what it has a form for that
-    /// allocates nothing: the element-wise operators of <see cref="TorchElementWise"/> over
-    /// floating-point values, a fill, a concatenation part by part, and a copy of what a view
-    /// operator reads.
+    /// one-input <c>Max</c>, a <c>Clip</c> without bounds, a branch handing back a value it captured
+    /// — unless it is placed, and then written into its range. It writes into a given range what it
+    /// writes there allocating nothing a plain run does not allocate at that node too, and holding
+    /// nothing once the node is done, so that a placed run never holds more than a plain one: the
+    /// element-wise operators of <see cref="TorchElementWise"/> and <c>MatMul</c> through torch's
+    /// <c>out=</c> forms, and the operators of <see cref="TorchComposed"/> step by step in the range
+    /// (each with the temporaries a plain run makes for it), over floating-point values; a fill; a
+    /// concatenation part by part; and a copy of what a view operator reads. A convolution is
+    /// written there by cuDNN on a card, and elsewhere computed and copied in, as an operator whose
+    /// translation cannot write into the range is.
     /// </summary>
     internal static PlacementMemory PyTorch { get; } = new(static (_, _, _) => false, TorchShares, TorchWrites);
 
     /// <summary>The operators whose translation always computes into memory of its own, never
     /// handing back an input or a view of one; <c>Max</c>, <c>Min</c> and <c>Sum</c> only of two
-    /// inputs or more, since one of one input is that input.</summary>
+    /// inputs or more, since one of one input is that input, and <c>Clip</c> only with a
+    /// bound.</summary>
     internal static readonly HashSet<string> TorchFresh = new(StringComparer.Ordinal)
     {
         "Shape", "Size", "Add", "Sub", "Mul", "Div", "Pow", "Mod", "Neg", "Abs", "Sign", "Reciprocal", "Sqrt",
         "Exp", "Log", "Sin", "Cos", "Tan", "Asin", "Acos", "Atan", "Sinh", "Cosh", "Tanh", "Asinh", "Acosh",
         "Atanh", "Erf", "Sigmoid", "Relu", "Mean", "MatMul", "Gemm", "ConstantOfShape", "Concat", "Where",
+        "Softmax", "LogSoftmax", "Gelu", "Conv", "LayerNormalization", "BatchNormalization",
+    };
+
+    /// <summary>The operators PyTorch's translation computes as a function that, handed a range,
+    /// writes its first output there step by step; placed only where that output is the one
+    /// used.</summary>
+    internal static readonly HashSet<string> TorchComposed = new(StringComparer.Ordinal)
+    {
+        "Softmax", "LogSoftmax", "Gelu", "Clip", "Gemm", "LayerNormalization", "BatchNormalization", "Conv",
     };
 
     /// <summary>The element-wise operators PyTorch writes into a given range of a floating-point
@@ -72,15 +87,19 @@ internal sealed record PlacementMemory(
     {
         if (!OutputAliasProof.IsStandard(node)) return true;
         if (node.OpType is "Max" or "Min" or "Sum") return node.Inputs.Count(i => i.Length > 0) < 2;
+        if (node.OpType == "Clip")
+            return node.Inputs.Skip(1).All(i => i.Length == 0) && node.Attributes.All(a => a.Name is not ("min" or "max"));
         return !TorchFresh.Contains(node.OpType);
     }
 
     private static bool TorchWrites(NodeProto node, int elementType)
     {
         if (!OutputAliasProof.IsStandard(node) || node.Outputs.Count(o => o.Length > 0) != 1) return false;
+        var floating = elementType is 1 or 10 or 11 or 16;
         if (TorchElementWise.Contains(node.OpType) || node.OpType == "MatMul")
-            return elementType is 1 or 10 or 11 or 16
-                   && (PlacementProof.InPlaceUnary.Contains(node.OpType) ? node.Inputs.Count == 1 : node.Inputs.Count == 2);
+            return floating && (PlacementProof.InPlaceUnary.Contains(node.OpType) ? node.Inputs.Count == 1 : node.Inputs.Count == 2);
+        if (TorchComposed.Contains(node.OpType))
+            return floating && node.Outputs[0].Length > 0 && !TorchShares(node, 0, 0);
         return node.OpType is "ConstantOfShape" or "Concat" || TorchCopies.Contains(node.OpType);
     }
 }

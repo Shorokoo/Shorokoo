@@ -1135,6 +1135,24 @@ public class PyTorchBackendCoverageTests
     }
 
     [Fact]
+    public void TestAShapeIsReadAsItsValueIsMadeSoThatTheValueIsHeldOnlyUntilItsContentsAreRead()
+    {
+        Assert.Equal("neg shape exp abs_", Calls(GraphOn("x:float[4]", "d s", Op("Neg", "x", "b"), Op("Exp", "b", "c"), Op("Abs", "c", "d"), Op("Shape", "b", "s"))));
+        Assert.Equal("size neg", Calls(GraphOn("x:float[4]", "b s", Op("Neg", "x", "b"), Op("Size", "x", "s"))));
+        Assert.Equal("neg shape shape exp", Calls(GraphOn("x:float[4]", "c r", Op("Neg", "x", "b"), Op("Exp", "b", "c"), Op("Shape", "b", "s"), Op("Shape", "s", "r"))));
+        Assert.Equal("neg exp shape", Calls(GraphOn("x:float[4]", "c s", Op("Neg", "x", "b"), Op("Exp", "b", "c"), Op("Shape", "c", "s"))));
+    }
+
+    /// <summary>The support functions the translation of <paramref name="graph"/> calls, in the order
+    /// it calls them.</summary>
+    private static string Calls(GraphProto graph)
+    {
+        var model = ProtoBuf.Serializer.Deserialize<ModelProto>(new MemoryStream(Serialize(graph)));
+        var source = Shorokoo.PythonTranslation.OnnxToPythonTranslator.Translate(model, [], TorchDialect.Instance).Source;
+        return string.Join(" ", System.Text.RegularExpressions.Regex.Matches(source, @"ops_\w+\.(\w+)\(").Select(m => m.Groups[1].Value));
+    }
+
+    [Fact]
     public void TestARunWritesSoftmaxesNormalizationsClipsConvolutionsAndGemmsIntoTheMemoryItConsumesComputingWhatAPlainRunComputes()
         => SoftmaxesNormalizationsClipsConvolutionsAndGemmsArePlaced(Torch);
 

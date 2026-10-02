@@ -286,11 +286,17 @@ namespace Shorokoo.Core.Nodes.AutoDiff
                 (OnnxOpAttributeNames.AttrStrides, strides)]);
 
             // Slice to match x's exact shape (ConvTranspose with output_padding may produce
-            // slightly larger spatial output than needed when the original input had odd spatial dims)
-            var xShape = OnnxOp.Shape(x);
-            var xRank = OnnxOp.Shape(xShape);
-            var zeros = OnnxOp.ConstantOfShape(xRank, Globals.TensorData(1, 0L).MoveToAttribute());
-            gradX = OnnxOp.Slice(gradX, zeros, xShape);
+            // slightly larger spatial output than needed when the original input had odd spatial dims).
+            // With every stride 1 there is no output padding, and the ConvTranspose's output has x's
+            // shape exactly — (OH − 1) + (K − 1)·d + 1 − pads = H — so the slice would copy all of it;
+            // a forward convolution padded by auto_pad leaves its pads to the slice.
+            if (strides.Any(s => s != 1) || attributes.GetAttributeObj("auto_pad") is AutoPad.SameUpper or AutoPad.SameLower or AutoPad.Valid)
+            {
+                var xShape = OnnxOp.Shape(x);
+                var xRank = OnnxOp.Shape(xShape);
+                var zeros = OnnxOp.ConstantOfShape(xRank, Globals.TensorData(1, 0L).MoveToAttribute());
+                gradX = OnnxOp.Slice(gradX, zeros, xShape);
+            }
 
             // dw: weight gradient. For a 2-D convolution the weight gradient is itself a
             // convolution of the input by the output-gradient:

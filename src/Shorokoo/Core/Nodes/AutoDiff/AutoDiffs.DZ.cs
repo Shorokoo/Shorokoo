@@ -113,12 +113,14 @@ namespace Shorokoo.Core.Nodes.AutoDiff
 
         // ===== Activation Functions =====
 
-        [AutoDiff(RELU)]
-        public static Variable?[] Relu<T>(Tensor<T> x, Tensor<T> grad) where T : IVarType
+        [AutoDiff(RELU, UsesOutputs = true)]
+        public static Variable?[] Relu<T>(Tensor<T> x, Tensor<T> y, Tensor<T> grad) where T : IVarType
         {
-            // d(relu(x))/dx = 1 if x > 0, 0 otherwise
-            var zero = TypedConst(0.0f, x);
-            var mask = x > zero;
+            // d(relu(x))/dx = 1 if x > 0, 0 otherwise. relu(x) > 0 exactly where x > 0, so the mask
+            // reads the output: the input then need not be kept for the backward pass, and a runtime
+            // may write the output over it.
+            var zero = TypedConst(0.0f, y);
+            var mask = y > zero;
             return [OnnxOp.Where(mask, grad, zero)];
         }
 

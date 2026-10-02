@@ -219,7 +219,7 @@ internal sealed partial class OnnxToPythonTranslator
         Line($"def {name}({string.Join(", ", parameters)}):");
         _indent++;
         EndStatement(scope);
-        foreach (var node in function.Nodes)
+        foreach (var node in ShapesFirst(function.Nodes))
             EmitNode(attributes is null ? node : FunctionAttributes.Resolve(node, attributes), scope);
         Return(function.Outputs, scope);
         Release(scope);
@@ -273,7 +273,7 @@ internal sealed partial class OnnxToPythonTranslator
         if (training is null)
         {
             if (parent is null && name == "main") _mainScope = scope;
-            foreach (var node in graph.Nodes) EmitNode(node, scope);
+            foreach (var node in ShapesFirst(graph.Nodes)) EmitNode(node, scope);
             Return(graph.Outputs.Select(o => o.Name), scope);
         }
         else if (Dialect.Gradients == GradientStyle.Tape)
@@ -286,6 +286,47 @@ internal sealed partial class OnnxToPythonTranslator
         }
         Release(scope);
         _indent--;
+    }
+
+    /// <summary>
+    /// <paramref name="nodes"/> in the order they are written: their own, but with each node that
+    /// reads only the shape of its one input — a standard <c>Shape</c> or <c>Size</c> — written right
+    /// after the node making that input, or first where nothing among them makes it. A shape is
+    /// known as soon as its value is made and never changes after, so the node computes the same
+    /// there; read where the graph puts it — in a backward pass, say, long after the value's last
+    /// read of its contents — it would keep the whole value alive until then just to read its shape.
+    /// </summary>
+    internal static IEnumerable<NodeProto> ShapesFirst(IReadOnlyList<NodeProto> nodes)
+    {
+        static bool ReadsAShape(NodeProto node)
+            => node.Domain is "" or "ai.onnx" && node.OpType is "Shape" or "Size" && node.Inputs.Count == 1 && node.Inputs[0].Length > 0;
+        var made = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var node in nodes)
+            foreach (var output in node.Outputs)
+                if (output.Length > 0) made.Add(output);
+        var after = new Dictionary<string, List<NodeProto>>(StringComparer.Ordinal);
+        var first = new List<NodeProto>();
+        foreach (var node in nodes.Where(ReadsAShape))
+        {
+            if (!made.Contains(node.Inputs[0]))
+            {
+                first.Add(node);
+                continue;
+            }
+            if (!after.TryGetValue(node.Inputs[0], out var readers)) after[node.Inputs[0]] = readers = [];
+            readers.Add(node);
+        }
+        foreach (var node in first.Concat(nodes.Where(n => !ReadsAShape(n))))
+        {
+            var pending = new Queue<NodeProto>([node]);
+            while (pending.TryDequeue(out var next))
+            {
+                yield return next;
+                foreach (var output in next.Outputs)
+                    if (output.Length > 0 && after.Remove(output, out var readers))
+                        foreach (var reader in readers) pending.Enqueue(reader);
+            }
+        }
     }
 
     /// <summary>Writes a subgraph as a nested function where the current statement is about to be

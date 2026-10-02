@@ -282,16 +282,18 @@ public class MemoryReuseScenarioTests
                 };
             }
             var stepModel = MemoryPassBenchmarkTests.RigModel(rig.TrainingStepPureGraph, rig.OptimizationInputShapes);
+            if (backend.StartsWith("torch", StringComparison.Ordinal) && Environment.GetEnvironmentVariable("SHOROKOO_MEMORY_REUSE_LOG") is not null)
+                File.WriteAllText(Path.Combine(OutputDirectory(), $"step-{family}.py"), OnnxToPythonTranslator.Translate(stepModel, [], Shorokoo.PyTorch.TorchDialect.Instance).Source);
             var state = rig.UpdatedParamFieldCount + rig.UpdatedStateFieldCount + rig.UpdatedOptimizerStateFieldCount;
             StepAnatomy Anatomy(GraphProto graph) => new(graph, rig.UpdatedParamFieldCount, state, rig.UpdatedOptimizerStateFieldCount);
             var handed = Anatomy(stepModel.Graph);
             // ONNX Runtime runs the graph it rewrites, in its own order, writing an activation over
             // its input where the input dies there; a translation runs the graph as handed over, in
             // its own order.
-            var anatomy = backend == "ort" ? Anatomy(OrtOptimized(stepModel, onCard)) : handed;
-            int[] OrderOf(StepAnatomy a, GraphProto g) => backend == "ort" ? a.OrtOrder() : [.. Enumerable.Range(0, g.Nodes.Count)];
-            var graphRun = backend == "ort" ? OrtOptimized(stepModel, onCard) : stepModel.Graph;
-            var order = OrderOf(anatomy, graphRun);
+            var ortRun = backend == "ort" ? OrtRun(stepModel, onCard, rig.OptimizationInputShapes) : default;
+            var anatomy = backend == "ort" ? Anatomy(ortRun.Graph) : handed;
+            int[] OrderOf(StepAnatomy a, GraphProto g) => backend == "ort" ? a.OrtOrder() : TranslationOrder(g);
+            var order = backend == "ort" ? ortRun.Order : TranslationOrder(stepModel.Graph);
             Func<NodeProto, int, int, bool> shares = backend == "ort" ? OutputAliasProof.Shares : PlacementMemory.PyTorch.SharesUnlessPlaced;
             Func<NodeProto, int, bool>? own = backend == "ort" ? static (node, slot) => slot == 0 && OrtWritesOver.Contains(node.OpType) : null;
             var peak = anatomy.Peak(order, shares, own);
@@ -301,8 +303,9 @@ public class MemoryReuseScenarioTests
             var batchFreed = anatomy.Peak(order, shares, own, batchFreed: true);
             var shapesFree = anatomy.Peak(order, shares, own, shapeReadsHold: false);
             var rewired = ReluMasksReadTheOutput(stepModel);
-            var reluAnatomy = backend == "ort" ? Anatomy(OrtOptimized(rewired, onCard)) : Anatomy(rewired.Graph);
-            var reluOrder = backend == "ort" ? reluAnatomy.OrtOrder() : [.. Enumerable.Range(0, rewired.Graph.Nodes.Count)];
+            var reluRun = backend == "ort" ? OrtRun(rewired, onCard, rig.OptimizationInputShapes) : default;
+            var reluAnatomy = backend == "ort" ? Anatomy(reluRun.Graph) : Anatomy(rewired.Graph);
+            var reluOrder = backend == "ort" ? reluRun.Order : TranslationOrder(rewired.Graph);
             var relu = reluAnatomy.Peak(reluOrder, shares, own);
             var everything = reluAnatomy.Peak(reluOrder, shares, (node, slot) => (own?.Invoke(node, slot) ?? false) || (OutputAliasProof.IsStandard(node)
                 && ((PlacementProof.InPlaceUnary.Contains(node.OpType) && slot == 0) || (PlacementProof.InPlaceBinary.Contains(node.OpType) && node.Inputs.Count == 2))),
@@ -314,10 +317,19 @@ public class MemoryReuseScenarioTests
             File.AppendAllText(Path.Combine(OutputDirectory(), $"step-anatomy-{backend}-{(onCard ? "card" : "host")}-x{scale}-detail.md"),
                 $"\n## {family}\n\nnodes by part: {string.Join(", ", anatomy.NodesByPart.Select(p => $"{p.Key} {p.Value}"))}; values of unknown shape: {anatomy.UnknownValues}\n\nunknown from: {anatomy.UnknownRoots}\n\n"
                 + "largest held at the peak: " + string.Join(", ", peak.Largest.Select(l => $"{l.Op} {l.Part} {Mib(l.Bytes)} (read until {l.Until})")) + "\n"
+                + (backend == "ort" ? $"\n{ortRun.Held}\n" : "")
                 + $"\nwith Relu's gradient reading its output: values of unknown shape {reluAnatomy.UnknownValues} ({reluAnatomy.UnknownRoots}); largest held at the peak: "
                 + string.Join(", ", relu.Largest.Select(l => $"{l.Op} {l.Part} {Mib(l.Bytes)} (read until {l.Until})")) + "\n");
         }
         File.WriteAllText(Path.Combine(OutputDirectory(), $"step-anatomy-{backend}-{(onCard ? "card" : "host")}-x{scale}.md"), string.Join("\n", lines) + "\n");
+    }
+
+    /// <summary>The order a translation runs <paramref name="graph"/>'s nodes in, by index.</summary>
+    private static int[] TranslationOrder(GraphProto graph)
+    {
+        var index = new Dictionary<NodeProto, int>(ReferenceEqualityComparer.Instance);
+        for (int i = 0; i < graph.Nodes.Count; i++) index[graph.Nodes[i]] = i;
+        return [.. Shorokoo.PythonTranslation.OnnxToPythonTranslator.ShapesFirst(graph.Nodes).Select(node => index[node])];
     }
 
     /// <summary><paramref name="model"/> with each <c>Greater</c> that reads a <c>Relu</c>'s input
@@ -344,7 +356,11 @@ public class MemoryReuseScenarioTests
 
     /// <summary>The graph ONNX Runtime runs for <paramref name="model"/>, built as a training step's
     /// session is — on the card's provider where <paramref name="onCard"/> — and written out.</summary>
-    private static GraphProto OrtOptimized(ModelProto model, bool onCard)
+    /// <summary>The graph ONNX Runtime runs for <paramref name="model"/>, built as a training step's
+    /// session is — on the card's provider where <paramref name="onCard"/> — and written out, and
+    /// the order its kernels ran in on a run fed <paramref name="shapes"/>, read off its profile, by
+    /// node index: the nodes it ran no kernel for last, in its depth-first order.</summary>
+    private static (GraphProto Graph, int[] Order, string Held) OrtRun(ModelProto model, bool onCard, (Shape Shape, DType DType)[] shapes)
     {
         var directory = Path.Combine(Path.GetTempPath(), $"shorokoo-step-anatomy-{Guid.NewGuid():N}");
         Directory.CreateDirectory(directory);
@@ -352,15 +368,90 @@ public class MemoryReuseScenarioTests
         {
             using var stream = new MemoryStream();
             ProtoBuf.Serializer.Serialize(stream, model);
+            string profile;
+            // The session allocates through Shorokoo's allocator, as a backend's does, so that every
+            // block it takes is seen, with when: the blocks held at the run's peak are put to the
+            // kernel that ran as each was taken.
+            var host = RuntimeAllocator.ForHost().Shared.Open("anatomy");
+            var card = onCard ? RuntimeAllocator.ForCard(0).Shared.Open("anatomy") : null;
+            var events = new List<(long Ticks, bool Allocation, IntPtr Address, long Size)>();
+            long runStart;
             using (var options = new SessionOptions())
             {
                 OrtBackend.Configure(options, ShorokooGraphOptimization.TrainingStep, ShorokooLogSeverity.Fatal);
+                options.AddSessionConfigEntry("session.use_env_allocators", "1");
                 options.OptimizedModelFilePath = Path.Combine(directory, "optimized.onnx");
+                options.ProfileOutputPathPrefix = Path.Combine(directory, "profile");
+                options.EnableProfiling = true;
                 if (onCard) OrtBackend.AppendCuda(options, 0, DeviceMemorySettings.Default);
-                using var session = new InferenceSession(stream.ToArray(), options);
+                InferenceSession session;
+                using (CachingAllocator.Charge(host, card))
+                    session = new InferenceSession(stream.ToArray(), options);
+                using (session)
+                {
+                    var feeds = new Dictionary<string, OrtValue>();
+                    for (var i = 0; i < session.InputNames.Count; i++)
+                        feeds[session.InputNames[i]] = Shorokoo.Tests.Utils.SyntheticFeed.Tensor(shapes[i].Shape, shapes[i].DType, i);
+                    using var runOptions = new RunOptions();
+                    using (CachingAllocator.Charge(host, card))
+                        foreach (var output in session.Run(runOptions, feeds, session.OutputNames)) output.Dispose();
+                    CachingAllocator.Observer = e =>
+                    {
+                        if (e.OnCard != onCard) return;
+                        lock (events) events.Add((System.Diagnostics.Stopwatch.GetTimestamp(), e.Allocation, e.Address, e.Size));
+                    };
+                    runStart = System.Diagnostics.Stopwatch.GetTimestamp();
+                    try
+                    {
+                        using (CachingAllocator.Charge(host, card))
+                            foreach (var output in session.Run(runOptions, feeds, session.OutputNames)) output.Dispose();
+                    }
+                    finally
+                    {
+                        CachingAllocator.Observer = null;
+                    }
+                    foreach (var feed in feeds.Values) feed.Dispose();
+                    profile = session.EndProfiling();
+                }
             }
-            using var written = File.OpenRead(Path.Combine(directory, "optimized.onnx"));
-            return ProtoBuf.Serializer.Deserialize<ModelProto>(written).Graph;
+            GraphProto graph;
+            using (var written = File.OpenRead(Path.Combine(directory, "optimized.onnx")))
+                graph = ProtoBuf.Serializer.Deserialize<ModelProto>(written).Graph;
+            var index = new Dictionary<string, int>(StringComparer.Ordinal);
+            for (int n = 0; n < graph.Nodes.Count; n++) index.TryAdd(graph.Nodes[n].Name, n);
+            var profiled = JArray.Parse(File.ReadAllText(profile));
+            var runEvent = profiled.Where(e => (string?)e["cat"] == "Session" && (string?)e["name"] == "model_run").OrderBy(e => (long)e["ts"]!).Last();
+            var kernels = profiled
+                .Where(e => (string?)e["cat"] == "Node" && ((string?)e["name"])?.EndsWith("_kernel_time", StringComparison.Ordinal) == true
+                            && (long)e["ts"]! >= (long)runEvent["ts"]!)
+                .Select(e => (Name: ((string)e["name"]!)[..^"_kernel_time".Length], Ts: (long)e["ts"]!, Dur: (long)e["dur"]!))
+                .OrderBy(k => k.Ts).ToList();
+            var ran = kernels.Select(k => k.Name).Where(index.ContainsKey).Select(name => index[name]).Distinct().ToList();
+            var seen = ran.ToHashSet();
+            var anatomy = new StepAnatomy(graph, 0, 0, 0);
+
+            // The blocks held at the peak of the observed run, each put to the kernel running as it
+            // was taken -- the last to start by then -- on the run's own clock.
+            var live = new Dictionary<IntPtr, (long Size, long Ticks)>();
+            Dictionary<IntPtr, (long Size, long Ticks)> atPeak = [];
+            long held = 0, most = 0, mostAt = 0;
+            foreach (var e in events)
+            {
+                if (e.Allocation) { live[e.Address] = (e.Size, e.Ticks); held += e.Size; }
+                else if (live.Remove(e.Address, out var was)) held -= was.Size;
+                if (held > most) { most = held; atPeak = new(live); mostAt = e.Ticks; }
+            }
+            string KernelAt(long ticks)
+            {
+                var at = (long)runEvent["ts"]! + (ticks - runStart) * 1_000_000 / System.Diagnostics.Stopwatch.Frequency;
+                var kernel = kernels.LastOrDefault(k => k.Ts <= at);
+                if (kernel.Name is null) return "before the first kernel";
+                var op = index.TryGetValue(kernel.Name, out var n) ? $"{graph.Nodes[n].OpType} #{ran.IndexOf(n)}" : "?";
+                return at <= kernel.Ts + kernel.Dur ? op : $"after {op}";
+            }
+            var heldText = $"observed peak {Mib(most)} reached in {KernelAt(mostAt)}: " + string.Join(", ", atPeak.Values.Where(v => v.Size >= Big).OrderByDescending(v => v.Size)
+                .Select(v => $"{Mib(v.Size)} by {KernelAt(v.Ticks)}"));
+            return (graph, [.. ran, .. anatomy.OrtOrder().Where(n => !seen.Contains(n))], heldText);
         }
         finally
         {
@@ -650,10 +741,12 @@ public class MemoryReuseScenarioTests
             using var scope = Py.CreateScope();
             scope.Exec(backend == "torch-cuda"
                 ? """
-                  import torch
+                  import os, torch
                   torch.cuda.synchronize()
                   torch.cuda.reset_peak_memory_stats()
                   before = torch.cuda.memory_allocated()
+                  if os.environ.get("SHOROKOO_MEMORY_REUSE_LOG"):
+                      torch.cuda.memory._record_memory_history(max_entries=500000)
                   """
                 : """
                   import torch
@@ -666,6 +759,26 @@ public class MemoryReuseScenarioTests
                 ? """
                   torch.cuda.synchronize()
                   peak = torch.cuda.max_memory_allocated() - before
+                  if os.environ.get("SHOROKOO_MEMORY_REUSE_LOG"):
+                      # Every block held at the run's peak, each put to the line of the translation
+                      # or the support package that asked for it.
+                      snapshot = torch.cuda.memory._snapshot()
+                      torch.cuda.memory._record_memory_history(enabled=None)
+                      live, held, most, at_most = {}, 0, -1, {}
+                      for event in snapshot["device_traces"][0]:
+                          if event["action"] == "alloc":
+                              live[event["addr"]] = event
+                              held += event["size"]
+                              if held > most:
+                                  most, at_most = held, dict(live)
+                          elif event["action"] in ("free_requested", "free_completed") and event["addr"] in live:
+                              held -= live.pop(event["addr"])["size"]
+                      def where(event):
+                          frames = [f for f in event.get("frames", []) if "shorokoo" in f["filename"]]
+                          return " < ".join(f"{f['name']}:{f['line']}" for f in frames[:3]) or "?"
+                      lines = sorted(((e["size"], where(e)) for e in at_most.values()), reverse=True)[:16]
+                      with open(os.path.join(os.environ["SHOROKOO_MEMORY_REUSE_DIR"], "torch-cuda-peak.txt"), "a") as f:
+                          f.write(f"peak {most / 2**20:.2f} MiB: " + "; ".join(f"{s / 2**20:.2f} {w}" for s, w in lines) + chr(10))
                   """
                 : """
                   prof.__exit__(None, None, None)
@@ -696,12 +809,21 @@ public class MemoryReuseScenarioTests
     {
         var gate = new object();
         long current = 0, peak = 0;
+        var live = new Dictionary<IntPtr, long>();
+        Dictionary<IntPtr, long> atPeak = [];
+        var log = Environment.GetEnvironmentVariable("SHOROKOO_MEMORY_REUSE_LOG") is not null;
         CachingAllocator.Observer = e =>
         {
             if (e.OnCard != onCard) return;
             lock (gate)
             {
                 current += e.Allocation ? e.Size : -e.Size;
+                if (log)
+                {
+                    if (e.Allocation) live[e.Address] = e.Size;
+                    else live.Remove(e.Address);
+                }
+                if (current > peak && log) atPeak = new Dictionary<IntPtr, long>(live);
                 peak = Math.Max(peak, current);
             }
         };
@@ -712,6 +834,10 @@ public class MemoryReuseScenarioTests
         finally
         {
             CachingAllocator.Observer = null;
+            // The blocks held at the peak, largest first: what an observed run's peak is made of.
+            if (log)
+                File.AppendAllText(Path.Combine(OutputDirectory(), $"observed-peak-{(onCard ? "card" : "host")}.txt"),
+                    $"peak {Mib(peak)}: {string.Join(" ", atPeak.Values.Where(v => v >= Big).OrderByDescending(v => v).Select(Mib))}, and {Mib(atPeak.Values.Where(v => v < Big).Sum())} in {atPeak.Values.Count(v => v < Big)} blocks under a mebibyte\n");
         }
     }
 

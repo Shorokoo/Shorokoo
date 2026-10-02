@@ -905,6 +905,15 @@ public class GpuExecutionTests
         Assert.True(held.TotalAllocatedBytes <= held.MaxInUseBytes);
     }
 
+    [CudaFact]
+    public void CudaProvider_TheReuseScenarioTakesItsKnownBlocksAndNoMoreBeyondItsInputsAndWeightsOnTheCard()
+    {
+        Assert.Equal((10L, 6L), ArenaProbeModels.ReuseRun(ArenaProbeModels.ReuseShapes.Computed));
+        Assert.Equal((10L, 6L), ArenaProbeModels.ReuseRun(ArenaProbeModels.ReuseShapes.Paired));
+        Assert.Equal((5L, 5L), ArenaProbeModels.ReuseRun(ArenaProbeModels.ReuseShapes.Static));
+        Assert.Equal((11L, 6L), ArenaProbeModels.ReuseRun(ArenaProbeModels.ReuseShapes.Tracked));
+    }
+
     /// <summary>What this process holds on the card once every tensor nothing reaches any more is
     /// released: a released tensor's finalizer can leave another to the next collection.</summary>
     private static long HeldOnTheCard()

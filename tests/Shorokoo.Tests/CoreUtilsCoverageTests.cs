@@ -1111,6 +1111,15 @@ public class CoreUtilsCoverageTests
     }
 
     [Fact]
+    public void TestTheReuseScenarioTakesItsKnownBlocksAndNoMoreBeyondItsInputsAndWeights()
+    {
+        Assert.Equal((13L, 6L), ArenaProbeModels.ReuseRun(ArenaProbeModels.ReuseShapes.Computed));
+        Assert.Equal((11L, 6L), ArenaProbeModels.ReuseRun(ArenaProbeModels.ReuseShapes.Paired));
+        Assert.Equal((5L, 5L), ArenaProbeModels.ReuseRun(ArenaProbeModels.ReuseShapes.Static));
+        Assert.Equal((11L, 6L), ArenaProbeModels.ReuseRun(ArenaProbeModels.ReuseShapes.Tracked));
+    }
+
+    [Fact]
     public void TestReleasingWhatTheAllocatorsKeepLeavesASessionHoldingWhatItUsesAndRunningOn()
     {
         using var context = new ComputeContext();
@@ -2823,6 +2832,70 @@ internal static class ArenaProbeModels
 
     /// <inheritdoc cref="Filled"/>
     internal static TensorData<int64> FilledShape(long elements) => TensorData([1L], elements);
+
+    /// <summary>How the reuse scenario states the shapes of its inputs and halves.</summary>
+    internal enum ReuseShapes { Computed, Paired, Static, Tracked }
+
+    /// <summary>
+    /// The memory-reuse scenario: inputs A and B of <c>[2n, m]</c> floats, both consumed;
+    /// <c>A_half = A[0:n]</c> and <c>B_half = B[n:2n]</c>; C a fill of 2s the shape of a half through
+    /// <c>Neg</c>, <c>Abs</c>, <c>Sigmoid</c>; L the concatenation of C and B_half through
+    /// <c>Sigmoid</c>, <c>Neg</c>, <c>Abs</c>. Outputs L, A_half and B_half. <i>Computed</i> slices at
+    /// half of A's rows as the run reads them; <i>Paired</i> feeds <c>[2, n, m]</c> and slices the
+    /// leading dimension; <i>Static</i> is compiled for the sizes it is fed; <i>Tracked</i> is Paired
+    /// with the fill made as <c>A_half * 0 + 2</c>.
+    /// </summary>
+    internal static CompiledGraph Reuse(ComputeContext context, ReuseShapes shapes, long n, long m)
+    {
+        var paired = shapes is ReuseShapes.Paired or ReuseShapes.Tracked;
+        var a = InputTensor<float32>("A", rank: paired ? 3 : 2);
+        var b = InputTensor<float32>("B", rank: paired ? 3 : 2);
+        Variable aHalf, bHalf;
+        if (paired)
+        {
+            aHalf = OnnxOp.Slice(a, Vector(0L), Vector(1L), Vector(0L));
+            bHalf = OnnxOp.Slice(b, Vector(1L), Vector(2L), Vector(0L));
+        }
+        else
+        {
+            Variable rows = shapes == ReuseShapes.Static ? Vector(2 * n) : OnnxOp.Shape(a, end: 1, start: 0);
+            Variable half = shapes == ReuseShapes.Static ? Vector(n) : OnnxOp.Div(rows, Vector(2L));
+            aHalf = OnnxOp.Slice(a, Vector(0L), half, Vector(0L));
+            bHalf = OnnxOp.Slice(b, half, rows, Vector(0L));
+        }
+        var fill = shapes == ReuseShapes.Tracked
+            ? OnnxOp.Add(OnnxOp.Mul(aHalf, Scalar(0f)), Scalar(2f))
+            : OnnxOp.ConstantOfShape(OnnxOp.Shape(aHalf), TensorAttribute.Create(new Shape(1L), 2f));
+        var c = OnnxOp.Sigmoid(OnnxOp.Abs(OnnxOp.Neg(fill)));
+        var l = OnnxOp.Abs(OnnxOp.Neg(OnnxOp.Sigmoid(OnnxOp.Concat([c, bHalf], axis: 0))));
+        var graph = new InternalComputationGraph([a, b], [l, aHalf, bHalf]);
+        long[] whole = paired ? [2L, n, m] : [2 * n, m];
+        return shapes == ReuseShapes.Static ? context.Compile(graph, [whole, whole], trainingStep: false) : context.Compile(graph);
+    }
+
+    /// <summary>The halves' side of the reuse scenario as the tests run it: a half is 256 KiB.</summary>
+    internal const long ReuseSide = 256;
+
+    /// <summary>
+    /// The reuse scenario compiled on a context of <paramref name="backend"/> (the default where
+    /// null) and run twice, each run consuming inputs of its own: the second run's allocations, and
+    /// the most its session had in use beyond its weights, in whole halves of an input.
+    /// </summary>
+    internal static (long Allocations, long Halves) ReuseRun(ReuseShapes shapes, IShorokooBackend? backend = null)
+    {
+        using var context = backend is null ? new ComputeContext() : new ComputeContext(backend);
+        var compiled = Reuse(context, shapes, ReuseSide, ReuseSide);
+        var weights = Assert.IsType<ArenaStatistics>(compiled.ReadArenaStatistics()).InUseBytes;
+        ComputeContext.ReleaseOutputs(compiled.Execute(ReuseInput(shapes, ReuseSide, ReuseSide), ReuseInput(shapes, ReuseSide, ReuseSide)));
+        var before = Assert.IsType<ArenaStatistics>(compiled.ReadArenaStatistics());
+        ComputeContext.ReleaseOutputs(compiled.Execute(ReuseInput(shapes, ReuseSide, ReuseSide), ReuseInput(shapes, ReuseSide, ReuseSide)));
+        var after = Assert.IsType<ArenaStatistics>(compiled.ReadArenaStatistics());
+        return (after.AllocationCount - before.AllocationCount, (after.MaxInUseBytes - weights) / (ReuseSide * ReuseSide * sizeof(float)));
+    }
+
+    /// <summary>A or B of the reuse scenario, <paramref name="shapes"/> deciding its rank.</summary>
+    internal static TensorData<float32> ReuseInput(ReuseShapes shapes, long n, long m)
+        => TensorData(shapes is ReuseShapes.Paired or ReuseShapes.Tracked ? [2L, n, m] : [2 * n, m], new float[2 * n * m]);
 
     /// <summary>
     /// Two fills one after the other, of the sizes the two shapes it is fed ask for: the second

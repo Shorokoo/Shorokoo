@@ -147,8 +147,10 @@ internal sealed unsafe class CachingAllocator
     }
 
     /// <summary>What a block is: its size class, what was asked for, the account it is charged to,
-    /// where its memory came from, the account's call it was last counted in, and whether that
-    /// account has handed it over (<see cref="HandOver"/>).</summary>
+    /// where its memory came from, the account's call it was last counted in, whether that account
+    /// has handed it over (<see cref="HandOver"/>), and the parts of it handed back while the rest
+    /// was still in use (<see cref="ReleaseRange"/>) — by offset, in order, none where none was —
+    /// with their bytes, and those of them that had been asked for.</summary>
     private struct Block
     {
         internal long Size;
@@ -157,6 +159,9 @@ internal sealed unsafe class CachingAllocator
         internal long Call;
         internal Source Source;
         internal bool HandedOver;
+        internal List<(long Start, long End)>? Released;
+        internal long ReleasedBytes;
+        internal long ReleasedRequested;
     }
 
     /// <summary>
@@ -593,9 +598,25 @@ internal sealed unsafe class CachingAllocator
             if (!_blocks.Remove(pointer, out var block)) return;
             Observer?.Invoke(new Event(false, OnCard, pointer, block.Requested, block.Size, Fresh: false));
             var account = block.Account;
-            account.InUse -= block.Size;
-            account.Requested -= block.Requested;
-            if (block.HandedOver) account.HandedOver -= block.Size;
+            account.InUse -= block.Size - block.ReleasedBytes;
+            account.Requested -= block.Requested - block.ReleasedRequested;
+            if (block.HandedOver) account.HandedOver -= block.Size - block.ReleasedBytes;
+            if (block.Released is { } released)
+            {
+                // Parts of it went back while the rest was in use, so it is no longer one block to
+                // keep: what is left goes back to the arena as those parts did -- on a card once work
+                // this thread's call queued is done with it.
+                if (OnCard && scope is not null && scope.Charges(account)) CudaRuntime.Synchronize(_device);
+                foreach (var (from, to) in Outside(released, 0, block.Size)) account.Arena!.Uncarve(pointer + (nint)from, to - from);
+                account.Blocks--;
+                if (account.Closed)
+                {
+                    account.Shrinkages++;
+                    if (account.Arena!.IsEmpty) account.Arena.ReleaseEmptyChunks();
+                    else account.Arena.DecommitAll(out _);
+                }
+                return;
+            }
             if (!account.Closed)
             {
                 if (OnCard && scope is not null && scope.Charges(account))
@@ -647,9 +668,102 @@ internal sealed unsafe class CachingAllocator
             ref var block = ref _blocks.Find(pointer);
             if (Unsafe.IsNullRef(ref block) || block.Account != account || block.HandedOver) return false;
             block.HandedOver = true;
-            account.HandedOver += block.Size;
+            account.HandedOver += block.Size - block.ReleasedBytes;
             return true;
         }
+    }
+
+    /// <summary>Whether <paramref name="pointer"/> is a block in use that hands back parts of itself
+    /// (<see cref="ReleaseRange"/>): one carved from its account's arena.</summary>
+    internal bool ReleasesRanges(IntPtr pointer)
+    {
+        using (_gate.Hold())
+        {
+            ref var block = ref _blocks.Find(pointer);
+            return !Unsafe.IsNullRef(ref block) && block.Source == Source.Arena;
+        }
+    }
+
+    /// <summary>
+    /// Hands back the part of <paramref name="pointer"/>, a block in use, from byte
+    /// <paramref name="offset"/> for <paramref name="length"/> bytes — on to the block's end where
+    /// <paramref name="toTheEnd"/> — which nothing reads any more while the rest of the block is
+    /// still in use: the memory of an input a run consumed that none of the outputs standing on it
+    /// covers. The whole units of the block's arena lying inside it — 4 KiB pages on the host,
+    /// granules on a card — go back to the arena as a block let go of does: still committed, for the
+    /// account's next request to be carved from, and shed as what the account keeps is. On a card,
+    /// where this thread's call charges the block's account, the card is waited for first: work the
+    /// call queued may still read the range. Answers the bytes handed back: none for a block not
+    /// carved from its account's arena, and none for a part handed back already.
+    /// </summary>
+    internal long ReleaseRange(IntPtr pointer, long offset, long length, bool toTheEnd)
+    {
+        if (pointer == IntPtr.Zero || offset < 0 || (length <= 0 && !toTheEnd)) return 0;
+        var scope = t_scope;
+        using (_gate.Hold())
+        {
+            ref var block = ref _blocks.Find(pointer);
+            if (Unsafe.IsNullRef(ref block) || block.Source != Source.Arena) return 0;
+            var account = block.Account;
+            var unit = OnCard ? _backing!.Granule : HostPage;
+            var start = (offset + unit - 1) / unit * unit;
+            var end = toTheEnd ? block.Size : Math.Min(block.Size, (offset + length) / unit * unit);
+            if (end <= start) return 0;
+            var pieces = Outside(block.Released, start, end);
+            if (pieces.Count == 0) return 0;
+            if (OnCard && scope is not null && scope.Charges(account)) CudaRuntime.Synchronize(_device);
+            long released = 0;
+            foreach (var (from, to) in pieces)
+            {
+                account.Arena!.Uncarve(pointer + (nint)from, to - from);
+                released += to - from;
+                var asked = Math.Max(0, Math.Min(to, block.Requested) - from);
+                block.ReleasedRequested += asked;
+                account.Requested -= asked;
+            }
+            block.Released = Merged(block.Released, pieces);
+            block.ReleasedBytes += released;
+            account.InUse -= released;
+            if (block.HandedOver) account.HandedOver -= released;
+            if (account.Closed)
+            {
+                // Nothing of a closed account's is kept: what went back to its arena goes back to the
+                // device.
+                account.Arena!.DecommitAll(out _);
+                account.Shrinkages++;
+            }
+            return released;
+        }
+    }
+
+    /// <summary>The stretches of [<paramref name="start"/>, <paramref name="end"/>) outside every
+    /// stretch of <paramref name="taken"/>, which are in order and do not overlap.</summary>
+    private static List<(long Start, long End)> Outside(List<(long Start, long End)>? taken, long start, long end)
+    {
+        List<(long, long)> outside = [];
+        var at = start;
+        foreach (var (from, to) in taken ?? [])
+        {
+            if (to <= at) continue;
+            if (from >= end) break;
+            if (from > at) outside.Add((at, from));
+            at = Math.Max(at, to);
+        }
+        if (at < end) outside.Add((at, end));
+        return outside;
+    }
+
+    /// <summary><paramref name="taken"/> and <paramref name="more"/>, in order, adjacent stretches
+    /// joined.</summary>
+    private static List<(long Start, long End)> Merged(List<(long Start, long End)>? taken, List<(long Start, long End)> more)
+    {
+        List<(long Start, long End)> merged = [];
+        foreach (var (from, to) in (taken ?? []).Concat(more).OrderBy(r => r.Start))
+        {
+            if (merged.Count > 0 && merged[^1].End >= from) merged[^1] = (merged[^1].Start, Math.Max(merged[^1].End, to));
+            else merged.Add((from, to));
+        }
+        return merged;
     }
 
     /// <summary>A block of its own from the device itself, or null where it has not that much

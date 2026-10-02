@@ -152,7 +152,9 @@ internal sealed class OrtPlacements : IDisposable
         var key = new System.Text.StringBuilder();
         foreach (var (name, value) in inputs.OrderBy(i => i.Key, StringComparer.Ordinal))
         {
-            key.Append(name).Append(blocks.ContainsKey(name) ? "!" : ":");
+            // A block whose parts go back once no output stands on them plans otherwise than one
+            // held whole, so the two are signatures of their own.
+            key.Append(name).Append(blocks.TryGetValue(name, out var block) ? OrtBackend.RangesGoBack(block, out _, out _) ? "!!" : "!" : ":");
             if (value is OrtTensorValue { ValueType: ShorokooOnnxValueType.Tensor } tensor)
                 key.Append((int)tensor.ElementType).Append('[').AppendJoin(',', tensor.ReadShape).Append(']');
             key.Append(';');
@@ -240,7 +242,7 @@ internal sealed class OrtPlacements : IDisposable
                     {
                         block = owner.Range is { } range
                             ? (range.Block, range.Offset)
-                            : (new SharedBlock(BytesOf(owner), () => ((IShorokooBackend)_backend).Release(owner)), 0L);
+                            : (OrtBackend.BlockOver(owner, BytesOf(owner), () => ((IShorokooBackend)_backend).Release(owner)), 0L);
                         shared[placement.Block] = block;
                     }
                     var view = OrtBackend.View(owner, placement.Offset, type, shape, placement.Bytes, block.Block, block.Base + placement.Offset);
@@ -254,7 +256,10 @@ internal sealed class OrtPlacements : IDisposable
                     bindings[placement.Value] = new OrtSession.PlacedBinding(over, null);
                 }
             }
-            return variant.Measured(() => placed(variant, bindings), out peak);
+            var results = variant.Measured(() => placed(variant, bindings), out peak);
+            // The run is over: what of each block no output it handed back stands on goes back.
+            foreach (var (block, _) in shared.Values) block.Settle();
+            return results;
         }
         catch
         {
@@ -289,6 +294,7 @@ internal sealed class OrtPlacements : IDisposable
                 if (value is OrtTensorValue { ValueType: ShorokooOnnxValueType.Tensor } tensor)
                     given[name] = (tensor.ReadShape, (int)tensor.ElementType);
             var blockBytes = blocks.ToDictionary(b => b.Key, b => BytesOf(b.Value), StringComparer.Ordinal);
+            var givingBack = blocks.Where(b => OrtBackend.RangesGoBack(b.Value, out _, out _)).Select(b => b.Key).ToHashSet(StringComparer.Ordinal);
             entry.Given = given;
             entry.BlockBytes = blockBytes;
             // The model as handed over first, which costs no build: what it places nothing in, the
@@ -296,7 +302,7 @@ internal sealed class OrtPlacements : IDisposable
             // and a session builds nothing for such a run.
             if (original.Graph is not { } handed
                 || handed.Nodes.Count > PlacementProof.MostNodes
-                || new PlacementProof(handed, blockBytes, PlacementShapes.Evaluate(handed, given)).Plan(PlacementProof.Smallest, PlacementProof.IdleOutputBytes).Count == 0)
+                || new PlacementProof(handed, blockBytes, PlacementShapes.Evaluate(handed, given)).Plan(PlacementProof.Smallest, PlacementProof.IdleOutputBytes, givingBack).Count == 0)
             {
                 Refuse(entry, "nothing to place in the graph handed over");
                 return;
@@ -312,7 +318,7 @@ internal sealed class OrtPlacements : IDisposable
             var shapes = PlacementShapes.Evaluate(runs, given);
             var runsOutputs = runs.Outputs.Select(o => o.Name).ToHashSet(StringComparer.Ordinal);
             var proof = new PlacementProof(runs, blockBytes, shapes);
-            var plan = proof.Prove(proof.Plan(PlacementProof.Smallest, PlacementProof.IdleOutputBytes)
+            var plan = proof.Prove(proof.Plan(PlacementProof.Smallest, PlacementProof.IdleOutputBytes, givingBack)
                 .Where(p => !runsOutputs.Contains(p.Value) || outputNames.Contains(p.Value)));
             if (plan.Count == 0)
             {

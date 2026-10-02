@@ -132,8 +132,8 @@ internal sealed class PlacementProof
     /// whose own reuse serves it, and placing it costs more than it saves.</summary>
     internal const long Smallest = 1L << 20;
 
-    /// <summary>The most of a block the outputs placed in it may leave idle once the run is over:
-    /// the block lives as long as its outputs.</summary>
+    /// <summary>The most of a block the outputs placed in it may leave idle once the run is over,
+    /// where the block lives whole as long as its outputs.</summary>
     internal const long IdleOutputBytes = 1L << 20;
 
     // The reader standing for whatever reads a value once the run is over: it runs after every node.
@@ -780,7 +780,8 @@ internal sealed class PlacementProof
     /// element-wise operand's, a slice's source, a concatenation part's slot — then the first aligned
     /// range that fits. An output placed in a block whose outputs would leave more than
     /// <paramref name="idleOutputBytes"/> of it unused after the run is not placed: the block lives as
-    /// long as its outputs.
+    /// long as its outputs — unless it is one of <paramref name="givingBack"/>, whose memory no output
+    /// stands on goes back as the run ends.
     ///
     /// <para>An output that is a view unless placed is planned as though every such output were
     /// placed — handed over as a view of a block, it would be copied out of it anyway — and a value
@@ -788,7 +789,7 @@ internal sealed class PlacementProof
     /// takes no memory. The plan is proved over the placements it ends with, so an output planned that
     /// way that found no room refuses whatever relied on its being placed.</para>
     /// </summary>
-    internal IReadOnlyList<Placement> Plan(long smallest, long idleOutputBytes)
+    internal IReadOnlyList<Placement> Plan(long smallest, long idleOutputBytes, IReadOnlySet<string>? givingBack = null)
     {
         if (_blocks.Count == 0) return [];
         var candidates = new List<string>();
@@ -817,7 +818,8 @@ internal sealed class PlacementProof
 
         // An output that would keep more of its block idle than it uses goes back to the backend.
         var idle = placed.Where(p => _readAfterRun.Contains(p.Value)).GroupBy(p => p.Block)
-            .Where(g => _blocks[g.Key] - g.Sum(p => p.Bytes) > idleOutputBytes).Select(g => g.Key).ToHashSet();
+            .Where(g => givingBack?.Contains(g.Key) != true && _blocks[g.Key] - g.Sum(p => p.Bytes) > idleOutputBytes)
+            .Select(g => g.Key).ToHashSet();
         placed.RemoveAll(p => idle.Contains(p.Block));
         placed = [.. ProveViewsFirst(placed)];
         occupants = Occupants(placed);

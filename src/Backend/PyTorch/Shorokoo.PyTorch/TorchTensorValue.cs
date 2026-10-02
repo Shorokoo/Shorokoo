@@ -107,7 +107,7 @@ public sealed class TorchTensorValue : IShorokooTensorValue
     /// block, which disposing the value releases.</summary>
     internal void StandOn(BlockRange range)
     {
-        range.Block.Lease();
+        range.Lease();
         _range = range;
     }
 
@@ -224,7 +224,7 @@ public sealed class TorchTensorValue : IShorokooTensorValue
     {
         if (Interlocked.Exchange(ref _released, 1) != 0) return;
         PythonRuntime.Release(_value);
-        _range?.Block.Release();
+        _range?.Release();
     }
 
     /// <summary>Marks this released and drops its reference, for a value handed into a sequence:

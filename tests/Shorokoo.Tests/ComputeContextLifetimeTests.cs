@@ -1102,7 +1102,9 @@ public class ComputeContextLifetimeCoverageTests
         var (a, b, _) = TwoHalvesValues(rows, columns);
         var x = InputTensor<float32>("x", rank: 2);
         var made = context.Compile(new InternalComputationGraph([x], [x + 1f]));
-        var consumed = made.Execute(TensorData([(long)rows, columns], a).Shared()).Single().ToTensorData();
+        var source = TensorData([(long)rows, columns], a).CopyTo(context);
+        var consumed = made.Execute(source.Shared()).Single().ToTensorData();
+        source.Delete();
         List<(long, long)> stages = [];
         void Stage() => stages.Add((made.ReadArenaStatistics()!.Value.InUseBytes, context.ReadDeviceMemoryUse().AttachedBytes));
         Stage();

@@ -1138,7 +1138,7 @@ public abstract class OrtBackend : IShorokooBackend
         OrtTensorValue owner, long offset, ShorokooTensorElementType elementType, long[] shape, long bytes,
         SharedBlock block, long offsetInBlock)
     {
-        block.Lease();
+        block.Lease(offsetInBlock, bytes);
         try
         {
             var inner = owner.Inner;
@@ -1150,9 +1150,42 @@ public abstract class OrtBackend : IShorokooBackend
         }
         catch
         {
-            block.Release();
+            block.Release(offsetInBlock, bytes);
             throw;
         }
+    }
+
+    /// <summary>
+    /// A block over <paramref name="owner"/>'s memory, of its <paramref name="bytes"/>, for values to
+    /// stand on, which <paramref name="letGo"/> lets go of with the last of them. Where that memory is
+    /// a block of Shorokoo's allocator — anything a session's run allocated, and every tensor placed on
+    /// a card — a part of it no value stands on any more goes back to that allocator
+    /// (<see cref="CachingAllocator.ReleaseRange"/>) while the rest is still in use.
+    /// </summary>
+    internal static SharedBlock BlockOver(OrtTensorValue owner, long bytes, Action letGo)
+    {
+        if (RangesGoBack(owner, out var allocator, out var address))
+            return new SharedBlock(bytes, letGo, (offset, length, toTheEnd) => allocator.ReleaseRange(address, offset, length, toTheEnd));
+        return new SharedBlock(bytes, letGo);
+    }
+
+    /// <summary>
+    /// Whether a part of <paramref name="value"/>'s memory no value stands on any more goes back
+    /// while the rest is in use: for a value standing on a block, whether that block gives back;
+    /// for one in memory of its own, whether that memory is a block Shorokoo's allocator carved
+    /// from an account's arena — where <paramref name="allocator"/> takes the part back at
+    /// <paramref name="address"/>.
+    /// </summary>
+    internal static bool RangesGoBack(OrtTensorValue value, out CachingAllocator allocator, out IntPtr address)
+    {
+        allocator = null!;
+        address = IntPtr.Zero;
+        if (value.Range is { } range) return range.Block.GivesBack;
+        if (value.CudaDevice is { } device) allocator = CachingAllocator.ForCard(device);
+        else if (value.InHostMemory) allocator = CachingAllocator.ForHost();
+        else return false;
+        address = AddressOf(value.Inner);
+        return allocator.ReleasesRanges(address);
     }
 
     /// <summary>

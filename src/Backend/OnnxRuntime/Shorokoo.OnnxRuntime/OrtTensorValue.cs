@@ -196,6 +196,13 @@ internal sealed class OrtTensorValue : IShorokooTensorValue
         return place;
     }
 
+    /// <summary>The CUDA device whose memory this tensor is in, or null for one in no card's.</summary>
+    internal int? CudaDevice => Inner.IsTensor && PlaceOf() is { Name: CudaAllocatorName } place ? place.Id : null;
+
+    /// <summary>Whether this is a tensor in the host's plain memory — not a provider's pinned
+    /// memory.</summary>
+    internal bool InHostMemory => Inner.IsTensor && PlaceOf().Name == CpuAllocatorName;
+
     /// <summary>Whether this is a tensor in the memory of CUDA device <paramref name="device"/>.</summary>
     internal bool IsOnCudaDevice(int device)
     {
@@ -312,7 +319,7 @@ internal sealed class OrtTensorValue : IShorokooTensorValue
         _inner.Dispose();
         // After the value over the memory, which reads nothing once released: the lease may be the
         // block's last, and letting it go frees the memory.
-        Range?.Block.Release();
+        Range?.Release();
     }
 
     /// <summary>

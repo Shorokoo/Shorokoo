@@ -602,7 +602,7 @@ internal sealed class OrtSession : IShorokooSession
     /// of its own there.</summary>
     private static OrtTensorValue Leased(OrtValue value, BlockRange range)
     {
-        range.Block.Lease();
+        range.Lease();
         return new OrtTensorValue(value, range);
     }
 

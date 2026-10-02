@@ -1000,6 +1000,42 @@ public class CoreUtilsCoverageTests
     }
 
     [Fact]
+    public void TestABlockHandsBackTheWholePagesOfAPartNothingReadsOnceAndTheRestWithItself()
+    {
+        const long MiB = 1L << 20, Page = 4L << 10;
+        var host = RuntimeAllocator.ForHost();
+        var account = host.Shared.Open("probe");
+        OrtValue Take(long floats)
+        {
+            using (CachingAllocator.Charge(account, null))
+                return OrtValue.CreateAllocatedTensorValue(host.Managed, Microsoft.ML.OnnxRuntime.Tensors.TensorElementType.Float, [floats]);
+        }
+        var value = Take(MiB);
+        var small = Take(1024);
+        var block = OrtBackend.AddressOf(value);
+        long[] figures =
+        [
+            host.Shared.Statistics(account).InUseBytes,
+            host.Shared.ReleaseRange(block, 100, 2 * Page, toTheEnd: false),
+            host.Shared.ReleaseRange(block, 0, 2 * Page, toTheEnd: false),
+            host.Shared.ReleaseRange(block, 0, 2 * Page, toTheEnd: false),
+            host.Shared.ReleaseRange(block, 3 * MiB, 0, toTheEnd: true),
+            host.Shared.ReleaseRange(OrtBackend.AddressOf(small), 0, Page, toTheEnd: true),
+            host.Shared.Statistics(account).InUseBytes,
+        ];
+        value.Dispose();
+        small.Dispose();
+        var again = Take(MiB);
+        var reused = OrtBackend.AddressOf(again) == block;
+        again.Dispose();
+        host.Shared.Close(account);
+
+        Assert.Equal([4 * MiB + 4096, Page, Page, 0, MiB, 0, 3 * MiB - 2 * Page + 4096], figures);
+        Assert.True(reused);
+        Assert.Equal(0L, host.Shared.Statistics(account).TotalAllocatedBytes);
+    }
+
+    [Fact]
     public void TestABlockTheHostAllocatorHandsBackIsNoLongerTheProcesssMemory()
     {
         var host = RuntimeAllocator.ForHost();

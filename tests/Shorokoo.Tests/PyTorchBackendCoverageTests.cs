@@ -292,6 +292,44 @@ public class PyTorchBackendCoverageTests
     [Fact]
     public void TestWhereSelectsOnEveryIntegerTypeAndBoolOnTorch() => WhereSelectsOnEveryIntegerTypeAndBool(new ComputeContext(Torch));
 
+    [Fact]
+    public void TestClipHandsBackAZeroInsideItsBoundsAndTheLowerOfTwoEqualZeroBoundsBelowThemSignAndAllOnTorchAsOnOnnxRuntime()
+    {
+        ClipKeepsTheSignOfAZero(DefaultBackend.Instance);
+        ClipKeepsTheSignOfAZero(Torch);
+    }
+
+    internal static void ClipKeepsTheSignOfAZero(IShorokooBackend backend)
+    {
+        Assert.Equal("+0", Clipped(backend, -1f, 0f, -0f));
+        Assert.Equal("-0", Clipped(backend, -1f, -0f, 0f));
+        Assert.Equal("-0", Clipped(backend, -0f, 0f, null));
+        Assert.Equal("+0", Clipped(backend, 0f, -0f, null));
+        Assert.Equal("+0", Clipped(backend, 0f, null, -0f));
+        Assert.Equal("-0", Clipped(backend, -0f, null, 0f));
+        Assert.Equal("+0", Clipped(backend, -0f, 1f, 0f));
+        Assert.Equal("-0", Clipped(backend, 0f, 1f, -0f));
+        Assert.Equal("2", Clipped(backend, 3f, 1f, 2f));
+        Assert.Equal("NaN", Clipped(backend, float.NaN, 1f, 2f));
+    }
+
+    /// <summary>What <c>Clip</c> makes of 67 elements equal to <paramref name="x"/> — enough to fill
+    /// a vectorized kernel's loop and leave a tail — as each distinct result, a zero written with
+    /// its sign.</summary>
+    private static string Clipped(IShorokooBackend backend, float x, float? lo, float? hi)
+    {
+        var graph = Graph(["x", "lo", "hi"], ["y"], Node("Clip", ["x", lo is null ? "" : "lo", hi is null ? "" : "hi"], ["y"]));
+        foreach (var value in graph.Inputs.Concat(graph.Outputs)) value.Type = FloatTensor;
+        using var session = backend.CreateSession(Serialize(graph), default, default, DeviceMemorySettings.Default);
+        var feeds = new Dictionary<string, IShorokooTensorValue> { ["x"] = backend.CreateTensor(Enumerable.Repeat(x, 67).ToArray(), [67]) };
+        if (lo is { } l) feeds["lo"] = backend.CreateTensor([l], []);
+        if (hi is { } h) feeds["hi"] = backend.CreateTensor([h], []);
+        using var y = session.Run(feeds, ["y"], RunSettings.Default)[0];
+        foreach (var feed in feeds.Values) feed.Dispose();
+        return string.Join(" ", MemoryMarshal.Cast<byte, float>(backend.CopyTensorToHost(y)).ToArray()
+            .Select(v => v == 0 ? (float.IsNegative(v) ? "-0" : "+0") : v.ToString(System.Globalization.CultureInfo.InvariantCulture)).Distinct());
+    }
+
     internal static void NoopReductionsReduceEachElementAlone(ComputeContext c)
     {
         var x = QeeAudit.F32([2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f);

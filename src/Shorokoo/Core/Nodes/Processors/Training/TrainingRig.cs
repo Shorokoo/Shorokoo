@@ -175,11 +175,10 @@ namespace Shorokoo
                         description: TrainStepDescription, aliasCandidates: StateAliasCandidates(),
                         trainingFormat: TrainingBackend.Format);
                 // Reached only once more distinct shapes have been fed than there are specialized
-                // slots, and shared by every shape after that -- so this session's sizes are known
-                // not to settle, which is the one case the arena strategy departs on.
+                // slots, and shared by every shape after that.
                 return _compiledTrainStepGeneric ??= RuntimeContext.Compile(
                     TrainingStepPureGraph.ToInternal(), inputDims: null, trainingStep: true,
-                    reusedAcrossShapes: true, description: TrainStepDescription,
+                    description: TrainStepDescription,
                     aliasCandidates: StateAliasCandidates(), trainingFormat: TrainingBackend.Format);
             }
         }

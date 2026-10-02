@@ -880,7 +880,7 @@ public class ComputeContextLifetimeCoverageTests
     internal static OrtSession Aliasing(IShorokooBackend backend, GraphProto graph)
         => (OrtSession)backend.CreateSession(
             ModelOf(graph), ShorokooGraphOptimization.EnableAll, ShorokooLogSeverity.Fatal,
-            new DeviceMemorySettings().Resolve(reusedAcrossShapes: false), DiagnosticSettings.Default,
+            new DeviceMemorySettings(), DiagnosticSettings.Default,
             [new OutputAlias("O", "a")]);
 
     [Fact]

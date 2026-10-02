@@ -12,25 +12,24 @@ namespace Shorokoo.Runtime
     ///
     /// <list type="bullet">
     /// <item><b>What it counts.</b> The bytes of the live tensors attached to the context that are in
-    /// its memory (<see cref="ReadDeviceMemoryUse"/>), plus — while one of its runs executes — that
-    /// run's arena, which the session was built to cap at what the attached tensors leave.</item>
+    /// its memory (<see cref="ReadDeviceMemoryUse"/>), plus — while one of its runs executes — what
+    /// that run's session allocates, which is limited to what the attached tensors leave.</item>
     /// <item><b>Transfers.</b> <see cref="TensorData.To"/>, <see cref="TensorData.CopyTo"/> and the
     /// copies a run makes of memory it cannot read where it is are refused, naming the budget, what is attached and what was asked
     /// for, when what is attached plus what they would add would pass the limit.</item>
-    /// <item><b>Runs.</b> A session's arena limit is the budget less what the context holds in its
-    /// memory outside that arena for the length of the run — the <i>discount</i>. A session is kept
-    /// while its limit is within what the budget allows, and built again when the discount has grown
-    /// past what it left room for; see <see cref="ArenaLimitWithin"/>. A tensor a run reads or
-    /// consumes outside the context's memory — a host tensor fed to a run on a card — is placed there
-    /// through a copy the framework makes before the run, outside the arena, and counted with the
-    /// rest of the discount. So is the memory a run is handed for each output whose shape its session
-    /// settled (<see cref="IShorokooSession.SettledOutputs"/>), unless the run writes it into memory
-    /// it consumed (<see cref="OutputAlias"/>), which the discount counts already. Every output is
-    /// memory of its own, outside every arena, and counted with the attached tensors from then on;
-    /// one whose shape is known only once the run is under way is made in the arena and copied out
-    /// of it as the run returns, for that moment in both.</item>
+    /// <item><b>Runs.</b> What a run's session may allocate is the budget less what the context holds
+    /// in its memory apart from it for the length of the run — the <i>discount</i>. A session that
+    /// enforces its limit itself (<see cref="IShorokooSession.TryLimitDeviceMemory"/>) is given exactly
+    /// that before each run; any other is kept while the limit it was built with is within it, and
+    /// built again when the discount has grown past what it left room for; see
+    /// <see cref="ArenaLimitWithin"/>. A tensor a run reads or consumes outside the context's memory
+    /// — a host tensor fed to a run on a card — is placed there through a copy the framework makes
+    /// before the run, and counted with the rest of the discount. The outputs a run makes are its
+    /// session's allocations until it returns, and counted with the attached tensors from then
+    /// on.</item>
     /// <item><b>One at a time.</b> Under a budget, the context's runs, the sessions it builds and what
-    /// is placed in its memory are serialized, and every run shrinks its arena when it ends.</item>
+    /// is placed in its memory are serialized, and every run hands back the memory its session keeps
+    /// cached when it ends.</item>
     /// </list>
     ///
     /// <para>A context with no <c>LimitBytes</c>, and one whose memory is the host's, keeps no budget:
@@ -275,9 +274,9 @@ namespace Shorokoo.Runtime
         internal static string Figure(long value) => value.ToString(CultureInfo.InvariantCulture);
 
         /// <summary>
-        /// The arena limit a session is built with under a budget of <paramref name="limit"/>
-        /// bytes while <paramref name="outside"/> bytes of the context's memory are held outside
-        /// that arena, or null when they leave it nothing.
+        /// The limit a session that cannot be limited in place is built with under a budget of
+        /// <paramref name="limit"/> bytes while <paramref name="outside"/> bytes of the context's
+        /// memory are held apart from what it allocates, or null when they leave it nothing.
         ///
         /// <para>The budget less the discount rounded up to the next whole
         /// <see cref="BudgetParts"/>th of the budget above it. Rounding up is the headroom that keeps

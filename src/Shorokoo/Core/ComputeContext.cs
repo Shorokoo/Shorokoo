@@ -224,18 +224,17 @@ namespace Shorokoo.Runtime
         internal ShorokooGraphOptimization Optimization { get; }
 
         /// <summary>
-        /// The arena settings this graph's session was built with: the compiling context's
-        /// <see cref="ComputeContext.DeviceMemory"/> as it stood then, with
-        /// <see cref="ArenaExtendStrategy.Auto"/> already settled to the strategy this session
-        /// got. A session keeps what it was built with, so this is what the session actually has —
-        /// not what its context says now, and not <c>Auto</c>.
+        /// The device-memory settings this graph's session runs under: the compiling context's
+        /// <see cref="ComputeContext.DeviceMemory"/>, with the session's own limit.
         ///
         /// <para>On a context whose device memory is under a budget,
-        /// <see cref="DeviceMemorySettings.LimitBytes"/> here is the session's own arena limit
-        /// rather than the budget: the budget less what the context held in its memory outside the
-        /// session when it was built, rounded up to the next sixty-fourth of the budget so that the
-        /// session is kept while that grows a little. It comes down, and never goes up, when a run
-        /// finds the context holding more than the session left room for and the session is built
+        /// <see cref="DeviceMemorySettings.LimitBytes"/> here is the limit on what the session's
+        /// runs may allocate rather than the budget: the budget less what the context held in its
+        /// memory apart from the session for its last run. On ONNX Runtime that is exactly what the
+        /// budget left that run, set before it in place. On a backend that fixes it when the session
+        /// is built it is rounded up to the next sixty-fourth of the budget so that the session is
+        /// kept while that grows a little, and comes down, never going up, when a run finds the
+        /// context holding more than the session left room for and the session is built
         /// again.</para>
         /// </summary>
         public DeviceMemorySettings DeviceMemory => _built.DeviceMemory;
@@ -431,15 +430,33 @@ namespace Shorokoo.Runtime
         private BuiltSession Within(long limit, RunFeeds feeds)
         {
             var built = _built;
-            // Every session this graph is built on is the same model's, so the one it has now answers
-            // for the outputs of the one it may be built again as.
-            var plan = feeds.Plan(built.Session, SessionNameOf);
-            if (built.DeviceMemory.LimitBytes is { } current && current <= limit - plan.Outside)
+            var plan = feeds.Plan();
+            var room = limit - plan.Outside;
+            // A session whose backend enforces its limit itself is given exactly the room this run
+            // leaves it, in place, and is never built again for it.
+            if (room > 0 && built.Session.TryLimitDeviceMemory(room))
+            {
+                feeds.Admit(room, plan);
+                return built.DeviceMemory.LimitBytes == room ? built : Relimited(built, room);
+            }
+            if (built.DeviceMemory.LimitBytes is { } current && current <= room)
             {
                 feeds.Admit(current, plan);
                 return built;
             }
             return Rebuild(feeds.AdmitFresh(limit, plan));
+        }
+
+        /// <summary>The session of <paramref name="built"/>, now limited to <paramref name="limit"/>
+        /// bytes in place, recorded as the limit it runs under.</summary>
+        private BuiltSession Relimited(BuiltSession built, long limit)
+        {
+            var relimited = new BuiltSession(built.Session, built.DeviceMemory with { LimitBytes = limit });
+            lock (_sessionGate)
+            {
+                if (ReferenceEquals(_built, built)) _built = relimited;
+            }
+            return relimited;
         }
 
         /// <summary>
@@ -768,33 +785,29 @@ namespace Shorokoo.Runtime
         private readonly DeviceMemorySettings _deviceMemory = DeviceMemorySettings.Default;
 
         /// <summary>
-        /// This context's device-memory budget, and the arena settings every session it compiles is
-        /// built with. Initialize-only: a context keeps what it was built with.
+        /// This context's device-memory budget. Initialize-only: a context keeps what it was built
+        /// with.
         ///
         /// <para><b><see cref="DeviceMemorySettings.LimitBytes"/> is a budget on this context's
         /// device memory</b>, and covers both halves of what it holds there: the tensors attached to
         /// it in its memory — what <see cref="TensorData.To"/> and <see cref="TensorData.CopyTo"/>
         /// placed for it, what its runs read there or copied there to read, and the outputs they left
         /// there — and, while one of its runs
-        /// executes, the arena that run computes in. A transfer that would take the attached bytes
+        /// executes, what that run's session allocates. A transfer that would take the attached bytes
         /// past the limit is refused, naming the budget, what is attached and what was asked for; a
-        /// session's arena is capped at the budget less what the context holds outside it for the
-        /// run, and is built again with a lower cap when that has grown past the room it left.
+        /// session's runs may allocate the budget less what the context holds apart from them for
+        /// the run.
         /// <see cref="ReadDeviceMemoryUse"/> reads what is attached against the limit.</para>
         ///
         /// <para>Under a budget the context's runs also go one at a time — a second waits for the
         /// first to return, as does a transfer onto the context or a compile on it — and each run
-        /// hands its arena's unused blocks back as it ends, whatever
+        /// hands back the memory its session keeps cached as it ends, whatever
         /// <see cref="RunSettings.ShrinkArenaAfterRun"/> says. A context with no limit is none of
-        /// this.</para>
+        /// this. <see cref="CompiledGraph.DeviceMemory"/> reports the limit a graph's session runs
+        /// under.</para>
         ///
-        /// <para>Its default <see cref="ArenaExtendStrategy.Auto"/> resolves per session, so one
-        /// context can still give a session it knows is reused across shapes a different arena
-        /// strategy from the rest; <see cref="CompiledGraph.DeviceMemory"/> reports which one a
-        /// graph got, and under a budget the arena limit it got.</para>
-        ///
-        /// <para>Ignored where the context's memory is the host's — the CPU backends have no device
-        /// arena, and a device-memory budget does not govern host memory.</para>
+        /// <para>Ignored where the context's memory is the host's: a device-memory budget does not
+        /// govern host memory.</para>
         /// </summary>
         /// <exception cref="ArgumentNullException">A null settings object.</exception>
         public DeviceMemorySettings DeviceMemory
@@ -1685,7 +1698,7 @@ namespace Shorokoo.Runtime
             return CompileFromModel(
                 () => FastOnnxModelBuilder.BuildInternalOnnxModel(graph, prepForOnnx: true,
                     workarounds: KernelWorkaroundRegistry.For(ResolvedBackend.KernelWorkaroundSet)),
-                ResolveOriginalInputNames(graph), trainingStep: false, reusedAcrossShapes: false,
+                ResolveOriginalInputNames(graph), trainingStep: false,
                 description: null, suppliedByIdentifier: supplied);
         }
 
@@ -1706,12 +1719,6 @@ namespace Shorokoo.Runtime
         /// already scheduled: what it duplicates, it duplicates on purpose, so the session must not
         /// merge it back (<see cref="ShorokooGraphOptimization.TrainingStep"/>). Every other graph
         /// — a user's <see cref="Compile(ComputationGraph)"/> included — runs the ordinary profile.</param>
-        /// <param name="reusedAcrossShapes">True only where this session is <i>known</i> to be fed
-        /// differing input shapes — the shapes have already differed, not merely could. It is the
-        /// one thing that moves <see cref="ArenaExtendStrategy.Auto"/> off exact-size extension
-        /// (<see cref="DeviceMemorySettings.Resolve"/>); a symbolic graph is not by itself
-        /// evidence, since an ordinary compiled graph fed one shape for its whole life is symbolic
-        /// too.</param>
         /// <param name="description">What a message about a run of the compiled graph calls it, in
         /// place of the list of its input and output names — "a TrainingRig's training step" for the
         /// rig's own, whose inputs are one per parameter.</param>
@@ -1735,7 +1742,6 @@ namespace Shorokoo.Runtime
             InternalComputationGraph graph,
             IReadOnlyList<long[]?>? inputDims,
             bool trainingStep,
-            bool reusedAcrossShapes = false,
             string? description = null,
             IReadOnlyList<(int Output, int Input)>? aliasCandidates = null,
             string trainingFormat = TrainingFormats.Onnx)
@@ -1748,7 +1754,6 @@ namespace Shorokoo.Runtime
                     workarounds: workarounds),
                 originalInputNames,
                 trainingStep,
-                reusedAcrossShapes,
                 description,
                 aliasCandidates,
                 buildWithoutWorkarounds: workarounds.IsEmpty ? null
@@ -1773,7 +1778,7 @@ namespace Shorokoo.Runtime
             return CompileFromModel(
                 () => FastOnnxModelBuilder.BuildInternalOnnxModel(graph, prepForOnnx: true,
                     workarounds: KernelWorkaroundRegistry.For(ResolvedBackend.KernelWorkaroundSet)),
-                ResolveOriginalInputNames(graph), trainingStep: false, reusedAcrossShapes: false,
+                ResolveOriginalInputNames(graph), trainingStep: false,
                 description: null, profile: optimization, intraOpThreads: intraOpThreads);
         }
 
@@ -1781,7 +1786,6 @@ namespace Shorokoo.Runtime
             Func<ModelProto> buildModel,
             string[] originalInputNames,
             bool trainingStep,
-            bool reusedAcrossShapes,
             string? description,
             IReadOnlyList<(int Output, int Input)>? aliasCandidates = null,
             ShorokooGraphOptimization? profile = null,
@@ -1803,9 +1807,7 @@ namespace Shorokoo.Runtime
             var modelData = memoryStream.ToArray();
 
             var optimization = profile ?? SessionOptimization(HasOptionalOps(model.Graph), trainingStep);
-            // Settled here, not inside the session: CompiledGraph then reports the strategy this
-            // session actually got rather than the Auto that asked for it.
-            var deviceMemory = DeviceMemory.Resolve(reusedAcrossShapes);
+            var deviceMemory = DeviceMemory;
             var backend = ResolvedBackend;
             var space = backend.MemorySpace;
             byte[]? kept = null;
@@ -2071,10 +2073,11 @@ namespace Shorokoo.Runtime
                 // for what this run holds on the device, since its arena starts empty and all of that
                 // is outside it: what that leaves of the budget, rounded as for a session kept while
                 // the context's holdings grow a little, though this one is never kept.
-                var deviceMemory = DeviceMemory.Resolve(reusedAcrossShapes: false);
+                var deviceMemory = DeviceMemory;
+                var plan = feeds.Budget is null ? default : feeds.Plan();
                 if (feeds.Budget is { } limit)
                 {
-                    deviceMemory = deviceMemory with { LimitBytes = feeds.AdmitFresh(limit, feeds.Plan(null, null)) };
+                    deviceMemory = deviceMemory with { LimitBytes = feeds.AdmitFresh(limit, plan) };
                 }
                 var optimization = SessionOptimization(
                     HasOptionalOps(model.Graph) || IsFullyConstant(model.Graph), trainingStep: false);
@@ -2084,16 +2087,10 @@ namespace Shorokoo.Runtime
                 string SessionNameOf(string name)
                     => onnxInputNameByOriginal.TryGetValue(name, out var mapped) ? mapped : name;
 
-                // The memory the run is handed for its outputs before it starts is known only once
-                // the session is: under a budget it is counted with the rest of what the run holds
-                // outside the arena, and where it leaves the arena less room than the session was built
-                // with, the session is built again with that room -- before anything is taken.
-                if (feeds.Budget is { } budgeted && feeds.AdmitOneShot(budgeted, session, SessionNameOf) is { } lower)
-                {
-                    session.Dispose();
-                    session = null;
-                    session = BuildSession(backend, modelData, optimization, deviceMemory with { LimitBytes = lower });
-                }
+                // A session whose backend enforces its limit itself gets exactly what the budget leaves
+                // this run, rather than the rounded figure it was built with.
+                if (feeds.Budget is { } budgeted && session.TryLimitDeviceMemory(budgeted - plan.Outside))
+                    feeds.Admit(budgeted - plan.Outside, plan);
 
                 // Held first, then the values -- see CompiledGraph.Run -- on this context's
                 // backend: the one that just built the session above, and so the runtime that is

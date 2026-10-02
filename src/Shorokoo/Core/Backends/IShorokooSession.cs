@@ -9,9 +9,10 @@ namespace Shorokoo.Core.Backends;
 // place surfaces as an error rather than as a copy nobody asked for. Every output it returns is in
 // that memory too, wherever the runtime computed it, and goes to the caller as it is.
 //
-// And every output it returns is memory of its own: it holds its own bytes and nothing of the
-// session's -- no block of an arena the run computed in, no workspace -- so a caller that keeps an
-// output keeps nothing else alive, whether the session goes on running, sits idle, or is disposed.
+// And every output it returns holds its own bytes and nothing of the session's -- no block of an
+// arena the run computed in, no workspace -- so a caller that keeps an output keeps nothing else
+// alive, whether the session goes on running, sits idle, or is disposed. It is where the runtime
+// wrote it, never a copy made after the run.
 public interface IShorokooSession : IDisposable
 {
     IReadOnlyList<string> InputNames { get; }
@@ -102,14 +103,14 @@ public interface IShorokooSession : IDisposable
     // The default is none: a session that aliases nothing binds no pair.
     IReadOnlyList<OutputAlias> BindableAliases => [];
 
-    // The outputs whose element type and shape this session settled when it was built, by this
-    // session's names, each of which a run is handed memory of its own for before it starts, outside
-    // the session's arena -- unless the run writes it into an input it consumes (RunConsuming), which
-    // takes no memory of its own. That memory is held for the length of the run beside the arena, so a
-    // device-memory budget leaves room for it outside the arena when it chooses the arena's limit.
+    // Sets the most this session's runs may hold in its device memory -- what a device-memory
+    // budget leaves them -- without the session being built again, where its backend can enforce
+    // that itself, and answers whether it can. The framework sets it before each run under a budget,
+    // to exactly what the budget leaves that run.
     //
-    // The default is none: a session whose runs make every output as they go places none before.
-    IReadOnlyList<SettledOutput> SettledOutputs => [];
+    // The default is false: such a session keeps the limit it was built with
+    // (DeviceMemorySettings.LimitBytes), and is built again where that limit no longer fits.
+    bool TryLimitDeviceMemory(long limitBytes) => false;
 
     // This session's own memory arena as its runtime reports it, or null when the backend has no
     // such figures to give. Cheap enough to call either side of a run, which is how a run's peak

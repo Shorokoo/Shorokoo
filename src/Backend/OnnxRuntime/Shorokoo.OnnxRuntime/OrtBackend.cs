@@ -366,7 +366,12 @@ public abstract class OrtBackend : IShorokooBackend
 
     /// <summary>An ONNX Runtime session, and the folder it writes its profile into, if it keeps
     /// one: what <see cref="OrtSession"/> is made of.</summary>
-    private readonly record struct BuiltSession(InferenceSession Session, string? ProfileDirectory, IReadOnlyList<OrtValue> SuppliedViews);
+    private readonly record struct BuiltSession(
+        InferenceSession Session,
+        string? ProfileDirectory,
+        IReadOnlyList<OrtValue> SuppliedViews,
+        CachingAllocator.Account HostAccount,
+        CachingAllocator.Account? CardAccount);
 
     /// <summary>
     /// An ONNX Runtime session over <paramref name="model"/>, writing the graph it will run into
@@ -401,20 +406,48 @@ public abstract class OrtBackend : IShorokooBackend
         var profileDirectory = diagnostics.TraceNodePlacement ? TempDirectory("shorokoo-node-placement-") : null;
         var placeholderDirectory = suppliedInitializers.Count > 0 ? TempDirectory("shorokoo-supplied-") : null;
         List<OrtValue> views = [];
+        // What the session allocates -- its weights as it is built, and everything its runs take --
+        // comes from Shorokoo's allocators, charged to accounts of its own (see CachingAllocator):
+        // ONNX Runtime writes every output into memory its session's allocator gives it, so an
+        // output can hold only its own block only where that allocator is Shorokoo's. On a card, the
+        // account carries the session's limit, which ONNX Runtime has no say in.
+        var host = CachingAllocator.ForHost().Open("session");
+        var card = _cudaDeviceId is { } device ? CachingAllocator.ForCard(device).Open("session") : null;
+        if (card is not null) card.Limit = deviceMemory.LimitBytes;
+        options.AddSessionConfigEntry("session.use_env_allocators", "1");
         try
         {
             if (profileDirectory is not null) EnableProfiling(options, profileDirectory);
             if (optimizedDirectory is not null) WriteOptimizedModel(options, optimizedDirectory);
             if (placeholderDirectory is not null) Supply(options, placeholderDirectory, suppliedInitializers, views);
             _configureExecutionProvider(options, deviceMemory);
-            var session = new InferenceSession(model, options);
+            InferenceSession session;
+            var charge = CachingAllocator.Charge(host, card);
+            try
+            {
+                session = new InferenceSession(model, options);
+            }
+            finally
+            {
+                charge.Dispose();
+            }
+            // A block of its weights the card could not give it, or its limit had no room for, was
+            // served from memory that is not the card's (see CachingAllocator): the session is not
+            // one to keep.
+            if (charge.Refusal is { } refusal)
+            {
+                session.Dispose();
+                throw refusal.ToException($"building a session of {Description}", null);
+            }
             // The values themselves are the caller's to keep alive for the session's life; this
             // keeps them reachable across the constructor, which takes them as bare handles.
             GC.KeepAlive(suppliedInitializers);
-            return new BuiltSession(session, profileDirectory, views);
+            return new BuiltSession(session, profileDirectory, views, host, card);
         }
         catch
         {
+            host.Allocator.Close(host);
+            card?.Allocator.Close(card);
             // No session to own the folder, so nothing would ever delete it.
             DeleteDirectory(profileDirectory);
             foreach (var view in views) view.Dispose();
@@ -432,12 +465,12 @@ public abstract class OrtBackend : IShorokooBackend
     /// <paramref name="outputAliases"/> it can.</summary>
     private OrtSession Wrap(BuiltSession built, IReadOnlyList<OrtSession.ProvedAlias> outputAliases)
     {
-        var (session, profileDirectory, views) = built;
+        var (session, profileDirectory, views, host, card) = built;
         try
         {
             // The session keeps this backend to release what its runs consume through it, and to
             // name it in a refusal.
-            return new OrtSession(session, _cudaDeviceId, this, profileDirectory, outputAliases) { SuppliedViews = views };
+            return new OrtSession(session, _cudaDeviceId, this, profileDirectory, outputAliases, host, card) { SuppliedViews = views };
         }
         catch
         {
@@ -450,6 +483,8 @@ public abstract class OrtBackend : IShorokooBackend
     private static void Discard(BuiltSession built)
     {
         built.Session.Dispose();
+        built.HostAccount.Allocator.Close(built.HostAccount);
+        built.CardAccount?.Allocator.Close(built.CardAccount);
         foreach (var view in built.SuppliedViews) view.Dispose();
         DeleteDirectory(built.ProfileDirectory);
     }
@@ -682,12 +717,11 @@ public abstract class OrtBackend : IShorokooBackend
     }
 
     /// <summary>
-    /// Appends the CUDA execution provider on <paramref name="deviceId"/>, configured with
-    /// <paramref name="deviceMemory"/>. This is what the GPU backends pass as their
-    /// execution-provider step, and the point at which
-    /// <see cref="DeviceMemorySettings.LimitBytes"/> and
-    /// <see cref="DeviceMemorySettings.ArenaExtend"/> reach ORT: the session being built keeps
-    /// them for its life, and no other session is touched.
+    /// Appends the CUDA execution provider on <paramref name="deviceId"/>. This is what the GPU
+    /// backends pass as their execution-provider step. <paramref name="deviceMemory"/> does not
+    /// reach the provider: a session of this backend allocates on the card through Shorokoo's
+    /// allocator, which enforces <see cref="DeviceMemorySettings.LimitBytes"/> itself (see
+    /// <see cref="CachingAllocator"/>), rather than through the provider's arena.
     /// </summary>
     public static void AppendCuda(SessionOptions options, int deviceId, DeviceMemorySettings deviceMemory)
     {
@@ -697,65 +731,17 @@ public abstract class OrtBackend : IShorokooBackend
         // AppendExecutionProvider_CUDA, well after the JIT has retired the local at its .Handle
         // read, and a GC there would run the critical finalizer under the native call.
         using var cuda = new OrtCUDAProviderOptions();
-        cuda.UpdateOptions(CudaProviderOptions(
-            deviceId, deviceMemory.LimitBytes, deviceMemory.ArenaExtend));
+        cuda.UpdateOptions(CudaProviderOptions(deviceId));
         options.AppendExecutionProvider_CUDA(cuda);
     }
 
     /// <summary>
-    /// The CUDA execution-provider options for a device and a device-memory configuration, in
-    /// ORT's own <c>provider_options</c> spelling. Pure, and public alongside
-    /// <see cref="Configure"/> so the mapping can be read and asserted without a CUDA machine to
-    /// build a session on. An absent <paramref name="limitBytes"/> omits <c>gpu_mem_limit</c>
-    /// altogether, which leaves ORT at its default of the whole card.
+    /// The CUDA execution-provider options for a device, in ORT's own <c>provider_options</c>
+    /// spelling. Pure, and public alongside <see cref="Configure"/> so the mapping can be read and
+    /// asserted without a CUDA machine to build a session on.
     /// </summary>
-    /// <exception cref="ArgumentOutOfRangeException"><paramref name="arenaExtend"/> is not one of
-    /// the two strategies ORT accepts — <see cref="ArenaExtendStrategy.Auto"/> is Shorokoo's choice
-    /// between them and must be resolved first — or <paramref name="limitBytes"/> is not
-    /// positive.</exception>
-    public static Dictionary<string, string> CudaProviderOptions(
-        int deviceId,
-        long? limitBytes,
-        ArenaExtendStrategy arenaExtend)
-    {
-        var options = new Dictionary<string, string>
-        {
-            ["device_id"] = deviceId.ToString(CultureInfo.InvariantCulture),
-            ["arena_extend_strategy"] = arenaExtend switch
-            {
-                ArenaExtendStrategy.NextPowerOfTwo => "kNextPowerOfTwo",
-                ArenaExtendStrategy.SameAsRequested => "kSameAsRequested",
-                // Auto lands here too, and should: it is Shorokoo's choice between the two and
-                // DeviceMemorySettings.Resolve settles it before a session is built, so one
-                // reaching ORT means that step was skipped rather than that ORT gained a value.
-                _ => throw new ArgumentOutOfRangeException(
-                    nameof(arenaExtend), arenaExtend,
-                    "Not an ONNX Runtime arena-extend strategy; resolve DeviceMemorySettings first."),
-            },
-        };
-        if (limitBytes is { } limit)
-        {
-            // ORT parses this into a size_t, where a negative reads back as SIZE_MAX -- an
-            // uncapped arena from a caller who asked for the opposite. Refuse it here, as
-            // DeviceMemorySettings.LimitBytes refuses it at the assignment.
-            if (limit <= 0)
-                throw new ArgumentOutOfRangeException(
-                    nameof(limitBytes), limit, "The device-memory limit must be positive.");
-            options["gpu_mem_limit"] = limit.ToString(CultureInfo.InvariantCulture);
-        }
-        return options;
-    }
-
-    /// <summary>
-    /// The arena ORT should shrink after a run — the value of its
-    /// <c>memory.enable_memory_arena_shrinkage</c> run option — or <c>null</c> to leave the run
-    /// option off. The entry says <i>which</i> arena to shrink: the card's on a GPU backend, where
-    /// a run's intermediates live, and the host's on a CPU backend.
-    /// </summary>
-    public static string? ArenaShrinkageRunConfig(int? cudaDeviceId, bool shrinkArenaAfterRun)
-        => !shrinkArenaAfterRun ? null
-            : cudaDeviceId is { } device ? $"gpu:{device.ToString(CultureInfo.InvariantCulture)}"
-            : "cpu:0";
+    public static Dictionary<string, string> CudaProviderOptions(int deviceId)
+        => new() { ["device_id"] = deviceId.ToString(CultureInfo.InvariantCulture) };
 
     /// <summary>
     /// Copies a flat managed array into an ORT tensor of the given shape. Shorokoo's
@@ -803,7 +789,7 @@ public abstract class OrtBackend : IShorokooBackend
     /// and the bytes cross the bus once, here.</para>
     ///
     /// <para>The card's memory comes out of one allocator per device, shared by every compute
-    /// context on it (<see cref="RuntimeAllocators"/>), so nothing here bounds it: a context's
+    /// context on it (<see cref="CachingAllocator"/>), so nothing here bounds it: a context's
     /// device-memory budget is kept by the context, which refuses a copy that would take it past
     /// its budget before asking for the memory at all.</para>
     /// </summary>
@@ -1202,25 +1188,33 @@ public abstract class OrtBackend : IShorokooBackend
     /// CUDA one.
     /// </summary>
     private OrtTensorValue AllocateInBackendMemory(TensorElementType elementType, long[] shape)
+    {
         // The one place the host-or-card decision is made for a tensor placed in this backend's
         // memory, so the two constructors that build there cannot come to differ on it. A CUDA
         // backend allocating from the default allocator would hand back host memory wearing the
         // card's name, which the execution provider then copies over on every run.
-        => new(OrtValue.CreateAllocatedTensorValue(
-            _cudaDeviceId is { } deviceId
-                ? RuntimeAllocators.ForCard(deviceId, _configureExecutionProvider)
-                : OrtAllocator.DefaultInstance,
-            elementType, shape));
-
-    /// <summary>
-    /// The allocator a session's run makes an output in, outside every session: on the card, this
-    /// runtime's own allocator for this backend's device, which every tensor placed there comes from
-    /// too; in host memory, this runtime's own arena for the host (<see cref="RuntimeAllocators"/>).
-    /// </summary>
-    internal OrtAllocator OutputAllocator(bool onCard)
-        => onCard && _cudaDeviceId is { } deviceId
-            ? RuntimeAllocators.ForCard(deviceId, _configureExecutionProvider)
-            : RuntimeAllocators.ForHost();
+        if (_cudaDeviceId is not { } deviceId)
+            return new(OrtValue.CreateAllocatedTensorValue(OrtAllocator.DefaultInstance, elementType, shape));
+        // A block the card has not free is served from host memory all the same rather than as
+        // nothing (see CachingAllocator.Allocate), so the tensor is checked for one before it is
+        // handed on, and refused as an allocation failure.
+        var charge = CachingAllocator.Charge(null, null);
+        OrtValue value;
+        try
+        {
+            value = OrtValue.CreateAllocatedTensorValue(CachingAllocator.ForCard(deviceId).Managed, elementType, shape);
+        }
+        finally
+        {
+            charge.Dispose();
+        }
+        if (charge.Refusal is { } refusal)
+        {
+            value.Dispose();
+            throw refusal.ToException($"a tensor placed by {Description}", null);
+        }
+        return new(value);
+    }
 
     /// <summary>
     /// Builds an ORT tensor on a buffer ORT itself allocates, in host memory, and copies

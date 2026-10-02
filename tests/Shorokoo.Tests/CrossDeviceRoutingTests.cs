@@ -303,10 +303,10 @@ public class CrossDeviceRoutingCoverageTests
         var fed = Floats(16);
 
         var consumed = Assert.Throws<InvalidOperationException>(() => compiled.Execute(fed)).Message;
-        Assert.Contains("would hold 64 bytes of CUDA device 0 memory outside its own arena", consumed);
+        Assert.Contains("would hold 64 bytes of CUDA device 0 memory outside what its session allocates", consumed);
         Assert.Contains("64 bytes more that it reads there or copies there for the run", consumed);
         var read = Assert.Throws<InvalidOperationException>(() => compiled.Execute(fed.Shared())).Message;
-        Assert.Contains("would hold 64 bytes of CUDA device 0 memory outside its own arena", read);
+        Assert.Contains("would hold 64 bytes of CUDA device 0 memory outside what its session allocates", read);
         Assert.Contains("0 bytes of the 0 tensor(s) attached to its compute context there, and 64 bytes more", read);
         Assert.Contains("64-byte device-memory budget", read);
         Assert.Throws<InvalidOperationException>(() => context.Execute(Echo(), fed));
@@ -468,37 +468,27 @@ public class CrossDeviceRoutingCoverageTests
     }
 
     [Fact]
-    public void TestAnOutputARunIsHandedMemoryForIsCountedBeforeItStartsUnlessItIsWrittenIntoWhatTheRunConsumes()
+    public void TestASessionThatLimitsItselfGetsExactlyWhatTheBudgetLeavesEachRunAndIsBuiltOnce()
     {
-        Assert.Equal(("6300 6200", 2L), KeepingTwo(aliases: true, settles: true, fed: a => a));
-        Assert.Equal(("6300 6200 6100", 0L), KeepingTwo(aliases: false, settles: true, fed: a => a));
-        Assert.Equal(("6300 6200 6100", 2L), KeepingTwo(aliases: true, settles: true, fed: a => a.TryConsume()));
-        Assert.Equal(("6300 6200", 2L), KeepingTwo(aliases: true, settles: false, fed: a => a));
-        Assert.Equal(("6300 6200", 0L), KeepingTwo(aliases: false, settles: false, fed: a => a));
-
-        var card = new StubBackend(ComputeDevice.Cuda, 0) { Settles = [16] };
-        using var context = new ComputeContext(card) { DeviceMemory = Budget(64) };
-        Assert.Contains(
-            "0 bytes of the 0 tensor(s) attached to its compute context there, 4 bytes more that it reads "
-            + "there or copies there for the run, and 64 bytes for the outputs it is handed memory for there "
-            + "before it starts",
-            Assert.Throws<InvalidOperationException>(() => context.Compile(Echo()).Execute(Floats(1))).Message);
+        Assert.Equal(("6300", "6320 6240", 2L), KeepingTwo(aliases: true, inPlace: true, fed: a => a));
+        Assert.Equal(("6300", "6320 6240", 0L), KeepingTwo(aliases: false, inPlace: true, fed: a => a));
+        Assert.Equal(("6300 6200", "", 2L), KeepingTwo(aliases: true, inPlace: false, fed: a => a));
+        Assert.Equal(("6300 6200", "", 0L), KeepingTwo(aliases: false, inPlace: false, fed: a => a));
     }
 
-    /// <summary>The arena limits a budgeted context's session went through, and how many outputs
-    /// were written into consumed memory, over two runs each fed a host tensor through
+    /// <summary>The limits a budgeted context's session was built with and given in place, and how
+    /// many outputs were written into consumed memory, over two runs each fed a host tensor through
     /// <paramref name="fed"/>, which is copied onto the card first, by a session that may write its
-    /// output into that copy and, where it <paramref name="settles"/> the output's shape, is handed
-    /// the output's memory before the run starts.</summary>
-    private static (string Limits, long Aliased) KeepingTwo(bool aliases, bool settles, Func<TensorData, IData> fed)
+    /// output into that copy and may take its limit <paramref name="inPlace"/>.</summary>
+    private static (string Built, string InPlace, long Aliased) KeepingTwo(bool aliases, bool inPlace, Func<TensorData, IData> fed)
     {
-        var card = new StubBackend(ComputeDevice.Cuda, 0) { ReleasesWhatItConsumes = true, Aliases = aliases, Settles = settles ? [20] : null };
+        var card = new StubBackend(ComputeDevice.Cuda, 0) { ReleasesWhatItConsumes = true, Aliases = aliases, LimitsInPlace = inPlace };
         using var context = new ComputeContext(card) { DeviceMemory = Budget(6400) };
         var compiled = context.Compile(Doubled(), inputDims: null, trainingStep: false, aliasCandidates: [(0, 0)]);
         TensorData Kept(IData a) => compiled.Execute(a)[0].ToTensorData();
         var (first, second) = (Kept(fed(Floats(20))), Kept(fed(Floats(20))));
         GC.KeepAlive((object[])[first, second]);
-        return (string.Join(' ', card.Sessions.Select(s => s.LimitBytes)), context.AliasedOutputs);
+        return (string.Join(' ', card.Sessions.Select(s => s.LimitBytes)), string.Join(' ', card.InPlaceLimits), context.AliasedOutputs);
     }
 
     [Fact]
@@ -1433,9 +1423,13 @@ public class CrossDeviceRoutingCoverageTests
         /// <summary>Whether its sessions' runs throw.</summary>
         internal bool FailsRuns { get; set; }
 
-        /// <summary>The shape its sessions say they settled for every output, of float elements, so
-        /// that a run is handed the memory for each before it starts; none where null.</summary>
-        internal long[]? Settles { get; init; }
+        /// <summary>Whether its sessions take the limit a budget leaves each run in place, as a native
+        /// one enforcing it in its own allocator does, rather than keeping the one they were built
+        /// with.</summary>
+        internal bool LimitsInPlace { get; init; }
+
+        /// <summary>The limits its sessions were given in place, in order.</summary>
+        internal List<long> InPlaceLimits { get; } = [];
 
         /// <summary>How many of its next releases throw after recording what they were given.</summary>
         internal int FailingReleases { get; set; }
@@ -1640,9 +1634,12 @@ public class CrossDeviceRoutingCoverageTests
 
         public IReadOnlyList<string> OutputNames => outputNames;
 
-        public IReadOnlyList<SettledOutput> SettledOutputs => backend.Settles is { } shape
-            ? [.. outputNames.Select(name => new SettledOutput(name, ShorokooTensorElementType.Float, shape))]
-            : [];
+        public bool TryLimitDeviceMemory(long limitBytes)
+        {
+            if (!backend.LimitsInPlace) return false;
+            lock (backend.InPlaceLimits) backend.InPlaceLimits.Add(limitBytes);
+            return true;
+        }
 
         public IReadOnlyList<IShorokooTensorValue> Run(
             IReadOnlyDictionary<string, IShorokooTensorValue> inputs,

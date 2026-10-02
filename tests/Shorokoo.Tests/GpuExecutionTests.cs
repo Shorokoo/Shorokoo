@@ -133,7 +133,6 @@ public class GpuExecutionTests
                 DeviceMemory = new DeviceMemorySettings
                 {
                     LimitBytes = 2L * 1024 * 1024 * 1024,
-                    ArenaExtend = ArenaExtendStrategy.NextPowerOfTwo,
                 },
                 RunSettings = new RunSettings { ShrinkArenaAfterRun = true },
             };
@@ -194,13 +193,15 @@ public class GpuExecutionTests
     }
 
     /// <summary>
-    /// A run's arena is capped at the budget less what the context holds on the card: with nothing
-    /// held, a run whose arena needs 160 MiB fits a 256 MiB budget; with 100 MiB held on the card
-    /// the session is built again with the room that leaves, and the same run fails where the arena
-    /// passes it. A graph compiled once the tensor is gone gets the room back.
+    /// What a run's session may allocate is capped at exactly the budget less what the context holds
+    /// on the card for the run — here the eight-byte copy of the shape it is fed: with nothing else
+    /// held, a run whose session needs 160 MiB fits a 256 MiB budget; with 100 MiB held on the
+    /// card the same session is limited to the room that leaves, and the same run fails with an
+    /// allocation failure as the allocator refuses the block that would pass it. Once the tensor is
+    /// gone the session gets the room back, and is never built again.
     /// </summary>
     [CudaFact]
-    public void CudaProvider_ARunsArenaIsCappedAtItsContextsBudgetLessWhatTheContextHoldsOnTheCard()
+    public void CudaProvider_WhatARunsSessionAllocatesIsCappedAtItsContextsBudgetLessWhatTheContextHoldsOnTheCard()
     {
         const long MiB = 1024 * 1024;
         using var ctx = new ComputeContext
@@ -208,33 +209,36 @@ public class GpuExecutionTests
             DeviceMemory = new DeviceMemorySettings { LimitBytes = 256 * MiB },
         };
         var filled = ArenaProbeModels.Filled(ctx);
-        IData Ones() => ArenaProbeModels.FilledShape(40L << 20);
+        float Sum()
+        {
+            var outputs = filled.Execute(ArenaProbeModels.FilledShape(40L << 20));
+            var sum = ArenaProbeModels.Sum(outputs);
+            ComputeContext.ReleaseOutputs(outputs);
+            return sum;
+        }
+        long Limit() => Assert.IsType<ArenaStatistics>(filled.ReadArenaStatistics()).LimitBytes;
 
-        Assert.Equal(252 * MiB, filled.DeviceMemory.LimitBytes);
-        Assert.True(ArenaProbeModels.Sum(filled.Execute(Ones())) > 0f);
-        Assert.Equal(252 * MiB, Assert.IsType<ArenaStatistics>(filled.ReadArenaStatistics()).LimitBytes);
+        Assert.True(Sum() > 0f);
+        Assert.Equal((256 * MiB - 8, 256 * MiB - 8), (filled.DeviceMemory.LimitBytes!.Value, Limit()));
 
         var held = TensorData([25L << 20], new float[25 << 20]).CopyTo(ctx);
-        var failed = Assert.ThrowsAny<OnnxRuntimeException>(() => filled.Execute(Ones()));
-        Assert.Contains("BFCArena", failed.Message);
-        Assert.Equal(152 * MiB, filled.DeviceMemory.LimitBytes);
-        Assert.Equal(152 * MiB, Assert.IsType<ArenaStatistics>(filled.ReadArenaStatistics()).LimitBytes);
+        Assert.True(Shorokoo.Core.Utils.AllocationFailureReport.IsAllocationFailure(Assert.ThrowsAny<Exception>(() => Sum())));
+        Assert.Equal((156 * MiB - 8, 156 * MiB - 8), (filled.DeviceMemory.LimitBytes!.Value, Limit()));
 
         held.Delete();
-        var again = ArenaProbeModels.Filled(ctx);
-        Assert.Equal(252 * MiB, again.DeviceMemory.LimitBytes);
-        Assert.True(ArenaProbeModels.Sum(again.Execute(Ones())) > 0f);
+        Assert.True(Sum() > 0f);
+        Assert.Equal(256 * MiB - 8, Limit());
     }
 
     /// <summary>
-    /// What <c>gpu_mem_limit</c> caps, measured on a session of its own: only what its arena
-    /// allocates. A 64 MiB input already on the card is read where it is by a session whose arena is
-    /// capped at 32 MiB, and the arena never holds it; the same bytes in host memory are refused,
-    /// since a session takes its inputs only in its own memory. That is why a context's budget
-    /// discounts what it holds on the card from the arena's limit for the length of the run.
+    /// What a session's limit caps, measured on a session of its own: only what the session
+    /// allocates. A 64 MiB input already on the card is read where it is by a session limited to
+    /// 32 MiB, which never allocates it; the same bytes in host memory are refused, since a session
+    /// takes its inputs only in its own memory. That is why a context's budget discounts what it
+    /// holds on the card from the session's limit for the length of the run.
     /// </summary>
     [CudaFact]
-    public void CudaProvider_AnArenaLimitCapsWhatTheArenaAllocatesAndNotAnInputReadWhereItIs()
+    public void CudaProvider_ASessionsLimitCapsWhatItAllocatesAndNotAnInputReadWhereItIs()
     {
         const long MiB = 1024 * 1024;
         var backend = DefaultBackend.Instance;
@@ -245,7 +249,7 @@ public class GpuExecutionTests
         ProtoBuf.Serializer.Serialize(model, proto);
         using var session = backend.CreateSession(
             model.ToArray(), ShorokooGraphOptimization.EnableAll, ShorokooLogSeverity.Fatal,
-            new DeviceMemorySettings { LimitBytes = 32 * MiB }.Resolve(reusedAcrossShapes: false));
+            new DeviceMemorySettings { LimitBytes = 32 * MiB });
         var bytes = new byte[64 * MiB];
         IReadOnlyList<IShorokooTensorValue> Run(IShorokooTensorValue input) => session.Run(
             new Dictionary<string, IShorokooTensorValue> { [session.InputNames[0]] = input },
@@ -254,9 +258,9 @@ public class GpuExecutionTests
         using var onCard = backend.CreateTensorInBackendMemory(ShorokooTensorElementType.Float, bytes, [16L << 20]);
         Assert.False(onCard.IsHostAccessible);
         foreach (var output in Run(onCard)) output.Dispose();
-        var arena = Assert.IsType<ArenaStatistics>(session.ReadArenaStatistics());
-        Assert.Equal(32 * MiB, arena.LimitBytes);
-        Assert.True(arena.MaxInUseBytes < 32 * MiB);
+        var allocated = Assert.IsType<ArenaStatistics>(session.ReadArenaStatistics());
+        Assert.Equal(32 * MiB, allocated.LimitBytes);
+        Assert.True(allocated.MaxInUseBytes < 32 * MiB);
 
         using var onHost = backend.CreateTensorFromRawBytes(ShorokooTensorElementType.Float, bytes, [16L << 20]);
         Assert.True(onHost.IsHostAccessible);
@@ -403,7 +407,6 @@ public class GpuExecutionTests
             DeviceMemory = new DeviceMemorySettings
             {
                 LimitBytes = 2L * 1024 * 1024 * 1024,
-                ArenaExtend = ArenaExtendStrategy.SameAsRequested,
             },
             RunSettings = new RunSettings { ShrinkArenaAfterRun = true },
         });
@@ -566,11 +569,14 @@ public class GpuExecutionTests
         ProtoBuf.Serializer.Serialize(model, proto);
         using var options = new SessionOptions();
         OrtBackend.Configure(options, ShorokooGraphOptimization.EnableAll, ShorokooLogSeverity.Fatal);
-        OrtBackend.AppendCuda(options, 0, new DeviceMemorySettings
+        using var cuda = new OrtCUDAProviderOptions();
+        cuda.UpdateOptions(new Dictionary<string, string>
         {
-            LimitBytes = 136 * MiB,
-            ArenaExtend = ArenaExtendStrategy.SameAsRequested,
+            ["device_id"] = "0",
+            ["gpu_mem_limit"] = (136 * MiB).ToString(System.Globalization.CultureInfo.InvariantCulture),
+            ["arena_extend_strategy"] = "kSameAsRequested",
         });
+        options.AppendExecutionProvider_CUDA(cuda);
         using var session = new InferenceSession(model.ToArray(), options);
         using var onDevice = new OrtMemoryInfo("Cuda", OrtAllocatorType.DeviceAllocator, 0, OrtMemType.Default);
         using var shape = OrtValue.CreateTensorValueFromMemory<long>([N], [1L]);
@@ -651,13 +657,11 @@ public class GpuExecutionTests
     /// <summary>
     /// What writing a step's state over the state it consumed saves: a resident run of
     /// <see cref="WideLinearModel"/> under AdamW, with shrinkage on as a budget would force it. A
-    /// step that writes its state elsewhere holds the state it consumed and the state it makes on the
-    /// card together, each in memory of its own outside the arena — measured, 594 MiB of this
-    /// process's card at the step's peak against 402 MiB for one that writes the new state over the
-    /// old, for 192 MiB of state — so this process's peak on the card falls by at least the state,
-    /// while the arena, which holds neither, peaks the same either way. Each measured run starts with
-    /// the garbage of the one before it collected and handed back to the card, so neither finds
-    /// blocks the other freed waiting to be reused.
+    /// step that writes its state elsewhere has its session allocate the new state beside the state
+    /// it consumed, so the session's peak and this process's peak on the card both fall by at least
+    /// the state for one that writes the new state over the old. Each measured run starts with the
+    /// garbage of the one before it collected and handed back to the card, so neither finds blocks
+    /// the other freed waiting to be reused.
     /// </summary>
     [CudaFact]
     public void CudaProvider_WritingAStepsStateOverWhatItConsumedTakesTheStateOffTheCardsPeak()
@@ -713,7 +717,7 @@ public class GpuExecutionTests
             var plain = Peaks(aliasing: false);
             var aliased = Peaks(aliasing: true);
 
-            Assert.True(Math.Abs(plain.Arena - aliased.Arena) < 1L << 20);
+            Assert.True(plain.Arena - aliased.Arena >= aliased.State - (1L << 20));
             Assert.True(plain.Card - aliased.Card >= aliased.State - (1L << 20));
         }
         finally
@@ -761,11 +765,10 @@ public class GpuExecutionTests
 
     /// <summary>
     /// A one-shot run whose intermediates fill 256 MiB of the card and whose output is four
-    /// kilobytes, carved out of the block the fill was freed from, leaves the card holding the
-    /// output and nothing more once it returns, though the output is kept. Compiled, with the
-    /// outputs kept, the arena holds no more in use than its weights once a run is over, and a run
-    /// that hands its unused blocks back leaves it as it was built where the output's shape was
-    /// settled, though the output is made after the run's 256 MiB intermediate is freed.
+    /// kilobytes, made after the fill is freed, leaves the card holding the output and nothing more
+    /// once it returns, though the output is kept. Compiled, with the outputs kept, a session holds in
+    /// use its weights and each output's own bytes once a run that hands its memory back is over,
+    /// nothing beyond what is in use, and its weights alone once the outputs are let go of.
     /// </summary>
     [CudaFact]
     public void CudaProvider_AKeptOutputHoldsOnlyItsOwnBytesOnTheCardAndNothingOfItsSessionsArena()
@@ -780,18 +783,24 @@ public class GpuExecutionTests
 
         var filled = ArenaProbeModels.Filled(ctx);
         var spread = ArenaProbeModels.Spread(ctx);
-        (long, long, long) Held()
+        (long, long, long, long) Held()
         {
             var learned = Assert.IsType<ArenaStatistics>(filled.ReadArenaStatistics());
             var settled = Assert.IsType<ArenaStatistics>(spread.ReadArenaStatistics());
-            return (learned.InUseBytes, settled.InUseBytes, settled.TotalAllocatedBytes);
+            return (learned.RequestedInUseBytes, settled.RequestedInUseBytes,
+                learned.TotalAllocatedBytes - learned.InUseBytes, settled.TotalAllocatedBytes - settled.InUseBytes);
         }
         var built = Held();
         var sum = filled.Execute(ArenaProbeModels.FilledShape(64L << 20))[0].ToTensorData();
         var spreadSum = spread.Execute(ArenaProbeModels.Ones(64 << 20))[0].ToTensorData();
-
-        Assert.Equal(built, Held());
+        var kept = Held();
         Assert.Equal([64 << 20, 64 << 20, -(64 << 20)], [widened.ValueAt<float>(999), sum.ValueAt<float>(0), spreadSum.ValueAt<float>(999)]);
+        var bytes = (sum.ByteCount, spreadSum.ByteCount);
+        sum.Delete();
+        spreadSum.Delete();
+
+        Assert.Equal((built.Item1 + bytes.Item1, built.Item2 + bytes.Item2, 0L, 0L), kept);
+        Assert.Equal((built.Item1, built.Item2), (Held().Item1, Held().Item2));
     }
 
     /// <summary>
@@ -818,13 +827,12 @@ public class GpuExecutionTests
     }
 
     /// <summary>
-    /// The card's own allocator — the one tensors placed on the card and every run's outputs there
-    /// come from — keeps the blocks of tensors that are gone, through a run that leaves its arena as
-    /// it is, and hands them back to the card as a run that hands its arena's unused blocks back
-    /// starts.
+    /// The card's allocator — the one tensors placed on the card and everything a session allocates
+    /// there come from — keeps the blocks of tensors that are gone, through a run that keeps what it
+    /// has, and hands them back to the card as a run that hands back its memory ends.
     /// </summary>
     [CudaFact]
-    public void CudaProvider_TheCardsOwnAllocatorHandsBackWhatNoTensorUsesAsARunThatShrinksStarts()
+    public void CudaProvider_TheCardsAllocatorHandsBackWhatNoTensorUsesAsARunThatHandsBackItsMemoryEnds()
     {
         const long MiB = 1024 * 1024;
         using var ctx = new ComputeContext();
@@ -862,9 +870,9 @@ public class GpuExecutionTests
     /// A graph the provider cannot run whole: one output is computed on the card and one on the
     /// host, which is what <see cref="SessionOutputPlacement.Mixed"/ > is for, and the crossing
     /// is charged to the pinned host arena rather than to the device one. A graph with no node the
-    /// provider can run is <see cref="SessionOutputPlacement.Host"/>, its device arena holding
-    /// nothing — the output it copies onto the card goes into memory of its own — and one it runs
-    /// whole is <see cref="SessionOutputPlacement.Device"/>. Every output comes back on the card.
+    /// provider can run is <see cref="SessionOutputPlacement.Host"/>, its device memory holding
+    /// nothing but the output it copies onto the card, and one it runs whole is
+    /// <see cref="SessionOutputPlacement.Device"/>. Every output comes back on the card.
     /// </summary>
     [CudaFact]
     public void CudaProvider_OutputPlacementSeparatesADeviceGraphAPartitionedOneAndOneThatFellBack()
@@ -887,7 +895,7 @@ public class GpuExecutionTests
         var host = ArenaProbeModels.HostOnly(ctx);
         Assert.All(host.Execute(ArenaProbeModels.Square()), o => Assert.False(o.ToTensorData().IsHostResident));
         Assert.Equal(SessionOutputPlacement.Host, host.OutputPlacement);
-        Assert.Equal(0L, Assert.IsType<ArenaStatistics>(host.ReadArenaStatistics()).AllocationCount);
+        Assert.Equal(1L, Assert.IsType<ArenaStatistics>(host.ReadArenaStatistics()).AllocationCount);
 
         var onCard = ArenaProbeModels.MatMul(ctx);
         Assert.All(onCard.Execute(ArenaProbeModels.MatMulOperand(8), ArenaProbeModels.MatMulOperand(8)), o => Assert.False(o.ToTensorData().IsHostResident));

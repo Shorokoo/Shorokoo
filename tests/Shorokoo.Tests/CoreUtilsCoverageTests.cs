@@ -630,61 +630,26 @@ public class CoreUtilsCoverageTests
     }
 
     [Fact]
-    public void TestDeviceMemorySettingsMapOntoTheCudaArenaOptions()
+    public void TestTheCudaProviderOptionsNameTheDeviceAndNothingOfItsMemory()
     {
-        var uncapped = OrtBackend.CudaProviderOptions(0, null, ArenaExtendStrategy.NextPowerOfTwo);
-        Assert.Equal("0", uncapped["device_id"]);
-        Assert.Equal("kNextPowerOfTwo", uncapped["arena_extend_strategy"]);
-        Assert.False(uncapped.ContainsKey("gpu_mem_limit"));
-
-        var budgeted = OrtBackend.CudaProviderOptions(
-            1, 16L * 1024 * 1024 * 1024, ArenaExtendStrategy.SameAsRequested);
-        Assert.Equal("1", budgeted["device_id"]);
-        Assert.Equal("kSameAsRequested", budgeted["arena_extend_strategy"]);
-        Assert.Equal("17179869184", budgeted["gpu_mem_limit"]);
-        Assert.Throws<ArgumentOutOfRangeException>(
-            () => OrtBackend.CudaProviderOptions(0, null, (ArenaExtendStrategy)7));
-
-        Assert.Equal("gpu:0", OrtBackend.ArenaShrinkageRunConfig(0, shrinkArenaAfterRun: true));
-        Assert.Equal("gpu:3", OrtBackend.ArenaShrinkageRunConfig(3, shrinkArenaAfterRun: true));
-        Assert.Null(OrtBackend.ArenaShrinkageRunConfig(0, shrinkArenaAfterRun: false));
-        Assert.Equal("cpu:0", OrtBackend.ArenaShrinkageRunConfig(null, shrinkArenaAfterRun: true));
-        Assert.Null(OrtBackend.ArenaShrinkageRunConfig(null, shrinkArenaAfterRun: false));
+        Assert.Equal([("device_id", "0")], OrtBackend.CudaProviderOptions(0).Select(o => (o.Key, o.Value)));
+        Assert.Equal([("device_id", "3")], OrtBackend.CudaProviderOptions(3).Select(o => (o.Key, o.Value)));
     }
 
-    /// <summary>
-    /// The shipped defaults, and the ORT options a GPU session built with them asks for. The
-    /// arena strategy is chosen per session rather than shipped as one value, and ORT is only
-    /// ever handed a strategy it has — an unresolved one is refused rather than guessed at.
-    /// </summary>
     [Fact]
-    public void TestDeviceMemoryDefaultsToAutoAndRejectsAnEmptyBudget()
+    public void TestDeviceMemoryDefaultsToNoBudgetAndRejectsAnEmptyOne()
     {
-        Assert.Equal(ArenaExtendStrategy.Auto, DeviceMemorySettings.Default.ArenaExtend);
         Assert.Null(DeviceMemorySettings.Default.LimitBytes);
         Assert.False(RunSettings.Default.ShrinkArenaAfterRun);
         Assert.Equal(DeviceMemorySettings.Default, new ComputeContext().DeviceMemory);
         Assert.Equal(RunSettings.Default, new ComputeContext().RunSettings);
 
-        var shipped = OrtBackend.CudaProviderOptions(
-            0,
-            DeviceMemorySettings.Default.LimitBytes,
-            DeviceMemorySettings.Default.Resolve(reusedAcrossShapes: false).ArenaExtend);
-        Assert.Equal("kSameAsRequested", shipped["arena_extend_strategy"]);
-        Assert.False(shipped.ContainsKey("gpu_mem_limit"));
-
-        Assert.Throws<ArgumentOutOfRangeException>(
-            () => OrtBackend.CudaProviderOptions(0, null, ArenaExtendStrategy.Auto));
-
         Assert.Throws<ArgumentOutOfRangeException>(() => new DeviceMemorySettings { LimitBytes = 0 });
         Assert.Throws<ArgumentOutOfRangeException>(() => new DeviceMemorySettings { LimitBytes = -1 });
-        Assert.Throws<ArgumentOutOfRangeException>(
-            () => new DeviceMemorySettings { ArenaExtend = (ArenaExtendStrategy)7 });
 
         // A refused assignment leaves the shared default as it was: a record cannot be edited in
         // place, so no caller can spoil it for another.
         Assert.Null(DeviceMemorySettings.Default.LimitBytes);
-        Assert.Equal(ArenaExtendStrategy.Auto, DeviceMemorySettings.Default.ArenaExtend);
 
         var capped = DeviceMemorySettings.Default with { LimitBytes = 4096 };
         Assert.Equal(4096L, capped.LimitBytes);
@@ -693,61 +658,12 @@ public class CoreUtilsCoverageTests
     }
 
     /// <summary>
-    /// Auto departs from exact-size extension only where Shorokoo knows a session is reused
-    /// across differing shapes; a session it knows nothing about keeps exact-size extension
-    /// rather than being guessed at. A named strategy is carried through untouched, and the
-    /// budget rides along either way.
-    /// </summary>
-    [Fact]
-    public void TestAutoTakesTheDoublingOnlyForASessionKnownToBeReusedAcrossShapes()
-    {
-        ArenaExtendStrategy Auto(bool reused) => DeviceMemorySettings.Default.Resolve(reused).ArenaExtend;
-
-        Assert.Equal(ArenaExtendStrategy.SameAsRequested, Auto(reused: false));
-        Assert.Equal(ArenaExtendStrategy.NextPowerOfTwo, Auto(reused: true));
-
-        var named = new DeviceMemorySettings { ArenaExtend = ArenaExtendStrategy.NextPowerOfTwo, LimitBytes = 4096 };
-        Assert.Same(named, named.Resolve(reusedAcrossShapes: false));
-        Assert.Same(named, named.Resolve(reusedAcrossShapes: true));
-
-        var budgeted = new DeviceMemorySettings { LimitBytes = 8192 };
-        Assert.Equal(
-            new DeviceMemorySettings { LimitBytes = 8192, ArenaExtend = ArenaExtendStrategy.SameAsRequested },
-            budgeted.Resolve(reusedAcrossShapes: false));
-    }
-
-    /// <summary>
-    /// The strategy a compiled graph really ends up with. A symbolic graph is not by itself
-    /// evidence that shapes vary — an ordinary compiled inference graph is symbolic and is the
-    /// case exact-size extension wins widest — so only the caller's own assertion moves it.
-    /// </summary>
-    [Fact]
-    public void TestOnlyAnAssertedShapeReuseMovesACompiledGraphOffExactSizeExtension()
-    {
-        var x = InputTensor<float32>("x", rank: 1);
-        var graph = new InternalComputationGraph([x], [x + x]);
-        var ctx = new ComputeContext();
-
-        ArenaExtendStrategy Compiled(IReadOnlyList<long[]?>? dims, bool trainingStep, bool reused)
-            => ctx.Compile(graph, dims, trainingStep, reused).DeviceMemory.ArenaExtend;
-
-        long[]?[] pinned = [[4L]];
-
-        Assert.Equal(ArenaExtendStrategy.SameAsRequested, Compiled(pinned, trainingStep: true, reused: false));
-        Assert.Equal(ArenaExtendStrategy.SameAsRequested, Compiled(null, trainingStep: true, reused: false));
-        Assert.Equal(ArenaExtendStrategy.SameAsRequested, Compiled(null, trainingStep: false, reused: false));
-        Assert.Equal(ArenaExtendStrategy.SameAsRequested, ctx.Compile(graph).DeviceMemory.ArenaExtend);
-        Assert.Equal(ArenaExtendStrategy.NextPowerOfTwo, Compiled(null, trainingStep: true, reused: true));
-    }
-
-    /// <summary>
-    /// The settings a session is built with reach the execution-provider step that configures its
-    /// arena, already resolved. Nothing else on a box without a card observes an arena at all, so
+    /// The settings a session is built with reach the execution-provider step. Nothing else on a box without a card observes an arena at all, so
     /// without this the whole per-session surface could be assembled, reported by
     /// <see cref="CompiledGraph.DeviceMemory"/>, and dropped on the way to ORT with the suite green.
     /// </summary>
     [Fact]
-    public void TestASessionsSettingsReachTheExecutionProviderStepResolved()
+    public void TestASessionsSettingsReachTheExecutionProviderStep()
     {
         var x = InputTensor<float32>("x", rank: 1);
         var proto = FastOnnxModelBuilder.BuildInternalOnnxModel(
@@ -757,16 +673,10 @@ public class CoreUtilsCoverageTests
 
         var seen = new List<DeviceMemorySettings>();
         var probe = new CapturingBackendProbe(seen);
-        var budget = new DeviceMemorySettings { LimitBytes = 8L << 30, ArenaExtend = ArenaExtendStrategy.NextPowerOfTwo };
+        var budget = new DeviceMemorySettings { LimitBytes = 8L << 30 };
 
         using (probe.CreateSession(model.ToArray(), ShorokooGraphOptimization.EnableAll, ShorokooLogSeverity.Fatal, budget)) { }
         Assert.Equal(budget, Assert.Single(seen));
-
-        seen.Clear();
-        using (probe.CreateSession(
-            model.ToArray(), ShorokooGraphOptimization.EnableAll, ShorokooLogSeverity.Fatal,
-            DeviceMemorySettings.Default.Resolve(reusedAcrossShapes: true))) { }
-        Assert.Equal(ArenaExtendStrategy.NextPowerOfTwo, Assert.Single(seen).ArenaExtend);
 
         Assert.Throws<ArgumentNullException>(() => probe.CreateSession(
             model.ToArray(), ShorokooGraphOptimization.EnableAll, ShorokooLogSeverity.Fatal, null!));
@@ -781,7 +691,7 @@ public class CoreUtilsCoverageTests
     [Fact]
     public void TestSessionAndRunSettingsAreScopedToTheSessionAndTheRunAndNotToTheProcess()
     {
-        var budget = new DeviceMemorySettings { LimitBytes = 8L << 30, ArenaExtend = ArenaExtendStrategy.NextPowerOfTwo };
+        var budget = new DeviceMemorySettings { LimitBytes = 8L << 30 };
         var shrinking = new RunSettings { ShrinkArenaAfterRun = true };
         var configured = new ComputeContext { DeviceMemory = budget, RunSettings = shrinking };
 
@@ -801,8 +711,6 @@ public class CoreUtilsCoverageTests
 
         // Nothing a caller does afterwards can reach that session: the settings it was built with
         // are its own, and a differently configured context builds a differently configured one.
-        // A default context resolves Auto rather than carrying it into the session.
-        Assert.Equal(ArenaExtendStrategy.SameAsRequested, new ComputeContext().Compile(graph).DeviceMemory.ArenaExtend);
         Assert.Null(new ComputeContext().Compile(graph).DeviceMemory.LimitBytes);
 
         Assert.Throws<ArgumentNullException>(() => new ComputeContext { DeviceMemory = null! });
@@ -982,48 +890,37 @@ public class CoreUtilsCoverageTests
     }
 
     /// <summary>
-    /// The shapes a session settles for its outputs are read through reflection as well, and what
-    /// they are read for is telling a scalar from an output ONNX Runtime has no shape for, which its
-    /// managed surface reports alike, with no dimensions: a sum over a vector is a scalar, and a sum
-    /// over a fill whose rank its runtime shape input decides has no shape at all. A dimension the
-    /// runtime leaves open but names after an input's is settled as that input's, so the session
-    /// settles every output here but the fill's sum.
+    /// Shorokoo's allocator is registered with ONNX Runtime's environment through reflection as well
+    /// — the C API's <c>RegisterAllocator</c>, which the managed surface has no call for, the native
+    /// handles of the environment and of a memory info, and a managed allocator over a native one —
+    /// and a session that could not allocate through it would allocate in an arena again. The names
+    /// are asserted here so an ONNX Runtime upgrade that moves one fails loudly, and a tensor made
+    /// through the allocator holds the block it handed out.
     /// </summary>
     [Fact]
-    public void TestTheOrtOutputShapesBindingStillResolvesAndTellsAScalarFromAnUnknownShape()
+    public void TestTheOrtEnvironmentBindingStillResolves()
     {
         var api = typeof(OrtAllocator).Assembly.GetType(OrtArenaStats.ApiHolderTypeName)!
             .GetField(OrtArenaStats.ApiFieldName, BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public)!
             .GetValue(null)!;
-        foreach (var entry in OrtOutputShapes.ApiEntryPointNames)
+        foreach (var entry in OrtEnvironment.ApiEntryPointNames)
             Assert.Equal(typeof(IntPtr), api.GetType().GetField(entry)!.FieldType);
-        var handle = typeof(InferenceSession).GetProperty(
-            OrtOutputShapes.HandlePropertyName, BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
-        Assert.Equal(typeof(IntPtr), handle!.PropertyType);
-        Assert.True(OrtOutputShapes.IsBound);
+        const BindingFlags Instance = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
+        Assert.Equal(typeof(IntPtr), typeof(OrtEnv).GetProperty(OrtEnvironment.EnvHandleProperty, Instance)!.PropertyType);
+        Assert.Equal(typeof(IntPtr), typeof(OrtMemoryInfo).GetProperty(OrtEnvironment.MemoryInfoPointerProperty, Instance)!.PropertyType);
+        Assert.NotNull(typeof(OrtAllocator).GetConstructor(Instance, [typeof(IntPtr), typeof(bool)]));
+        Assert.True(OrtEnvironment.IsBound);
 
-        var x = InputTensor<float32>("x", rank: 1);
-        var shape = InputVector<int64>("shape");
-        var sum = OnnxOp.ReduceSum(x, keepdims: false);
-        var proto = FastOnnxModelBuilder.BuildInternalOnnxModel(new InternalComputationGraph([x, shape],
-        [
-            sum, x + x, Tensor([2L, 3L], new float[6]) + sum,
-            OnnxOp.ReduceSum(OnnxOp.Expand(Vector(1f), shape), keepdims: false),
-        ]), prepForOnnx: true);
-        var model = new MemoryStream();
-        ProtoBuf.Serializer.Serialize(model, proto);
-        using var session = new InferenceSession(model.ToArray());
-
-        Assert.Equal([[], [-1L], [2L, 3L], null], OrtOutputShapes.Read(session)!);
-        Assert.Empty(session.OutputMetadata[session.OutputNames[0]].Dimensions);
-        Assert.Empty(session.OutputMetadata[session.OutputNames[3]].Dimensions);
-
-        using var settling = DefaultBackend.Instance.CreateSession(
-            model.ToArray(), ShorokooGraphOptimization.EnableAll, ShorokooLogSeverity.Fatal, DeviceMemorySettings.Default.Resolve(reusedAcrossShapes: false));
-        Assert.Equal(
-            ["", $"{settling.InputNames[0]}:0", "2 3"],
-            settling.SettledOutputs.Select(o => string.Join(' ', o.Dimensions.Select(d => d.Input is { } input ? $"{input}:{d.Axis}" : $"{d.Count}"))));
-        Assert.Equal([5L], settling.SettledOutputs[1].ShapeFor(input => input == settling.InputNames[0] ? [5L] : null));
+        var host = CachingAllocator.ForHost();
+        var account = host.Open("probe");
+        long InUse() => host.Statistics(account).InUseBytes;
+        using (CachingAllocator.Charge(account, null))
+        {
+            using var value = OrtValue.CreateAllocatedTensorValue(host.Managed, Microsoft.ML.OnnxRuntime.Tensors.TensorElementType.Float, [1000L]);
+            Assert.Equal(CachingAllocator.SizeClass(4000), InUse());
+        }
+        Assert.Equal(0L, InUse());
+        host.Close(account);
     }
 
     /// <summary>
@@ -1066,9 +963,10 @@ public class CoreUtilsCoverageTests
     }
 
     /// <summary>
-    /// A session's weights come out of the same arena these figures read, so a session is already
-    /// holding them before it has run anything and the first run's peak is weights plus whatever
-    /// that run added. The record carries the mark the run found, which is what separates the two.
+    /// A session's weights come out of the same allocator these figures read — one block, taken
+    /// from the device — so a session is already holding them before it has run anything and the
+    /// first run's peak is weights plus whatever that run added. The record carries the mark the run
+    /// found, which is what separates the two.
     /// </summary>
     [Fact]
     public void TestASessionHoldsItsWeightsInTheArenaBeforeItsFirstRunAndTheRecordSeparatesThem()
@@ -1083,9 +981,7 @@ public class CoreUtilsCoverageTests
         Assert.Equal(ArenaProbeModels.WeightBytes, built.MaxInUseBytes);
         Assert.Equal(ArenaProbeModels.WeightBytes, built.InUseBytes);
         Assert.Equal(ArenaProbeModels.WeightBytes, built.MaxAllocSizeBytes);
-        Assert.Equal(1L, built.AllocationCount);
-        Assert.Equal(1L, built.ReserveCount);
-        Assert.Equal(0L, built.ArenaExtensionCount);
+        Assert.Equal((1L, 0L, 1L), (built.AllocationCount, built.ReserveCount, built.ArenaExtensionCount));
 
         compiled.Execute(ArenaProbeModels.WeightedInput());
         var run = Assert.Single(context.RunStats.RecentRuns);
@@ -1097,30 +993,35 @@ public class CoreUtilsCoverageTests
     }
 
     /// <summary>
-    /// A run's outputs are memory of their own rather than blocks of its session's arena: with every
-    /// output kept, the arena holds no more in use than its weights once the run is over — an output
-    /// whose shape the session learns only as it runs, and one whose shape it settled when it was
-    /// built though it is made after the run's 4 MiB intermediate is freed, alike.
+    /// A kept output holds its own block of its session's memory and nothing else: with every output
+    /// kept, the session holds in use its weights and the outputs' own bytes once the run is over,
+    /// and its weights alone once they are let go of — an output whose shape the run learns, one the
+    /// run sizes from what it is fed, and one made after the run's 4 MiB intermediate is freed, alike.
     /// </summary>
     [Fact]
-    public void TestAKeptOutputHoldsNothingOfItsSessionsArena()
+    public void TestAKeptOutputHoldsOnlyItsOwnBlockOfItsSessionsMemory()
     {
         using var context = new ComputeContext();
         var filled = ArenaProbeModels.Filled(context);
         var product = ArenaProbeModels.MatMul(context);
         var spread = ArenaProbeModels.Spread(context);
         (long, long, long) InUse() => (
-            Assert.IsType<ArenaStatistics>(filled.ReadArenaStatistics()).InUseBytes,
-            Assert.IsType<ArenaStatistics>(product.ReadArenaStatistics()).InUseBytes,
-            Assert.IsType<ArenaStatistics>(spread.ReadArenaStatistics()).InUseBytes);
+            Assert.IsType<ArenaStatistics>(filled.ReadArenaStatistics()).RequestedInUseBytes,
+            Assert.IsType<ArenaStatistics>(product.ReadArenaStatistics()).RequestedInUseBytes,
+            Assert.IsType<ArenaStatistics>(spread.ReadArenaStatistics()).RequestedInUseBytes);
         var weights = InUse();
 
         var sum = filled.Execute(ArenaProbeModels.FilledShape(1 << 20))[0].ToTensorData();
         var negated = product.Execute(ArenaProbeModels.MatMulOperand(64), ArenaProbeModels.MatMulOperand(64))[0].ToTensorData();
         var spreadSum = spread.Execute(ArenaProbeModels.Ones(1 << 20))[0].ToTensorData();
-
-        Assert.Equal(weights, InUse());
+        var kept = InUse();
         Assert.Equal([1 << 20, 0f, -(1 << 20)], [sum.ValueAt<float>(0), negated.ValueAt<float>(4095), spreadSum.ValueAt<float>(999)]);
+        TensorData[] outputs = [sum, negated, spreadSum];
+        var bytes = outputs.Select(o => o.ByteCount).ToArray();
+        foreach (var output in outputs) output.Delete();
+
+        Assert.Equal((weights.Item1 + bytes[0], weights.Item2 + bytes[1], weights.Item3 + bytes[2]), kept);
+        Assert.Equal(weights, InUse());
     }
 
     /// <summary>
@@ -1369,14 +1270,14 @@ public class CoreUtilsCoverageTests
     /// <summary>
     /// The settings are reachable from a GPU session, which no test on a CPU box can observe by
     /// running one. What it can observe is that the product still calls the wiring: a backend that
-    /// stopped passing its device id, stopped carrying the session's
-    /// <see cref="DeviceMemorySettings"/> into the provider options, or stopped putting the
-    /// shrinkage entry on its run options would leave every setting dead with every other test
-    /// still green. It also pins where those values come from — the parameter the session or run
+    /// stopped passing its device id, stopped building its sessions over Shorokoo's allocators with
+    /// the card's account held to the session's <see cref="DeviceMemorySettings"/>, or stopped having
+    /// a shrinking run hand back what they keep cached would leave every setting dead with every
+    /// other test still green. It also pins where those values come from — the parameter the session or run
     /// was given, never process-wide state.
     /// </summary>
     [Fact]
-    public void TestTheGpuBackendsStillCarryTheDeviceMemorySettingsIntoOrt()
+    public void TestTheGpuBackendsStillCarryTheDeviceMemorySettingsIntoTheirAllocator()
     {
         var backend = Path.Combine(ProductSourceRoot(), "Backend", "OnnxRuntime");
         string Source(params string[] parts) =>
@@ -1395,26 +1296,30 @@ public class CoreUtilsCoverageTests
         // reaches the session, not how many other things travel with it.
         Assert.Matches(@"new\s+OrtSession\s*\(\s*session\s*,\s*_cudaDeviceId\s*[,)]", source);
         Assert.Matches(@"AppendExecutionProvider_CUDA\s*\(\s*cuda\s*\)", source);
-        Assert.Matches(@"CudaProviderOptions\s*\(\s*deviceId\s*,\s*deviceMemory\.LimitBytes\s*,\s*deviceMemory\.ArenaExtend\s*\)", source);
+        Assert.Matches(@"CudaProviderOptions\s*\(\s*deviceId\s*\)", source);
+        Assert.Matches(@"card\.Limit\s*=\s*deviceMemory\.LimitBytes", source);
+        Assert.Matches(@"var\s+charge\s*=\s*CachingAllocator\.Charge\s*\(\s*host\s*,\s*card\s*\)\s*;\s*try\s*\{\s*session\s*=\s*new\s+InferenceSession", source);
+        Assert.Contains("\"session.use_env_allocators\", \"1\"", File.ReadAllText(
+            Path.Combine(backend, "Shorokoo.OnnxRuntime", "OrtBackend.cs")));
         Assert.Matches(@"_configureExecutionProvider\s*\(\s*options\s*,\s*deviceMemory\s*\)", source);
 
         var context = StripCommentsAndStrings(File.ReadAllText(
             Path.Combine(ProductSourceRoot(), "Shorokoo", "Core", "ComputeContext.cs")));
         Assert.Matches(@"BuildSession\s*\(\s*backend\s*,\s*modelData\s*,\s*optimization\s*,\s*deviceMemory\s*[,)]", context);
         Assert.Matches(@"backend\.CreateSession\s*\(\s*modelData\s*,\s*optimization\s*,\s*ShorokooLogSeverity\.Fatal\s*,\s*deviceMemory\s*,", context);
-        Assert.Matches(@"DeviceMemory\.Resolve\s*\(\s*reusedAcrossShapes\s*\)", context);
+        Assert.Matches(@"TryLimitDeviceMemory\s*\(\s*room\s*\)", context);
 
         var session = Source("Shorokoo.OnnxRuntime", "OrtSession.cs");
-        Assert.Contains("memory.enable_memory_arena_shrinkage", File.ReadAllText(
-            Path.Combine(backend, "Shorokoo.OnnxRuntime", "OrtSession.cs")));
-        Assert.Matches(@"ArenaShrinkageRunConfig\s*\(\s*_cudaDeviceId\s*,\s*runSettings\.ShrinkArenaAfterRun\s*\)", session);
-        Assert.Matches(@"AddRunConfigEntry\s*\(", session);
+        Assert.Matches(@"if\s*\(\s*runSettings\.ShrinkArenaAfterRun\s*\)", session);
+        Assert.Matches(@"ReleaseCached\s*\(\s*card\s*\)", session);
+        Assert.Matches(@"ReleaseCached\s*\(\s*_hostAccount\s*\)", session);
+        Assert.Matches(@"card\.Limit\s*=\s*limitBytes", session);
 
-        // Every path that runs the session has to apply it, not just one: each runs inside the one
-        // member that sets the run's options up.
+        // Every path that runs the session has to charge its accounts, not just one: each runs
+        // inside the one member that does.
         var runPaths = Regex.Matches(session, @"_session\s*\.\s*Run\w*\s*\(").Count;
         Assert.Equal(runPaths, Regex.Matches(session, @"Invoke\s*\(\s*runSettings\s*,").Count);
-        Assert.Single(Regex.Matches(session, @"ConfigureRun\s*\(\s*runOptions\s*,\s*runSettings\s*\)"));
+        Assert.Single(Regex.Matches(session, @"CachingAllocator\.Charge\s*\(\s*_hostAccount\s*,\s*_cardAccount\s*,\s*runOptions\s*\)"));
     }
 
     /// <summary>Two shapes the guard's exemptions once let through: a span consumed by a call

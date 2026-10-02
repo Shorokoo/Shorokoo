@@ -22,8 +22,13 @@ internal delegate string OperatorEmitter(NodeContext node);
 /// One operator's translation: the expression it emits and whether that expression is a tuple of
 /// the node's outputs (in which case the node's outputs are unpacked from its leading elements, so
 /// a node may leave off optional outputs at the end) or the node's single output.
+/// <see cref="Function"/> names the support package's function the expression calls, for an
+/// operator translated as one plain call of it.
 /// </summary>
-internal sealed record OperatorEntry(string OpType, OperatorEmitter Emit, bool ReturnsTuple, GradientRule Gradient);
+internal sealed record OperatorEntry(string OpType, OperatorEmitter Emit, bool ReturnsTuple, GradientRule Gradient)
+{
+    public string? Function { get; init; }
+}
 
 /// <summary>
 /// The ONNX operators the Python-based backends translate, keyed by operator type (standard domain).
@@ -141,6 +146,7 @@ internal static partial class OperatorTable
         {
             var accepted = attributes ?? [];
             Custom(opType, node => node.Call(function, accepted, opset, outputs), outputs || tuple, gradient);
+            Entries[opType] = Entries[opType] with { Function = function };
         }
 
         /// <summary><paramref name="opType"/> translated by an emitter of its own.</summary>

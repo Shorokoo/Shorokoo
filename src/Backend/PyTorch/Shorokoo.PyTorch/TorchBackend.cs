@@ -297,7 +297,9 @@ public abstract class TorchBackend : IShorokooBackend
     /// <summary>
     /// A sequence of <paramref name="values"/>, which it takes over: on success the sequence holds
     /// them and each value handed over refuses every read from then on; on failure every one is
-    /// released before this throws. A value of another runtime is copied in, and released too.
+    /// released before this throws. A value of another runtime is copied in, and released too; so is
+    /// one standing on a block other values stand on (<see cref="TorchTensorValue.Range"/>), since a
+    /// sequence holds its elements' memory with no lease on a block.
     /// </summary>
     public IShorokooTensorValue CreateSequence(IReadOnlyList<IShorokooTensorValue> values)
     {
@@ -312,8 +314,8 @@ public abstract class TorchBackend : IShorokooBackend
             {
                 foreach (var value in values)
                 {
-                    if (value is TorchTensorValue torch) { own.Add(torch); continue; }
-                    var copy = (TorchTensorValue)BackendTransfer.CopyTo(this, value);
+                    if (value is TorchTensorValue { Range: null } torch) { own.Add(torch); continue; }
+                    var copy = value is TorchTensorValue standing ? Cloned(runtime, standing) : (TorchTensorValue)BackendTransfer.CopyTo(this, value);
                     copies.Add(copy);
                     own.Add(copy);
                 }
@@ -338,6 +340,13 @@ public abstract class TorchBackend : IShorokooBackend
             // on in the sequence's list, which holds a reference of its own.
             foreach (var value in values) value.Dispose();
         }
+    }
+
+    /// <summary>A copy of <paramref name="value"/> in memory of its own.</summary>
+    private static TorchTensorValue Cloned(TorchRuntime runtime, TorchTensorValue value)
+    {
+        using (PythonRuntime.Gil())
+            return TorchTensorValue.Wrap(runtime, value.Value.InvokeMethod("clone"), value.ElementType);
     }
 
     private static TorchTensorValue WrapSequence(TorchRuntime runtime, PyObject list, ShorokooTensorElementType elementType)

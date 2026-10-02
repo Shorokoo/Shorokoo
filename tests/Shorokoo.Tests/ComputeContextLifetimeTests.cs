@@ -784,16 +784,22 @@ public class ComputeContextLifetimeCoverageTests
         Assert.False(Proves(GraphOf("a b", "O", Op("Sub", "a b", "O", domain: "custom"))));
     }
 
-    private static PlacementProof PlacementsOver(GraphProto graph, string consumed)
+    private static PlacementProof PlacementsOver(GraphProto graph, string consumed, PlacementMemory? memory = null)
     {
         var inputs = graph.Inputs.Where(i => i.Type?.TensorType?.Shape is not null).ToDictionary(
             i => i.Name, i => (i.Type.TensorType.Shape.Dims.Select(d => d.DimValue).ToArray(), i.Type.TensorType.ElemType));
         var shapes = PlacementShapes.Evaluate(graph, inputs);
-        return new PlacementProof(graph, Names(consumed).ToDictionary(n => n, n => shapes[n].Bytes), shapes);
+        return new PlacementProof(graph, Names(consumed).ToDictionary(n => n, n => shapes[n].Bytes), shapes, memory: memory);
     }
 
     private static bool Places(GraphProto graph, string consumed, params Placement[] placements)
         => PlacementsOver(graph, consumed).Prove(placements).Count == placements.Length;
+
+    private static bool PlacesOnTorch(GraphProto graph, string consumed, params Placement[] placements)
+        => PlacementsOver(graph, consumed, PlacementMemory.PyTorch).Prove(placements).Count == placements.Length;
+
+    private static GraphProto FirstHalf(string outputs, params NodeProto[] nodes)
+        => WithInts(WithInts(GraphOf("a:float[256] c:float[128]", outputs, [Op("Slice", "a zero half zero", "x"), .. nodes]), "zero", 0), "half", 128);
 
     private static Placement At(string value, string block, long offset, long bytes = 512) => new(value, block, offset, bytes);
 
@@ -868,6 +874,35 @@ public class ComputeContextLifetimeCoverageTests
     }
 
     [Fact]
+    public void TestOnTorchAViewIsItsInputsMemoryUnlessPlacedAndSoIsWhatAnOperatorNotKnownToComputeAfreshHandsBack()
+    {
+        Assert.True(Places(FirstHalf("O x", Op("Neg", "x", "O")), "a", At("O", "a", 0)));
+        Assert.False(PlacesOnTorch(FirstHalf("O x", Op("Neg", "x", "O")), "a", At("O", "a", 0)));
+        Assert.True(PlacesOnTorch(FirstHalf("O x", Op("Neg", "c", "O")), "a", At("O", "a", 512)));
+        Assert.True(PlacesOnTorch(FirstHalf("x", Op("Neg", "c", "O")), "a", At("x", "a", 0)));
+        Assert.True(PlacesOnTorch(FirstHalf("x", Op("Neg", "c", "O")), "a", At("x", "a", 512)));
+        Assert.False(PlacesOnTorch(FirstHalf("x", Op("Neg", "c", "O")), "a", At("x", "a", 256)));
+        Assert.True(PlacesOnTorch(FirstHalf("O x", Op("Neg", "x", "O")), "a", At("x", "a", 512), At("O", "a", 0)));
+        Assert.True(Places(GraphOf("a:float[128]", "O Z", Op("Cast", "a", "y", attribute: ("to", 1)), Op("Neg", "y", "O"), Op("Exp", "y", "Z")), "a", At("O", "a", 0)));
+        Assert.False(PlacesOnTorch(GraphOf("a:float[128]", "O Z", Op("Cast", "a", "y", attribute: ("to", 1)), Op("Neg", "y", "O"), Op("Exp", "y", "Z")), "a", At("O", "a", 0)));
+        Assert.True(Places(GraphOf("a:float[128] c:bool[1]", "O:float[128] Z:float[128]", Op("If", "c", "Z", body: GraphOf("", "t", Op("Identity", "a", "t"))), Op("Neg", "Z", "O")), "a", At("O", "a", 0)));
+        Assert.False(PlacesOnTorch(GraphOf("a:float[128] c:bool[1]", "O:float[128] Z:float[128]", Op("If", "c", "Z", body: GraphOf("", "t", Op("Identity", "a", "t"))), Op("Neg", "Z", "O")), "a", At("O", "a", 0)));
+    }
+
+    [Fact]
+    public void TestOnTorchOnlyWhatItWritesIntoAGivenRangeAllocatingNothingIsPlaced()
+    {
+        Assert.True(Places(GraphOf("a:int64[64]", "O", Op("Neg", "a", "O")), "a", At("O", "a", 0)));
+        Assert.False(PlacesOnTorch(GraphOf("a:int64[64]", "O", Op("Neg", "a", "O")), "a", At("O", "a", 0)));
+        Assert.True(PlacesOnTorch(GraphOf("a:float[128]", "O", Op("Neg", "a", "O")), "a", At("O", "a", 0)));
+        Assert.False(PlacesOnTorch(GraphOf("a:float[128] b:float[128]", "O", Op("Clip", "a", "O")), "b", At("O", "b", 0)));
+        Assert.False(PlacesOnTorch(GraphOf("a:float[128] b:float[128]", "O", Op("Softmax", "a", "O")), "b", At("O", "b", 0)));
+        Assert.True(PlacesOnTorch(GraphOf("a:float[8,16] b:float[16,8]", "O", Op("Transpose", "a", "O")), "b", At("O", "b", 0)));
+        Assert.True(PlacesOnTorch(WithInts(GraphOf("a:float[128]", "O", Op("Reshape", "a s", "O")), "s", 2, 64), "a", At("O", "a", 0)));
+        Assert.False(PlacesOnTorch(WithInts(GraphOf("a:float[8,16]", "O", Op("Transpose", "a", "t"), Op("Reshape", "t s", "O")), "s", 128), "a", At("O", "a", 0)));
+    }
+
+    [Fact]
     public void TestThePlannerPlacesTheTwoHalvesScenarioWithNothingLeftToAllocate()
     {
         var graph = ProtoBuf.Serializer.Deserialize<ModelProto>(new MemoryStream(
@@ -878,6 +913,9 @@ public class ComputeContextLifetimeCoverageTests
             ["A_half@A+0", "B_half@A+65536", "C0@B+0", "C1@B+0", "C2@B+0", "C3@B+0", "L0@B+0", "L1@B+0", "L2@B+0", "L@B+0"],
             plan.Select(p => $"{p.Value}@{p.Block}+{p.Offset}").Order(StringComparer.Ordinal));
         Assert.Empty(new PlacementProof(graph, new Dictionary<string, long> { ["A"] = 131072 }, shapes).Plan(smallest: 65536, idleOutputBytes: 0).Where(p => p.Value == "L"));
+        var torchPlan = new PlacementProof(graph, new Dictionary<string, long> { ["A"] = 131072, ["B"] = 131072 }, shapes, memory: PlacementMemory.PyTorch)
+            .Plan(smallest: 65536, idleOutputBytes: 0);
+        Assert.Equal(plan.Select(p => p.ToString()).Order(), torchPlan.Select(p => p.ToString()).Order());
     }
 
     /// <summary>Two tensors standing on one host block of eight floats, its halves, and the block.</summary>

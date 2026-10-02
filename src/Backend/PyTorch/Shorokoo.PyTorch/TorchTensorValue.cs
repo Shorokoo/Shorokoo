@@ -14,7 +14,9 @@ namespace Shorokoo.PyTorch;
 /// reading it again would take the interpreter lock for every question.</para>
 ///
 /// <para><b>The span accessors read the tensor's own memory.</b> A host tensor this wraps is always
-/// contiguous and owns its storage (the backend makes it so before wrapping it), and it lives for
+/// contiguous (the backend makes it so before wrapping it), and its bytes are its own: memory no
+/// other value names — a tensor of its own storage, or one a run placed in a range of a consumed
+/// tensor's memory, standing on that memory's block (<see cref="Range"/>) — and it lives for
 /// as long as this value holds its reference — so a span stays valid until the value is released,
 /// exactly as an ONNX Runtime value's does, and a caller keeps the value alive across its use of
 /// the span the same way. No lock is needed to read it: the memory is torch's, not the
@@ -29,6 +31,7 @@ public sealed class TorchTensorValue : IShorokooTensorValue
     private readonly ShorokooTensorElementType _elementType;
     private readonly bool _isHost;
     private readonly int _cudaDevice;
+    private BlockRange? _range;
     private int _released;
 
     private TorchTensorValue(
@@ -88,6 +91,20 @@ public sealed class TorchTensorValue : IShorokooTensorValue
     {
         using var item = sequence[index];
         return item.As<T>();
+    }
+
+    /// <summary>Where this value stands on a block of memory other values stand on too, holding a
+    /// lease on it; null for a tensor of its own storage.</summary>
+    internal BlockRange? Range => _range;
+
+    BlockRange? IShorokooTensorValue.Range => _range;
+
+    /// <summary>Makes this value one standing on <paramref name="range"/>, taking a lease on its
+    /// block, which disposing the value releases.</summary>
+    internal void StandOn(BlockRange range)
+    {
+        range.Block.Lease();
+        _range = range;
     }
 
     /// <summary>The Python object this wraps, refused once released: a released value's reference
@@ -203,6 +220,7 @@ public sealed class TorchTensorValue : IShorokooTensorValue
     {
         if (Interlocked.Exchange(ref _released, 1) != 0) return;
         PythonRuntime.Release(_value);
+        _range?.Block.Release();
     }
 
     /// <summary>Marks this released and drops its reference, for a value handed into a sequence:

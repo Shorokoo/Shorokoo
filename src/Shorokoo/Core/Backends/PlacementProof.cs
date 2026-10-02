@@ -22,37 +22,66 @@ internal readonly record struct Placement(string Value, string Block, long Offse
 internal sealed record PlacementMemory(
     Func<NodeProto, int, int, bool> AlwaysShares,
     Func<NodeProto, int, int, bool> SharesUnlessPlaced,
-    Func<NodeProto, bool> Writes)
+    Func<NodeProto, int, bool> Writes)
 {
     /// <summary>ONNX Runtime: what it may hand back over a kernel's input
     /// (<see cref="OutputAliasProof.Shares"/>) is that input's memory, and every other value of the
     /// graph is memory of its own — a <c>Slice</c> copies. A binding can take any value.</summary>
-    internal static PlacementMemory OnnxRuntime { get; } = new(OutputAliasProof.Shares, OutputAliasProof.Shares, static _ => true);
+    internal static PlacementMemory OnnxRuntime { get; } = new(OutputAliasProof.Shares, OutputAliasProof.Shares, static (_, _) => true);
 
     /// <summary>
-    /// PyTorch run eagerly from a translation: a slice, a reshape, a transpose, an expansion and a
-    /// split are views of their input unless placed — then written into their range — and so is
-    /// whatever a runtime may hand back over its input. It writes into a given range the operators
-    /// it has a form for that writes into a tensor: element-wise ones, a fill, a slice, a
-    /// concatenation, and the copies a view makes.
+    /// PyTorch run eagerly from a translation of the graph. An output of anything but the operators
+    /// known to compute into memory of their own (<see cref="TorchFresh"/>) may be its input's memory
+    /// — a slice, a reshape, a transpose, an expansion, a split, a cast to the type it has, a
+    /// one-input <c>Max</c>, a branch handing back a value it captured — unless it is placed, and
+    /// then written into its range. It writes into a given range only what it has a form for that
+    /// allocates nothing: the element-wise operators of <see cref="TorchElementWise"/> over
+    /// floating-point values, a fill, a concatenation part by part, and a copy of what a view
+    /// operator reads.
     /// </summary>
     internal static PlacementMemory PyTorch { get; } = new(static (_, _, _) => false, TorchShares, TorchWrites);
 
-    private static bool TorchShares(NodeProto node, int input, int output)
-        => OutputAliasProof.Shares(node, input, output)
-           || (OutputAliasProof.IsStandard(node) && input == 0 && node.OpType switch
-           {
-               "Slice" or "Reshape" or "Squeeze" or "Unsqueeze" or "Flatten" or "Transpose" or "Expand"
-                   or "Identity" or "Dropout" => output == 0,
-               "Split" => true,
-               _ => false,
-           });
+    /// <summary>The operators whose translation always computes into memory of its own, never
+    /// handing back an input or a view of one; <c>Max</c>, <c>Min</c> and <c>Sum</c> only of two
+    /// inputs or more, since one of one input is that input.</summary>
+    internal static readonly HashSet<string> TorchFresh = new(StringComparer.Ordinal)
+    {
+        "Shape", "Size", "Add", "Sub", "Mul", "Div", "Pow", "Mod", "Neg", "Abs", "Sign", "Reciprocal", "Sqrt",
+        "Exp", "Log", "Sin", "Cos", "Tan", "Asin", "Acos", "Atan", "Sinh", "Cosh", "Tanh", "Asinh", "Acosh",
+        "Atanh", "Erf", "Sigmoid", "Relu", "Mean", "MatMul", "Gemm", "ConstantOfShape", "Concat", "Where",
+    };
 
-    private static bool TorchWrites(NodeProto node)
-        => OutputAliasProof.IsStandard(node)
-           && (PlacementProof.InPlaceUnary.Contains(node.OpType) || PlacementProof.InPlaceBinary.Contains(node.OpType)
-               || node.OpType is "ConstantOfShape" or "Slice" or "Concat" or "Clip" or "Identity" or "Reshape"
-                   or "Squeeze" or "Unsqueeze" or "Flatten");
+    /// <summary>The element-wise operators PyTorch writes into a given range of a floating-point
+    /// value as the translation computes them: those of one input, and those of two.</summary>
+    internal static readonly HashSet<string> TorchElementWise = new(StringComparer.Ordinal)
+    {
+        "Neg", "Abs", "Sigmoid", "Relu", "Exp", "Log", "Sqrt", "Tanh", "Sin", "Cos", "Tan", "Asin", "Acos",
+        "Atan", "Sinh", "Cosh", "Asinh", "Acosh", "Atanh", "Reciprocal", "Floor", "Ceil", "Round", "Erf",
+        "Add", "Sub", "Mul", "Div", "Pow", "Max", "Min", "Sum",
+    };
+
+    /// <summary>The operators whose output PyTorch writes into a given range as a copy of what the
+    /// operator reads: the views, and what is a view unless placed.</summary>
+    internal static readonly HashSet<string> TorchCopies = new(StringComparer.Ordinal)
+    {
+        "Slice", "Identity", "Reshape", "Squeeze", "Unsqueeze", "Flatten", "Transpose", "Expand",
+    };
+
+    private static bool TorchShares(NodeProto node, int input, int output)
+    {
+        if (!OutputAliasProof.IsStandard(node)) return true;
+        if (node.OpType is "Max" or "Min" or "Sum") return node.Inputs.Count(i => i.Length > 0) < 2;
+        return !TorchFresh.Contains(node.OpType);
+    }
+
+    private static bool TorchWrites(NodeProto node, int elementType)
+    {
+        if (!OutputAliasProof.IsStandard(node) || node.Outputs.Count(o => o.Length > 0) != 1) return false;
+        if (TorchElementWise.Contains(node.OpType))
+            return elementType is 1 or 10 or 11 or 16
+                   && (PlacementProof.InPlaceUnary.Contains(node.OpType) ? node.Inputs.Count == 1 : node.Inputs.Count == 2);
+        return node.OpType is "ConstantOfShape" or "Concat" || TorchCopies.Contains(node.OpType);
+    }
 }
 
 /// <summary>
@@ -97,6 +126,17 @@ internal sealed class PlacementProof
     /// <summary>The boundary every placement starts at: what a card's own allocations are aligned
     /// to, which kernels reading wide vectors rely on.</summary>
     internal const long Alignment = 256;
+
+    /// <summary>The smallest value the planner places: one under a mebibyte is left to the backend,
+    /// whose own reuse serves it, and placing it costs more than it saves.</summary>
+    internal const long Smallest = 1L << 20;
+
+    /// <summary>The most of a block the outputs placed in it may leave idle once the run is over:
+    /// the block lives as long as its outputs.</summary>
+    internal const long IdleOutputBytes = 1L << 20;
+
+    // The reader standing for whatever reads a value once the run is over: it runs after every node.
+    private const int AfterTheRun = int.MaxValue;
 
     // Element-wise operators reading each element of an operand of the output's shape in the position
     // they write it, in one pass: the standard ones of one input, and of exactly two.
@@ -240,8 +280,19 @@ internal sealed class PlacementProof
         pending.Enqueue(root);
         while (pending.TryDequeue(out var current))
         {
-            if (!_consumers.TryGetValue(current, out var consumers)) continue;
             var parent = chain[current];
+            // A node holding a subgraph that reads the value may hand it back as one of its outputs,
+            // where the backend does that: somewhere within the occupant.
+            if (_capturedBy.TryGetValue(current, out var holders))
+                foreach (var n in holders)
+                    foreach (var (output, o) in _nodes[n].Outputs.Select((output, o) => (output, o)))
+                        if (output.Length > 0 && !chain.ContainsKey(output)
+                            && (_memory.AlwaysShares(_nodes[n], -1, o) || (_memory.SharesUnlessPlaced(_nodes[n], -1, o) && !placed.Contains(output))))
+                        {
+                            chain[output] = new Member(0, bytes, false);
+                            pending.Enqueue(output);
+                        }
+            if (!_consumers.TryGetValue(current, out var consumers)) continue;
             foreach (var (n, slot) in consumers)
             {
                 var node = _nodes[n];
@@ -303,7 +354,8 @@ internal sealed class PlacementProof
     /// <c>Shape</c> or <c>Size</c> reads nothing; a <c>Slice</c> taking one contiguous run of a
     /// contiguous value reads that run; anything else reads all of the value it reads, or the whole
     /// occupant where that value is not one contiguous run of it; a node whose subgraph refers to it
-    /// reads the whole occupant.
+    /// reads the whole occupant. A value read after the run is read there by
+    /// <see cref="AfterTheRun"/>, which no node precedes.
     /// </summary>
     private List<(int Node, long Start, long End)> ReadsOf(Dictionary<string, Member> chain, long offset, long bytes)
     {
@@ -311,6 +363,7 @@ internal sealed class PlacementProof
         foreach (var (name, member) in chain)
         {
             var (start, end) = member.Contiguous ? (offset + member.Shift, offset + member.Shift + member.Bytes) : (offset, offset + bytes);
+            if (_readAfterRun.Contains(name)) reads.Add((AfterTheRun, start, end));
             if (_consumers.TryGetValue(name, out var consumers))
                 foreach (var (n, slot) in consumers)
                 {
@@ -330,9 +383,6 @@ internal sealed class PlacementProof
         return reads;
     }
 
-    /// <summary>Whether anything in <paramref name="chain"/> is read after the run.</summary>
-    private bool ReadAfterRun(Dictionary<string, Member> chain) => chain.Keys.Any(_readAfterRun.Contains);
-
     /// <summary>The contiguous run, in elements, a <c>Slice</c> node takes of
     /// <paramref name="data"/>, or null.</summary>
     private (long First, long Count)? SliceRun(NodeProto node, string data)
@@ -348,22 +398,21 @@ internal sealed class PlacementProof
     // ---- occupants ----
 
     /// <summary>What occupies a range of a block for a while: an input's own content (no writer)
-    /// or a placed value, the memory chain behind it, every read of it, and whether it is read
-    /// after the run.</summary>
+    /// or a placed value, the memory chain behind it, and every read of it.</summary>
     private sealed record Occupant(
-        Placement Placement, int Writer, Dictionary<string, Member> Chain, List<(int Node, long Start, long End)> Reads, bool AfterRun);
+        Placement Placement, int Writer, Dictionary<string, Member> Chain, List<(int Node, long Start, long End)> Reads);
 
     private Occupant Content(string block, IReadOnlySet<string> placed)
     {
         var bytes = _blocks[block];
         var chain = ChainOf(block, bytes, placed);
-        return new Occupant(new Placement(block, block, 0, bytes), -1, chain, ReadsOf(chain, 0, bytes), ReadAfterRun(chain));
+        return new Occupant(new Placement(block, block, 0, bytes), -1, chain, ReadsOf(chain, 0, bytes));
     }
 
     private Occupant Placed(Placement placement, IReadOnlySet<string> placed)
     {
         var chain = ChainOf(placement.Value, placement.Bytes, placed);
-        return new Occupant(placement, _producer[placement.Value], chain, ReadsOf(chain, placement.Offset, placement.Bytes), ReadAfterRun(chain));
+        return new Occupant(placement, _producer[placement.Value], chain, ReadsOf(chain, placement.Offset, placement.Bytes));
     }
 
     /// <summary>
@@ -382,9 +431,9 @@ internal sealed class PlacementProof
         var o = node.Outputs.IndexOf(value);
         for (int i = 0; i < node.Inputs.Count; i++)
             if (_memory.AlwaysShares(node, i, o)) return "a view of its writer's input";
-        if (!_memory.Writes(node)) return "written by an operator the backend cannot write into a range";
         if (!_shapes.TryGetValue(value, out var shape)) return "of unknown shape";
         if (shape.Bytes <= 0) return "of no fixed-width element type";
+        if (!_memory.Writes(node, shape.ElementType)) return "written by an operator the backend cannot write into a range";
         return null;
     }
 
@@ -392,7 +441,6 @@ internal sealed class PlacementProof
     /// on the bytes their ranges share.</summary>
     private bool Before(Occupant first, Occupant second)
     {
-        if (first.AfterRun) return false;
         var w = second.Writer;
         if (w < 0) return false;
         if (first.Writer >= 0 && (first.Writer == w || !Precedes(first.Writer, w))) return false;
@@ -402,7 +450,7 @@ internal sealed class PlacementProof
         {
             if (end <= lo || start >= hi) continue;
             if (reader == w) continue;
-            if (!Precedes(reader, w)) return false;
+            if (reader == AfterTheRun || !Precedes(reader, w)) return false;
         }
         foreach (var (start, end, identical) in WriterReads(w, first, second.Placement))
             if (end > lo && start < hi && !identical) return false;
@@ -447,6 +495,8 @@ internal sealed class PlacementProof
                     || (node.OpType == "Clip" && slot == 0)
                     || (InPlaceBinary.Contains(node.OpType) && node.Inputs.Count == 2))
                     identical = sameElements && written.Offset == start;
+                else if (IsWholeCopy(node, slot))
+                    identical = inBytes == outBytes && inBytes > 0 && inShape.Elements == outShape.Elements && written.Offset == start;
                 else if (node.OpType == "Slice" && slot == 0 && SliceRun(node, name) is { } run && inBytes > 0)
                 {
                     start += run.First * inBytes;
@@ -459,6 +509,12 @@ internal sealed class PlacementProof
             yield return (start, end, identical);
         }
     }
+
+    /// <summary>Whether <paramref name="node"/> writes its output element for element as it reads
+    /// its input <paramref name="slot"/>, in the same order: a view operator that keeps every
+    /// element where it is, which a backend that places it writes as a copy.</summary>
+    private static bool IsWholeCopy(NodeProto node, int slot)
+        => slot == 0 && node.OpType is "Identity" or "Reshape" or "Squeeze" or "Unsqueeze" or "Flatten";
 
     /// <summary>Where part <paramref name="slot"/> of a <c>Concat</c> lands in its output, in
     /// elements, when every part lands as one contiguous run — every dimension outside the axis
@@ -488,15 +544,16 @@ internal sealed class PlacementProof
     /// content, then each placement, every memory chain as the backend lays it out with those
     /// values placed.
     /// </summary>
-    private List<Occupant> Occupants(IReadOnlyList<Placement> placements)
+    private List<Occupant> Occupants(IReadOnlyList<Placement> placements, IReadOnlySet<string>? cut = null)
     {
         var placed = placements.Select(p => p.Value).ToHashSet(StringComparer.Ordinal);
+        if (cut is not null) placed.UnionWith(cut);
         return [.. _blocks.Keys.Select(b => Content(b, placed)), .. placements.Select(p => Placed(p, placed))];
     }
 
     /// <summary>Whether <paramref name="value"/> is a view its writer hands back unless it is
     /// placed, so placing it changes the memory chain of what it views.</summary>
-    private bool LeavesAChain(string value)
+    internal bool LeavesAChain(string value)
     {
         var node = _nodes[_producer[value]];
         var o = node.Outputs.IndexOf(value);
@@ -506,21 +563,23 @@ internal sealed class PlacementProof
     }
 
     /// <summary>
-    /// <paramref name="occupants"/> — those of <paramref name="accepted"/> — with
-    /// <paramref name="candidate"/> placed too, where every pair of them is compatible; null where
-    /// the candidate does not fit.
+    /// <paramref name="occupants"/> — those of <paramref name="accepted"/>, laid out with the values
+    /// of <paramref name="cut"/> out of every memory chain too — with <paramref name="candidate"/>
+    /// placed as well, where every pair of them is compatible; null where the candidate does not fit.
     /// </summary>
-    private List<Occupant>? With(List<Occupant> occupants, List<Placement> accepted, Placement candidate)
+    private List<Occupant>? With(List<Occupant> occupants, List<Placement> accepted, Placement candidate, IReadOnlySet<string>? cut = null)
     {
         if (!Fits(candidate)) return null;
-        if (!LeavesAChain(candidate.Value))
+        if (!LeavesAChain(candidate.Value) || cut?.Contains(candidate.Value) == true)
         {
-            var occupant = Placed(candidate, accepted.Select(p => p.Value).Append(candidate.Value).ToHashSet(StringComparer.Ordinal));
+            var placed = accepted.Select(p => p.Value).Append(candidate.Value).ToHashSet(StringComparer.Ordinal);
+            if (cut is not null) placed.UnionWith(cut);
+            var occupant = Placed(candidate, placed);
             return occupants.All(other => Compatible(other, occupant)) ? [.. occupants, occupant] : null;
         }
         // Placing a view writes it into its own range, which takes it out of the memory chain it was
         // part of: every occupant is laid out again, and every pair checked.
-        var rebuilt = Occupants([.. accepted, candidate]);
+        var rebuilt = Occupants([.. accepted, candidate], cut);
         for (int i = 0; i < rebuilt.Count; i++)
             for (int j = i + 1; j < rebuilt.Count; j++)
                 if (!Compatible(rebuilt[i], rebuilt[j])) return null;
@@ -571,6 +630,12 @@ internal sealed class PlacementProof
     /// range that fits. An output placed in a block whose outputs would leave more than
     /// <paramref name="idleOutputBytes"/> of it unused after the run is not placed: the block lives as
     /// long as its outputs.
+    ///
+    /// <para>An output that is a view unless placed is planned as though every such output were
+    /// placed — handed over as a view of a block, it would be copied out of it anyway — and a value
+    /// that is a view unless placed and is not read after the run is not planned at all: as a view it
+    /// takes no memory. The plan is proved over the placements it ends with, so an output planned that
+    /// way that found no room refuses whatever relied on its being placed.</para>
     /// </summary>
     internal IReadOnlyList<Placement> Plan(long smallest, long idleOutputBytes)
     {
@@ -578,37 +643,43 @@ internal sealed class PlacementProof
         var candidates = new List<string>();
         for (int n = 0; n < _nodes.Count; n++)
             foreach (var value in _nodes[n].Outputs)
-                if (value.Length > 0 && Unplaceable(value) is null && _shapes[value].Bytes >= smallest)
+                if (value.Length > 0 && Unplaceable(value) is null && _shapes[value].Bytes >= smallest
+                    && (_readAfterRun.Contains(value) || !LeavesAChain(value)))
                     candidates.Add(value);
         var outputs = candidates.Where(_readAfterRun.Contains).OrderByDescending(v => _shapes[v].Bytes).ToList();
         var others = candidates.Where(v => !_readAfterRun.Contains(v)).ToList();
+        var cut = outputs.Where(LeavesAChain).ToHashSet(StringComparer.Ordinal);
 
         var placed = new List<Placement>();
-        var occupants = Occupants(placed);
-        void Try(string value)
+        var occupants = Occupants(placed, cut);
+        void Try(string value, IReadOnlySet<string>? planCut)
         {
             foreach (var placement in Options(value, occupants))
             {
-                if (With(occupants, placed, placement) is not { } next) continue;
+                if (With(occupants, placed, placement, planCut) is not { } next) continue;
                 occupants = next;
                 placed.Add(placement);
                 return;
             }
         }
-        foreach (var value in outputs) Try(value);
+        foreach (var value in outputs) Try(value, cut);
 
         // An output that would keep more of its block idle than it uses goes back to the backend.
         var idle = placed.Where(p => _readAfterRun.Contains(p.Value)).GroupBy(p => p.Block)
             .Where(g => _blocks[g.Key] - g.Sum(p => p.Bytes) > idleOutputBytes).Select(g => g.Key).ToHashSet();
-        if (idle.Count > 0)
-        {
-            placed.RemoveAll(p => idle.Contains(p.Block));
-            occupants = Occupants(placed);
-        }
+        placed.RemoveAll(p => idle.Contains(p.Block));
+        placed = [.. ProveViewsFirst(placed)];
+        occupants = Occupants(placed);
 
-        foreach (var value in others) Try(value);
-        return Prove(placed);
+        foreach (var value in others) Try(value, null);
+        return ProveViewsFirst(placed);
     }
+
+    /// <summary><see cref="Prove"/> over <paramref name="placements"/> with the views among them
+    /// first: placing a view takes it out of the memory it views, which can only free what the
+    /// placements after it need, and a placement planned on that is proved after it.</summary>
+    private IReadOnlyList<Placement> ProveViewsFirst(List<Placement> placements)
+        => Prove(placements.OrderBy(p => LeavesAChain(p.Value) ? 0 : 1));
 
     /// <summary>Where <paramref name="value"/> may go, best first: the ranges its writer writes in
     /// place, then every aligned range starting at a block's start or right after an
@@ -654,6 +725,8 @@ internal sealed class PlacementProof
         if ((InPlaceUnary.Contains(writer.OpType) && slot == 0) || (writer.OpType == "Clip" && slot == 0)
             || (InPlaceBinary.Contains(writer.OpType) && writer.Inputs.Count == 2))
             return inShape.Shape.SequenceEqual(outShape.Shape) ? start : null;
+        if (IsWholeCopy(writer, slot))
+            return inShape.Elements == outShape.Elements ? start : null;
         if (writer.OpType == "Slice" && slot == 0 && SliceRun(writer, name) is { } run)
             return start + run.First * size;
         if (writer.OpType == "Concat" && ConcatPart(writer, slot, outShape) is { } part)

@@ -20,8 +20,10 @@ namespace Shorokoo.PyTorch;
 /// <para>Every output is handed over as memory of its own — never an input's, a constant's or
 /// another output's, even where the model's graph returns one of those as it is (an
 /// <c>Identity</c>, a <c>Reshape</c> view), since the caller owns what it is handed and may write
-/// to it — with one exception, which is output aliasing: an output the session was built to write
-/// into an input's memory (<see cref="OutputAlias"/>), on a run that consumed that input. See
+/// to it — with two exceptions, both on a run that consumed inputs: output aliasing, an output the
+/// session was built to write into an input's memory (<see cref="OutputAlias"/>); and placement, an
+/// output the run wrote into a range of a consumed input's memory proved free for it
+/// (<see cref="TorchPlacements"/>), handed over as a value standing on that memory. See
 /// <see cref="RunConsuming(IReadOnlyDictionary{string, IShorokooTensorValue}, IReadOnlyCollection{IShorokooTensorValue}, IReadOnlyList{string}, RunSettings, out IReadOnlyList{string?})"/>.</para>
 ///
 /// <para><b>Precision.</b> Whether torch computes <c>float32</c> products in TensorFloat-32 on a card,
@@ -55,6 +57,7 @@ internal sealed class TorchSession : IShorokooSession
     private readonly PyObject _constants;
     private readonly PyObject _constantStorages;
     private readonly PyObject _constantIds;
+    private readonly TorchPlacements? _placements;
     private int _disposed;
 
     // torch's CUDA caching allocator is the whole process's, so a cap on it is too: a run under a
@@ -70,7 +73,8 @@ internal sealed class TorchSession : IShorokooSession
     private TorchSession(
         TorchBackend backend, TorchRuntime runtime, TranslatedModel model, ShorokooLogSeverity logSeverity,
         long? limitBytes, bool tensorFloat32, NodePlacement? nodePlacement, SessionOutputPlacement outputPlacement,
-        PyObject main, PyObject constants, PyObject constantStorages, PyObject constantIds)
+        PyObject main, PyObject constants, PyObject constantStorages, PyObject constantIds,
+        ModelProto proto, int modelBytes, IReadOnlyList<OutputAlias> outputAliases)
     {
         _backend = backend;
         _runtime = runtime;
@@ -99,6 +103,7 @@ internal sealed class TorchSession : IShorokooSession
         _constants = constants;
         _constantStorages = constantStorages;
         _constantIds = constantIds;
+        _placements = TorchPlacements.For(proto, modelBytes, outputAliases, _inputNames, _outputIndex, runtime, constants, model.Constants.Count);
     }
 
     /// <summary>Whether a session of <paramref name="backend"/> built with <paramref name="precision"/>
@@ -143,7 +148,8 @@ internal sealed class TorchSession : IShorokooSession
                 return new TorchSession(backend, runtime, model, logSeverity,
                     backend.OnCuda ? deviceMemory.LimitBytes : null, TensorFloat32(backend, precision),
                     placement, OutputPlacementOf(proto.Graph!, backend.OnCuda),
-                    main, constants, runtime.ConstantStorages.Invoke(constants), runtime.ConstantIds.Invoke(constants));
+                    main, constants, runtime.ConstantStorages.Invoke(constants), runtime.ConstantIds.Invoke(constants),
+                    proto, modelBytes.Length, outputAliases);
             }
             catch (PythonException ex)
             {
@@ -205,6 +211,9 @@ internal sealed class TorchSession : IShorokooSession
 
     public NodePlacement? ReadNodePlacement() => _nodePlacement;
 
+    /// <summary>Where this session's consuming runs place their values; null where it places none.</summary>
+    internal TorchPlacements? Placements => _placements;
+
     /// <summary>
     /// On CUDA, torch's caching allocator on this session's device, as <c>torch.cuda.memory_stats</c>
     /// reports it — which is the whole process's allocator on that device and not this session's
@@ -262,6 +271,11 @@ internal sealed class TorchSession : IShorokooSession
     /// pair knows only those. <paramref name="aliasedInputs"/> names, per output, the input it was
     /// written into.</para>
     ///
+    /// <para>Values of the run are written into ranges of the consumed values' memory where the
+    /// graph proves those ranges free for them (<see cref="TorchPlacements"/>): an output written so
+    /// is handed over standing on the consumed value's memory, a <see cref="SharedBlock"/> it holds a
+    /// lease on, beside every other output of the run standing on it.</para>
+    ///
     /// <para>The consumed values are released as the run returns. An output written into one is a
     /// value of its own holding a reference to the same tensor, so it outlives the release.</para>
     /// </summary>
@@ -316,6 +330,10 @@ internal sealed class TorchSession : IShorokooSession
                 feeds[i] = Fed(_inputNames[i], value);
             }
             var targets = AliasTargets(inputs, consumed, feeds);
+            var entry = consumed is null || _placements is null
+                ? null
+                : _placements.EntryFor(feeds, TorchPlacements.Blocks(_inputNames, inputs, consumed, feeds, targets), outputNames);
+            if (entry?.Main is null) entry = null;
 
             // A flag in native memory the run reads before every node, and the token's callback
             // sets: it needs no interpreter lock to set, so a cancellation lands while the run holds
@@ -330,7 +348,7 @@ internal sealed class TorchSession : IShorokooSession
             var device = _backend.OnCuda
                 ? DeviceRuns.GetOrAdd(_backend.CudaDeviceId, static _ => new ReaderWriterLockSlim(LockRecursionPolicy.SupportsRecursion))
                 : null;
-            if (device is null) return Invoke(feeds, wanted, outputNames, targets, stop, runSettings, out aliasedInputs);
+            if (device is null) return Invoke(feeds, wanted, outputNames, targets, entry, stop, runSettings, out aliasedInputs);
             if (_tensorFloat32) Float32Runs.EnterWriteLock();
             else Float32Runs.EnterReadLock();
             try
@@ -340,7 +358,7 @@ internal sealed class TorchSession : IShorokooSession
                 else device.EnterReadLock();
                 try
                 {
-                    return Invoke(feeds, wanted, outputNames, targets, stop, runSettings, out aliasedInputs);
+                    return Invoke(feeds, wanted, outputNames, targets, entry, stop, runSettings, out aliasedInputs);
                 }
                 finally
                 {
@@ -420,7 +438,7 @@ internal sealed class TorchSession : IShorokooSession
 
     private IReadOnlyList<IShorokooTensorValue> Invoke(
         TorchTensorValue[] feeds, int[] wanted, IReadOnlyList<string> outputNames,
-        int[] targets, IntPtr stop, RunSettings runSettings, out IReadOnlyList<string?> aliasedInputs)
+        int[] targets, TorchPlacements.Entry? placing, IntPtr stop, RunSettings runSettings, out IReadOnlyList<string?> aliasedInputs)
     {
         aliasedInputs = [];
         using (PythonRuntime.Gil())
@@ -442,10 +460,11 @@ internal sealed class TorchSession : IShorokooSession
             PyObject results;
             try
             {
+                using var noPlacements = new PyList();
                 results = PyCall.Invoke(_runtime.Run,
-                    _main, args, wantedList, _backend.DeviceName, _constantStorages, _constantIds,
+                    placing?.Main ?? _main, args, wantedList, _backend.DeviceName, _constantStorages, _constantIds,
                     stop.ToInt64(), (int)_logSeverity, aliases, _limitBytes ?? -1L, runSettings.ShrinkArenaAfterRun,
-                    _tensorFloat32);
+                    _tensorFloat32, placing?.Slots ?? noPlacements);
             }
             catch (PythonException ex) when (ex.Type.Name == TorchRuntime.RunStopped && runSettings.CancellationToken.IsCancellationRequested)
             {
@@ -473,6 +492,7 @@ internal sealed class TorchSession : IShorokooSession
             {
                 var outputs = new List<IShorokooTensorValue>(wanted.Length);
                 string?[]? aliased = null;
+                Dictionary<int, (SharedBlock Block, long Offset)>? blocks = null;
                 try
                 {
                     for (int i = 0; i < wanted.Length; i++)
@@ -480,8 +500,19 @@ internal sealed class TorchSession : IShorokooSession
                         using var triple = results[i];
                         using var description = triple[1];
                         using var written = triple[2];
-                        outputs.Add(TorchTensorValue.Wrap(triple[0], description, _outputSequenceTypes[wanted[i]]));
-                        if (written.IsTrue())
+                        var output = TorchTensorValue.Wrap(triple[0], description, _outputSequenceTypes[wanted[i]]);
+                        outputs.Add(output);
+                        if (PyTuple.IsTupleType(written))
+                        {
+                            using var slot = written[0];
+                            var placement = placing!.Plan[slot.As<int>()];
+                            var input = Array.IndexOf(_inputNames, placement.Block);
+                            blocks ??= [];
+                            if (!blocks.TryGetValue(input, out var block))
+                                blocks[input] = block = BlockOf(feeds[input]);
+                            output.StandOn(new BlockRange(block.Block, block.Offset + placement.Offset, placement.Bytes));
+                        }
+                        else if (written.IsTrue())
                             (aliased ??= new string?[wanted.Length])[i] = _aliases.Where((_, slot) => _bindable[slot]).First(a => a.Output == outputNames[i]).Input;
                     }
                 }
@@ -496,9 +527,21 @@ internal sealed class TorchSession : IShorokooSession
         }
     }
 
+    /// <summary>
+    /// The block the outputs a run placed in consumed value <paramref name="consumed"/> stand on, and
+    /// where its memory starts in it: the block the value itself stands on, where it does — its range
+    /// is that block's to give out again — or else a block of the value's own memory, which torch
+    /// frees once the last tensor reading it is gone, so letting go of the block has nothing to do.
+    /// </summary>
+    private static (SharedBlock Block, long Offset) BlockOf(TorchTensorValue consumed)
+        => consumed.Range is { } range
+            ? (range.Block, range.Offset)
+            : (new SharedBlock(TorchPlacements.BytesOf(consumed), static () => { }), 0);
+
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+        _placements?.Dispose();
         using (PythonRuntime.Gil())
         {
             _main.Dispose();

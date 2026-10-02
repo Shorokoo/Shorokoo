@@ -272,6 +272,7 @@ internal sealed partial class OnnxToPythonTranslator
         EndStatement(scope);
         if (training is null)
         {
+            if (parent is null && name == "main") _mainScope = scope;
             foreach (var node in graph.Nodes) EmitNode(node, scope);
             Return(graph.Outputs.Select(o => o.Name), scope);
         }
@@ -394,6 +395,7 @@ internal sealed partial class OnnxToPythonTranslator
             expression = entry.Emit(context);
             returnsTuple = entry.ReturnsTuple;
             if (returnsTuple) expression += $"[:{outputs.Count}]";
+            else expression = Placed(node, scope, entry.Function, expression);
         }
         else
         {

@@ -30,14 +30,6 @@ namespace Shorokoo.OnnxRuntime;
 /// </summary>
 internal sealed class OrtPlacements : IDisposable
 {
-    /// <summary>The smallest value placed: one under a mebibyte is left to ONNX Runtime, whose own
-    /// reuse serves it, and binding it costs more than it saves.</summary>
-    internal const long Smallest = 1L << 20;
-
-    /// <summary>The most of a block the outputs placed in it may leave idle once the run is over:
-    /// the block lives as long as its outputs.</summary>
-    internal const long IdleOutputBytes = 1L << 20;
-
     /// <summary>The largest model a session keeps to build variants from.</summary>
     internal const int ModelBytesKept = 16 << 20;
 
@@ -278,7 +270,7 @@ internal sealed class OrtPlacements : IDisposable
             // and a session builds nothing for such a run.
             if (original.Graph is not { } handed
                 || handed.Nodes.Count > PlacementProof.MostNodes
-                || new PlacementProof(handed, blockBytes, PlacementShapes.Evaluate(handed, given)).Plan(Smallest, IdleOutputBytes).Count == 0)
+                || new PlacementProof(handed, blockBytes, PlacementShapes.Evaluate(handed, given)).Plan(PlacementProof.Smallest, PlacementProof.IdleOutputBytes).Count == 0)
             {
                 Refuse(entry, "nothing to place");
                 return;
@@ -292,7 +284,7 @@ internal sealed class OrtPlacements : IDisposable
             var shapes = PlacementShapes.Evaluate(runs, given);
             var proof = new PlacementProof(runs, blockBytes, shapes);
             var originalOutputs = original.Graph.Outputs.Select(o => o.Name).ToHashSet(StringComparer.Ordinal);
-            var plan = proof.Prove(proof.Plan(Smallest, IdleOutputBytes)
+            var plan = proof.Prove(proof.Plan(PlacementProof.Smallest, PlacementProof.IdleOutputBytes)
                 .Where(p => _originalValues!.Contains(p.Value) && (originalOutputs.Contains(p.Value) ? outputNames.Contains(p.Value) : true)));
             for (int attempt = 0; attempt < 3; attempt++)
             {

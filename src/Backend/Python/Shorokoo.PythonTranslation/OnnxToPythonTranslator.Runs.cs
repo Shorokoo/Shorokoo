@@ -13,6 +13,15 @@ namespace Shorokoo.PythonTranslation;
 internal sealed record AliasSlot(string Output, string Input, int InputIndex, bool WrittenByTheGraph);
 
 /// <summary>
+/// A value of the top-level graph a run writes into a range of memory it is handed rather than into
+/// memory of its own: <see cref="Slot"/> numbers the range among the run's placements.
+/// <see cref="OwnMemory"/> marks a value whose operator may hand back its input's memory, which a
+/// run that does not write it into its range must copy into memory of its own all the same — the
+/// placement was proved with it out of its input's memory.
+/// </summary>
+internal readonly record struct PlacedValue(int Slot, bool OwnMemory);
+
+/// <summary>
 /// What the translation adds to every model for the runs of the session built from it, apart from
 /// what the model computes: a point to stop at before each node, and the writes of an output into a
 /// consumed input's memory. Both are calls the support package's <c>runtime</c> puts in the model's
@@ -39,6 +48,8 @@ internal sealed partial class OnnxToPythonTranslator
     };
 
     private AliasPlan? _aliasPlan;
+    private IReadOnlyDictionary<string, PlacedValue>? _placed;
+    private Scope? _mainScope;
 
     /// <summary>
     /// Translates <paramref name="model"/>, arranging for the runs of its session to write the outputs
@@ -49,6 +60,19 @@ internal sealed partial class OnnxToPythonTranslator
     /// <exception cref="NotSupportedException">The model uses something the backend cannot run: the
     /// dialect's own exception.</exception>
     public static TranslatedModel Translate(ModelProto model, IReadOnlyList<OutputAlias> outputAliases, PythonDialect dialect)
+        => Translate(model, outputAliases, dialect, null);
+
+    /// <summary>
+    /// <see cref="Translate(ModelProto, IReadOnlyList{OutputAlias}, PythonDialect)"/>, with each value
+    /// of the top-level graph <paramref name="placed"/> names written into the range of its slot
+    /// where a run hands one over (the support package's <c>_into</c>): a value whose operator is
+    /// translated as one plain call of a support function. Which ranges are safe to write is the
+    /// caller's to prove (<see cref="PlacementProof"/>); a run that hands over no range for a slot
+    /// computes the value as the plain translation does.
+    /// </summary>
+    internal static TranslatedModel Translate(
+        ModelProto model, IReadOnlyList<OutputAlias> outputAliases, PythonDialect dialect,
+        IReadOnlyDictionary<string, PlacedValue>? placed)
     {
         ArgumentNullException.ThrowIfNull(model);
         ArgumentNullException.ThrowIfNull(outputAliases);
@@ -56,9 +80,25 @@ internal sealed partial class OnnxToPythonTranslator
         var graph = model.Graph ?? throw dialect.Unsupported(
             UnsupportedReason.UnsupportedModel, null, null, "The model has no graph.");
         var plan = AliasPlan.For(graph, outputAliases);
-        var translator = new OnnxToPythonTranslator(dialect) { _aliasPlan = plan };
+        var translator = new OnnxToPythonTranslator(dialect) { _aliasPlan = plan, _placed = placed };
         var translated = translator.Run(model, graph);
         return translated with { Aliases = plan?.Slots(translated.InputNames) ?? [] };
+    }
+
+    /// <summary>
+    /// <paramref name="expression"/>, the call of <paramref name="function"/> a node of the top-level
+    /// graph evaluates to, as a write into its range where the node's one output is placed: the same
+    /// call made through <c>_into</c>, which writes the result into the range a run hands over for
+    /// the slot and returns it there, or computes it as the call does where none is.
+    /// </summary>
+    private string Placed(NodeProto node, Scope scope, string? function, string expression)
+    {
+        if (_placed is null || !ReferenceEquals(scope, _mainScope) || function is null
+            || !expression.StartsWith(function + "(", StringComparison.Ordinal)
+            || node.Outputs.Count(o => o.Length > 0) != 1
+            || !_placed.TryGetValue(node.Outputs.First(o => o.Length > 0), out var placed))
+            return expression;
+        return $"_into({placed.Slot}, {(placed.OwnMemory ? "True" : "False")}, {function}, {expression[(function.Length + 1)..]}";
     }
 
     /// <summary>

@@ -196,10 +196,13 @@ def _export(value, device, taken, ids):
 
 
 def run(main, args, wanted, run_device, constant_storages, constant_ids,
-        stop_address=0, severity=None, aliases=(), limit_bytes=-1, shrink=False, tensor_float32=False):
+        stop_address=0, severity=None, aliases=(), limit_bytes=-1, shrink=False, tensor_float32=False,
+        placements=()):
     """Runs a translated model and exports the outputs at indices `wanted`, each tensor on the run's
     device and each sequence in host memory -- where the .NET side reads every input and leaves every
-    output. Returns (value, description, aliased) per output.
+    output. Returns (value, description, written) per output: `written` is True for an output
+    written into a consumed input by an alias pair, a one-element tuple (slot,) for one written into
+    its placement's range, and False otherwise.
 
     `args` are where the run reads them already: a tensor on the run's device, a string tensor or a
     sequence in host memory. `stop_address` is the address of a 32-bit flag the .NET side sets to
@@ -210,7 +213,8 @@ def run(main, args, wanted, run_device, constant_storages, constant_ids,
     allocate on a CUDA device beyond what its allocator holds there already, or -1; `shrink` whether
     to hand the device's unused cached blocks back once the run is over; `tensor_float32` whether a
     run on a CUDA device may compute float32 products, convolutions and recurrent layers in
-    TensorFloat-32 -- see float32_precision."""
+    TensorFloat-32 -- see float32_precision; `placements` the ranges of consumed inputs the
+    translation's `_into` calls write values into, one per slot -- see _Placing."""
     run_device = torch.device(run_device)
     if run_device.type == "cuda":
         float32_precision(tensor_float32)
@@ -224,6 +228,8 @@ def run(main, args, wanted, run_device, constant_storages, constant_ids,
             moved = [_read_on_run_device(arg, run_device) for arg in args]
             aliasing = _Aliasing(args, moved, aliases, run_device, constant_storages)
             tokens.append(_aliasing.set(aliasing))
+            placing = _Placing(args, moved, placements, run_device, constant_storages)
+            tokens.append(_placing.set(placing))
             capped = _cap(run_device, limit_bytes)
             with torch.no_grad():
                 outputs = main(*moved)
@@ -231,7 +237,7 @@ def run(main, args, wanted, run_device, constant_storages, constant_ids,
             for token in reversed(tokens):
                 token.var.reset(token)
             _uncap(capped)
-        return _export_all(outputs, args, moved, wanted, run_device, aliasing, constant_storages, constant_ids)
+        return _export_all(outputs, args, moved, wanted, run_device, aliasing, placing, constant_storages, constant_ids)
     finally:
         # After the outputs are exported and every intermediate is dropped, so that what the run
         # allocated and no longer holds is handed back too, and on a failed run as well.
@@ -252,8 +258,8 @@ def float32_precision(tensor_float32):
     torch.backends.cudnn.allow_tf32 = bool(tensor_float32)
 
 
-def _export_all(outputs, args, moved, wanted, run_device, aliasing, constant_storages, constant_ids):
-    """(value, description, aliased) per wanted output: see `run`."""
+def _export_all(outputs, args, moved, wanted, run_device, aliasing, placing, constant_storages, constant_ids):
+    """(value, description, written) per wanted output: see `run`."""
     taken = set(constant_storages) | storages(args) | storages(moved)
     ids = set(constant_ids) | {id(arg) for arg in args}
     results = [None] * len(wanted)
@@ -262,6 +268,14 @@ def _export_all(outputs, args, moved, wanted, run_device, aliasing, constant_sto
         slot = aliasing.slot_of(index, outputs[index])
         if slot is not None and slot not in into:
             into[slot] = position
+            continue
+        placed = placing.slot_of(index, outputs[index])
+        if placed is not None and placed not in placing.handed:
+            # Handed over where the run wrote it, in the consumed input's memory: the .NET side
+            # makes it a value standing on that input's block.
+            placing.handed.add(placed)
+            value = outputs[index].detach()
+            results[position] = (value, describe(value), (placed,))
             continue
         value = _export(outputs[index], run_device, taken, ids)
         results[position] = (value, describe(value), False)
@@ -303,7 +317,8 @@ def load_model(source, filename, constants):
             linecache.cache.pop(evicted, None)
     else:
         _compiled.move_to_end(filename)
-    namespace = {"__name__": "shorokoo_model", "_C": constants, "_stop": stop_point, "_alias_write": alias_write}
+    namespace = {"__name__": "shorokoo_model", "_C": constants, "_stop": stop_point, "_alias_write": alias_write,
+                 "_into": place_into}
     exec(code, namespace)
     return namespace["main"]
 
@@ -468,6 +483,211 @@ def alias_write(slot, op, a, b, live):
     _WRITERS[op](a, b, out=target)
     state.written[slot] = target
     return target
+
+
+# ---- writing a run's values into the memory it consumed ---------------------------------------
+
+_FLOATING = (torch.float32, torch.float64, torch.float16, torch.bfloat16)
+_placing = contextvars.ContextVar("shorokoo_placing", default=None)
+_fast = None
+
+
+class _Placing:
+    """The ranges of consumed inputs a run writes values into, one per slot of the translation's
+    placements, and what it wrote.
+
+    A slot is (input index, byte offset, byte count, element type code, shape, output index): the
+    value goes `byte count` bytes from byte `offset` of the memory of `main`'s input `input index`,
+    and is graph output `output index` (-1 for none). Which ranges are safe to write, and when, the
+    .NET side has proved over the graph; what is checked here is that each input is a tensor of
+    memory of its own: fed at that one position on the run's device, contiguous, its bytes no other
+    argument's and no constant's. A slot whose input is not is not written, and its value computed
+    as the plain translation computes it."""
+
+    def __init__(self, args, moved, placements, run_device, constant_storages):
+        self.slots = list(placements)
+        self.targets = [None] * len(self.slots)
+        self.written = [None] * len(self.slots)
+        self.handed = set()
+        self.blocks = {}
+        if not self.slots:
+            return
+        extents = []
+        for index, value in enumerate(list(args) + list(moved)):
+            for extent in _extents(value):
+                extents.append((index % len(args), extent))
+        constants = set(constant_storages)
+        for index in {slot[0] for slot in self.slots}:
+            if index < 0 or index >= len(args):
+                continue
+            arg = args[index]
+            if not isinstance(arg, torch.Tensor) or moved[index] is not arg or arg.device != run_device:
+                continue
+            if not arg.is_contiguous() or arg.numel() == 0 or _storage_of(arg) in constants:
+                continue
+            start = arg.data_ptr()
+            end = start + arg.numel() * arg.element_size()
+            if any(other != index and lo < end and start < hi for other, (lo, hi) in extents):
+                continue
+            try:
+                self.blocks[index] = arg.detach().reshape(-1).view(torch.uint8)
+            except RuntimeError:
+                continue
+
+    def target(self, slot):
+        """The tensor over slot `slot`'s range, or None where the slot is not written."""
+        if slot >= len(self.slots):
+            return None
+        target = self.targets[slot]
+        if target is None:
+            index, offset, count, code, shape, _ = self.slots[slot]
+            block = self.blocks.get(index)
+            if block is None or offset < 0 or offset + count > block.numel():
+                return None
+            target = block[offset:offset + count].view(torch_dtype(code)).view(list(shape))
+            self.targets[slot] = target
+        return target
+
+    def slot_of(self, index, value):
+        """The slot output `value`, at output index `index`, was written into; else None."""
+        for slot, placement in enumerate(self.slots):
+            if placement[5] == index and self.written[slot] is not None and value is self.written[slot]:
+                return slot
+        return None
+
+
+def _extents(value):
+    """The address ranges of memory `value` reads: a contiguous tensor's own bytes, all of a strided
+    view's storage, and each element's of a sequence."""
+    if isinstance(value, list):
+        return [extent for item in value for extent in _extents(item)]
+    if not isinstance(value, torch.Tensor) or value.numel() == 0:
+        return []
+    if value.is_contiguous():
+        start = value.data_ptr()
+        return [(start, start + value.numel() * value.element_size())]
+    storage = value.untyped_storage()
+    return [(storage.data_ptr(), storage.data_ptr() + storage.nbytes())]
+
+
+def _same_memory(a, b):
+    return (a.data_ptr() == b.data_ptr() and a.dtype == b.dtype and tuple(a.shape) == tuple(b.shape)
+            and a.stride() == b.stride())
+
+
+def _overlap(a, b):
+    return any(lo < end and start < hi for lo, hi in _extents(a) for start, end in _extents(b))
+
+
+def _fast_writers():
+    """Per support function, how it writes its result into a tensor it is handed allocating nothing,
+    exactly as it computes it: ("out", f) for torch's f taking out=, over floating-point operands;
+    ("relu", None) for the activation torch has only an in-place form of; ("fill", None) for
+    constant_of_shape; ("cat", None) for concat, part by part."""
+    global _fast
+    if _fast is None:
+        from . import ops_elementwise as e, ops_shape as s
+        table = {function: ("out", op) for function, op in [
+            (e.neg, torch.neg), (e.abs_, torch.abs), (e.sigmoid, torch.sigmoid), (e.exp, torch.exp),
+            (e.log, torch.log), (e.sqrt, torch.sqrt), (e.tanh, torch.tanh), (e.sin, torch.sin),
+            (e.cos, torch.cos), (e.tan, torch.tan), (e.asin, torch.asin), (e.acos, torch.acos),
+            (e.atan, torch.atan), (e.sinh, torch.sinh), (e.cosh, torch.cosh), (e.asinh, torch.asinh),
+            (e.acosh, torch.acosh), (e.atanh, torch.atanh), (e.reciprocal, torch.reciprocal),
+            (e.floor, torch.floor), (e.ceil, torch.ceil), (e.round_, torch.round), (e.erf, torch.erf),
+            (e.add, torch.add), (e.sub, torch.sub), (e.mul, torch.mul), (e.div, torch.div),
+            (e.pow_, torch.pow), (e.max_, torch.maximum), (e.min_, torch.minimum), (e.sum_, torch.add),
+        ]}
+        table[e.relu] = ("relu", None)
+        table[s.constant_of_shape] = ("fill", None)
+        table[s.concat] = ("cat", None)
+        _fast = table
+    return _fast
+
+
+def _write_fast(fast, target, args, kwargs):
+    """Writes the call into `target` allocating nothing, where `fast` can; whether it did."""
+    kind, op = fast
+    dtype = target.dtype
+    if kind == "fill":
+        value = kwargs.get("value")
+        if len(args) != 1 or set(kwargs) - {"value"} or (value.dtype if value is not None else torch.float32) != dtype:
+            return False
+        if [int(d) for d in args[0].reshape(-1).tolist()] != list(target.shape):
+            return False
+        target.fill_(value.reshape(-1)[0].item() if value is not None else 0)
+        return True
+    if kind == "cat":
+        if set(kwargs) != {"axis"} or not args or target.dim() == 0:
+            return False
+        rank = target.dim()
+        axis = kwargs["axis"] % rank
+        if not all(isinstance(part, torch.Tensor) and part.dtype == dtype and part.device == target.device
+                   and part.dim() == rank for part in args):
+            return False
+        if sum(part.shape[axis] for part in args) != target.shape[axis]:
+            return False
+        if any(part.shape[d] != target.shape[d] for part in args for d in range(rank) if d != axis):
+            return False
+        start = 0
+        for part in args:
+            length = part.shape[axis]
+            destination = target.narrow(axis, start, length)
+            if length and not _same_memory(part, destination):
+                destination.copy_(part)
+            start += length
+        return True
+    if dtype not in _FLOATING or kwargs or not args:
+        return False
+    if not all(isinstance(a, torch.Tensor) and a.dtype == dtype and (a.device == target.device or a.dim() == 0) for a in args):
+        return False
+    if tuple(torch.broadcast_shapes(*(a.shape for a in args))) != tuple(target.shape):
+        return False
+    if kind == "relu":
+        if not _same_memory(args[0], target):
+            target.copy_(args[0])
+        torch.relu_(target)
+        return True
+    op(*args, out=target)
+    return True
+
+
+def _write_copy(target, value):
+    """Copies `value`, a result already computed, into `target`; whether it is there now."""
+    if not isinstance(value, torch.Tensor) or value.dtype != target.dtype or tuple(value.shape) != tuple(target.shape):
+        return False
+    if value.device != target.device:
+        return False
+    if _same_memory(value, target):
+        return True
+    if _overlap(value, target):
+        return False
+    target.copy_(value)
+    return True
+
+
+def place_into(slot, own, function, *args, **kwargs):
+    """`function(*args, **kwargs)` -- a node of the translated graph -- written into the range of
+    placement slot `slot` and returned there, where the run hands one over: by torch writing the
+    result into it where `function` has a form that does (_fast_writers), else by copying the result
+    in. Where the run hands over none, or the result cannot go there, the result as computed --
+    copied into memory of its own where `own` says the placement was proved with the value out of
+    its operands' memory and it is still in it."""
+    state = _placing.get()
+    target = state.target(slot) if state is not None else None
+    if target is not None:
+        fast = _fast_writers().get(function)
+        if fast is not None and _write_fast(fast, target, args, kwargs):
+            state.written[slot] = target
+            return target
+    value = function(*args, **kwargs)
+    if target is not None and _write_copy(target, value):
+        state.written[slot] = target
+        return target
+    if own and isinstance(value, torch.Tensor):
+        storage = _storage_of(value)
+        if storage is not None and storage in storages([a for a in args if isinstance(a, (torch.Tensor, list))]):
+            value = value.clone(memory_format=torch.contiguous_format)
+    return value
 
 
 # ---- device memory ---------------------------------------------------------------------------

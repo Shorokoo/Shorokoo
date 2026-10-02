@@ -122,8 +122,8 @@ public static class DeviceMemory
     /// runs on, taking its blocks from the device again as its next runs ask for them.
     ///
     /// <para>The allocators keep a block that is let go of for the next request of its size, so a
-    /// loop's runs find their blocks waiting. Each session keeps no more than the most it has had in
-    /// use at once, and gives what it keeps back as it is disposed, or at the end of a run with
+    /// loop's runs find their blocks waiting. Each session keeps no more than the most one of its runs
+    /// has used, and gives what it keeps back as it is disposed, or at the end of a run with
     /// <see cref="RunSettings.ShrinkArenaAfterRun"/>; what the tensors placed on a card left kept
     /// goes back at the end of such a run on that card. This is the way to give it all back with
     /// no run to make: between phases of a long-lived program, say, or before handing the card to

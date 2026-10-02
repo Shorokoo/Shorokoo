@@ -29,12 +29,16 @@ namespace Shorokoo.Core.Backends;
 /// rather than handed back, so a loop's runs find their blocks waiting, as they would in an arena.
 /// Sizes are rounded up to a class — to 512 bytes up to a mebibyte, to an eighth of the power of
 /// two above — so a block is reused across requests that differ a little. An account never holds
-/// from the device more than the most it has ever had in use at once: a request no kept block
-/// serves hands back the blocks kept longest, as many as the new block takes it past that mark —
-/// on a card as the call that asked ends, since handing a block back there waits for the card — so
-/// an account fed one shape after another holds what its busiest moment needed rather than a block
-/// of every class it ever used. The price is a block from the device for each request of a shape
-/// it no longer keeps blocks for, where an arena would carve one out of a larger free region. What is kept also goes back when a run that
+/// from the device more than the most one of its calls has used: the blocks it had in use as the
+/// call began and every block the call was handed, each counted once (<see cref="Account.MaxUsed"/>)
+/// — for the device's own account, the tensors placed between one session call's end on the device
+/// and the next. A request no kept block serves hands back the blocks kept longest, as many as the
+/// new block takes the account past that mark — on a card as the call that asked ends, since
+/// handing a block back there waits for the card. So a loop whose calls repeat finds every block it
+/// needs kept, and an account fed one shape after another holds what its busiest call used rather
+/// than a block of every class it ever saw. The price is a block from the device for each request
+/// of a shape it no longer keeps blocks for, where an arena would carve one out of a larger free
+/// region. What is kept also goes back when a run that
 /// hands back its memory ends (<see cref="ReleaseCached(Account)"/>), when a session closes,
 /// before an account would refuse an allocation for want of room, before the device would refuse
 /// one, and when the program asks (<see cref="ReleaseEverywhere"/>).</para>
@@ -225,13 +229,15 @@ internal sealed unsafe class CachingAllocator
             if ((scope is not null && scope.TakeHeld(account, size, out var held)) || account.TakeCached(size, out held))
                 return Hand(held, size, bytes, account);
             // A fresh block: what the account kept longest goes back, as much as the block takes
-            // what it holds from the device past the most it has had in use at once. On a card, as
-            // the call charging the account ends (Scope.End), where one does: handing a block back
-            // waits for the card, which mid-run would stall the run's queued work.
+            // what it holds from the device past the most one of its calls has used, this one with
+            // the block included. On a card, as the call charging the account ends (Scope.End), where
+            // one does: handing a block back waits for the card, which mid-run would stall the run's
+            // queued work.
+            if (account == Placements) BeginPlacementsCall();
             release = OnCard && scope is not null && scope.Charges(account)
                 ? []
                 : account.Shed(account.InUse + account.Cached + account.Held + size
-                               - Math.Max(account.MaxInUse, account.InUse + size));
+                               - Math.Max(account.MaxUsed, account.Used + size));
             if (account.LimitUnderLock is { } limit && account.Charged + account.Cached + account.Held + size > limit)
             {
                 // What it keeps goes back first -- cached, and on a card what this call let go of,
@@ -275,6 +281,22 @@ internal sealed unsafe class CachingAllocator
         }
     }
 
+    // How many session calls on this device have ended, which divides what is placed on it into
+    // calls of its own (BeginPlacementsCall).
+    private long _callsEnded;
+
+    /// <summary>
+    /// Starts a call of <see cref="Placements"/> where a session call on this device has ended since
+    /// it was last handed a block: what is placed between two session calls is one call of its own.
+    /// Under the lock.
+    /// </summary>
+    private void BeginPlacementsCall()
+    {
+        if (Placements.CallsSeen == _callsEnded) return;
+        Placements.CallsSeen = _callsEnded;
+        Placements.BeginCall();
+    }
+
     /// <summary>Where this allocator's memory is, as a refusal says it.</summary>
     private string Where => OnCard ? $"on CUDA device {_device}" : "of host memory";
 
@@ -282,10 +304,13 @@ internal sealed unsafe class CachingAllocator
     /// <c>AllocationFailureReport</c> reads as the card's.</summary>
     private string Allocator => OnCard ? "Shorokoo's cuda_allocator" : "Shorokoo's host allocator";
 
-    /// <summary>Records <paramref name="block"/> as handed to <paramref name="account"/>.</summary>
+    /// <summary>Records <paramref name="block"/> as handed to <paramref name="account"/>, and as used
+    /// by the account's call.</summary>
     private IntPtr Hand(IntPtr block, long size, long requested, Account account)
     {
         _blocks[block] = new Block { Size = size, Requested = requested, Account = account };
+        if (account == Placements) BeginPlacementsCall();
+        account.Use(block, size);
         account.InUse += size;
         account.Requested += requested;
         account.Allocations++;
@@ -506,6 +531,38 @@ internal sealed unsafe class CachingAllocator
         internal long Refusals;
         internal bool Closed;
 
+        /// <summary>What the account's current call has used: what it had in use as the call
+        /// began, and every block the call was handed, each counted once.</summary>
+        internal long Used;
+
+        /// <summary>
+        /// The most <see cref="Used"/> has reached over the account's calls: what it holds from the
+        /// device is kept at or under it, so a call like the busiest one finds every block it needs.
+        /// </summary>
+        internal long MaxUsed;
+
+        // The blocks counted in Used, the calls charging the account now, and for the device's own
+        // account how many session calls had ended on the device when its call began.
+        private readonly HashSet<IntPtr> _used = [];
+        internal int Calls;
+        internal long CallsSeen;
+
+        /// <summary>A call begins: what is in use now is what it starts out using.</summary>
+        internal void BeginCall()
+        {
+            Used = InUse;
+            _used.Clear();
+        }
+
+        /// <summary><paramref name="block"/>, of <paramref name="size"/>, is handed to the account's
+        /// call.</summary>
+        internal void Use(IntPtr block, long size)
+        {
+            if (!_used.Add(block)) return;
+            Used += size;
+            if (Used > MaxUsed) MaxUsed = Used;
+        }
+
         /// <summary>What counts against <see cref="Limit"/> of what is out: all of it but what was
         /// handed over.</summary>
         internal long Charged => InUse - HandedOver;
@@ -586,8 +643,18 @@ internal sealed unsafe class CachingAllocator
     internal static ChargeScope Charge(Account? host, Account? card)
     {
         var scope = new Scope(host, card, t_scope);
+        if (host is not null) Begin(host);
+        if (card is not null) Begin(card);
         t_scope = scope;
         return new ChargeScope(scope);
+    }
+
+    /// <summary>A call charging <paramref name="account"/> begins: its first, where no other is
+    /// under way, begins what the account's call uses.</summary>
+    private static void Begin(Account account)
+    {
+        lock (account.Allocator._gate)
+            if (account.Calls++ == 0) account.BeginCall();
     }
 
     /// <summary>The disposable <see cref="Charge"/> answers.</summary>
@@ -659,7 +726,7 @@ internal sealed unsafe class CachingAllocator
 
         /// <summary>The call is over, its stream done with what it held: into the cache, or back to
         /// the device where the account has closed meanwhile; and each account sheds what it keeps
-        /// beyond the most it has had in use at once.</summary>
+        /// beyond the most one of its calls has used.</summary>
         internal void End()
         {
             if (card is not null) EndOn(card);
@@ -672,6 +739,8 @@ internal sealed unsafe class CachingAllocator
             List<(IntPtr, long)> release = [];
             lock (allocator._gate)
             {
+                account.Calls--;
+                allocator._callsEnded++;
                 if (account == card && _held is not null)
                 {
                     foreach (var (size, blocks) in _held)
@@ -690,7 +759,7 @@ internal sealed unsafe class CachingAllocator
                     _held = null;
                 }
                 if (!account.Closed)
-                    release.AddRange(account.Shed(account.InUse + account.Cached + account.Held - account.MaxInUse));
+                    release.AddRange(account.Shed(account.InUse + account.Cached + account.Held - account.MaxUsed));
             }
             allocator.Release(release);
         }

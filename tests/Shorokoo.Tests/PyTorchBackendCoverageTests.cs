@@ -1159,6 +1159,7 @@ public class PyTorchBackendCoverageTests
         Assert.Equal("O@b+0", Placed(GraphOn("a:float[512,512] b:float[512,512]", "O", Op("Transpose", "a", "O"))));
         Assert.Equal("O@b+0", Placed(GraphOn("a:float[512,512] b:float[512,512] w:float[512,512]", "O", Op("MatMul", "a w", "O"))));
         Assert.Equal("O@a+0 Z@b+0", Placed(Graph("O Z", Op("Exp", "a", "e"), Op("Neg", "e", "O"), Op("Sigmoid", "b", "s"), Op("Add", "s e", "Z"))));
+        Assert.Equal("O@-", Placed(GraphOn("a:float[64] b:float[64]", "O", Op("Neg", "a", "t"), Op("Exp", "t", "u"), Op("Add", "u b", "O"))));
     }
 
     [Fact]
@@ -1207,17 +1208,18 @@ public class PyTorchBackendCoverageTests
             """.Replace("\n", " ").Replace("\r", " "), backend);
 
     [Fact]
-    public void TestAnElementWiseNodeIsWrittenOverAnOperandOfItsOwnMemoryThatNothingReadsAfterIt()
+    public void TestAnElementWiseNodeIsWrittenOverAnOperandNothingReadsAfterItAnInputOrAValueOfItsOwnMemory()
     {
-        Assert.Equal("neg over:exp", Calls(GraphOn("x:float[4]", "c", Op("Neg", "x", "b"), Op("Exp", "b", "c")), over: true));
-        Assert.Equal("exp", Calls(GraphOn("x:float[4]", "c", Op("Exp", "x", "c")), over: true));
-        Assert.Equal("neg exp over:abs_", Calls(GraphOn("x:float[4]", "c d", Op("Neg", "x", "b"), Op("Exp", "b", "c"), Op("Abs", "b", "d")), over: true));
-        Assert.Equal("neg exp", Calls(GraphOn("x:float[4]", "b c", Op("Neg", "x", "b"), Op("Exp", "b", "c")), over: true));
-        Assert.Equal("neg over:exp shape", Calls(GraphOn("x:float[4]", "c s", Op("Neg", "x", "b"), Op("Exp", "b", "c"), Op("Shape", "c", "s")), over: true));
+        Assert.Equal("over:neg over:exp", Calls(GraphOn("x:float[4]", "c", Op("Neg", "x", "b"), Op("Exp", "b", "c")), over: true));
+        Assert.Equal("over:exp", Calls(GraphOn("x:float[4]", "c", Op("Exp", "x", "c")), over: true));
+        Assert.Equal("over:neg exp over:abs_", Calls(GraphOn("x:float[4]", "c d", Op("Neg", "x", "b"), Op("Exp", "b", "c"), Op("Abs", "b", "d")), over: true));
+        Assert.Equal("over:neg exp", Calls(GraphOn("x:float[4]", "b c", Op("Neg", "x", "b"), Op("Exp", "b", "c")), over: true));
+        Assert.Equal("over:neg over:exp shape", Calls(GraphOn("x:float[4]", "c s", Op("Neg", "x", "b"), Op("Exp", "b", "c"), Op("Shape", "c", "s")), over: true));
         Assert.Equal("neg over:add over:mul", Calls(GraphOn("x:float[4]", "d", Op("Neg", "x", "b"), Op("Add", "x b", "c"), Op("Mul", "c c", "d")), over: true));
-        Assert.Equal("neg softmax", Calls(GraphOn("x:float[4]", "c", Op("Neg", "x", "b"), Op("Softmax", "b", "c")), over: true));
-        Assert.Equal("neg identity exp abs_", Calls(GraphOn("x:float[4]", "c d", Op("Neg", "x", "b"), Op("Identity", "b", "r"), Op("Exp", "b", "c"), Op("Abs", "r", "d")), over: true));
-        Assert.Equal("neg transpose mul", Calls(GraphOn("x:float[2,2]", "c", Op("Neg", "x", "b"), Op("Transpose", "b", "t"), Op("Mul", "b t", "c")), over: true));
+        Assert.Equal("over:neg softmax", Calls(GraphOn("x:float[4]", "c", Op("Neg", "x", "b"), Op("Softmax", "b", "c")), over: true));
+        Assert.Equal("over:neg identity exp abs_", Calls(GraphOn("x:float[4]", "c d", Op("Neg", "x", "b"), Op("Identity", "b", "r"), Op("Exp", "b", "c"), Op("Abs", "r", "d")), over: true));
+        Assert.Equal("over:neg transpose mul", Calls(GraphOn("x:float[2,2]", "c", Op("Neg", "x", "b"), Op("Transpose", "b", "t"), Op("Mul", "b t", "c")), over: true));
+        Assert.Equal("neg over:add", Calls(GraphOn("x:float[4]", "c", Op("Neg", "x", "b"), Op("Add", "b x", "c")), over: true));
     }
 
     [Fact]
@@ -1299,10 +1301,15 @@ public class PyTorchBackendCoverageTests
                 feeds[input.Name] = feedTwice && feeds.Count > 0 ? feeds.Values.First() : Pattern(backend, input, feeds.Count);
             var fed = feeds.Values.Distinct().Cast<TorchTensorValue>().ToArray();
             var at = feeds.ToDictionary(f => f.Key, f => (((TorchTensorValue)f.Value).Address, TorchPlacements.BytesOf((TorchTensorValue)f.Value)));
+            var fedBytes = fed.Select(value => Convert.ToBase64String(backend.CopyTensorToHost(value))).ToArray();
             var before = CardAllocated(backend);
             var results = session.RunConsuming(feeds, consuming ? fed : [], names, RunSettings.Default);
             var allocated = CardAllocated(backend) - before;
-            if (!consuming) foreach (var value in fed) value.Dispose();
+            if (!consuming)
+            {
+                Assert.Equal(fedBytes, fed.Select(value => Convert.ToBase64String(backend.CopyTensorToHost(value))));
+                foreach (var value in fed) value.Dispose();
+            }
             var where = names.Select((name, i) => ((TorchTensorValue)results[i]).Range is null
                 ? $"{name}@-"
                 : at.Where(f => ((TorchTensorValue)results[i]).Address >= f.Value.Address && ((TorchTensorValue)results[i]).Address < f.Value.Address + (nint)f.Value.Item2)

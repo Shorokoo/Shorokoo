@@ -202,9 +202,7 @@ public class MemoryReuseScenarioTests
         var lines = new List<string>
         {
             $"# Placement across the benchmark families, {where}, batch x{(long.TryParse(Environment.GetEnvironmentVariable("SHOROKOO_MEMORY_REUSE_SCALE"), out var x) ? x : 1)}", "",
-            backend == "torch-cpu"
-                ? "| family | placement | step allocated | step ms | step plans | inference allocated | inference ms | ms, input shared | inference plans |"
-                : "| family | placement | step peak | step ms | step plans | inference peak | inference ms | ms, input shared | inference plans |",
+            "| family | placement | step peak | step ms | step plans | inference peak | inference ms | ms, input shared | inference plans |",
             "|---|---|---|---|---|---|---|---|---|",
         };
         var scale = long.TryParse(Environment.GetEnvironmentVariable("SHOROKOO_MEMORY_REUSE_SCALE"), out var s) ? s : 1;
@@ -244,10 +242,13 @@ public class MemoryReuseScenarioTests
         var lines = new List<string>
         {
             $"# What bounds a training step's peak, {where}, batch x{scale}", "",
-            "| family | measured | modelled, graph handed over | modelled, graph run | forward | backward | parameter gradients | update | every element-wise op over a dying operand | batch freed after its last read | a shape read holds nothing | Relu's gradient reads its output | all four | batch | parameters | state | peak at |",
+            "| family | measured | modelled, graph handed over | modelled, graph run | forward | backward | parameter gradients | update | every element-wise op over a dying operand | batch freed after its last read | a shape read holds nothing | all three | modelled before the memory-aware pass (its strategy) | batch | parameters | state | peak at |",
             "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
         };
-        foreach (var (family, model, benchmarkShape) in MemoryPassBenchmarkTests.Suite)
+        // Beside the benchmark's families, one whose parameters outweigh its activations: a 4096-wide
+        // linear layer, 64 MiB of weights, where the optimizer's state and arithmetic are the step.
+        (string, Func<ComputationGraph>, long[])[] wide = [("wide", () => WideLinearModel.ComputationGraph, [2L, 4096L])];
+        foreach (var (family, model, benchmarkShape) in MemoryPassBenchmarkTests.Suite.Concat(wide))
         {
             if (only is not null && !only.Contains(family)) continue;
             long[] shape = [benchmarkShape[0] * scale, .. benchmarkShape[1..]];
@@ -292,15 +293,14 @@ public class MemoryReuseScenarioTests
                 measured = backend switch
                 {
                     "ort" => Observed(onCard, () => { run.Step(bx, bt); return 0; }).Peak,
-                    "torch-cuda" => TorchObserved(backend, () => { run.Step(bx, bt); return 0; }).Peak,
-                    _ => -1,
+                    _ => TorchObserved(backend, () => { run.Step(bx, bt); return 0; }).Peak,
                 };
             }
             OrtPlacements.Settled = null;
             TorchPlacements.Settled = null;
             var stepModel = MemoryPassBenchmarkTests.RigModel(rig.TrainingStepPureGraph, rig.OptimizationInputShapes);
             if (backend.StartsWith("torch", StringComparison.Ordinal) && Environment.GetEnvironmentVariable("SHOROKOO_MEMORY_REUSE_LOG") is not null)
-                File.WriteAllText(Path.Combine(OutputDirectory(), $"step-{family}.py"), OnnxToPythonTranslator.Translate(stepModel, [], Shorokoo.PyTorch.TorchDialect.Instance).Source);
+                File.WriteAllText(Path.Combine(OutputDirectory(), $"step-{family}.py"), OnnxToPythonTranslator.Translate(stepModel, [], Shorokoo.PyTorch.TorchDialect.Instance, null, TorchInPlace.Plan(stepModel.Graph)).Source);
             var state = rig.UpdatedParamFieldCount + rig.UpdatedStateFieldCount + rig.UpdatedOptimizerStateFieldCount;
             StepAnatomy Anatomy(GraphProto graph) => new(graph, rig.UpdatedParamFieldCount, state, rig.UpdatedOptimizerStateFieldCount);
             var handed = Anatomy(stepModel.Graph);
@@ -319,17 +319,18 @@ public class MemoryReuseScenarioTests
                 && ((PlacementProof.InPlaceUnary.Contains(node.OpType) && slot == 0) || (PlacementProof.InPlaceBinary.Contains(node.OpType) && node.Inputs.Count == 2))));
             var batchFreed = anatomy.Peak(order, shares, own, batchFreed: true);
             var shapesFree = anatomy.Peak(order, shares, own, shapeReadsHold: false);
-            var rewired = ReluMasksReadTheOutput(stepModel);
-            var reluRun = backend == "ort" ? OrtRun(rewired, onCard, rig.OptimizationInputShapes) : default;
-            var reluAnatomy = backend == "ort" ? Anatomy(reluRun.Graph) : Anatomy(rewired.Graph);
-            var reluOrder = backend == "ort" ? reluRun.Order : TranslationOrder(rewired.Graph);
-            var relu = reluAnatomy.Peak(reluOrder, shares, own);
-            var everything = reluAnatomy.Peak(reluOrder, shares, (node, slot) => (own?.Invoke(node, slot) ?? false) || (OutputAliasProof.IsStandard(node)
+            // The step before the memory-aware pass rematerialized or reordered anything, as the
+            // backend runs it.
+            var preModel = MemoryPassBenchmarkTests.RigModel(rig.PreOptimizationGraph, rig.OptimizationInputShapes);
+            var preRun = backend == "ort" ? OrtRun(preModel, onCard, rig.OptimizationInputShapes) : default;
+            var preAnatomy = backend == "ort" ? Anatomy(preRun.Graph) : Anatomy(preModel.Graph);
+            var pre = preAnatomy.Peak(backend == "ort" ? preRun.Order : TranslationOrder(preModel.Graph), shares, own);
+            var everything = anatomy.Peak(order, shares, (node, slot) => (own?.Invoke(node, slot) ?? false) || (OutputAliasProof.IsStandard(node)
                 && ((PlacementProof.InPlaceUnary.Contains(node.OpType) && slot == 0) || (PlacementProof.InPlaceBinary.Contains(node.OpType) && node.Inputs.Count == 2))),
                 batchFreed: true, shapeReadsHold: false);
             lines.Add($"| {family} | {(measured < 0 ? "-" : Mib(measured))} | {Mib(handedPeak.Bytes)} | {Mib(peak.Bytes)} | {Mib(peak.ByPart[StepAnatomy.Part.Forward])} | {Mib(peak.ByPart[StepAnatomy.Part.Backward])} "
                       + $"| {Mib(peak.ByPart[StepAnatomy.Part.ParameterGradient])} | {Mib(peak.ByPart[StepAnatomy.Part.Update])} | {Mib(inPlace.Bytes)} | {Mib(batchFreed.Bytes)} "
-                      + $"| {Mib(shapesFree.Bytes)} | {Mib(relu.Bytes)} | {Mib(everything.Bytes)} "
+                      + $"| {Mib(shapesFree.Bytes)} | {Mib(everything.Bytes)} | {Mib(pre.Bytes)} ({rig.OptimizationResult.StrategyName}) "
                       + $"| {Mib(anatomy.BatchBytes)} | {Mib(anatomy.ParameterBytes)} | {Mib(anatomy.StateBytes)} | {peak.Position}/{order.Length}: {anatomy.At(order, peak.Position)} |");
             File.AppendAllText(Path.Combine(OutputDirectory(), $"step-anatomy-{backend}-{(onCard ? "card" : "host")}-x{scale}-detail.md"),
                 $"\n## {family}\n\nplacements: {string.Join(", ", settled.GroupBy(x => x).Select(g => g.Count() == 1 ? g.Key : $"{g.Count()}x {g.Key}"))}\n\n"
@@ -339,8 +340,7 @@ public class MemoryReuseScenarioTests
                 + (SessionModel(rig) is { } handedOver ? $"; in the graph the step's session was handed, as ONNX Runtime lays values out: {BatchPlan(handedOver.Graph, state, PlacementMemory.OnnxRuntime, rig.OptimizationInputShapes)} ({handedOver.Graph.Nodes.Count} nodes against {stepModel.Graph.Nodes.Count}; "
                     + $"unknown shapes {UnknownIn(handedOver.Graph, rig.OptimizationInputShapes)}; " + $"the batch read by {BatchReaders(handedOver.Graph, state)} there, by {BatchReaders(stepModel.Graph, state)} in the other)" : "") + "\n"
                 + (backend == "ort" ? $"\n{ortRun.Held}\n" : "")
-                + $"\nwith Relu's gradient reading its output: values of unknown shape {reluAnatomy.UnknownValues} ({reluAnatomy.UnknownRoots}); largest held at the peak: "
-                + string.Join(", ", relu.Largest.Select(l => $"{l.Op} {l.Part} {Mib(l.Bytes)} (read until {l.Until})")) + "\n");
+                + "\nbefore the memory-aware pass, largest held at the peak: " + string.Join(", ", pre.Largest.Select(l => $"{l.Op} {l.Part} {Mib(l.Bytes)} (read until {l.Until})")) + "\n");
         }
         File.WriteAllText(Path.Combine(OutputDirectory(), $"step-anatomy-{backend}-{(onCard ? "card" : "host")}-x{scale}.md"), string.Join("\n", lines) + "\n");
     }
@@ -404,21 +404,6 @@ public class MemoryReuseScenarioTests
         var index = new Dictionary<NodeProto, int>(ReferenceEqualityComparer.Instance);
         for (int i = 0; i < graph.Nodes.Count; i++) index[graph.Nodes[i]] = i;
         return [.. Shorokoo.PythonTranslation.OnnxToPythonTranslator.ShapesFirst(graph.Nodes).Select(node => index[node])];
-    }
-
-    /// <summary><paramref name="model"/> with each <c>Greater</c> that reads a <c>Relu</c>'s input
-    /// — the mask of its gradient — reading the <c>Relu</c>'s output instead, which is positive
-    /// exactly where the input is.</summary>
-    private static ModelProto ReluMasksReadTheOutput(ModelProto model)
-    {
-        using var stream = new MemoryStream();
-        ProtoBuf.Serializer.Serialize(stream, model);
-        stream.Position = 0;
-        var copy = ProtoBuf.Serializer.Deserialize<ModelProto>(stream);
-        foreach (var relu in copy.Graph.Nodes.Where(n => n.OpType == "Relu").ToList())
-            foreach (var mask in copy.Graph.Nodes.Where(n => n.OpType == "Greater" && n.Inputs.Count == 2 && n.Inputs[0] == relu.Inputs[0]))
-                mask.Inputs[0] = relu.Outputs[0];
-        return copy;
     }
 
     /// <summary>The activations ONNX Runtime's kernels write over their input where it dies there
@@ -804,10 +789,9 @@ public class MemoryReuseScenarioTests
         foreach (var output in outputs) output.ToTensorData().Delete();
     }
 
-    /// <summary>What <paramref name="run"/> answers, and on CUDA the most torch's allocator had
-    /// handed out beyond what it had as the run began; on the CPU, where torch keeps no such figure
-    /// and its profiler's releases cannot be placed in time, everything the run allocated, transfers
-    /// onto the host excluded.</summary>
+    /// <summary>What <paramref name="run"/> answers, and the most torch held at once beyond what it
+    /// held as the run began: on CUDA off its allocator, on the CPU, where torch keeps no such figure,
+    /// off its profiler's memory timeline.</summary>
     private static (T Result, long Peak) TorchObserved<T>(string backend, Func<T> run)
     {
         using (PythonRuntime.Gil())
@@ -825,7 +809,7 @@ public class MemoryReuseScenarioTests
                 : """
                   import torch
                   from torch.profiler import profile, ProfilerActivity
-                  prof = profile(activities=[ProfilerActivity.CPU], profile_memory=True, with_stack=True)
+                  prof = profile(activities=[ProfilerActivity.CPU], profile_memory=True, record_shapes=True, with_stack=True)
                   prof.__enter__()
                   """);
             var result = run();
@@ -863,10 +847,15 @@ public class MemoryReuseScenarioTests
                               return True
                           e = e.cpu_parent
                       return False
-                  # What the run allocated: the profiler attributes each allocation to the operator
-                  # making it, but not each release to when it happens, so a peak cannot be read
-                  # off it reliably; the total can.
-                  peak = sum(e.self_cpu_memory_usage for e in prof.events() if not transfer(e) and e.self_cpu_memory_usage > 0)
+                  # The most the run held at once: its memory profile's timeline of every tensor
+                  # storage made and let go of, in order, what was there before the run left out.
+                  held = peak = 0
+                  for _, action, _, size in prof._memory_profile().timeline:
+                      if action.name == "CREATE":
+                          held += size
+                          peak = max(peak, held)
+                      elif action.name == "DESTROY":
+                          held -= size
                   import os
                   if os.environ.get("SHOROKOO_MEMORY_REUSE_LOG"):
                       import tempfile

@@ -182,13 +182,14 @@ internal sealed class TorchPlacements : IDisposable
         var placed = new Dictionary<string, PlacedValue>(StringComparer.Ordinal);
         for (int slot = 0; slot < plan.Count; slot++)
             placed[plan[slot].Value] = new PlacedValue(slot, proof.LeavesAChain(plan[slot].Value));
-        // A node is written over its operand as in the plain translation, unless either is placed:
-        // the plan relies on a placed value's range alone, and on the memory of every value it does
-        // not place being its own.
+        // A node is written over its operand as in the plain translation, unless either is placed or
+        // the operand is an input the plan places values in: the plan relies on a placed value's range
+        // alone, on a block holding only what it places there, and on the memory of every value it
+        // does not place being its own.
         var writers = graph.Nodes.SelectMany(n => n.Outputs.Where(o => o.Length > 0).Select(o => (Output: o, Node: n)))
             .GroupBy(p => p.Output, StringComparer.Ordinal).ToDictionary(g => g.Key, g => g.First().Node, StringComparer.Ordinal);
         var over = TorchInPlace.Plan(graph)
-            .Where(o => !placed.ContainsKey(o.Key) && !placed.ContainsKey(writers[o.Key].Inputs[o.Value]))
+            .Where(o => !placed.ContainsKey(o.Key) && !placed.ContainsKey(writers[o.Key].Inputs[o.Value]) && !blockBytes.ContainsKey(writers[o.Key].Inputs[o.Value]))
             .ToDictionary(o => o.Key, o => o.Value, StringComparer.Ordinal);
         TranslatedModel translated;
         try

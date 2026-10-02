@@ -197,7 +197,7 @@ def _export(value, device, taken, ids):
 
 def run(main, args, wanted, run_device, constant_storages, constant_ids,
         stop_address=0, severity=None, aliases=(), limit_bytes=-1, shrink=False, tensor_float32=False,
-        placements=()):
+        placements=(), writable=()):
     """Runs a translated model and exports the outputs at indices `wanted`, each tensor on the run's
     device and each sequence in host memory -- where the .NET side reads every input and leaves every
     output. Returns (value, description, written) per output: `written` is True for an output
@@ -214,7 +214,9 @@ def run(main, args, wanted, run_device, constant_storages, constant_ids,
     to hand the device's unused cached blocks back once the run is over; `tensor_float32` whether a
     run on a CUDA device may compute float32 products, convolutions and recurrent layers in
     TensorFloat-32 -- see float32_precision; `placements` the ranges of consumed inputs the
-    translation's `_into` calls write values into, one per slot -- see _Placing."""
+    translation's `_into` calls write values into, one per slot -- see _Placing; `writable` the
+    indices of the inputs the run consumed, which its `_over` calls may write over -- see
+    _Writing."""
     run_device = torch.device(run_device)
     if run_device.type == "cuda":
         float32_precision(tensor_float32)
@@ -230,6 +232,7 @@ def run(main, args, wanted, run_device, constant_storages, constant_ids,
             tokens.append(_aliasing.set(aliasing))
             placing = _Placing(args, moved, placements, run_device, constant_storages)
             tokens.append(_placing.set(placing))
+            tokens.append(_writing.set(_Writing(args, moved, writable, run_device, constant_storages)))
             capped = _cap(run_device, limit_bytes)
             with torch.no_grad():
                 outputs = main(*moved)
@@ -696,12 +699,44 @@ def _write_copy(target, value):
     return True
 
 
+_writing = contextvars.ContextVar("shorokoo_writing", default=None)
+
+
+class _Writing:
+    """Which of a run's inputs its `_over` calls may write over: those it consumed (`writable`,
+    by index), fed at that one position on the run's device, in no other argument's or constant's
+    storage. Every other input is the caller's, or another's too, and is only read."""
+
+    def __init__(self, args, moved, writable, run_device, constant_storages):
+        self.inputs = {id(value) for value in moved if isinstance(value, torch.Tensor)}
+        self.own = set()
+        held = {}
+        for value in list(args) + list(moved):
+            if isinstance(value, torch.Tensor) and (storage := _storage_of(value)) is not None:
+                held[storage] = held.get(storage, 0) + 1
+        constants = set(constant_storages)
+        for index in writable:
+            if index < 0 or index >= len(args) or not isinstance(args[index], torch.Tensor):
+                continue
+            arg = args[index]
+            storage = _storage_of(arg)
+            if (moved[index] is arg and arg.device == run_device and storage is not None
+                    and storage not in constants and held[storage] == 2):
+                self.own.add(id(arg))
+
+    def may_write(self, target):
+        return id(target) not in self.inputs or id(target) in self.own
+
+
 def write_over(target, function, *args, **kwargs):
     """`function(*args, **kwargs)` -- an element-wise node of the translated graph -- written over
     `target`, an operand of it that nothing reads after it, and returned there, where torch writes the
     result into it (_fast_writers) and the run computes no gradient; elsewhere, or where the result
-    is not of the operand's type and shape, the result as computed."""
-    if (isinstance(target, torch.Tensor) and not torch.is_grad_enabled() and not target.requires_grad
+    is not of the operand's type and shape, the result as computed. An input of the run is written
+    over only where the run consumed it (_Writing)."""
+    writing = _writing.get()
+    if (isinstance(target, torch.Tensor) and writing is not None and writing.may_write(target)
+            and not torch.is_grad_enabled() and not target.requires_grad
             and target.is_contiguous() and target.numel() > 0):
         fast = _fast_writers().get(function)
         if fast is not None and fast[0] != "own" and _write_fast(fast, target, args, kwargs):

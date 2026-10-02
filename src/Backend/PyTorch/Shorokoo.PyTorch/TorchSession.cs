@@ -341,6 +341,9 @@ internal sealed class TorchSession : IShorokooSession
                 ? null
                 : _placements.EntryFor(feeds, TorchPlacements.Blocks(_inputNames, inputs, consumed, feeds, targets), outputNames);
             if (entry?.Main is null) entry = null;
+            // The inputs the run consumed and holds alone, which an element-wise node may be written over
+            // (TorchInPlace) -- every one but those the plan places values in.
+            int[] writable = consumed is null ? [] : [.. TorchPlacements.Blocks(_inputNames, inputs, consumed, feeds, []).Except(entry?.Blocks ?? [])];
 
             // A flag in native memory the run reads before every node, and the token's callback
             // sets: it needs no interpreter lock to set, so a cancellation lands while the run holds
@@ -355,7 +358,7 @@ internal sealed class TorchSession : IShorokooSession
             var device = _backend.OnCuda
                 ? DeviceRuns.GetOrAdd(_backend.CudaDeviceId, static _ => new ReaderWriterLockSlim(LockRecursionPolicy.SupportsRecursion))
                 : null;
-            if (device is null) return Invoke(feeds, wanted, outputNames, targets, entry, stop, runSettings, out aliasedInputs);
+            if (device is null) return Invoke(feeds, wanted, outputNames, targets, entry, writable, stop, runSettings, out aliasedInputs);
             if (_tensorFloat32) Float32Runs.EnterWriteLock();
             else Float32Runs.EnterReadLock();
             try
@@ -365,7 +368,7 @@ internal sealed class TorchSession : IShorokooSession
                 else device.EnterReadLock();
                 try
                 {
-                    return Invoke(feeds, wanted, outputNames, targets, entry, stop, runSettings, out aliasedInputs);
+                    return Invoke(feeds, wanted, outputNames, targets, entry, writable, stop, runSettings, out aliasedInputs);
                 }
                 finally
                 {
@@ -445,7 +448,7 @@ internal sealed class TorchSession : IShorokooSession
 
     private IReadOnlyList<IShorokooTensorValue> Invoke(
         TorchTensorValue[] feeds, int[] wanted, IReadOnlyList<string> outputNames,
-        int[] targets, TorchPlacements.Entry? placing, IntPtr stop, RunSettings runSettings, out IReadOnlyList<string?> aliasedInputs)
+        int[] targets, TorchPlacements.Entry? placing, int[] writable, IntPtr stop, RunSettings runSettings, out IReadOnlyList<string?> aliasedInputs)
     {
         aliasedInputs = [];
         using (PythonRuntime.Gil())
@@ -468,10 +471,12 @@ internal sealed class TorchSession : IShorokooSession
             try
             {
                 using var noPlacements = new PyList();
+                using var writes = new PyList();
+                foreach (var index in writable) PyCall.Append(writes, index);
                 results = PyCall.Invoke(_runtime.Run,
                     placing?.Main ?? _main, args, wantedList, _backend.DeviceName, _constantStorages, _constantIds,
                     stop.ToInt64(), (int)_logSeverity, aliases, _limitBytes ?? -1L, runSettings.ShrinkArenaAfterRun,
-                    _tensorFloat32, placing?.Slots ?? noPlacements);
+                    _tensorFloat32, placing?.Slots ?? noPlacements, writes);
             }
             catch (PythonException ex) when (ex.Type.Name == TorchRuntime.RunStopped && runSettings.CancellationToken.IsCancellationRequested)
             {

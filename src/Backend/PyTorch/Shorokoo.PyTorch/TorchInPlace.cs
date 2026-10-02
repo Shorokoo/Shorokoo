@@ -13,11 +13,12 @@ namespace Shorokoo.PyTorch;
 /// <para>A translation runs the top-level graph's nodes one after the other in the order it writes
 /// them (<see cref="OnnxToPythonTranslator.ShapesFirst"/>), so "after" is that order. The operand
 /// is the output of a node whose translation always computes into memory of its own
-/// (<see cref="PlacementMemory.TorchFresh"/>), and so is anything handed back over it — a view
-/// (<see cref="PlacementMemory.PyTorch"/>), or a value a node holding a subgraph that reads it hands
-/// back — each read by no node after the writer, nor after the run. Whether torch can write the
-/// result there — of the operand's type and shape, the run computing no gradient — the run decides
-/// as it writes, and computes the result as it would otherwise where not.</para>
+/// (<see cref="PlacementMemory.TorchFresh"/>), or an input of the graph, and so is anything handed
+/// back over it — a view (<see cref="PlacementMemory.PyTorch"/>), or a value a node holding a
+/// subgraph that reads it hands back — each read by no node after the writer, nor after the run.
+/// Whether torch can write the result there — of the operand's type and shape, the run computing no
+/// gradient, an input one the run consumed and holds alone — the run decides as it writes, and
+/// computes the result as it would otherwise where not.</para>
 /// </summary>
 internal static class TorchInPlace
 {
@@ -33,6 +34,8 @@ internal static class TorchInPlace
         var readers = new Dictionary<string, List<int>>(StringComparer.Ordinal);
         var views = new Dictionary<string, List<string>>(StringComparer.Ordinal);
         var outputs = graph.Outputs.Select(o => o.Name).ToHashSet(StringComparer.Ordinal);
+        var inputs = graph.Inputs.Select(i => i.Name).ToHashSet(StringComparer.Ordinal);
+        var initializers = graph.Initializers.Select(i => i.Name).ToHashSet(StringComparer.Ordinal);
         void Read(string value, int at)
         {
             if (!readers.TryGetValue(value, out var list)) readers[value] = list = [];
@@ -78,7 +81,7 @@ internal static class TorchInPlace
             foreach (var slot in Slots(writer))
             {
                 var operand = writer.Inputs[slot];
-                if (operand.Length == 0 || !Fresh(operand, producer)) continue;
+                if (operand.Length == 0 || !(Fresh(operand, producer) || (inputs.Contains(operand) && !initializers.Contains(operand)))) continue;
                 var memory = Memory(operand, views);
                 if (memory.Any(outputs.Contains)) continue;
                 if (memory.Any(value => readers.GetValueOrDefault(value, []).Any(at => at > k || (at == k && value != operand)))) continue;

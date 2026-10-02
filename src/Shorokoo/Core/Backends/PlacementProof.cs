@@ -529,9 +529,9 @@ internal sealed class PlacementProof
         return conflict switch
         {
             Conflict.ContentLast => "an input's own content comes first",
-            Conflict.WriterOrder => $"written by {named}, which need not run first",
+            Conflict.WriterOrder => $"written by {named}, which does not run first",
             Conflict.ReadAfterRun => "read after the run",
-            Conflict.ReaderOrder => $"read by {named}, which need not run first",
+            Conflict.ReaderOrder => $"read by {named}, which does not run first",
             Conflict.WriterReads => $"its writer {named} reads it where it does not write it",
             _ => "nothing",
         };

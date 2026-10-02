@@ -93,6 +93,10 @@ public sealed class TorchTensorValue : IShorokooTensorValue
         return item.As<T>();
     }
 
+    /// <summary>Where a tensor's bytes start: on the host or on the card, as torch's data pointer
+    /// says; zero for a string tensor or a sequence.</summary>
+    internal IntPtr Address => _address;
+
     /// <summary>Where this value stands on a block of memory other values stand on too, holding a
     /// lease on it; null for a tensor of its own storage.</summary>
     internal BlockRange? Range => _range;

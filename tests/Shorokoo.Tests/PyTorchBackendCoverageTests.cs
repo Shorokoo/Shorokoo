@@ -1079,6 +1079,78 @@ public class PyTorchBackendCoverageTests
     private static float[] Floats(NamedModelParam value) => [.. value.ToTensorData().As<float32>().AccessMemory<float>()];
 
     [Fact]
+    public void TestARunWritesAValueIntoTheMemoryItConsumesOnlyWhereItIsProvedFreeAndTorchCanWriteItThere()
+    {
+        Assert.Equal("O@a+0", Placed(Graph("O", Op("Neg", "a", "O"))));
+        Assert.Equal("O@-", Placed(Graph("O", Op("Neg", "a", "O")), consume: false));
+        Assert.Equal("O@-", Placed(Graph("O", Op("Neg", "a", "O")), feedTwice: true));
+        Assert.Equal("O@-", Placed(GraphOn("a:int64[131072] b:int64[131072]", "O", Op("Neg", "a", "O"))));
+        Assert.Equal("x@a+0 O@a+1048576", Placed(Halved("x O", Op("Slice", "a zero half zero", "x"), Op("Neg", "b", "n"), Op("Slice", "n zero half zero", "O"))));
+        Assert.Equal("x@a+1048576 O@a+0", Placed(Halved("x O", Op("Slice", "a half end zero", "x"), Op("Exp", "b", "e"), Op("Slice", "e zero half zero", "s"), Op("Neg", "s", "O"))));
+        Assert.Equal("O@- Z@-", Placed(GraphOn("a:float[262144]", "O Z", ComputeContextLifetimeCoverageTests.Op("Cast", "a", "y", attribute: ("to", 1)), Op("Neg", "y", "O"), Op("Exp", "y", "Z"))));
+        Assert.Equal("O@b+0", Placed(GraphOn("a:float[512,512] b:float[512,512]", "O", Op("Transpose", "a", "O"))));
+        Assert.Equal("O@a+0 Z@b+0", Placed(Graph("O Z", Op("Exp", "a", "e"), Op("Neg", "e", "O"), Op("Sigmoid", "b", "s"), Op("Add", "s e", "Z"))));
+    }
+
+    [Fact]
+    public void TestAPlacedValueGivenNoRangeIsComputedAsItIsAndCopiedOutOfItsOperandsWhereItWasProvedOutOfThem()
+    {
+        Assert.Equal("False", Evaluated("(lambda t: __import__('shorokoo_torch.runtime', fromlist=['_']).place_into(0, True, S.identity, t).data_ptr() == t.data_ptr())(torch.ones(4))"));
+        Assert.Equal("True", Evaluated("(lambda t: __import__('shorokoo_torch.runtime', fromlist=['_']).place_into(0, False, S.identity, t).data_ptr() == t.data_ptr())(torch.ones(4))"));
+        Assert.Equal("[-1.0, -1.0] torch.float32", Evaluated("__import__('shorokoo_torch.runtime', fromlist=['_']).place_into(0, True, E.neg, torch.ones(2))"));
+    }
+
+    private static GraphProto Graph(string outputs, params NodeProto[] nodes) => GraphOn("a:float[262144] b:float[262144]", outputs, nodes);
+
+    private static GraphProto GraphOn(string inputs, string outputs, params NodeProto[] nodes) => ComputeContextLifetimeCoverageTests.GraphOf(inputs, outputs, nodes);
+
+    private static GraphProto Halved(string outputs, params NodeProto[] nodes)
+        => ComputeContextLifetimeCoverageTests.WithInts(ComputeContextLifetimeCoverageTests.WithInts(ComputeContextLifetimeCoverageTests.WithInts(
+            GraphOn("a:float[524288] b:float[524288]", outputs, nodes), "zero", 0), "half", 262144), "end", 524288);
+
+    /// <summary>
+    /// Where each output of <paramref name="graph"/> stands after a run that consumes every input —
+    /// <c>O@a+16</c> for 16 bytes into input a's memory, <c>O@-</c> for memory of its own — once the
+    /// run is shown to compute what a run consuming nothing computes.
+    /// </summary>
+    private static string Placed(GraphProto graph, bool consume = true, bool feedTwice = false)
+    {
+        using var session = Torch.CreateSession(Serialize(graph), default, default, DeviceMemorySettings.Default, DiagnosticSettings.Default, []);
+        var names = graph.Outputs.Select(o => o.Name).ToArray();
+        (string[] Values, string Where) Run(bool consuming)
+        {
+            var feeds = new Dictionary<string, IShorokooTensorValue>(StringComparer.Ordinal);
+            foreach (var input in graph.Inputs.Where(i => i.Type?.TensorType is not null))
+                feeds[input.Name] = feedTwice && feeds.Count > 0 ? feeds.Values.First() : Pattern(input, feeds.Count);
+            var fed = feeds.Values.Distinct().Cast<TorchTensorValue>().ToArray();
+            var at = feeds.ToDictionary(f => f.Key, f => (((TorchTensorValue)f.Value).Address, TorchPlacements.BytesOf((TorchTensorValue)f.Value)));
+            var results = session.RunConsuming(feeds, consuming ? fed : [], names, RunSettings.Default);
+            if (!consuming) foreach (var value in fed) value.Dispose();
+            var where = names.Select((name, i) => ((TorchTensorValue)results[i]).Range is null
+                ? $"{name}@-"
+                : at.Where(f => ((TorchTensorValue)results[i]).Address >= f.Value.Address && ((TorchTensorValue)results[i]).Address < f.Value.Address + (nint)f.Value.Item2)
+                    .Select(f => $"{name}@{f.Key}+{((TorchTensorValue)results[i]).Address - f.Value.Address}").Single());
+            string[] values = [.. results.Select(r => Convert.ToBase64String(r.GetTensorDataAsSpan<byte>()))];
+            foreach (var result in results) result.Dispose();
+            return (values, string.Join(" ", where));
+        }
+        var plain = Run(consuming: false);
+        var placed = Run(consume);
+        Assert.Equal(plain.Values, placed.Values);
+        return placed.Where;
+    }
+
+    private static IShorokooTensorValue Pattern(ValueInfoProto input, int seed)
+    {
+        var shape = input.Type.TensorType.Shape.Dims.Select(d => d.DimValue).ToArray();
+        var count = (int)shape.Aggregate(1L, (a, d) => a * d);
+        return input.Type.TensorType.ElemType == (int)TensorProto.DataType.Int64
+            ? Torch.CreateTensor([.. Enumerable.Range(0, count).Select(i => (long)((i * 7 + seed) % 1000))], shape)
+            : Torch.CreateTensor([.. Enumerable.Range(0, count).Select(i => ((i * 7 + seed) % 1000) * 0.001f - 0.4f)], shape);
+    }
+
+
+    [Fact]
     public void TestAnInitializerWhoseRawDataIsNotItsShapesSizeIsRefusedAtSessionCreation()
     {
         Assert.Throws<TorchUnsupportedModelException>(() => Torch.CreateSession(RawInitialized(4), default, default, DeviceMemorySettings.Default));

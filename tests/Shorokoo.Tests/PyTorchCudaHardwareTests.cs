@@ -217,6 +217,33 @@ public class PyTorchCudaHardwareTests
     }
 
     [TorchCudaFact]
+    public void TestTheTwoHalvesScenarioWritesEveryValueIntoTheMemoryItConsumesOnTheCardAndItsOutputsOutliveTheSession()
+    {
+        const int Rows = 512, Columns = 1024;
+        var (a, b, l) = ComputeContextLifetimeCoverageTests.TwoHalvesValues(Rows, Columns);
+        NamedModelParam[] outputs = [];
+        using (var context = new ComputeContext(Cuda.Value))
+        {
+            var compiled = context.Compile(ComputeContextLifetimeCoverageTests.TwoHalves());
+            for (int run = 0; run < 2; run++)
+            {
+                outputs = compiled.Execute(TensorData([(long)Rows, Columns], a).To(context), TensorData([(long)Rows, Columns], b).To(context));
+                Assert.True(l.Zip(SideBySideModel.Floats(outputs[0]), (x, y) => MathF.Abs(x - y) < 1e-5f).All(x => x));
+                Assert.Equal(a[..(Rows / 2 * Columns)], SideBySideModel.Floats(outputs[1]));
+                Assert.Equal(b[(Rows / 2 * Columns)..], SideBySideModel.Floats(outputs[2]));
+            }
+            var entry = Assert.Single(((TorchSession)compiled.Session).Placements!.Entries);
+            Assert.Equal(10, entry.Plan.Count);
+            Assert.All(outputs, o => Assert.NotNull(o.ToTensorData().Block));
+            Assert.Same(outputs[1].ToTensorData().Block, outputs[2].ToTensorData().Block);
+        }
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        Assert.True(l.Zip(SideBySideModel.Floats(outputs[0]), (x, y) => MathF.Abs(x - y) < 1e-5f).All(x => x));
+        Assert.Equal(b[(Rows / 2 * Columns)..], SideBySideModel.Floats(outputs[2]));
+    }
+
+    [TorchCudaFact]
     public void TestARunOnTheCardIsStoppedWhenItsTokenIsCancelledAndItsNodesAreTracedOnTheCard()
     {
         using var session = Cuda.Value.CreateSession(PyTorchBackendCoverageTests.Serialize(PyTorchBackendCoverageTests.CountingLoop()),

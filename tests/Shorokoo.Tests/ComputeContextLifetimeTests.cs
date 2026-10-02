@@ -803,7 +803,7 @@ public class ComputeContextLifetimeCoverageTests
 
     private static Placement At(string value, string block, long offset, long bytes = 512) => new(value, block, offset, bytes);
 
-    private static GraphProto WithInts(GraphProto graph, string name, params long[] values)
+    internal static GraphProto WithInts(GraphProto graph, string name, params long[] values)
     {
         graph.Initializers.Add(new TensorProto { Name = name, data_type = (int)TensorProto.DataType.Int64, Dims = [values.Length], Int64Datas = values });
         return graph;

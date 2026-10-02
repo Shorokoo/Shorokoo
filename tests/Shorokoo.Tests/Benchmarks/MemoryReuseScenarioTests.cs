@@ -242,8 +242,8 @@ public class MemoryReuseScenarioTests
         var lines = new List<string>
         {
             $"# What bounds a training step's peak, {where}, batch x{scale}", "",
-            "| family | measured | modelled, graph handed over | modelled, graph run | forward | backward | parameter gradients | update | every element-wise op over a dying operand | batch freed after its last read | a shape read holds nothing | all three | modelled before the memory-aware pass (its strategy) | batch | parameters | state | peak at |",
-            "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+            "| family | measured | modelled, graph handed over | modelled, graph run | forward | backward | parameter gradients | update | every element-wise op over a dying operand | batch freed after its last read | a shape read holds nothing | all three | modelled before the memory-aware pass (its strategy) | modelled in the graph's own order, after the pass and before | batch | parameters | state | peak at |",
+            "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
         };
         // Beside the benchmark's families, one whose parameters outweigh its activations: a 4096-wide
         // linear layer, 64 MiB of weights, where the optimizer's state and arithmetic are the step.
@@ -325,12 +325,16 @@ public class MemoryReuseScenarioTests
             var preRun = backend == "ort" ? OrtRun(preModel, onCard, rig.OptimizationInputShapes) : default;
             var preAnatomy = backend == "ort" ? Anatomy(preRun.Graph) : Anatomy(preModel.Graph);
             var pre = preAnatomy.Peak(backend == "ort" ? preRun.Order : TranslationOrder(preModel.Graph), shares, own);
+            // A translation run in the graph's own order rather than the one the memory-aware pass
+            // schedules for, ONNX Runtime's.
+            var listed = backend == "ort" ? peak : anatomy.Peak(GraphOrder(stepModel.Graph), shares, own);
+            var listedPre = backend == "ort" ? pre : preAnatomy.Peak(GraphOrder(preModel.Graph), shares, own);
             var everything = anatomy.Peak(order, shares, (node, slot) => (own?.Invoke(node, slot) ?? false) || (OutputAliasProof.IsStandard(node)
                 && ((PlacementProof.InPlaceUnary.Contains(node.OpType) && slot == 0) || (PlacementProof.InPlaceBinary.Contains(node.OpType) && node.Inputs.Count == 2))),
                 batchFreed: true, shapeReadsHold: false);
             lines.Add($"| {family} | {(measured < 0 ? "-" : Mib(measured))} | {Mib(handedPeak.Bytes)} | {Mib(peak.Bytes)} | {Mib(peak.ByPart[StepAnatomy.Part.Forward])} | {Mib(peak.ByPart[StepAnatomy.Part.Backward])} "
                       + $"| {Mib(peak.ByPart[StepAnatomy.Part.ParameterGradient])} | {Mib(peak.ByPart[StepAnatomy.Part.Update])} | {Mib(inPlace.Bytes)} | {Mib(batchFreed.Bytes)} "
-                      + $"| {Mib(shapesFree.Bytes)} | {Mib(everything.Bytes)} | {Mib(pre.Bytes)} ({rig.OptimizationResult.StrategyName}) "
+                      + $"| {Mib(shapesFree.Bytes)} | {Mib(everything.Bytes)} | {Mib(pre.Bytes)} ({rig.OptimizationResult.StrategyName}) | {Mib(listed.Bytes)}, {Mib(listedPre.Bytes)} "
                       + $"| {Mib(anatomy.BatchBytes)} | {Mib(anatomy.ParameterBytes)} | {Mib(anatomy.StateBytes)} | {peak.Position}/{order.Length}: {anatomy.At(order, peak.Position)} |");
             File.AppendAllText(Path.Combine(OutputDirectory(), $"step-anatomy-{backend}-{(onCard ? "card" : "host")}-x{scale}-detail.md"),
                 $"\n## {family}\n\nplacements: {string.Join(", ", settled.GroupBy(x => x).Select(g => g.Count() == 1 ? g.Key : $"{g.Count()}x {g.Key}"))}\n\n"
@@ -400,6 +404,15 @@ public class MemoryReuseScenarioTests
 
     /// <summary>The order a translation runs <paramref name="graph"/>'s nodes in, by index.</summary>
     private static int[] TranslationOrder(GraphProto graph)
+    {
+        var index = new Dictionary<NodeProto, int>(ReferenceEqualityComparer.Instance);
+        for (int i = 0; i < graph.Nodes.Count; i++) index[graph.Nodes[i]] = i;
+        return [.. Shorokoo.PythonTranslation.OnnxToPythonTranslator.RunOrder(graph.Nodes).Select(node => index[node])];
+    }
+
+    /// <summary>The order a translation would run <paramref name="graph"/>'s nodes in were it to
+    /// take them in the graph's own order, shapes read first, by index.</summary>
+    private static int[] GraphOrder(GraphProto graph)
     {
         var index = new Dictionary<NodeProto, int>(ReferenceEqualityComparer.Instance);
         for (int i = 0; i < graph.Nodes.Count; i++) index[graph.Nodes[i]] = i;

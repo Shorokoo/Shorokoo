@@ -6,12 +6,13 @@ namespace Shorokoo.PyTorch;
 
 /// <summary>
 /// Which nodes of a graph a torch run computing no gradient writes over one of their operands: an
-/// element-wise operator reading, in the position it writes each element, a value of memory of its
-/// own that nothing reads after it — what a run would let go of right after the node — so that the
-/// node allocates nothing for its result and the run never holds the two at once.
+/// operator torch computes the same over its operand as elsewhere (<see cref="Writes"/>), reading
+/// a value of memory of its own that nothing reads after it — what a run would let go of right
+/// after the node — so that the node allocates nothing for its result and the run never holds the
+/// two at once.
 ///
 /// <para>A translation runs the top-level graph's nodes one after the other in the order it writes
-/// them (<see cref="OnnxToPythonTranslator.ShapesFirst"/>), so "after" is that order. The operand
+/// them (<see cref="OnnxToPythonTranslator.RunOrder"/>), so "after" is that order. The operand
 /// is the output of a node whose translation always computes into memory of its own
 /// (<see cref="PlacementMemory.TorchFresh"/>), or an input of the graph, and so is anything handed
 /// back over it — a view (<see cref="PlacementMemory.PyTorch"/>), or a value a node holding a
@@ -29,7 +30,7 @@ internal static class TorchInPlace
     {
         var plan = new Dictionary<string, int>(StringComparer.Ordinal);
         if (graph.Nodes.Any(n => n.Domain == TrainingFormats.AutoGradDomain)) return plan;
-        var order = OnnxToPythonTranslator.ShapesFirst(graph.Nodes).ToList();
+        var order = OnnxToPythonTranslator.RunOrder(graph.Nodes);
         var producer = new Dictionary<string, (NodeProto Node, int Output)>(StringComparer.Ordinal);
         var readers = new Dictionary<string, List<int>>(StringComparer.Ordinal);
         var views = new Dictionary<string, List<string>>(StringComparer.Ordinal);
@@ -93,18 +94,26 @@ internal static class TorchInPlace
         return plan;
     }
 
-    /// <summary>Whether torch can write <paramref name="node"/>'s result over an operand it reads
-    /// in the position it writes each element: the element-wise operators torch has a form of that
-    /// writes into a given tensor, a <c>Clip</c> and a <c>Gelu</c>.</summary>
+    /// <summary>Whether torch can write <paramref name="node"/>'s result over an operand of the
+    /// result's shape, computing it exactly as it would elsewhere: the element-wise operators torch
+    /// has a form of that writes into a given tensor, a <c>Clip</c>, a <c>Gelu</c> and a
+    /// <c>Where</c>, each reading every element in the position it writes it; a <c>Softmax</c> and
+    /// a <c>LogSoftmax</c>, whose kernels read each element of a row before writing it there; and
+    /// a <c>LayerNormalization</c> and a <c>BatchNormalization</c>, whose translations read their
+    /// statistics off the input before writing the centered values over it.</summary>
     private static bool Writes(NodeProto node)
         => OutputAliasProof.IsStandard(node)
            && ((PlacementMemory.TorchElementWise.Contains(node.OpType)
                 && (PlacementProof.InPlaceUnary.Contains(node.OpType) ? node.Inputs.Count == 1 : node.Inputs.Count == 2))
-               || node.OpType is "Clip" or "Gelu");
+               || node.OpType is "Clip" or "Gelu" or "Softmax" or "LogSoftmax" or "LayerNormalization" or "BatchNormalization"
+               || (node.OpType == "Where" && node.Inputs.Count == 3));
 
-    /// <summary>The operand slots <paramref name="node"/> reads in the position it writes.</summary>
+    /// <summary>The operand slots <paramref name="node"/> may write over: a <c>Where</c>'s two
+    /// values, not its condition; a normalization's input, not its parameters.</summary>
     private static IEnumerable<int> Slots(NodeProto node)
-        => node.OpType is "Clip" or "Gelu" || PlacementProof.InPlaceUnary.Contains(node.OpType) ? [0] : [0, 1];
+        => node.OpType == "Where" ? [1, 2]
+           : PlacementMemory.TorchElementWise.Contains(node.OpType) && !PlacementProof.InPlaceUnary.Contains(node.OpType) ? [0, 1]
+           : [0];
 
     /// <summary>Whether <paramref name="value"/> is memory of its own: written by a node of the
     /// graph whose translation always computes afresh.</summary>

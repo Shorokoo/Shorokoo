@@ -55,7 +55,8 @@ internal sealed record PlacementMemory(
         "Shape", "Size", "Add", "Sub", "Mul", "Div", "Pow", "Mod", "Neg", "Abs", "Sign", "Reciprocal", "Sqrt",
         "Exp", "Log", "Sin", "Cos", "Tan", "Asin", "Acos", "Atan", "Sinh", "Cosh", "Tanh", "Asinh", "Acosh",
         "Atanh", "Erf", "Sigmoid", "Relu", "Mean", "MatMul", "Gemm", "ConstantOfShape", "Concat", "Where",
-        "Softmax", "LogSoftmax", "Gelu", "Conv", "LayerNormalization", "BatchNormalization",
+        "Softmax", "LogSoftmax", "Gelu", "Conv", "ConvTranspose", "LayerNormalization", "BatchNormalization",
+        "Equal", "Greater", "GreaterOrEqual", "Less", "LessOrEqual", "And", "Or", "Xor", "Not", "IsNaN", "IsInf",
     };
 
     /// <summary>The operators PyTorch's translation computes as a function that, handed a range,

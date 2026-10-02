@@ -1051,7 +1051,7 @@ public class PyTorchBackendCoverageTests
         Assert.Equal((null, "300"), Aliased("a:float[4] b:float[4]", "O", [Op("MatMul", "b a", "O")]));
         Assert.Equal((null, "-9 -18 -27 -36"), Aliased("a:float[4] b:float[4]", "O:float[4]", [Op("Sub", "a b", "t"), Op("Neg", "t", "O")]));
         Assert.Equal((null, "9 18 27 36"), Aliased("a:int64[4] b:int64[4]", "O:int64[4]", [Op("Sub", "a b", "O")], integers: true));
-        Assert.Equal((null, "0 -20 -60 -120 -10 -20 -30 -40"), Aliased("a:float[4] b:float[4]", "O:float[4] T:float[4]", [Op("Transpose", "a", "t"), Op("Mul", "t b", "m"), Op("Sub", "a m", "O"), Op("Neg", "t", "T")]));
+        Assert.Equal((null, "0 -20 -60 -120 -10 -20 -30 -40"), Aliased("a:float[4] b:float[4]", "O:float[4] T:float[4]", [Op("Transpose", "a", "t"), Op("Mul", "t b", "m"), Op("Neg", "t", "T"), Op("Sub", "a m", "O")]));
         Assert.Equal((null, "0 -20 -60 -120 10 20 30 40"), Aliased("a:float[4] b:float[4]", "O:float[4] T:float[4]", [Op("Transpose", "a", "T"), Op("Mul", "T b", "m"), Op("Sub", "a m", "O")]));
     }
 
@@ -1160,12 +1160,14 @@ public class PyTorchBackendCoverageTests
         Assert.Equal("O@b+0", Placed(GraphOn("a:float[512,512] b:float[512,512] w:float[512,512]", "O", Op("MatMul", "a w", "O"))));
         Assert.Equal("O@a+0 Z@b+0", Placed(Graph("O Z", Op("Exp", "a", "e"), Op("Neg", "e", "O"), Op("Sigmoid", "b", "s"), Op("Add", "s e", "Z"))));
         Assert.Equal("O@-", Placed(GraphOn("a:float[64] b:float[64]", "O", Op("Neg", "a", "t"), Op("Exp", "t", "u"), Op("Add", "u b", "O"))));
+        Assert.Equal("O@-", Placed(GraphOn("a:float[64] b:float[64]", "O", Op("Neg", "a", "t"), Op("Greater", "t b", "m"), Op("Where", "m b t", "O"))));
+        Assert.Equal("O@-", Placed(GraphOn("a:float[8,8] s:float[8]", "O", Op("Softmax", "a", "t"), Op("LayerNormalization", "t s", "O"))));
     }
 
     [Fact]
     public void TestAShapeIsReadAsItsValueIsMadeSoThatTheValueIsHeldOnlyUntilItsContentsAreRead()
     {
-        Assert.Equal("neg shape exp abs_", Calls(GraphOn("x:float[4]", "d s", Op("Neg", "x", "b"), Op("Exp", "b", "c"), Op("Abs", "c", "d"), Op("Shape", "b", "s"))));
+        Assert.Equal("neg shape exp abs_ reshape", Calls(GraphOn("x:float[4]", "e", Op("Neg", "x", "b"), Op("Shape", "b", "s"), Op("Exp", "b", "c"), Op("Abs", "c", "d"), Op("Reshape", "d s", "e"))));
         Assert.Equal("size neg", Calls(GraphOn("x:float[4]", "b s", Op("Neg", "x", "b"), Op("Size", "x", "s"))));
         Assert.Equal("neg shape shape exp", Calls(GraphOn("x:float[4]", "c r", Op("Neg", "x", "b"), Op("Exp", "b", "c"), Op("Shape", "b", "s"), Op("Shape", "s", "r"))));
         Assert.Equal("neg exp shape", Calls(GraphOn("x:float[4]", "c s", Op("Neg", "x", "b"), Op("Exp", "b", "c"), Op("Shape", "c", "s"))));
@@ -1212,14 +1214,16 @@ public class PyTorchBackendCoverageTests
     {
         Assert.Equal("over:neg over:exp", Calls(GraphOn("x:float[4]", "c", Op("Neg", "x", "b"), Op("Exp", "b", "c")), over: true));
         Assert.Equal("over:exp", Calls(GraphOn("x:float[4]", "c", Op("Exp", "x", "c")), over: true));
-        Assert.Equal("over:neg exp over:abs_", Calls(GraphOn("x:float[4]", "c d", Op("Neg", "x", "b"), Op("Exp", "b", "c"), Op("Abs", "b", "d")), over: true));
+        Assert.Equal("over:neg abs_ over:exp", Calls(GraphOn("x:float[4]", "c d", Op("Neg", "x", "b"), Op("Exp", "b", "c"), Op("Abs", "b", "d")), over: true));
         Assert.Equal("over:neg exp", Calls(GraphOn("x:float[4]", "b c", Op("Neg", "x", "b"), Op("Exp", "b", "c")), over: true));
         Assert.Equal("over:neg over:exp shape", Calls(GraphOn("x:float[4]", "c s", Op("Neg", "x", "b"), Op("Exp", "b", "c"), Op("Shape", "c", "s")), over: true));
         Assert.Equal("neg over:add over:mul", Calls(GraphOn("x:float[4]", "d", Op("Neg", "x", "b"), Op("Add", "x b", "c"), Op("Mul", "c c", "d")), over: true));
-        Assert.Equal("over:neg softmax", Calls(GraphOn("x:float[4]", "c", Op("Neg", "x", "b"), Op("Softmax", "b", "c")), over: true));
-        Assert.Equal("over:neg identity exp abs_", Calls(GraphOn("x:float[4]", "c d", Op("Neg", "x", "b"), Op("Identity", "b", "r"), Op("Exp", "b", "c"), Op("Abs", "r", "d")), over: true));
+        Assert.Equal("over:neg over:softmax over:layer_normalization", Calls(GraphOn("x:float[4] s:float[4]", "d", Op("Neg", "x", "b"), Op("Softmax", "b", "c"), Op("LayerNormalization", "c s", "d")), over: true));
+        Assert.Equal("over:neg identity abs_ over:exp", Calls(GraphOn("x:float[4]", "c d", Op("Neg", "x", "b"), Op("Identity", "b", "r"), Op("Exp", "b", "c"), Op("Abs", "r", "d")), over: true));
         Assert.Equal("over:neg transpose mul", Calls(GraphOn("x:float[2,2]", "c", Op("Neg", "x", "b"), Op("Transpose", "b", "t"), Op("Mul", "b t", "c")), over: true));
         Assert.Equal("neg over:add", Calls(GraphOn("x:float[4]", "c", Op("Neg", "x", "b"), Op("Add", "b x", "c")), over: true));
+        Assert.Equal("over:neg greater over:where", Calls(GraphOn("x:float[4] y:float[4]", "c", Op("Neg", "x", "b"), Op("Greater", "b y", "m"), Op("Where", "m b y", "c")), over: true));
+        Assert.Equal("over:neg greater where over:add", Calls(GraphOn("x:float[4]", "d", Op("Neg", "x", "b"), Op("Greater", "b b", "m"), Op("Where", "m b b", "c"), Op("Add", "c b", "d")), over: true));
     }
 
     [Fact]

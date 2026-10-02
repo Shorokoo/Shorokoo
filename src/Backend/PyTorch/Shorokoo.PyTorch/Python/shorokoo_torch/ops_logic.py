@@ -74,9 +74,12 @@ def is_inf(x, *, detect_negative=1, detect_positive=1):
     return torch.zeros_like(x, dtype=torch.bool)
 
 
-def where(condition, x, y):
+def where(condition, x, y, _out=None):
     if _rt.is_strings(x):
         return np.where(condition.cpu().numpy(), x, y).astype(object)
+    if (_out is not None and x.dtype == y.dtype == _out.dtype and _out.device == x.device
+            and tuple(_out.shape) == tuple(torch.broadcast_shapes(condition.shape, x.shape, y.shape))):
+        return torch.where(condition, x, y, out=_out)
     return torch.where(condition, x, y)
 
 

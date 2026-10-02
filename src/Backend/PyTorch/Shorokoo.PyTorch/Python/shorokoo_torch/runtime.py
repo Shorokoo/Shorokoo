@@ -600,7 +600,7 @@ def _fast_writers():
     a plain call does not allocate too (`writes_into`)."""
     global _fast
     if _fast is None:
-        from . import ops_conv_pool as cp, ops_elementwise as e, ops_linalg as la, ops_norm as n, ops_shape as s
+        from . import ops_conv_pool as cp, ops_elementwise as e, ops_linalg as la, ops_logic as lo, ops_norm as n, ops_shape as s
         table = {function: ("out", op) for function, op in [
             (e.neg, torch.neg), (e.abs_, torch.abs), (e.sigmoid, torch.sigmoid), (e.exp, torch.exp),
             (e.log, torch.log), (e.sqrt, torch.sqrt), (e.tanh, torch.tanh), (e.sin, torch.sin),
@@ -613,7 +613,7 @@ def _fast_writers():
         ]}
         table[e.relu] = ("relu", None)
         for function in (e.clip, e.softmax, e.log_softmax, e.gelu, n.layer_normalization, n.batch_normalization,
-                         cp.conv, la.gemm):
+                         cp.conv, la.gemm, lo.where):
             table[function] = ("own", None)
         table[la.matmul] = ("matmul", torch.matmul)
         table[s.constant_of_shape] = ("fill", None)
@@ -729,11 +729,11 @@ class _Writing:
 
 
 def write_over(target, function, *args, **kwargs):
-    """`function(*args, **kwargs)` -- an element-wise node of the translated graph -- written over
-    `target`, an operand of it that nothing reads after it, and returned there, where torch writes the
-    result into it (_fast_writers) and the run computes no gradient; elsewhere, or where the result
-    is not of the operand's type and shape, the result as computed. An input of the run is written
-    over only where the run consumed it (_Writing)."""
+    """`function(*args, **kwargs)` -- a node of the translated graph that computes the same over its
+    operand -- written over `target`, an operand of it that nothing reads after it, and returned
+    there, where torch writes the result into it (_fast_writers) and the run computes no gradient;
+    elsewhere, or where the result is not of the operand's type and shape, the result as computed.
+    An input of the run is written over only where the run consumed it (_Writing)."""
     writing = _writing.get()
     if (isinstance(target, torch.Tensor) and writing is not None and writing.may_write(target)
             and not torch.is_grad_enabled() and not target.requires_grad

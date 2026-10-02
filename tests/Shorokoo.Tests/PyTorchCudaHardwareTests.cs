@@ -272,17 +272,39 @@ public class PyTorchCudaHardwareTests
     public void TestAnElementWiseChainOnTheCardHoldsOneOfItsValuesAtATime()
     {
         const long Count = 1L << 22;
-        var graph = ComputeContextLifetimeCoverageTests.GraphOf($"x:float[{Count}]", "d",
-            ComputeContextLifetimeCoverageTests.Op("Neg", "x", "b"), ComputeContextLifetimeCoverageTests.Op("Abs", "b", "c"),
-            ComputeContextLifetimeCoverageTests.Op("Sigmoid", "c", "d"));
+        Assert.Equal(Count * 4, ChainPeak($"x:float[{Count}]", ComputeContextLifetimeCoverageTests.Op("Neg", "x", "b"),
+            ComputeContextLifetimeCoverageTests.Op("Abs", "b", "c"), ComputeContextLifetimeCoverageTests.Op("Sigmoid", "c", "d")));
+        Assert.Equal(Count * 5, ChainPeak("x:float[1024,4096] h:float[1]", ComputeContextLifetimeCoverageTests.Op("Neg", "x", "b"),
+            ComputeContextLifetimeCoverageTests.Op("Softmax", "b", "c"), ComputeContextLifetimeCoverageTests.Op("Greater", "c h", "m"),
+            ComputeContextLifetimeCoverageTests.Op("Where", "m c h", "d")));
+    }
+
+    /// <summary>The most a run of <paramref name="nodes"/> holds on the card beyond its inputs, each
+    /// input zeros but a 0.5 of one element, once its output's first two elements are shown to be
+    /// 0.5.</summary>
+    private static long ChainPeak(string inputs, params NodeProto[] nodes)
+    {
+        var graph = ComputeContextLifetimeCoverageTests.GraphOf(inputs, "d", nodes);
         using var session = Cuda.Value.CreateSession(PyTorchBackendCoverageTests.Serialize(graph), default, default, DeviceMemorySettings.Default);
-        using var x = Cuda.Value.CreateTensorInBackendMemory(ShorokooTensorElementType.Float, new byte[Count * 4], [Count]);
-        var feeds = new Dictionary<string, IShorokooTensorValue> { ["x"] = x };
-        session.Run(feeds, ["d"], RunSettings.Default)[0].Dispose();
-        var (peak, d) = PyTorchBackendCoverageTests.CardPeak(() => session.Run(feeds, ["d"], RunSettings.Default)[0]);
-        Assert.Equal([.. MemoryMarshal.AsBytes<float>([0.5f, 0.5f])], Cuda.Value.CopyTensorToHost(d)[..8]);
-        d.Dispose();
-        Assert.Equal(Count * 4, peak);
+        var feeds = new Dictionary<string, IShorokooTensorValue>();
+        foreach (var input in graph.Inputs)
+        {
+            long[] shape = [.. input.Type.TensorType.Shape.Dims.Select(d => d.DimValue)];
+            var count = shape.Aggregate(1L, (a, d) => a * d);
+            feeds[input.Name] = Cuda.Value.CreateTensorInBackendMemory(ShorokooTensorElementType.Float,
+                count == 1 ? [.. MemoryMarshal.AsBytes<float>([0.5f])] : new byte[count * 4], shape);
+        }
+        try
+        {
+            session.Run(feeds, ["d"], RunSettings.Default)[0].Dispose();
+            var (peak, d) = PyTorchBackendCoverageTests.CardPeak(() => session.Run(feeds, ["d"], RunSettings.Default)[0]);
+            using (d) Assert.Equal([.. MemoryMarshal.AsBytes<float>([0.5f, 0.5f])], Cuda.Value.CopyTensorToHost(d)[..8]);
+            return peak;
+        }
+        finally
+        {
+            foreach (var feed in feeds.Values) feed.Dispose();
+        }
     }
 
     [TorchCudaFact]

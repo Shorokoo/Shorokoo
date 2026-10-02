@@ -219,7 +219,7 @@ internal sealed partial class OnnxToPythonTranslator
         Line($"def {name}({string.Join(", ", parameters)}):");
         _indent++;
         EndStatement(scope);
-        foreach (var node in ShapesFirst(function.Nodes))
+        foreach (var node in RunOrder(function.Nodes))
             EmitNode(attributes is null ? node : FunctionAttributes.Resolve(node, attributes), scope);
         Return(function.Outputs, scope);
         Release(scope);
@@ -273,7 +273,7 @@ internal sealed partial class OnnxToPythonTranslator
         if (training is null)
         {
             if (parent is null && name == "main") _mainScope = scope;
-            foreach (var node in ShapesFirst(graph.Nodes)) EmitNode(node, scope);
+            foreach (var node in RunOrder(graph.Nodes)) EmitNode(node, scope);
             Return(graph.Outputs.Select(o => o.Name), scope);
         }
         else if (Dialect.Gradients == GradientStyle.Tape)
@@ -289,9 +289,77 @@ internal sealed partial class OnnxToPythonTranslator
     }
 
     /// <summary>
-    /// <paramref name="nodes"/> in the order they are written: their own, but with each node that
-    /// reads only the shape of its one input — a standard <c>Shape</c> or <c>Size</c> — written right
-    /// after the node making that input, or first where nothing among them makes it. A shape is
+    /// <paramref name="nodes"/> in the order a translation writes them, and so runs them: the order
+    /// ONNX Runtime runs them in (<see cref="InOnnxRuntimeOrder"/>) — the one Shorokoo's
+    /// memory-aware pass schedules a training step for, so that a translation holds what the pass
+    /// planned for — with each shape read as soon as its value is made (<see cref="ShapesFirst"/>).
+    /// </summary>
+    internal static IReadOnlyList<NodeProto> RunOrder(IReadOnlyList<NodeProto> nodes) => [.. ShapesFirst(InOnnxRuntimeOrder(nodes))];
+
+    /// <summary>
+    /// <paramref name="nodes"/> in the order ONNX Runtime's sequential executor runs a graph's nodes
+    /// in, which is the order Shorokoo's memory-aware pass schedules a training step for: every
+    /// <c>Constant</c> first, as ONNX Runtime holds them before the graph runs; then a depth-first
+    /// walk from the nodes whose outputs no node among them reads, all of them pushed in node order
+    /// so that the last is walked first, which reaches each node's producers highest index first and
+    /// writes each node once all of its producers are written. A value a node's subgraph reads from
+    /// outside it counts as read by the node.
+    /// </summary>
+    internal static IReadOnlyList<NodeProto> InOnnxRuntimeOrder(IReadOnlyList<NodeProto> nodes)
+    {
+        static bool Resident(NodeProto node) => node.Domain is "" or "ai.onnx" && node.OpType == "Constant";
+        var producer = new Dictionary<string, int>(StringComparer.Ordinal);
+        for (int n = 0; n < nodes.Count; n++)
+            foreach (var output in nodes[n].Outputs)
+                if (output.Length > 0) producer[output] = n;
+        var producers = new SortedSet<int>[nodes.Count];
+        var read = new bool[nodes.Count];
+        for (int n = 0; n < nodes.Count; n++)
+        {
+            var reads = new HashSet<string>(nodes[n].Inputs.Where(i => i.Length > 0), StringComparer.Ordinal);
+            foreach (var attribute in nodes[n].Attributes)
+            {
+                if (attribute.G is { } body) AliasPlan.ReferencedFrom(body, reads);
+                foreach (var each in attribute.Graphs) AliasPlan.ReferencedFrom(each, reads);
+            }
+            producers[n] = [];
+            foreach (var value in reads)
+                if (producer.TryGetValue(value, out var p) && p != n && !Resident(nodes[p])) producers[n].Add(p);
+            foreach (var p in producers[n]) read[p] = true;
+        }
+        var order = new List<NodeProto>(nodes.Count);
+        var visited = new bool[nodes.Count];
+        for (int n = 0; n < nodes.Count; n++)
+            if (Resident(nodes[n]))
+            {
+                visited[n] = true;
+                order.Add(nodes[n]);
+            }
+        var stack = new List<(int Node, bool Leave)>();
+        for (int n = 0; n < nodes.Count; n++)
+            if (!visited[n] && !read[n]) stack.Add((n, false));
+        while (stack.Count > 0)
+        {
+            var (n, leave) = stack[^1];
+            stack.RemoveAt(stack.Count - 1);
+            if (leave)
+            {
+                order.Add(nodes[n]);
+                continue;
+            }
+            if (visited[n]) continue;
+            visited[n] = true;
+            stack.Add((n, true));
+            foreach (var p in producers[n])
+                if (!visited[p]) stack.Add((p, false));
+        }
+        return order.Count == nodes.Count ? order : [.. nodes];
+    }
+
+    /// <summary>
+    /// <paramref name="nodes"/> in their own order, but with each node that reads only the shape of
+    /// its one input — a standard <c>Shape</c> or <c>Size</c> — written right after the node making
+    /// that input, or first where nothing among them makes it. A shape is
     /// known as soon as its value is made and never changes after, so the node computes the same
     /// there; read where the graph puts it — in a backward pass, say, long after the value's last
     /// read of its contents — it would keep the whole value alive until then just to read its shape.

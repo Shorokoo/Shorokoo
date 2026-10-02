@@ -28,6 +28,7 @@ internal sealed class StepAnatomy
     private readonly GraphProto _graph;
     private readonly Dictionary<string, PlacementShapes.Value> _shapes;
     private readonly Dictionary<string, int> _producer = new(StringComparer.Ordinal);
+    private readonly Dictionary<NodeProto, int> _index = new(ReferenceEqualityComparer.Instance);
     private readonly Dictionary<string, List<int>> _consumers = new(StringComparer.Ordinal);
     private readonly HashSet<string> _inputs;
     private readonly Part[] _parts;
@@ -55,6 +56,7 @@ internal sealed class StepAnatomy
         _inputs = graph.Inputs.Select(i => i.Name).ToHashSet(StringComparer.Ordinal);
         for (int n = 0; n < graph.Nodes.Count; n++)
         {
+            _index[graph.Nodes[n]] = n;
             foreach (var output in graph.Nodes[n].Outputs.Where(o => o.Length > 0)) _producer[output] = n;
             foreach (var input in graph.Nodes[n].Inputs.Where(i => i.Length > 0))
             {
@@ -118,37 +120,8 @@ internal sealed class StepAnatomy
         return seen;
     }
 
-    /// <summary>The order ONNX Runtime's sequential executor runs the nodes in: a depth-first walk
-    /// from every node no other node reads, taken in node order, that explores each node's
-    /// producers highest index first and emits in post-order.</summary>
-    internal int[] OrtOrder()
-    {
-        var order = new List<int>();
-        var visited = new bool[_graph.Nodes.Count];
-        var leaves = Enumerable.Range(0, _graph.Nodes.Count)
-            .Where(n => _graph.Nodes[n].Outputs.All(o => o.Length == 0 || !_consumers.ContainsKey(o)));
-        foreach (var leaf in leaves)
-        {
-            var stack = new Stack<(int Node, bool Done)>();
-            stack.Push((leaf, false));
-            while (stack.TryPop(out var top))
-            {
-                if (top.Done)
-                {
-                    order.Add(top.Node);
-                    continue;
-                }
-                if (visited[top.Node]) continue;
-                visited[top.Node] = true;
-                stack.Push((top.Node, true));
-                var producers = _graph.Nodes[top.Node].Inputs.Where(i => i.Length > 0 && _producer.ContainsKey(i))
-                    .Select(i => _producer[i]).Distinct().OrderBy(p => p);
-                foreach (var p in producers)
-                    if (!visited[p]) stack.Push((p, false));
-            }
-        }
-        return [.. order];
-    }
+    /// <summary>The order ONNX Runtime's sequential executor runs the nodes in.</summary>
+    internal int[] OrtOrder() => [.. Shorokoo.PythonTranslation.OnnxToPythonTranslator.InOnnxRuntimeOrder(_graph.Nodes).Select(n => _index[n])];
 
     /// <summary>
     /// What the step holds at its peak, run in <paramref name="order"/>, under a backend that hands

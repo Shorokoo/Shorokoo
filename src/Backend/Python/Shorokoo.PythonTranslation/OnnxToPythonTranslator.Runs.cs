@@ -282,7 +282,7 @@ internal sealed partial class OnnxToPythonTranslator
 
         /// <summary>Adds to <paramref name="found"/> every name <paramref name="subgraph"/>, or a
         /// subgraph inside it, reads from outside itself.</summary>
-        private static void ReferencedFrom(GraphProto subgraph, HashSet<string> found)
+        internal static void ReferencedFrom(GraphProto subgraph, HashSet<string> found)
         {
             var defined = new HashSet<string>(StringComparer.Ordinal);
             foreach (var input in subgraph.Inputs) defined.Add(input.Name);

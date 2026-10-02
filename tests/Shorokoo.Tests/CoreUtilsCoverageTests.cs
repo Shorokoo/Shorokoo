@@ -924,6 +924,26 @@ public class CoreUtilsCoverageTests
         host.Shared.Close(account);
     }
 
+    [Fact]
+    public void TestAClosedAccountHandsBackWhatItKeptAndEachBlockItStillHadOutAsThatGoes()
+    {
+        var host = RuntimeAllocator.ForHost();
+        var account = host.Shared.Open("probe");
+        OrtValue kept;
+        using (CachingAllocator.Charge(account, null))
+        {
+            OrtValue.CreateAllocatedTensorValue(host.Managed, Microsoft.ML.OnnxRuntime.Tensors.TensorElementType.Float, [1000L]).Dispose();
+            kept = OrtValue.CreateAllocatedTensorValue(host.Managed, Microsoft.ML.OnnxRuntime.Tensors.TensorElementType.Float, [2000L]);
+        }
+        host.Shared.Close(account);
+        var closed = host.Shared.Statistics(account);
+        kept.Dispose();
+        var gone = host.Shared.Statistics(account);
+
+        Assert.Equal((1L, 1L), (closed.ArenaShrinkageCount, closed.ArenaExtensionCount));
+        Assert.Equal((2L, 0L, 0L), (gone.ArenaShrinkageCount, gone.ArenaExtensionCount, gone.TotalAllocatedBytes));
+    }
+
     /// <summary>
     /// A session's own arena, read back through the public surface: zeroed before it has run, and
     /// carrying what the run took afterwards — the product the run negates, its output being memory

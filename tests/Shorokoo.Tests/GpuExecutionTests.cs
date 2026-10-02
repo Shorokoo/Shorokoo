@@ -803,6 +803,12 @@ public class GpuExecutionTests
         var widened = ctx.Execute(ArenaProbeModels.Widened(), ArenaProbeModels.FilledShape(64L << 20))[0].ToTensorData();
         Assert.True(HeldOnTheCard() - before < 16 * MiB);
 
+        using var unshrinking = new ComputeContext();
+        before = HeldOnTheCard();
+        var widenedUnshrunk = unshrinking.Execute(ArenaProbeModels.Widened(), ArenaProbeModels.FilledShape(64L << 20))[0].ToTensorData();
+        Assert.True(HeldOnTheCard() - before < 16 * MiB);
+        widenedUnshrunk.Delete();
+
         var filled = ArenaProbeModels.Filled(ctx);
         var spread = ArenaProbeModels.Spread(ctx);
         (long, long, long, long) Held()

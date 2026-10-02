@@ -89,6 +89,50 @@ public class TrainingPerfBaselineTests
             measured.TrainStepsPerSecond, baseline.TrainStepsPerSecond, baseline.SlowdownFactor);
     }
 
+    /// <summary>
+    /// A loop alternating runs that consume their input with runs that share it, over one compile
+    /// of the two-layer encoder of the memory-pass benchmark at sixteen times its batch, takes no
+    /// longer per pair with placement on — the consuming runs placed, on a second session — than
+    /// with it off, on the session alone. Best of three loops each, off and on alternating.
+    /// </summary>
+    [Fact]
+    public void AlternatingConsumingAndSharedRunsOfOneCompileTakeNoLongerPlacedThanNot()
+    {
+        long[] shape = [128L, 128L, 128L];
+        float[] values = [.. Enumerable.Range(0, 128 * 128 * 128).Select(i => (i % 101) / 101f - 0.5f)];
+        var model = MemoryPassEncoder2.ComputationGraph.ToConcreteArchitecture([TensorData(shape, values)]).ToConcreteModel();
+        double Pair(bool placing)
+        {
+            using var context = new ComputeContext { ValuePlacement = placing };
+            var compiled = context.Compile(model);
+            var shared = TensorData(shape, values);
+            void Run()
+            {
+                ComputeContext.ReleaseOutputs(compiled.Execute(TensorData(shape, values)));
+                ComputeContext.ReleaseOutputs(compiled.Execute(shared.Shared()));
+            }
+            Run();
+            Run();
+            var least = double.MaxValue;
+            for (int i = 0; i < 8; i++)
+            {
+                var watch = Stopwatch.StartNew();
+                Run();
+                least = Math.Min(least, watch.Elapsed.TotalMilliseconds);
+            }
+            return least;
+        }
+
+        double off = double.MaxValue, on = double.MaxValue;
+        for (int round = 0; round < 3; round++)
+        {
+            off = Math.Min(off, Pair(placing: false));
+            on = Math.Min(on, Pair(placing: true));
+        }
+
+        Assert.True(on <= off * 1.15);
+    }
+
     private static void AssertNotSlower(string phase, double measuredMs, double baselineMs, double factor)
     {
         Assert.True(measuredMs <= baselineMs * factor);

@@ -263,6 +263,17 @@ public class GpuExecutionTests
     }
 
     [CudaFact]
+    public void CudaProvider_TheSessionAModelOverSixteenMebibytesPlacesThroughHoldsNoCopyOfTheWeightsItCarries()
+    {
+        using var context = new ComputeContext();
+        var (_, session, _) = ComputeContextLifetimeCoverageTests.LargeModelRun(context, 9 << 19);
+        var entry = Assert.Single(Assert.IsType<OrtPlacements>(session.Placements).Entries);
+        Assert.Equal(OrtPlacements.Stage.Adopted, entry.Stage);
+        Assert.True(entry.VariantHeld < 1L << 20);
+        Assert.True(session.HeldBytes < (18L + 1) << 20);
+    }
+
+    [CudaFact]
     public void CudaProvider_ASessionRunsEachProvidersNodesInTheOrderOfTheGraphItWritesOutBuiltFromAModelOrFromAWrittenGraph()
     {
         foreach (var family in (string[])["encoder2", "attn-chunk4"])

@@ -28,8 +28,8 @@ Related: [core-types.md](core-types.md) · [defining-models.md](defining-models.
   leaves it there; fed to a run on another context, it is placed there by that run —
   [Where a run's inputs and outputs are](#where-a-runs-inputs-and-outputs-are).
 - **A run may write its values into the memory of the inputs it consumes**, where the graph proves
-  it safe and it saves memory; its outputs then stand on that memory, and it is freed with the last
-  of them — [A run that writes into what it consumed](#a-run-that-writes-into-what-it-consumed).
+  it safe and it saves memory; its outputs then stand on that memory, each holding its own range of
+  it — [A run that writes into what it consumed](#a-run-that-writes-into-what-it-consumed).
 - On a GPU backend a context's `DeviceMemory` settings are a budget on what it holds on the card,
   which the allocator its sessions allocate through holds each run to —
   [Device memory](#device-memory-gpu-backends). Diagnostics start at
@@ -698,10 +698,20 @@ shape of every input, the outputs asked for — runs, and kept for it.
 
 **Outputs on consumed memory.** An output written into an input stands on that input's memory —
 its **block** — as a `TensorData` of its own over its range, never overlapping another's. Several
-outputs of one run may stand on one block; the block is freed when the last of them ends, not
-before, so deleting one of them frees nothing while another lives
-([A tensor's lifetime](#a-tensors-lifetime-locks-and-deletion)). A device-memory budget counts the
-block once, whole, for as long as any tensor on it is attached.
+outputs of one run may stand on one block. How the block is freed depends on whose memory it is:
+
+- **Memory of Shorokoo's allocator** — on ONNX Runtime every tensor over a mebibyte on a card,
+  and on the host what a session's run allocated, such as an earlier run's output: each
+  output frees its own range as it ends, and what of the block no output stands on is freed as
+  the run ends. The whole pages inside a range go back — 4 KiB on the host, 2 MiB on a card — to
+  the allocator, as a tensor's own memory does
+  ([Device memory](#device-memory-gpu-backends)).
+- **Any other memory** — a host tensor made from host data, a card block of a mebibyte or less,
+  and every tensor on PyTorch — is freed when the last output on it ends, not before. A run places
+  outputs in such a block only where they leave at most a mebibyte of it unused.
+
+A device-memory budget counts a block once, for what of it is still held, for as long as any
+tensor on it is attached ([A tensor's lifetime](#a-tensors-lifetime-locks-and-deletion)).
 
 Otherwise nothing differs: outputs are new `TensorData` attached to the running context, and
 values are the same.
@@ -711,7 +721,8 @@ values are the same.
 A `TensorData` **is** its memory: one object per allocation, or per range of a block several
 tensors stand on — the memory of an input a run consumed and wrote them into
 ([A run that writes into what it consumed](#a-run-that-writes-into-what-it-consumed)). Ranges
-never overlap, and a block is freed with the last tensor standing on it. A tensor records the
+never overlap, and each tensor's range is freed with it, or the block with the last tensor
+standing on it ([Outputs on consumed memory](#a-run-that-writes-into-what-it-consumed)). A tensor records the
 backend that allocated it (`AllocatingBackend`), which releases it, and where it lives: `Space`
 (the device) and `Location` (device plus runtime). It does not know which contexts it is attached
 to — see [Moving data between contexts](#moving-data-between-contexts).

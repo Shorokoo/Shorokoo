@@ -29,5 +29,8 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="Shorokoo.Tests" />
+    <!-- The ONNX Runtime backends hand the process's allocator (Core/Backends/CachingAllocator.cs) to
+         their runtimes; every copy of a backend has to reach the one in this assembly. -->
+    <InternalsVisibleTo Include="Shorokoo.OnnxRuntime" />
   </ItemGroup>
 </Project>

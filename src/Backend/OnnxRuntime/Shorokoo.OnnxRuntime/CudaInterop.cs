@@ -3,16 +3,14 @@ using System.Runtime.InteropServices;
 namespace Shorokoo.OnnxRuntime;
 
 /// <summary>
-/// The CUDA runtime entry points this backend calls itself: a copy between host memory and the
-/// card, in either direction, and the card's own allocation and release. ONNX Runtime's managed
-/// surface has no such call, and a value living on the card hands out a pointer with no way to read
-/// or fill it.
+/// The one CUDA entry point this backend calls itself: a copy between host memory and the card,
+/// in either direction. ONNX Runtime's managed surface has no such call, and a value living on
+/// the card hands out a pointer with no way to read or fill it.
 ///
 /// <para>Both directions serve one promise apiece. Device-to-host reads back a tensor on the
 /// card — an output a run left there, or a tensor put there; host-to-device is what puts a tensor
 /// into the card's memory in the first place, which is where a CUDA session reads every tensor it
-/// is fed. The allocation is what the card's <see cref="CachingAllocator"/> gets its blocks
-/// from.</para>
+/// is fed.</para>
 ///
 /// <para>Bound lazily and by name, so nothing here requires a CUDA machine to load — the copy
 /// simply reports failure when the runtime is absent, which is the right answer on a host-only
@@ -33,77 +31,12 @@ internal static class CudaInterop
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate int StreamSynchronize(IntPtr stream);
 
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    private delegate int Malloc(out IntPtr pointer, nuint count);
-
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    private delegate int Free(IntPtr pointer);
-
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    private delegate int GetDevice(out int device);
-
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    private delegate int SetDevice(int device);
-
-    /// <summary>The runtime's allocation entry points, bound together or not at all.</summary>
-    private sealed record Allocation(
-        Malloc Malloc, Free Free, GetDevice GetDevice, SetDevice SetDevice, GetLastError Clear);
-
     private const int HostToDevice = 1;
     private const int DeviceToHost = 2;
 
     private static readonly object _gate = new();
     private static Memcpy? _memcpy;
     private static bool _bound;
-    private static Allocation? _allocation;
-
-    /// <summary>
-    /// <paramref name="count"/> bytes of CUDA device <paramref name="deviceId"/>'s memory, from the
-    /// CUDA runtime itself, or <see cref="IntPtr.Zero"/> where the card has not that much free or
-    /// there is no runtime to ask. The thread's current device is left as it was found.
-    /// </summary>
-    public static IntPtr Allocate(int deviceId, long count)
-    {
-        if (BindAllocation() is not { } cuda) return IntPtr.Zero;
-        return OnDevice(cuda, deviceId, () => cuda.Malloc(out var pointer, (nuint)count) == 0 ? pointer : IntPtr.Zero);
-    }
-
-    /// <summary>
-    /// Hands <paramref name="pointer"/>, which <see cref="Allocate"/> answered for CUDA device
-    /// <paramref name="deviceId"/>, back to the card. The runtime waits for the work the card has in
-    /// hand before it does, so nothing still reading the block is cut short.
-    /// </summary>
-    public static void Release(int deviceId, IntPtr pointer)
-    {
-        if (BindAllocation() is not { } cuda) return;
-        OnDevice(cuda, deviceId, () => cuda.Free(pointer) == 0 ? pointer : IntPtr.Zero);
-    }
-
-    /// <summary>
-    /// <paramref name="call"/> with CUDA device <paramref name="deviceId"/> current on this thread,
-    /// and the device that was current before it current again after. A failure is cleared once
-    /// answered, as a failed copy's is (see <see cref="Bind"/>).
-    /// </summary>
-    private static IntPtr OnDevice(Allocation cuda, int deviceId, Func<IntPtr> call)
-    {
-        var switched = cuda.GetDevice(out var current) == 0 && current != deviceId && cuda.SetDevice(deviceId) == 0;
-        try
-        {
-            var answer = call();
-            if (answer == IntPtr.Zero) cuda.Clear();
-            return answer;
-        }
-        finally
-        {
-            if (switched) cuda.SetDevice(current);
-        }
-    }
-
-    private static Allocation? BindAllocation()
-    {
-        Bind();
-        return _allocation;
-    }
 
     public static bool CopyDeviceToHost(IntPtr source, byte[] destination)
         => CopyDeviceToHost(source, destination.AsSpan()) == 0;
@@ -203,16 +136,6 @@ internal static class CudaInterop
                     if (status != 0) clear();
                     return status;
                 };
-                if (NativeLibrary.TryGetExport(handle, "cudaMalloc", out var malloc)
-                    && NativeLibrary.TryGetExport(handle, "cudaFree", out var free)
-                    && NativeLibrary.TryGetExport(handle, "cudaGetDevice", out var getDevice)
-                    && NativeLibrary.TryGetExport(handle, "cudaSetDevice", out var setDevice))
-                    _allocation = new Allocation(
-                        Marshal.GetDelegateForFunctionPointer<Malloc>(malloc),
-                        Marshal.GetDelegateForFunctionPointer<Free>(free),
-                        Marshal.GetDelegateForFunctionPointer<GetDevice>(getDevice),
-                        Marshal.GetDelegateForFunctionPointer<SetDevice>(setDevice),
-                        clear);
             }
             return _memcpy;
         }

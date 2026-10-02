@@ -5,9 +5,9 @@ namespace Shorokoo.OnnxRuntime;
 /// <summary>
 /// The native library ONNX Runtime holds Shorokoo's allocator through
 /// (<c>native/shorokoo_ort_allocator.cpp</c>, built with this assembly): the <c>OrtAllocator</c>
-/// whose entry points forward each request to a <see cref="CachingAllocator"/>, and which turns a
-/// request that allocator refuses into the C++ exception ONNX Runtime's own allocators throw, so
-/// that the call that asked fails rather than writing through a null block.
+/// whose entry points forward each request to a <c>CachingAllocator</c>, and which turns a request
+/// that allocator refuses into the C++ exception ONNX Runtime's own allocators throw, so that the
+/// call that asked fails rather than writing through a null block.
 ///
 /// <para><b>Where it is found.</b> Beside this assembly, or under <c>runtimes/&lt;rid&gt;/native/</c>
 /// there — the two places a build or a package deploys a native — and failing both, wherever the
@@ -33,19 +33,16 @@ internal static unsafe class NativeAllocator
 
     /// <summary>
     /// A native <c>OrtAllocator</c> over the managed allocator <paramref name="state"/> names,
-    /// whose requests go to <paramref name="allocate"/> and <paramref name="free"/>, describing
-    /// itself with the native memory info <paramref name="info"/>. It lives for the life of the
-    /// process.
+    /// whose requests go to the entry points <paramref name="allocate"/>
+    /// (<c>(state, size, reason, capacity)</c>, answering a block or null with the reason written
+    /// down) and <paramref name="free"/> (<c>(state, block)</c>), describing itself with the native
+    /// memory info <paramref name="info"/>. It lives for the life of the process.
     /// </summary>
     /// <exception cref="DllNotFoundException">The library is not deployed.</exception>
-    internal static IntPtr Create(
-        IntPtr state,
-        delegate* unmanaged<IntPtr, nuint, byte*, int, IntPtr> allocate,
-        delegate* unmanaged<IntPtr, IntPtr, void> free,
-        IntPtr info)
+    internal static IntPtr Create(IntPtr state, IntPtr allocate, IntPtr free, IntPtr info)
     {
         var create = (delegate* unmanaged<IntPtr, IntPtr, IntPtr, IntPtr, IntPtr>)_create.Value;
-        var made = create(state, (IntPtr)allocate, (IntPtr)free, info);
+        var made = create(state, allocate, free, info);
         return made != IntPtr.Zero ? made
             : throw new OutOfMemoryException("There was no memory for Shorokoo's native allocator itself.");
     }

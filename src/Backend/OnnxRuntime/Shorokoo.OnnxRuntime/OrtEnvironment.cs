@@ -5,7 +5,7 @@ using Microsoft.ML.OnnxRuntime;
 namespace Shorokoo.OnnxRuntime;
 
 /// <summary>
-/// The parts of ONNX Runtime's surface <see cref="CachingAllocator"/> needs that the managed package
+/// The parts of ONNX Runtime's surface <see cref="RuntimeAllocator"/> needs that the managed package
 /// does not expose: registering an allocator of the caller's own with the environment
 /// (<c>RegisterAllocator</c> in the C API, which the managed <c>OrtEnv</c> has no call for), the
 /// native handles of the environment and of a memory info, and a managed <see cref="OrtAllocator"/>
@@ -111,6 +111,16 @@ internal static class OrtEnvironment
         var message = Marshal.PtrToStringUTF8(api.GetErrorMessage(status));
         api.ReleaseStatus(status);
         throw new InvalidOperationException($"ONNX Runtime refused Shorokoo's allocator: {message}");
+    }
+
+    /// <summary>The native handle of the process's ONNX Runtime environment: one per native runtime,
+    /// however many copies of the managed wrapper bind it.</summary>
+    internal static IntPtr EnvironmentHandle()
+    {
+        var env = OrtEnv.Instance();
+        var handle = Required.EnvHandle(env);
+        GC.KeepAlive(env);
+        return handle;
     }
 
     /// <summary>The native handle of <paramref name="info"/>, which the caller keeps alive for as

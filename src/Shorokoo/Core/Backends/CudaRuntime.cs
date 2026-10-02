@@ -4,11 +4,12 @@ namespace Shorokoo.Core.Backends;
 
 /// <summary>
 /// The thin bit of the CUDA runtime library Shorokoo calls itself, outside ONNX Runtime:
-/// <c>cudaMemGetInfo</c>, which <see cref="DeviceMemory"/> reports, and the two questions that
+/// <c>cudaMemGetInfo</c>, which <see cref="DeviceMemory"/> reports, the two questions that
 /// name the device it read — <c>cudaGetDevice</c> and <c>cudaDeviceGetPCIBusId</c> — which
-/// <see cref="ProcessDeviceMemory"/> needs to find the same card elsewhere. The library is resolved
-/// by name and its exports bound lazily, so nothing here requires a CUDA machine to load — every entry point
-/// simply reports failure when the runtime is absent.
+/// <see cref="ProcessDeviceMemory"/> needs to find the same card elsewhere, and the card's own
+/// allocation and release, which <see cref="CachingAllocator"/> takes its blocks from. The library
+/// is resolved by name and its exports bound lazily, so nothing here requires a CUDA machine to
+/// load — every entry point simply reports failure when the runtime is absent.
 /// </summary>
 internal static class CudaRuntime
 {
@@ -28,10 +29,26 @@ internal static class CudaRuntime
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate int GetPciBusId(byte[] pciBusId, int length, int device);
 
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate int Malloc(out IntPtr pointer, nuint count);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate int Free(IntPtr pointer);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate int SetDevice(int device);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate int GetLastError();
+
+    /// <summary>The runtime's allocation entry points, bound together or not at all.</summary>
+    private sealed record Allocation(Malloc Malloc, Free Free, GetDevice GetDevice, SetDevice SetDevice, GetLastError Clear);
+
     private static readonly object _gate = new();
     private static MemGetInfo? _memGetInfo;
     private static GetDevice? _getDevice;
     private static GetPciBusId? _getPciBusId;
+    private static Allocation? _allocation;
     private static bool _bound;
 
     /// <summary>
@@ -81,6 +98,55 @@ internal static class CudaRuntime
         return System.Text.Encoding.ASCII.GetString(buffer, 0, end < 0 ? buffer.Length : end);
     }
 
+    /// <summary>
+    /// <paramref name="count"/> bytes of CUDA device <paramref name="deviceId"/>'s memory, from the
+    /// CUDA runtime itself, or <see cref="IntPtr.Zero"/> where the card has not that much free or
+    /// there is no runtime to ask. The thread's current device is left as it was found.
+    /// </summary>
+    internal static IntPtr Allocate(int deviceId, long count)
+    {
+        if (BindAllocation() is not { } cuda) return IntPtr.Zero;
+        return OnDevice(cuda, deviceId, () => cuda.Malloc(out var pointer, (nuint)count) == 0 ? pointer : IntPtr.Zero);
+    }
+
+    /// <summary>
+    /// Hands <paramref name="pointer"/>, which <see cref="Allocate"/> answered for CUDA device
+    /// <paramref name="deviceId"/>, back to the card. The runtime waits for the work the card has in
+    /// hand before it does, so nothing still reading the block is cut short.
+    /// </summary>
+    internal static void Release(int deviceId, IntPtr pointer)
+    {
+        if (BindAllocation() is not { } cuda) return;
+        OnDevice(cuda, deviceId, () => cuda.Free(pointer) == 0 ? pointer : IntPtr.Zero);
+    }
+
+    /// <summary>
+    /// <paramref name="call"/> with CUDA device <paramref name="deviceId"/> current on this thread,
+    /// and the device that was current before it current again after. A failure is cleared once
+    /// answered: left as the thread's last CUDA error, it would be read by the execution provider
+    /// after its own next launch on this thread, and reported as that run's failure.
+    /// </summary>
+    private static IntPtr OnDevice(Allocation cuda, int deviceId, Func<IntPtr> call)
+    {
+        var switched = cuda.GetDevice(out var current) == 0 && current != deviceId && cuda.SetDevice(deviceId) == 0;
+        try
+        {
+            var answer = call();
+            if (answer == IntPtr.Zero) cuda.Clear();
+            return answer;
+        }
+        finally
+        {
+            if (switched) cuda.SetDevice(current);
+        }
+    }
+
+    private static Allocation? BindAllocation()
+    {
+        Bind();
+        return _allocation;
+    }
+
     private static MemGetInfo? Bind()
     {
         lock (_gate)
@@ -97,13 +163,24 @@ internal static class CudaRuntime
                         _getDevice = Marshal.GetDelegateForFunctionPointer<GetDevice>(getDevice);
                     if (NativeLibrary.TryGetExport(library, "cudaDeviceGetPCIBusId", out var getPciBusId))
                         _getPciBusId = Marshal.GetDelegateForFunctionPointer<GetPciBusId>(getPciBusId);
+                    if (_getDevice is { } current
+                        && NativeLibrary.TryGetExport(library, "cudaMalloc", out var malloc)
+                        && NativeLibrary.TryGetExport(library, "cudaFree", out var free)
+                        && NativeLibrary.TryGetExport(library, "cudaSetDevice", out var setDevice)
+                        && NativeLibrary.TryGetExport(library, "cudaGetLastError", out var lastError))
+                        _allocation = new Allocation(
+                            Marshal.GetDelegateForFunctionPointer<Malloc>(malloc),
+                            Marshal.GetDelegateForFunctionPointer<Free>(free),
+                            current,
+                            Marshal.GetDelegateForFunctionPointer<SetDevice>(setDevice),
+                            Marshal.GetDelegateForFunctionPointer<GetLastError>(lastError));
                 }
                 else
                     NativeLibrary.Free(library);
             }
             // Binding is best effort -- a reading is worth nothing next to failing a run, and
             // TryMemGetInfo promises to report rather than throw.
-            catch (Exception) { _memGetInfo = null; _getDevice = null; _getPciBusId = null; }
+            catch (Exception) { _memGetInfo = null; _getDevice = null; _getPciBusId = null; _allocation = null; }
             finally { _bound = true; }
             return _memGetInfo;
         }

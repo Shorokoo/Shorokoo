@@ -1,17 +1,22 @@
 using System.Numerics;
-using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
-using Microsoft.ML.OnnxRuntime;
-using Shorokoo.Core.Backends;
 
-namespace Shorokoo.OnnxRuntime;
+namespace Shorokoo.Core.Backends;
 
 /// <summary>
-/// The allocator every ONNX Runtime session of this backend allocates through on one device — the
-/// host, or one CUDA card — and that every tensor the framework places on a card comes from: a
-/// caching allocator of Shorokoo's own, registered with the runtime's environment, which each session
-/// is built to use in place of the arena it would otherwise make.
+/// Shorokoo's allocator for one device — the host, or one CUDA card — for the whole process: what
+/// every ONNX Runtime session allocates through on that device, whichever runtime and whichever
+/// copy of the backend built it, and what every tensor a backend places on a card comes from. A
+/// backend hands it to its runtime through a native allocator of Shorokoo's, which forwards each
+/// request to <see cref="AllocateEntry"/> and <see cref="FreeEntry"/>.
+///
+/// <para><b>One per device, not per runtime.</b> Two backends can bind one native runtime — the
+/// program's own and one loaded in isolation over the same file — and a runtime keeps one allocator
+/// per device for every session it builds, whichever backend asked. So the allocator, its accounts
+/// and the charging that picks an account are this assembly's, which every copy of a backend
+/// shares, and a runtime is handed it once (<see cref="ClaimRuntime"/>): the sessions of either
+/// backend then charge their own accounts, and are held to their own limits.</para>
 ///
 /// <para><b>Why the session's allocator is Shorokoo's.</b> ONNX Runtime writes a run's every output
 /// into memory its session's allocator gives it — an output whose shape only the run learns
@@ -43,12 +48,10 @@ namespace Shorokoo.OnnxRuntime;
 /// lets go of may still be read by work queued before it. Such a block is reused by that run alone
 /// until it ends — on the same stream, so in order — and only then by anything else.</para>
 ///
-/// <para><b>Refusing.</b> ONNX Runtime holds the allocator through a native library of Shorokoo's
-/// (<see cref="NativeAllocator"/>), which forwards each request here. A request this cannot serve —
-/// one an account's limit has no room for, or one the device has no memory for — is answered with
-/// null and the reason, and the native side throws that reason as ONNX Runtime's own allocators
-/// throw theirs: the call that asked fails as an allocation failure, and the device is left as
-/// usable as before it.</para>
+/// <para><b>Refusing.</b> A request this cannot serve — one an account's limit has no room for, or
+/// one the device has no memory for — is answered with null and the reason, and the native side
+/// throws that reason as ONNX Runtime's own allocators throw theirs: the call that asked fails as an
+/// allocation failure, and the device is left as usable as before it.</para>
 ///
 /// <para><b>Held for the life of the process</b>, as every tensor that came from it frees itself
 /// through it.</para>
@@ -61,11 +64,10 @@ internal sealed unsafe class CachingAllocator
     private static readonly object _registryGate = new();
     private static readonly Dictionary<int, CachingAllocator> _byDevice = [];
 
-    /// <summary>The allocator for the host, registered on first use.</summary>
+    /// <summary>The allocator for the host, made on first use.</summary>
     internal static CachingAllocator ForHost() => For(Host);
 
-    /// <summary>The allocator for CUDA device <paramref name="deviceId"/>, registered on first
-    /// use.</summary>
+    /// <summary>The allocator for CUDA device <paramref name="deviceId"/>, made on first use.</summary>
     internal static CachingAllocator ForCard(int deviceId) => For(deviceId);
 
     private static CachingAllocator For(int device)
@@ -73,19 +75,14 @@ internal sealed unsafe class CachingAllocator
         lock (_registryGate)
         {
             if (_byDevice.TryGetValue(device, out var existing)) return existing;
-            var made = new CachingAllocator(device);
-            OrtEnvironment.Register(made._native);
-            _byDevice[device] = made;
-            return made;
+            return _byDevice[device] = new CachingAllocator(device);
         }
     }
 
     private readonly int _device;
-    private readonly IntPtr _native;
-    private readonly OrtMemoryInfo _info;
-    private readonly IntPtr _infoPointer;
     private readonly object _gate = new();
     private readonly Dictionary<IntPtr, Block> _blocks = [];
+    private readonly HashSet<IntPtr> _runtimes = [];
 
     /// <summary>What a block is: its size class, what was asked for, the account it is charged to,
     /// and whether that account has handed it over (<see cref="HandOver"/>).</summary>
@@ -100,28 +97,34 @@ internal sealed unsafe class CachingAllocator
     private CachingAllocator(int device)
     {
         _device = device;
-        _info = InfoFor(device);
-        _infoPointer = OrtEnvironment.PointerOf(_info);
         Placements = new Account(this, "placements");
-
-        _native = NativeAllocator.Create(GCHandle.ToIntPtr(GCHandle.Alloc(this)), &AllocCallback, &FreeCallback, _infoPointer);
-        Managed = OrtEnvironment.Wrap(_native);
+        State = GCHandle.ToIntPtr(GCHandle.Alloc(this));
     }
 
-    /// <summary>The memory info ONNX Runtime matches this allocator to a device by: the host's, or
-    /// CUDA device <paramref name="device"/>'s.</summary>
-    private static OrtMemoryInfo InfoFor(int device)
+    /// <summary>The handle the native allocator passes back to the entry points, naming this
+    /// allocator.</summary>
+    internal IntPtr State { get; }
+
+    /// <summary>Where the native allocator asks for a block: <c>(state, size, reason, capacity)</c>,
+    /// answering the block or null with the reason written down.</summary>
+    internal static IntPtr AllocateEntry => (IntPtr)(delegate* unmanaged<IntPtr, nuint, byte*, int, IntPtr>)&AllocCallback;
+
+    /// <summary>Where the native allocator hands a block back: <c>(state, block)</c>.</summary>
+    internal static IntPtr FreeEntry => (IntPtr)(delegate* unmanaged<IntPtr, IntPtr, void>)&FreeCallback;
+
+    /// <summary>
+    /// Whether the runtime whose environment is <paramref name="environment"/> still has to be handed
+    /// this allocator: true the first time a runtime is named, for the caller to register it there,
+    /// and false after, however many backends bind that runtime. A runtime keeps one allocator per
+    /// device, so a second registration would take the device over from the first.
+    /// </summary>
+    internal bool ClaimRuntime(IntPtr environment)
     {
-        if (device == Host)
-            return new OrtMemoryInfo(OrtMemoryInfo.allocatorCPU, OrtAllocatorType.DeviceAllocator, 0, OrtMemType.Default);
-        return new OrtMemoryInfo(OrtMemoryInfo.allocatorCUDA, OrtAllocatorType.DeviceAllocator, device, OrtMemType.Default);
+        lock (_gate) return _runtimes.Add(environment);
     }
 
     /// <summary>Whether this is a card's allocator.</summary>
     internal bool OnCard => _device != Host;
-
-    /// <summary>This allocator as the managed surface takes one, to make a tensor from.</summary>
-    internal OrtAllocator Managed { get; }
 
     /// <summary>The account of what the framework places on the device itself, and of every block a
     /// closed account still had cached.</summary>
@@ -325,7 +328,7 @@ internal sealed unsafe class CachingAllocator
     /// <summary>A block from the device itself, or null where it has not that much free.</summary>
     private IntPtr Fresh(long size)
     {
-        if (OnCard) return CudaInterop.Allocate(_device, size);
+        if (OnCard) return CudaRuntime.Allocate(_device, size);
         try
         {
             // Sixty-four bytes, as ONNX Runtime aligns its own host blocks for its kernels.
@@ -344,7 +347,7 @@ internal sealed unsafe class CachingAllocator
         if (blocks is null) return;
         foreach (var block in blocks)
         {
-            if (OnCard) CudaInterop.Release(_device, block);
+            if (OnCard) CudaRuntime.Release(_device, block);
             else NativeMemory.AlignedFree((void*)block);
         }
     }

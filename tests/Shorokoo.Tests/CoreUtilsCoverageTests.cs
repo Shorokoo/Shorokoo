@@ -912,16 +912,16 @@ public class CoreUtilsCoverageTests
         Assert.True(OrtEnvironment.IsBound);
         Assert.NotNull(NativeAllocator.Locate());
 
-        var host = CachingAllocator.ForHost();
-        var account = host.Open("probe");
-        long InUse() => host.Statistics(account).InUseBytes;
+        var host = RuntimeAllocator.ForHost();
+        var account = host.Shared.Open("probe");
+        long InUse() => host.Shared.Statistics(account).InUseBytes;
         using (CachingAllocator.Charge(account, null))
         {
             using var value = OrtValue.CreateAllocatedTensorValue(host.Managed, Microsoft.ML.OnnxRuntime.Tensors.TensorElementType.Float, [1000L]);
             Assert.Equal(CachingAllocator.SizeClass(4000), InUse());
         }
         Assert.Equal(0L, InUse());
-        host.Close(account);
+        host.Shared.Close(account);
     }
 
     /// <summary>

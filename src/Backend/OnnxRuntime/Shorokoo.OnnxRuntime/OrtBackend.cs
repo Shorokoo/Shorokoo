@@ -411,8 +411,8 @@ public abstract class OrtBackend : IShorokooBackend
         // ONNX Runtime writes every output into memory its session's allocator gives it, so an
         // output can hold only its own block only where that allocator is Shorokoo's. On a card, the
         // account carries the session's limit, which ONNX Runtime has no say in.
-        var host = CachingAllocator.ForHost().Open("session");
-        var card = _cudaDeviceId is { } device ? CachingAllocator.ForCard(device).Open("session") : null;
+        var host = RuntimeAllocator.ForHost().Shared.Open("session");
+        var card = _cudaDeviceId is { } device ? RuntimeAllocator.ForCard(device).Shared.Open("session") : null;
         if (card is not null) card.Limit = deviceMemory.LimitBytes;
         options.AddSessionConfigEntry("session.use_env_allocators", "1");
         try
@@ -1180,7 +1180,7 @@ public abstract class OrtBackend : IShorokooBackend
         // card's name, which the execution provider then copies over on every run.
         if (_cudaDeviceId is not { } deviceId)
             return new(OrtValue.CreateAllocatedTensorValue(OrtAllocator.DefaultInstance, elementType, shape));
-        return new(OrtValue.CreateAllocatedTensorValue(CachingAllocator.ForCard(deviceId).Managed, elementType, shape));
+        return new(OrtValue.CreateAllocatedTensorValue(RuntimeAllocator.ForCard(deviceId).Managed, elementType, shape));
     }
 
     /// <summary>

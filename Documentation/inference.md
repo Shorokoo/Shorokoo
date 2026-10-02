@@ -458,6 +458,17 @@ One backend per package, in a namespace equal to the package id. **The type name
 All four implement `IShorokooBackend` with a parameterless constructor; the GPU ones use the
 CUDA provider on device 0, the CPU ones ORT's default provider.
 
+Their sessions run their operators on ONNX Runtime's thread pools of the process, made with its
+environment when the first of these backends is built, rather than each on an intra-op pool of its
+own (`SessionsShareThreadPools`, true unless set otherwise: `new WinCpuBackend { SessionsShareThreadPools = false }`).
+A pool's threads spin for a while after a run, waiting for more work, so sessions with pools of
+their own run one after another contend: two compiled graphs run in turn, or a compiled graph whose
+runs consuming their inputs place values through a session of their own
+([A run that writes into what it consumed](#a-run-that-writes-into-what-it-consumed)). A session
+built with an intra-op thread count of its own (`CreateSession`'s `intraOpThreads`) keeps a pool of
+its own of that size; where
+something else made ONNX Runtime's environment first, without pools, every session keeps its own.
+
 | package | backend type | fully qualified |
 |---|---|---|
 | `Shorokoo.PyTorch.Cpu` | `TorchCpuBackend` | `Shorokoo.PyTorch.Cpu.TorchCpuBackend` |

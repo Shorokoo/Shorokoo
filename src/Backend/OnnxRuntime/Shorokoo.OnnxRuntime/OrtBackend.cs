@@ -104,6 +104,9 @@ public abstract class OrtBackend : IShorokooBackend
         _configureExecutionProvider = configureExecutionProvider;
         _cudaDeviceId = cudaDeviceId;
         _stockProvider = stockProvider;
+        // Before anything of this runtime's makes ONNX Runtime's environment without them: the
+        // environment's thread pools are made with it or never (see SessionsShareThreadPools).
+        OrtEnvironment.Environment();
     }
 
     /// <summary>
@@ -314,6 +317,22 @@ public abstract class OrtBackend : IShorokooBackend
     /// </summary>
     internal bool SessionsUseOrtArena { get; init; }
 
+    /// <summary>
+    /// Whether the sessions this backend builds run their operators on ONNX Runtime's thread pools
+    /// of the process, which every such session shares, rather than each on an intra-op pool of its
+    /// own; true unless set otherwise. A pool's threads spin for a while after the work they were
+    /// given, waiting for more, so two sessions with pools of their own run one after the other —
+    /// a compiled graph's session and the one a run that consumes its input places its values
+    /// through, or two compiled graphs — each run contending with the other pool's spinning threads:
+    /// measured on the host, a two-layer encoder ran a consuming and a shared run in 385–450 ms
+    /// that way against 113–118 on shared pools, and a session run alone took as long either way.
+    /// A session built with an intra-op thread count of its own — one run side by side with others
+    /// on a thread each — keeps a pool of its own of that size whatever this says. Where something
+    /// else made the process's ONNX Runtime environment first, without pools of its own, every
+    /// session keeps its own.
+    /// </summary>
+    public bool SessionsShareThreadPools { get; init; } = true;
+
     /// <summary>Whether this backend's sessions run on a CUDA card.</summary>
     internal bool OnCard => _cudaDeviceId is not null;
 
@@ -456,6 +475,34 @@ public abstract class OrtBackend : IShorokooBackend
         (CachingAllocator.Account Host, CachingAllocator.Account? Card)? accounts = null,
         string? externalDataDirectory = null)
     {
+        try
+        {
+            return NewSessionOnce(model, graphOptimization, logSeverity, deviceMemory, diagnostics, optimizedDirectory,
+                intraOpThreads, suppliedInitializers, precision, accounts, externalDataDirectory);
+        }
+        catch (OnnxRuntimeException refused) when (refused.Message.Contains("CreateEnvWithGlobalThreadPools", StringComparison.Ordinal))
+        {
+            // An environment made elsewhere with no pools of its own refuses a session asked to run
+            // on them: from now on every session keeps its own.
+            OrtEnvironment.NoSharedThreadPools();
+            return NewSessionOnce(model, graphOptimization, logSeverity, deviceMemory, diagnostics, optimizedDirectory,
+                intraOpThreads, suppliedInitializers, precision, accounts, externalDataDirectory);
+        }
+    }
+
+    private BuiltSession NewSessionOnce(
+        byte[] model,
+        ShorokooGraphOptimization graphOptimization,
+        ShorokooLogSeverity logSeverity,
+        DeviceMemorySettings deviceMemory,
+        DiagnosticSettings diagnostics,
+        string? optimizedDirectory,
+        int intraOpThreads,
+        IReadOnlyList<SuppliedInitializer> suppliedInitializers,
+        PrecisionSettings precision,
+        (CachingAllocator.Account Host, CachingAllocator.Account? Card)? accounts = null,
+        string? externalDataDirectory = null)
+    {
         // The `using` is load-bearing, not tidiness. SessionOptions is a SafeHandle, so it
         // carries a critical finalizer that calls OrtReleaseSessionOptions, and ORT takes its
         // handle as a bare IntPtr -- the P/Invoke does no SafeHandle ref-counting, and the
@@ -467,6 +514,12 @@ public abstract class OrtBackend : IShorokooBackend
         using var options = new SessionOptions();
         Configure(options, graphOptimization, logSeverity);
         if (intraOpThreads > 0) options.IntraOpNumThreads = intraOpThreads;
+        // A session with no thread count of its own runs its operators on the process's pools, so
+        // that two sessions run one after another -- a session and the one it places values
+        // through, or two compiles -- do not each keep a pool whose threads spin against the
+        // other's (see SessionsShareThreadPools).
+        var sharedPools = SessionsShareThreadPools && intraOpThreads == 0 && OrtEnvironment.SharedThreadPools;
+        if (sharedPools) options.DisablePerSessionThreads();
         if (diagnostics.DeterministicCompute) UseDeterministicCompute(options);
         // Named before anything can throw, and made inside the try, by the call that points the
         // options into it: a setter there throwing after the folder was made would otherwise leave

@@ -269,19 +269,6 @@ What that still leaves:
   the first layer's weight gradient reads the input — so its memory is free only
   as the step ends.
 
-### A loop alternating between a compiled graph's signatures is slower on the host
-
-On ONNX Runtime each session keeps a thread pool of its own, whose threads spin a
-while after a run in case another comes. A run that writes into what it consumed
-runs on a second session over the graph, one per signature, so a loop alternating
-between runs that consume and runs that do not — or between two shapes that both
-consume — alternates between two sessions, and each run's threads contend with the
-other session's still spinning. Measured on the host, a two-layer encoder ran
-3–4× slower per run alternating between two sessions than on either alone; two
-plain compiles of the same graph alternate the same way. Runs of one signature
-are not slowed: on that encoder, consuming runs one after another took as long as
-plain ones, within 1%. Keep a loop's runs of one kind.
-
 ### Some outputs written into one consumed input are freed together
 
 Outputs a run wrote into the memory of one input it consumed stand on that memory

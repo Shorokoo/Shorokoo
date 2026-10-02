@@ -90,6 +90,60 @@ internal static class OrtEnvironment
         catch (Exception) { return null; }
     }
 
+    private static readonly object _environmentGate = new();
+    private static bool? _sharedThreadPools;
+
+    /// <summary>
+    /// Whether the process's ONNX Runtime environment has thread pools of its own, which a session
+    /// built not to keep pools of its own runs its operators on (<c>DisablePerSessionThreads</c>).
+    /// Made so here, with the environment, where nothing has made the environment yet: an intra-op
+    /// pool sized as a session's own would be (a thread per physical core, spinning while it waits
+    /// for work), and no inter-op pool, sessions running their nodes one at a time. An environment
+    /// something else made first may have none, and then answers false.
+    /// </summary>
+    internal static bool SharedThreadPools
+    {
+        get
+        {
+            Environment();
+            return _sharedThreadPools == true;
+        }
+    }
+
+    /// <summary>Takes note that the environment has no thread pools of its own after all: a
+    /// session asked to run on them was refused for want of them.</summary>
+    internal static void NoSharedThreadPools()
+    {
+        lock (_environmentGate) _sharedThreadPools = false;
+    }
+
+    /// <summary>The process's ONNX Runtime environment, made with thread pools of its own where
+    /// nothing has made it yet (<see cref="SharedThreadPools"/>).</summary>
+    internal static OrtEnv Environment()
+    {
+        lock (_environmentGate)
+        {
+            if (_sharedThreadPools is null)
+            {
+                if (OrtEnv.IsCreated)
+                    _sharedThreadPools = false;
+                else
+                {
+                    using var threads = new OrtThreadingOptions { GlobalIntraOpNumThreads = 0, GlobalInterOpNumThreads = 1, GlobalSpinControl = true };
+                    var options = new EnvironmentCreationOptions
+                    {
+                        logId = "CSharpOnnxRuntime",
+                        logLevel = OrtLoggingLevel.ORT_LOGGING_LEVEL_WARNING,
+                        threadOptions = threads,
+                    };
+                    OrtEnv.CreateInstanceWithOptions(ref options);
+                    _sharedThreadPools = true;
+                }
+            }
+        }
+        return OrtEnv.Instance();
+    }
+
     private static Binding Required => _binding.Value ?? throw new InvalidOperationException(
         "This ONNX Runtime does not expose what Shorokoo registers its allocator through "
         + "(RegisterAllocator, and the native handles of its environment and memory infos), so no "
@@ -104,7 +158,7 @@ internal static class OrtEnvironment
     internal static void Register(IntPtr allocator)
     {
         var api = Required;
-        var env = OrtEnv.Instance();
+        var env = Environment();
         var status = api.RegisterAllocator(api.EnvHandle(env), allocator);
         GC.KeepAlive(env);
         if (status == IntPtr.Zero) return;
@@ -117,7 +171,7 @@ internal static class OrtEnvironment
     /// however many copies of the managed wrapper bind it.</summary>
     internal static IntPtr EnvironmentHandle()
     {
-        var env = OrtEnv.Instance();
+        var env = Environment();
         var handle = Required.EnvHandle(env);
         GC.KeepAlive(env);
         return handle;

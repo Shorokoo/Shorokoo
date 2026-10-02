@@ -267,6 +267,16 @@ public interface IShorokooBackend
     // A decorator forwards this, as it forwards every member with a default body.
     string? KernelWorkaroundSet => null;
 
+    // The most a run of `model` holds at once beyond its inputs -- with the outputs of
+    // `outputAliases` written into the inputs they are paired with -- as this backend lays a run's
+    // values out, or null where this backend has no such model. `model`'s inputs state their shapes
+    // in full. The training rig's memory-aware pass judges the steps it weighs by this where it is
+    // not null, so that a step it hands a backend holds least on that backend, rather than in the
+    // pass's own model of a run, which is ONNX Runtime's.
+    //
+    // A decorator forwards this, as it forwards every member with a default body.
+    internal long? ModelledRunPeak(Shorokoo.Core.Factory.IR.ModelProto model, IReadOnlyList<OutputAlias> outputAliases) => null;
+
     IShorokooTensorValue CreateTensor<T>(T[] data, long[] shape) where T : unmanaged;
 
     IShorokooTensorValue CreateTensorFromRawBytes(

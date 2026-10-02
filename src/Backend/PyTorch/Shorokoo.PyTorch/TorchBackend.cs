@@ -62,6 +62,11 @@ public abstract class TorchBackend : IShorokooBackend
     public bool AcceptsTrainingFormat(string format)
         => format is TrainingFormats.Onnx or TrainingFormats.OnnxAutoGrad;
 
+    /// <summary>What a run of the model's translation holds at once beyond its inputs
+    /// (<see cref="TorchRunMemory"/>).</summary>
+    long? IShorokooBackend.ModelledRunPeak(Shorokoo.Core.Factory.IR.ModelProto model, IReadOnlyList<OutputAlias> outputAliases)
+        => TorchRunMemory.Peak(model, outputAliases);
+
     /// <summary>torch's name for this backend's device: <c>cpu</c> or <c>cuda:N</c>.</summary>
     public string DeviceName { get; }
 

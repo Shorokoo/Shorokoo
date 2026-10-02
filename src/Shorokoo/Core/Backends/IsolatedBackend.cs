@@ -449,6 +449,9 @@ public static class IsolatedBackend
 
         public string? KernelWorkaroundSet => _inner.KernelWorkaroundSet;
 
+        long? IShorokooBackend.ModelledRunPeak(Shorokoo.Core.Factory.IR.ModelProto model, IReadOnlyList<OutputAlias> outputAliases)
+            => _inner.ModelledRunPeak(model, outputAliases);
+
         public IShorokooTensorValue CreateTensor<T>(T[] data, long[] shape) where T : unmanaged
             => _inner.CreateTensor(data, shape);
 

@@ -18,6 +18,13 @@ public class GraphOptimizationResult
     public required string StrategyName { get; init; }
 
     /// <summary>
+    /// What the backend the step runs on holds at the peak of a run of each strategy's graph, in
+    /// <see cref="AllStrategies"/>' order, where that backend models a run and the pass chose by
+    /// it; null where it chose by its own evaluation.
+    /// </summary>
+    internal IReadOnlyList<long>? BackendPeakBytes { get; init; }
+
+    /// <summary>
     /// The optimized <see cref="InternalComputationGraph"/> produced by the selected strategy.
     /// </summary>
     /// <summary>The winning strategy's rewritten graph. Internal: the rig freezes it
@@ -117,20 +124,27 @@ internal class MemoryAwareGraphOptimizer
     private readonly ShapeInferenceInterpreter _shapeInference;
     private readonly double _computeFactor;
     private readonly double _memoryFactor;
+    private readonly Func<InternalComputationGraph, long?>? _backendPeak;
 
     /// <summary>
     /// A pass scoring every graph it considers — the baseline, each checkpoint segment, each
     /// rematerialization and each reordering — with <paramref name="evaluator"/>, the default
     /// evaluator when null. Give that evaluator the step's <see cref="StepState"/> and every
     /// candidate is scored with the state it will run with, written in place where the candidate
-    /// still proves it.
+    /// still proves it. Where <paramref name="backendPeak"/> answers for every strategy's graph —
+    /// what the backend the step runs on holds at the peak of a run of it
+    /// (<see cref="Shorokoo.Core.Backends.IShorokooBackend"/>'s modelled run peak) — the strategies
+    /// are judged by that peak in place of the evaluator's at the end, so that the graph handed back
+    /// holds no more on that backend than the one handed over, at the same objective.
     /// </summary>
     public MemoryAwareGraphOptimizer(
         double computeFactor = DefaultComputeWeight,
         double memoryFactor = DefaultMemoryWeight,
         GraphEvaluator? evaluator = null,
-        ShapeInferenceInterpreter? shapeInference = null)
+        ShapeInferenceInterpreter? shapeInference = null,
+        Func<InternalComputationGraph, long?>? backendPeak = null)
     {
+        _backendPeak = backendPeak;
         _evaluator = evaluator ?? new GraphEvaluator();
         _shapeInference = shapeInference ?? new ShapeInferenceInterpreter();
         _computeFactor = computeFactor;
@@ -206,17 +220,7 @@ internal class MemoryAwareGraphOptimizer
         // while the model claimed a small saving. Until bodies are modelled per iteration, a
         // graph with a scope is handed back as it came.
         if (baselineEval.PeakMemoryBytes < MinimumPeakBytesToOptimize || graph.Nodes.Any(n => n.IsOpenNode()))
-        {
-            var kept = strategies[^1];
-            return new GraphOptimizationResult
-            {
-                StrategyName = kept.Name,
-                OptimizedGraph = kept.Graph,
-                ShapeInfo = kept.ShapeInfo,
-                Evaluation = kept.Evaluation,
-                AllStrategies = strategies.Select(s => (s.Name, s.Evaluation, s.Graph)).ToList(),
-            };
-        }
+            return Chosen(strategies, strategies.Count - 1, selection);
 
         var scheduler = new MemoryAwareScheduler();
         var rematerializer = new Rematerializer(selection, _evaluator);
@@ -235,8 +239,44 @@ internal class MemoryAwareGraphOptimizer
         strategies.Add(RunAlternatingStrategy("RematReorder", selection, start, startEval, Remat, Reorder));
         strategies.Add(RunAlternatingStrategy("ReorderRemat", selection, start, startEval, Reorder, Remat));
 
-        var best = strategies.OrderBy(s => selection.Score(s.Evaluation)).First();
+        var best = Enumerable.Range(0, strategies.Count).MinBy(i => selection.Score(strategies[i].Evaluation));
+        return Chosen(strategies, best, selection);
+    }
 
+    /// <summary>
+    /// The result handing back <paramref name="strategies"/>' entry at <paramref name="chosen"/>,
+    /// the pass's own choice — or, where the backend the step runs on models a run of every
+    /// strategy's graph (<see cref="_backendPeak"/>), the strategy scoring least by the same
+    /// objective with that backend's peaks, its first entry (the graph as handed over) scoring the
+    /// weights' sum: so the step handed back never holds more on that backend than the one handed
+    /// over, unless it buys that with less compute at the objective's rate.
+    /// </summary>
+    private GraphOptimizationResult Chosen(
+        List<(string Name, GraphEvaluationResult Evaluation, InternalComputationGraph Graph, ShapeInferenceResult ShapeInfo)> strategies,
+        int chosen, ComputeMemoryObjective selection)
+    {
+        List<long>? peaks = null;
+        if (_backendPeak is not null)
+        {
+            peaks = new List<long>(strategies.Count);
+            foreach (var strategy in strategies)
+            {
+                if (_backendPeak(strategy.Graph) is not { } peak)
+                {
+                    peaks = null;
+                    break;
+                }
+                peaks.Add(peak);
+            }
+        }
+        if (peaks is not null)
+        {
+            var onBackend = new ComputeMemoryObjective(_computeFactor, _memoryFactor,
+                new GraphEvaluationResult { TotalComputeTime = strategies[0].Evaluation.TotalComputeTime, PeakMemoryBytes = peaks[0], NodeDetails = [] });
+            chosen = Enumerable.Range(0, strategies.Count).MinBy(i => onBackend.Score(
+                new GraphEvaluationResult { TotalComputeTime = strategies[i].Evaluation.TotalComputeTime, PeakMemoryBytes = peaks[i], NodeDetails = [] }));
+        }
+        var best = strategies[chosen];
         return new GraphOptimizationResult
         {
             StrategyName = best.Name,
@@ -244,6 +284,7 @@ internal class MemoryAwareGraphOptimizer
             ShapeInfo = best.ShapeInfo,
             Evaluation = best.Evaluation,
             AllStrategies = strategies.Select(s => (s.Name, s.Evaluation, s.Graph)).ToList(),
+            BackendPeakBytes = peaks,
         };
     }
 

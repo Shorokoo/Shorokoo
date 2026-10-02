@@ -184,6 +184,38 @@ namespace Shorokoo
         }
 
         /// <summary>
+        /// What the backend of the context this rig's steps run on holds at the peak of a run of a
+        /// step graph, at the shapes of <paramref name="exemplars"/> — the model it would be handed,
+        /// built as a compile builds it, with the state pairs that model proves written in place where
+        /// the context writes in place — or null where that backend models no run (ONNX Runtime's runs
+        /// are what the pass's own evaluation models) or the context is the unread default.
+        /// </summary>
+        private Func<InternalComputationGraph, long?>? BackendPeakOf(IReadOnlyList<IRuntimeTensor> exemplars)
+        {
+            if (_runtimeContext is not { } context) return null;
+            var backend = context.ResolvedBackend;
+            var dims = new long[]?[exemplars.Count];
+            for (int i = 0; i < dims.Length; i++)
+            {
+                if (exemplars[i] is not RuntimeTensor { Shape: { } shape }) return null;
+                dims[i] = [.. shape.Dims.Select(d => (long)d)];
+            }
+            var workarounds = Shorokoo.Core.Lowering.KernelWorkarounds.KernelWorkaroundRegistry.For(backend.KernelWorkaroundSet);
+            var writesInPlace = context.OutputAliasing || context.ValuePlacement == true;
+            var candidates = StateAliasCandidates();
+            return graph =>
+            {
+                var model = Shorokoo.Core.Factory.FastOnnxModelBuilder.BuildInternalOnnxModel(graph, prepForOnnx: true, inputDims: dims, workarounds: workarounds);
+                var step = model.Graph!;
+                List<OutputAlias> named = writesInPlace
+                    ? [.. candidates.Where(c => c.Output < step.Outputs.Count && c.Input < step.Inputs.Count)
+                        .Select(c => new OutputAlias(step.Outputs[c.Output].Name, step.Inputs[c.Input].Name))]
+                    : [];
+                return backend.ModelledRunPeak(model, OutputAliasProof.Prove(step, named));
+            };
+        }
+
+        /// <summary>
         /// The outputs of a training step that could be written into the memory of the inputs they
         /// replace: each updated parameter, model-state and optimizer-state field with the field it
         /// updates. The step's inputs and outputs lead with those fields in one order, so the pairs
@@ -4945,14 +4977,18 @@ namespace Shorokoo
             // return state to the host, write nothing in place and hold both copies, more than is
             // modelled here. A rig whose runtime context is still the unread default models the
             // default's aliasing, since reading the default resolves a backend.
+            // A context that places a run's values in what it consumes writes the state there as
+            // aliasing would (PlacementProof), so the state is modelled written in place where it
+            // aliases or places.
             var evaluator = new Shorokoo.Core.AutoDiffCheckpointing.GraphEvaluator(state: new StepState(
-                StateAliasCandidates(), _runtimeContext?.OutputAliasing ?? true));
+                StateAliasCandidates(), (_runtimeContext?.OutputAliasing ?? true) || _runtimeContext?.ValuePlacement == true));
             var baselineEval = evaluator.Evaluate(graph, shapeInfo);
             GraphOptimizationResult optResult;
             if (TrainingBackend.LowersAutoGrad)
             {
                 Stage("OptimizeTrainingStepGraph");
-                var optimizer = new MemoryAwareGraphOptimizer(evaluator: evaluator, shapeInference: shapeInferencer);
+                var optimizer = new MemoryAwareGraphOptimizer(evaluator: evaluator, shapeInference: shapeInferencer,
+                    backendPeak: BackendPeakOf(allInputs));
                 optResult = optimizer.OptimizeWithShapeInfo(graph, shapeInfo);
             }
             else

@@ -71,11 +71,12 @@ internal sealed class QeeAuditOnBackend(
     };
 
     /// <summary>The modules the JAX backend refuses because their graph computes, from an input's
-    /// values, a number an operator needs when the model is compiled, and that operator.</summary>
+    /// values, a number an operator needs when the model is compiled, and that operator — the first
+    /// such one the translation runs.</summary>
     private static readonly Dictionary<Type, string> JaxKnownRefusals = new()
     {
-        [typeof(QeeWindowValueAuditCheck)] = "HannWindow",
-        [typeof(QeeSignalValueAuditCheck)] = "HannWindow",
+        [typeof(QeeWindowValueAuditCheck)] = "BlackmanWindow",
+        [typeof(QeeSignalValueAuditCheck)] = "MelWeightMatrix",
         [typeof(QeeDftStftMelAuditCheck)] = "STFT",
     };
 

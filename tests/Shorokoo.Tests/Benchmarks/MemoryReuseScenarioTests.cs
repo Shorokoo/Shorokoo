@@ -172,6 +172,8 @@ public class MemoryReuseScenarioTests
     /// <c>$SHOROKOO_MEMORY_REUSE_FAMILIES</c>, a comma-separated list, picks families, and
     /// <c>$SHOROKOO_MEMORY_REUSE_SCALE</c> multiplies each family's batch, and
     /// <c>$SHOROKOO_MEMORY_REUSE_ROUNDS</c> repeats each family's pair of measurements, off then on.
+    /// <c>$SHOROKOO_MEMORY_REUSE_UNPAIRED</c> times the consuming runs alone, with no shared run
+    /// between them.
     /// </summary>
     [Fact]
     public void RecordPlacementAcrossTheBenchmarkFamilies()
@@ -423,6 +425,9 @@ public class MemoryReuseScenarioTests
         // session's plain run beside its placed one, in the same moment of a loaded machine.
         var inferenceTimes = new List<double>();
         var sharedTimes = new List<double>();
+        // With $SHOROKOO_MEMORY_REUSE_TWIN set, the shared runs go to a second compile of the model:
+        // two sessions taking turns, which is what a plain session and its variant do.
+        var twin = Environment.GetEnvironmentVariable("SHOROKOO_MEMORY_REUSE_TWIN") is null ? null : context.Compile(concrete);
         for (int i = 0; i < Timed; i++)
         {
             var input1 = TensorData(shape, Values(1));
@@ -430,16 +435,17 @@ public class MemoryReuseScenarioTests
             var each = compiled.Execute(input1);
             inferenceTimes.Add(watch.Elapsed.TotalMilliseconds);
             Release(each);
+            if (Environment.GetEnvironmentVariable("SHOROKOO_MEMORY_REUSE_UNPAIRED") is not null) continue;
             var kept = TensorData(shape, Values(1));
             watch.Restart();
-            each = compiled.Execute(kept.Shared());
+            each = (twin ?? compiled).Execute(kept.Shared());
             sharedTimes.Add(watch.Elapsed.TotalMilliseconds);
             Release(each);
             kept.Delete();
         }
         OrtPlacements.Settled = null;
         TorchPlacements.Settled = null;
-        return new FamilyFigures(stepPeak, Median(stepTimes), stepPlans, inferencePeak, Median(inferenceTimes), Median(sharedTimes), Settled());
+        return new FamilyFigures(stepPeak, Median(stepTimes), stepPlans, inferencePeak, Median(inferenceTimes), sharedTimes.Count == 0 ? 0 : Median(sharedTimes), Settled());
     }
 
     private static void Release(NamedModelParam[] outputs)

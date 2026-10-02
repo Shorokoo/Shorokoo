@@ -38,11 +38,12 @@ namespace Shorokoo.Runtime
     public partial class ComputeContext
     {
         /// <summary>
-        /// Into how many parts a budget is cut for the room a session's arena leaves: a session is
-        /// built with the budget less the discount rounded up to the next whole part above it — a
-        /// sixty-fourth of the budget — so that it is kept until the discount grows past that, and
-        /// rebuilt at most this many times as the discount climbs through the parts, and once more
-        /// each time what is left halves in the last one (see <see cref="ArenaLimitWithin"/>).
+        /// Into how many parts a budget is cut for the limit of a session that cannot take one in
+        /// place: such a session is built with the budget less the discount rounded up to the next
+        /// whole part above it — a sixty-fourth of the budget — so that it is kept until the
+        /// discount grows past that, and rebuilt at most this many times as the discount climbs
+        /// through the parts, and once more each time what is left halves in the last one (see
+        /// <see cref="ArenaLimitWithin"/>).
         /// </summary>
         internal const int BudgetParts = 64;
 
@@ -57,7 +58,7 @@ namespace Shorokoo.Runtime
         ///
         /// <para>That is what the budget counts. A transfer onto this context is refused when what is
         /// attached plus what it would add passes <see cref="DeviceMemoryUse.LimitBytes"/>, and a
-        /// session compiled or run here gets an arena limited to what is left. A tensor on two
+        /// session compiled or run here is limited to what is left. A tensor on two
         /// contexts' books counts on both; one that dies, is collected or is detached
         /// (<see cref="Detach"/>) drops out. <see cref="Host"/> keeps no books and reads as
         /// nothing.</para>
@@ -80,7 +81,8 @@ namespace Shorokoo.Runtime
 
         /// <summary>
         /// The bytes of the live tensors attached to this context in its own memory, and how many
-        /// they are. None of them is in a session's arena: a run's outputs are memory of their own.
+        /// they are. A run's outputs are among them once the run has returned, apart from what its
+        /// session's runs are limited to.
         /// </summary>
         internal (long Bytes, int Tensors) AttachedIn()
         {
@@ -258,12 +260,12 @@ namespace Shorokoo.Runtime
 
         /// <summary>
         /// The refusal of a compile when what is attached to this context leaves no room in its
-        /// budget for the new session's arena: a session holds its weights in that arena from the
-        /// moment it is built, so it needs a limit above zero.
+        /// budget for the new session: a session holds its weights from the moment it is built, so
+        /// it needs a limit above zero.
         /// </summary>
         private InvalidOperationException NoRoomToCompile(MemorySpace space, long limit, long attached, int tensors)
             => new(
-                "Compiling a graph on this compute context builds a session whose arena has to fit "
+                "Compiling a graph on this compute context builds a session whose memory has to fit "
                 + $"in the context's device-memory budget, and the {Figure(attached)} bytes of the "
                 + $"{Figure(tensors)} tensor(s) attached to it in {space} leave nothing of the "
                 + $"{Figure(limit)} bytes it has (DeviceMemorySettings.LimitBytes). Delete what the "
@@ -283,8 +285,8 @@ namespace Shorokoo.Runtime
         /// a session: one is kept while its limit is within what the budget allows, which it stays
         /// until the discount grows past the part it rounded up to. So a steady run keeps its
         /// session, and one whose discount keeps climbing rebuilds once per part it climbs through —
-        /// at most <see cref="BudgetParts"/> times — rather than on every run. It costs the arena at
-        /// most one part of the budget.</para>
+        /// at most <see cref="BudgetParts"/> times — rather than on every run. It costs the session
+        /// at most one part of the budget.</para>
         ///
         /// <para>In the budget's last part, where that rounding would leave less than a part — nothing,
         /// or the few bytes a budget that is not a whole number of parts has over — the limit is the
@@ -305,9 +307,9 @@ namespace Shorokoo.Runtime
             var rounded = limit - outside - headroom;
             if (rounded >= part) return rounded;
             var room = limit - outside;
-            var arena = part;
-            while (arena > room) arena /= 2;
-            return arena;
+            var halved = part;
+            while (halved > room) halved /= 2;
+            return halved;
         }
     }
 

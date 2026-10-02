@@ -112,7 +112,7 @@ public interface IShorokooSession : IDisposable
     // (DeviceMemorySettings.LimitBytes), and is built again where that limit no longer fits.
     bool TryLimitDeviceMemory(long limitBytes) => false;
 
-    // This session's own memory arena as its runtime reports it, or null when the backend has no
+    // This session's own memory as its allocator reports it, or null when the backend has no
     // such figures to give. Cheap enough to call either side of a run, which is how a run's peak
     // is attributed; see ArenaStatistics for why MaxInUseBytes alone cannot be.
     //

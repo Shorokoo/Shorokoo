@@ -44,8 +44,8 @@ public abstract class OrtBackend : IShorokooBackend
     /// Applied to the <see cref="SessionOptions"/> of every session this backend creates,
     /// after the log-severity and graph-optimization settings and before the session is
     /// constructed. This is where a subclass appends its execution provider. It is handed the
-    /// <see cref="DeviceMemorySettings"/> of the session being built — the arena settings belong
-    /// to that session, so they arrive with it rather than being read from anywhere else.
+    /// <see cref="DeviceMemorySettings"/> of the session being built — the settings belong to that
+    /// session, so they arrive with it rather than being read from anywhere else.
     /// </param>
     /// <param name="device">
     /// The kind of device those sessions run on. A subclass driving a provider that is neither
@@ -57,9 +57,9 @@ public abstract class OrtBackend : IShorokooBackend
     /// </param>
     /// <param name="cudaDeviceId">
     /// The CUDA device the provider appended above allocates on, or <c>null</c> when it is
-    /// not a CUDA provider. It names the arena that
-    /// <see cref="RunSettings.ShrinkArenaAfterRun"/> shrinks: that card's, or the host's where it
-    /// is <c>null</c>.
+    /// not a CUDA provider. It names the device whose allocator the sessions allocate through and
+    /// <see cref="RunSettings.ShrinkArenaAfterRun"/> hands memory back to: that card, or the host
+    /// where it is <c>null</c>.
     /// </param>
     /// <exception cref="ArgumentException"><paramref name="cudaDeviceId"/> disagrees with
     /// <paramref name="device"/>, or is negative.</exception>
@@ -80,7 +80,7 @@ public abstract class OrtBackend : IShorokooBackend
     /// The CUDA-backend constructor: every session gets the CUDA execution provider on
     /// <paramref name="cudaDeviceId"/>, configured from the <see cref="DeviceMemorySettings"/>
     /// that session is built with, and honours <see cref="RunSettings.ShrinkArenaAfterRun"/> for
-    /// that device's arena on each run.
+    /// what Shorokoo's allocator keeps on that device on each run.
     /// </summary>
     protected OrtBackend(int cudaDeviceId)
         : this((opts, mem) => AppendCuda(opts, cudaDeviceId, mem), ComputeDevice.Cuda, cudaDeviceId, stockProvider: true) { }
@@ -153,9 +153,8 @@ public abstract class OrtBackend : IShorokooBackend
     /// <param name="modelBytes">The serialized ONNX model.</param>
     /// <param name="graphOptimization">The ORT graph-optimization level to apply.</param>
     /// <param name="logSeverity">The minimum severity ORT logs at.</param>
-    /// <param name="deviceMemory">The arena settings this session is built with. ORT reads them
-    /// during construction and the session keeps them for life, so they are settled here and
-    /// nowhere else.</param>
+    /// <param name="deviceMemory">The device-memory settings this session is built with, which
+    /// limit what it allocates from its first block on.</param>
     public IShorokooSession CreateSession(
         ReadOnlyMemory<byte> modelBytes,
         ShorokooGraphOptimization graphOptimization,
@@ -166,14 +165,14 @@ public abstract class OrtBackend : IShorokooBackend
 
     /// <summary>
     /// <see cref="CreateSession(ReadOnlyMemory{byte}, ShorokooGraphOptimization, ShorokooLogSeverity, DeviceMemorySettings)"/>,
-    /// also recording what <paramref name="diagnostics"/> asks for. ORT reads both the arena
-    /// settings and the profiler switch while the session is being created and the session keeps
-    /// them for life, which is why they arrive here and not per run.
+    /// also recording what <paramref name="diagnostics"/> asks for. ORT reads the profiler switch
+    /// while the session is being created and the session keeps it for life, which is why it
+    /// arrives here and not per run.
     /// </summary>
     /// <param name="modelBytes">The serialized ONNX model.</param>
     /// <param name="graphOptimization">The ORT graph-optimization level to apply.</param>
     /// <param name="logSeverity">The minimum severity ORT logs at.</param>
-    /// <param name="deviceMemory">The arena settings this session is built with.</param>
+    /// <param name="deviceMemory">The device-memory settings this session is built with.</param>
     /// <param name="diagnostics">What the session records about itself, and whether it computes
     /// deterministically. Its default records nothing and leaves the runtime's kernels as they are,
     /// which is what every session gets unless a context asked otherwise.</param>

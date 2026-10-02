@@ -366,6 +366,9 @@ internal static partial class CudaLibraryCache
         try
         {
             File.Move(link, path, overwrite: true);
+            // POSIX rename does nothing when both names are already one file, as a copy the cache
+            // was filled from is; the second name it leaves is removed here.
+            File.Delete(link);
             return true;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)

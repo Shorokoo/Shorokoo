@@ -350,11 +350,11 @@ public abstract class OrtBackend : IShorokooBackend
         if (_stockProvider && !SessionsUseOrtArena && model.Length <= OrtPlacements.ModelBytesKept)
             session.Placements = new OrtPlacements(
                 model,
-                (variant, directory, externalData) => Wrap(NewSession(
+                (variant, directory, externalData, shared) => Wrap(NewSession(
                     variant, externalData is null ? graphOptimization : ShorokooGraphOptimization.DisableAll, logSeverity,
                     deviceMemory, diagnostics with { TraceNodePlacement = false },
                     directory, intraOpThreads, suppliedInitializers, precision,
-                    accounts: externalData is null ? null : (session.HostAccount, session.CardAccount), externalDataDirectory: externalData), []),
+                    accounts: shared ? (session.HostAccount, session.CardAccount) : null, externalDataDirectory: externalData), []),
                 this,
                 () => session.HeldBytes);
         return session;

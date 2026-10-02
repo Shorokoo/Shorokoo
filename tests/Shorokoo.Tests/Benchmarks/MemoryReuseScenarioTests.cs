@@ -285,6 +285,12 @@ public class MemoryReuseScenarioTests
                     lines.Add($"\n{entry.Stage}{(entry.Refusal is null ? "" : ": " + entry.Refusal)}; modelled {Mib(entry.PredictedPlainPeak)} plain, {Mib(entry.PredictedPlacedPeak)} placed; placed run measured {Mib(entry.PlacedPeak)}; "
                               + $"{entry.BlockBytes.Count} blocks of {Mib(entry.BlockBytes.Values.Sum())}; {entry.Plan.Count} placed, {Mib(entry.Plan.Sum(p => p.Bytes))}\n");
                     var shapes = PlacementShapes.Evaluate(graph, entry.Given);
+                    if (entry.VariantGraph is { } variantGraph)
+                    {
+                        var variantProof = new PlacementProof(variantGraph, entry.BlockBytes, PlacementShapes.Evaluate(variantGraph, entry.Given));
+                        lines.Add($"variant graph, in its own order: modelled {Mib(variantProof.ModelledPeak([]))} plain, {Mib(variantProof.ModelledPeak(entry.Plan))} placed; "
+                                  + $"its order {(variantGraph.Nodes.Select(n => n.Name).SequenceEqual(graph.Nodes.Select(n => n.Name)) ? "is" : "is not")} the plain graph's");
+                    }
                     var outputs = graph.Outputs.Select(o => o.Name).ToHashSet(StringComparer.Ordinal);
                     var proof = new PlacementProof(graph, entry.BlockBytes, shapes, outputs);
                     var plan = proof.Plan(PlacementProof.Smallest, PlacementProof.IdleOutputBytes);

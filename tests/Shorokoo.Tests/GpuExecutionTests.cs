@@ -753,56 +753,12 @@ public class GpuExecutionTests
     [CudaFact]
     public void CudaProvider_WritingAStepsStateOverWhatItConsumedTakesTheStateOffTheCardsPeak()
     {
-        (long Arena, long Card, long State) Peaks(bool aliasing)
-        {
-            using var context = new ComputeContext
-            {
-                OutputAliasing = aliasing,
-                Diagnostics = new DiagnosticSettings { CollectRunStatistics = true },
-                RunSettings = new RunSettings { ShrinkArenaAfterRun = true },
-            };
-            var sample = TensorData([2L, 4096L], [.. Enumerable.Range(0, 8192).Select(i => (i % 13) / 13f)]);
-            var rig = TrainingRig.FromScratch(
-                WideLinearModel.ComputationGraph, L2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph,
-                [sample.CopyTo(ComputeContext.Host)],
-                new AdamWOptimizerHyperparameters { LearningRate = 0.001f }, runtimeContext: context);
-            var input = rig.InputDef.FromOrderedData(sample);
-            var target = rig.TargetDef.FromOrderedData(TensorData([2L, 4096L], new float[8192]));
-            var initial = rig.CreateInitialCheckpoint();
-            var state = ((TensorDataStruct[])[initial.TrainableParams, initial.ModelState, initial.OptimizerState])
-                .SelectMany(s => s.Fields.Values.OfType<TensorData>()).Sum(t => t.ByteCount);
-
-            GC.Collect();
-            GC.WaitForPendingFinalizers();
-            context.Execute(PlusOne(), TensorData([1L], 0f)).Single().ToTensorData().Delete();
-            DeviceMemory.ResetPeak();
-            var idle = DeviceMemory.Sample()!.Value.ProcessBytes!.Value;
-            using var stop = new CancellationTokenSource();
-            var sampler = Task.Run(() => { while (!stop.IsCancellationRequested) DeviceMemory.Sample(); });
-            try
-            {
-                using var run = rig.BeginResidentRun(initial);
-                for (int i = 0; i < 4; i++) run.Step(input.Shared(), target.Shared());
-            }
-            finally
-            {
-                stop.Cancel();
-                sampler.Wait();
-            }
-            return (context.RunStats.PeakBytes, DeviceMemory.PeakProcessBytes - idle, state);
-        }
-        static InternalComputationGraph PlusOne()
-        {
-            var x = InputVector<float32>("x");
-            return new InternalComputationGraph([x], [x + 1f]);
-        }
-
         DeviceMemory.ResetPeak();
         try
         {
-            Peaks(aliasing: true);
-            var plain = Peaks(aliasing: false);
-            var aliased = Peaks(aliasing: true);
+            StepPeaks(aliasing: true);
+            var plain = StepPeaks(aliasing: false);
+            var aliased = StepPeaks(aliasing: true);
 
             Assert.True(plain.Arena - aliased.Arena >= aliased.State - (1L << 20));
             Assert.True(plain.Card - aliased.Card >= aliased.State - (1L << 20));
@@ -811,6 +767,73 @@ public class GpuExecutionTests
         {
             DeviceMemory.ResetPeak();
         }
+    }
+
+    [CudaFact]
+    public void CudaProvider_PlacingAStepsStateOverWhatItConsumedTakesTheStateOffTheCardsPeakAsAliasingDoes()
+    {
+        DeviceMemory.ResetPeak();
+        try
+        {
+            StepPeaks(aliasing: true);
+            var plain = StepPeaks(aliasing: false);
+            var aliased = StepPeaks(aliasing: true);
+            var placed = StepPeaks(aliasing: false, placing: true);
+
+            Assert.True(plain.Arena - placed.Arena >= placed.State - (1L << 20));
+            Assert.True(placed.Arena <= aliased.Arena + (1L << 20));
+        }
+        finally
+        {
+            DeviceMemory.ResetPeak();
+        }
+    }
+
+    /// <summary>
+    /// The resident AdamW step of <see cref="WideLinearModel"/>, four times: the most its context's
+    /// arena held, the most the card held beyond what it did as the run began, and the bytes of the
+    /// step's state — with output aliasing as <paramref name="aliasing"/> says, and placement as
+    /// <paramref name="placing"/> does, or as aliasing does where it says nothing.
+    /// </summary>
+    private static (long Arena, long Card, long State) StepPeaks(bool aliasing, bool? placing = null)
+    {
+        using var context = new ComputeContext
+        {
+            OutputAliasing = aliasing,
+            ValuePlacement = placing,
+            Diagnostics = new DiagnosticSettings { CollectRunStatistics = true },
+            RunSettings = new RunSettings { ShrinkArenaAfterRun = true },
+        };
+        var sample = TensorData([2L, 4096L], [.. Enumerable.Range(0, 8192).Select(i => (i % 13) / 13f)]);
+        var rig = TrainingRig.FromScratch(
+            WideLinearModel.ComputationGraph, L2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph,
+            [sample.CopyTo(ComputeContext.Host)],
+            new AdamWOptimizerHyperparameters { LearningRate = 0.001f }, runtimeContext: context);
+        var input = rig.InputDef.FromOrderedData(sample);
+        var target = rig.TargetDef.FromOrderedData(TensorData([2L, 4096L], new float[8192]));
+        var initial = rig.CreateInitialCheckpoint();
+        var state = ((TensorDataStruct[])[initial.TrainableParams, initial.ModelState, initial.OptimizerState])
+            .SelectMany(s => s.Fields.Values.OfType<TensorData>()).Sum(t => t.ByteCount);
+
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        var x = InputVector<float32>("x");
+        context.Execute(new InternalComputationGraph([x], [x + 1f]), TensorData([1L], 0f)).Single().ToTensorData().Delete();
+        DeviceMemory.ResetPeak();
+        var idle = DeviceMemory.Sample()!.Value.ProcessBytes!.Value;
+        using var stop = new CancellationTokenSource();
+        var sampler = Task.Run(() => { while (!stop.IsCancellationRequested) DeviceMemory.Sample(); });
+        try
+        {
+            using var run = rig.BeginResidentRun(initial);
+            for (int i = 0; i < 4; i++) run.Step(input.Shared(), target.Shared());
+        }
+        finally
+        {
+            stop.Cancel();
+            sampler.Wait();
+        }
+        return (context.RunStats.PeakBytes, DeviceMemory.PeakProcessBytes - idle, state);
     }
 
     /// <summary>

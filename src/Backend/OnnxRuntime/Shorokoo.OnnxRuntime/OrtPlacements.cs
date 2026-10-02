@@ -41,11 +41,11 @@ internal sealed class OrtPlacements : IDisposable
     /// <summary>
     /// Builds a session over a model, writing the graph it will run into the folder
     /// <paramref name="optimizedDirectory"/> names where one is. A model read with its initializers
-    /// from files in <paramref name="externalDataDirectory"/> — a graph ONNX Runtime wrote out, a
-    /// variant — is built with ONNX Runtime's optimizations off, charging the session's own
-    /// allocator accounts; any other — a probe, built and let go of — charges accounts of its own.
+    /// from files in <paramref name="externalDataDirectory"/> — a graph ONNX Runtime wrote out — is
+    /// built with ONNX Runtime's optimizations off. A <paramref name="variant"/> charges the
+    /// session's own allocator accounts; a probe, built and let go of, accounts of its own.
     /// </summary>
-    internal delegate OrtSession VariantBuilder(byte[] model, string? optimizedDirectory, string? externalDataDirectory);
+    internal delegate OrtSession VariantBuilder(byte[] model, string? optimizedDirectory, string? externalDataDirectory, bool variant);
 
     private readonly byte[] _model;
     private readonly VariantBuilder _build;
@@ -94,6 +94,10 @@ internal sealed class OrtPlacements : IDisposable
         // What the entry was planned over, for a measurement to read: the graph ONNX Runtime runs
         // for the plain session, the shapes the run's inputs came in, and its blocks.
         internal GraphProto? Graph;
+        internal GraphProto? VariantGraph;
+        // Whether the variant was built from the graph ONNX Runtime wrote out rather than from the
+        // model as handed over.
+        internal bool VariantFromRuns;
         internal IReadOnlyDictionary<string, (long[] Shape, int ElementType)> Given = new Dictionary<string, (long[], int)>();
         internal IReadOnlyDictionary<string, long> BlockBytes = new Dictionary<string, long>();
     }
@@ -326,63 +330,98 @@ internal sealed class OrtPlacements : IDisposable
                               + $"{entry.PredictedPlacedPeak} placed, {predictedHeld} held by the variant");
                 return;
             }
-            for (int attempt = 0; attempt < 3; attempt++)
+            // A variant over the model as handed over, optimized as the plain session is, runs its
+            // nodes in the order the plain session does; it can only bind values of that model, and
+            // where exposing them stops a fusion, what it runs is no longer the plain session's. A
+            // variant over the graph ONNX Runtime wrote out binds any value of it, a fusion's too,
+            // but ONNX Runtime orders that graph afresh as it loads it. So the first is tried where it
+            // can be, and the second where it cannot or did not hold.
+            var originalValues = original.Graph.Nodes.SelectMany(n => n.Outputs).ToHashSet(StringComparer.Ordinal);
+            bool[] sources = plan.All(p => originalValues.Contains(p.Value)) ? [false, true] : [true];
+            foreach (var fromRuns in sources)
             {
-                var exposed = plan.Where(p => !runsOutputs.Contains(p.Value)).Select(p => p.Value).ToList();
-                var model = WithOutputs(runsModel, exposed, shapes);
-                var directory = Path.Combine(Path.GetTempPath(), "shorokoo-placed-" + Guid.NewGuid().ToString("N"));
-                Directory.CreateDirectory(directory);
-                OrtSession? variant = null;
-                try
+                var candidate = plan;
+                for (int attempt = 0; attempt < 3; attempt++)
                 {
-                    var heldBefore = _held();
-                    variant = _build(model, directory, _runsDirectory);
-                    var variantHeld = _held() - heldBefore;
-                    var graph = ReadOptimized(directory).Graph!;
-                    var variantShapes = PlacementShapes.Evaluate(graph, given);
-                    if (!SameComputeNodes(runs, graph))
-                    {
-                        Refuse(entry, "exposing the placed values changed what ONNX Runtime runs");
-                        return;
-                    }
-                    var proved = new PlacementProof(graph, blockBytes, variantShapes, runsOutputs).Prove(plan
-                        .Where(p => variantShapes.TryGetValue(p.Value, out var v) && v.Bytes == p.Bytes && StatedAgrees(graph, p.Value, v, given)));
-                    if (proved.Count == plan.Count)
-                    {
-                        entry.Plan = plan;
-                        entry.Shapes = plan.ToDictionary(
-                            p => p.Value, p => (variantShapes[p.Value].Shape, (ShorokooTensorElementType)variantShapes[p.Value].ElementType),
-                            StringComparer.Ordinal);
-                        entry.VariantHeld = variantHeld;
-                        if (!Pays(entry, variantHeld))
-                        {
-                            Refuse(entry, $"placing saves too little: the variant holds {variantHeld} bytes of its own");
-                            return;
-                        }
-                        entry.Variant = variant;
-                        entry.Stage = Stage.Adopted;
-                        variant = null;
-                        return;
-                    }
-                    if (proved.Count == 0)
-                    {
-                        Refuse(entry, "the variant's own graph proves none of the placements");
-                        return;
-                    }
-                    plan = proved;
-                    entry.PredictedPlacedPeak = proof.ModelledPeak(plan);
+                    var outcome = TryVariant(entry, fromRuns ? runsModel : original, fromRuns, candidate, runs, runsOutputs, shapes, given, blockBytes);
+                    if (outcome.Plan is null) break;
+                    if (entry.Stage != Stage.Unplanned) return;
+                    candidate = outcome.Plan;
                 }
-                finally
-                {
-                    variant?.Dispose();
-                    try { Directory.Delete(directory, recursive: true); } catch (Exception) { }
-                }
+                if (entry.Stage != Stage.Unplanned) return;
             }
-            Refuse(entry, "the placements proved kept changing as the variant was built");
+            Refuse(entry, entry.Refusal ?? "no variant held the plan");
         }
         catch (Exception failure) when (failure is not OutOfMemoryException)
         {
             Refuse(entry, $"planning failed: {failure.GetType().Name}: {failure.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Builds a variant over <paramref name="model"/> — the graph ONNX Runtime wrote out where
+    /// <paramref name="fromRuns"/>, the model as handed over otherwise — binding <paramref name="plan"/>,
+    /// and settles <paramref name="entry"/> where it can: adopted with the variant where the plan is
+    /// proved again in full over the graph the variant runs and pays in the order it runs it,
+    /// refused where it does not pay. Answers the placements it proved where only some held, to
+    /// try again with; null where this variant cannot hold the plan — what it runs differs from the
+    /// plain session, or it proves none — with <see cref="Entry.Refusal"/> saying why.
+    /// </summary>
+    private (IReadOnlyList<Placement>? Plan, bool _) TryVariant(
+        Entry entry, ModelProto model, bool fromRuns, IReadOnlyList<Placement> plan, GraphProto runs, HashSet<string> runsOutputs,
+        IReadOnlyDictionary<string, PlacementShapes.Value> shapes, IReadOnlyDictionary<string, (long[] Shape, int ElementType)> given,
+        IReadOnlyDictionary<string, long> blockBytes)
+    {
+        var exposed = plan.Where(p => !runsOutputs.Contains(p.Value)).Select(p => p.Value).ToList();
+        var directory = Path.Combine(Path.GetTempPath(), "shorokoo-placed-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        OrtSession? variant = null;
+        try
+        {
+            var heldBefore = _held();
+            variant = _build(WithOutputs(model, exposed, shapes), directory, fromRuns ? _runsDirectory : null, true);
+            var variantHeld = _held() - heldBefore;
+            var graph = ReadOptimized(directory).Graph!;
+            entry.VariantGraph = graph;
+            if (!SameComputeNodes(runs, graph))
+            {
+                entry.Refusal = "exposing the placed values changed what ONNX Runtime runs";
+                return (null, false);
+            }
+            var variantShapes = PlacementShapes.Evaluate(graph, given);
+            var variantProof = new PlacementProof(graph, blockBytes, variantShapes, runsOutputs);
+            var proved = variantProof.Prove(plan
+                .Where(p => variantShapes.TryGetValue(p.Value, out var v) && v.Bytes == p.Bytes && StatedAgrees(graph, p.Value, v, given)));
+            if (proved.Count == 0)
+            {
+                entry.Refusal = "the variant's own graph proves none of the placements";
+                return (null, false);
+            }
+            if (proved.Count < plan.Count) return (proved, false);
+            entry.Plan = plan;
+            entry.Shapes = plan.ToDictionary(
+                p => p.Value, p => (variantShapes[p.Value].Shape, (ShorokooTensorElementType)variantShapes[p.Value].ElementType),
+                StringComparer.Ordinal);
+            entry.VariantHeld = variantHeld;
+            // The variant's own order decides what it holds at once, which may not be the plain
+            // session's: weighed again in it.
+            entry.PredictedPlacedPeak = variantProof.ModelledPeak(plan);
+            entry.VariantFromRuns = fromRuns;
+            if (!Pays(entry, variantHeld))
+            {
+                Refuse(entry, $"placing saves too little: {entry.PredictedPlainPeak} bytes modelled plain, "
+                              + $"{entry.PredictedPlacedPeak} placed in the variant's order, {variantHeld} held by the variant");
+                return (null, false);
+            }
+            entry.Variant = variant;
+            entry.Stage = Stage.Adopted;
+            variant = null;
+            return (plan, true);
+        }
+        finally
+        {
+            variant?.Dispose();
+            try { Directory.Delete(directory, recursive: true); } catch (Exception) { }
         }
     }
 
@@ -435,7 +474,7 @@ internal sealed class OrtPlacements : IDisposable
         Directory.CreateDirectory(directory);
         try
         {
-            _build(_model, directory, null).Dispose();
+            _build(_model, directory, null, false).Dispose();
             _runs = ReadOptimized(directory);
             _runsDirectory = directory;
             return _runs;

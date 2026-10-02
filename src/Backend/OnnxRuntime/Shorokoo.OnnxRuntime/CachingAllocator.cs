@@ -204,6 +204,12 @@ internal sealed unsafe class CachingAllocator
     internal IntPtr Allocate(long bytes)
     {
         if (bytes <= 0) return IntPtr.Zero;
+        if (Redirect?.Invoke(OnCard, bytes) is { } redirected && redirected != IntPtr.Zero)
+        {
+            lock (_gate) _redirected[redirected] = _redirected.GetValueOrDefault(redirected) + 1;
+            Observer?.Invoke(new Event(true, OnCard, redirected, bytes, bytes, Fresh: false, Redirected: true));
+            return redirected;
+        }
         var scope = t_scope;
         var account = scope?.AccountOn(this) ?? Placements;
         var size = SizeClass(bytes);
@@ -211,7 +217,7 @@ internal sealed unsafe class CachingAllocator
         lock (_gate)
         {
             if ((scope is not null && scope.TakeHeld(account, size, out var held)) || account.TakeCached(size, out held))
-                return Hand(held, size, bytes, account);
+                return Observed(Hand(held, size, bytes, account), bytes, size, fresh: false);
             if (account.LimitUnderLock is { } limit && account.Charged + account.Cached + account.Held + size > limit)
             {
                 // What it keeps goes back first -- cached, and on a card what this call let go of,
@@ -245,8 +251,38 @@ internal sealed unsafe class CachingAllocator
         lock (_gate)
         {
             account.Blocks++;
-            return Hand(block, size, bytes, account);
+            return Observed(Hand(block, size, bytes, account), bytes, size, fresh: true);
         }
+    }
+
+    // ---- what an investigation watches and steers ----
+
+    /// <summary>One request served, or one block taken back, as <see cref="Observer"/> is told of
+    /// it: whether it is a request, on which device, at what address, of how many bytes asked for
+    /// and served, whether the device gave the block for it, and whether <see cref="Redirect"/>
+    /// answered it.</summary>
+    internal readonly record struct Event(
+        bool Allocation, bool OnCard, IntPtr Address, long Requested, long Size, bool Fresh, bool Redirected);
+
+    /// <summary>Told of every request every allocator serves and every block it takes back, on the
+    /// thread making the call. Null tells nothing.</summary>
+    internal static Action<Event>? Observer;
+
+    /// <summary>
+    /// Asked first of every request, on the thread making it, with whether it is a card's and how
+    /// many bytes it asks for: an address it answers is what the request is served, memory the
+    /// answerer owns, and the free of it is let go of here without anything taken back. Zero, or a
+    /// null hook, serves the request as usual.
+    /// </summary>
+    internal static Func<bool, long, IntPtr>? Redirect;
+
+    // How many requests each address Redirect answered still has out.
+    private readonly Dictionary<IntPtr, int> _redirected = [];
+
+    private IntPtr Observed(IntPtr block, long requested, long size, bool fresh)
+    {
+        Observer?.Invoke(new Event(true, OnCard, block, requested, size, fresh, Redirected: false));
+        return block;
     }
 
     /// <summary>Records <paramref name="block"/> as handed to <paramref name="account"/>.</summary>
@@ -346,7 +382,15 @@ internal sealed unsafe class CachingAllocator
         var scope = t_scope;
         lock (_gate)
         {
+            if (_redirected.TryGetValue(pointer, out var outstanding))
+            {
+                if (outstanding == 1) _redirected.Remove(pointer);
+                else _redirected[pointer] = outstanding - 1;
+                Observer?.Invoke(new Event(false, OnCard, pointer, 0, 0, Fresh: false, Redirected: true));
+                return;
+            }
             if (!_blocks.Remove(pointer, out var block)) return;
+            Observer?.Invoke(new Event(false, OnCard, pointer, block.Requested, block.Size, Fresh: false, Redirected: false));
             if (!block.Overdraft)
             {
                 var account = block.Account;

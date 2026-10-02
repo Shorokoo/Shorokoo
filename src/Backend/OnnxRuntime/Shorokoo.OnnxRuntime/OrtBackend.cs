@@ -422,23 +422,8 @@ public abstract class OrtBackend : IShorokooBackend
             if (placeholderDirectory is not null) Supply(options, placeholderDirectory, suppliedInitializers, views);
             _configureExecutionProvider(options, deviceMemory);
             InferenceSession session;
-            var charge = CachingAllocator.Charge(host, card);
-            try
-            {
+            using (CachingAllocator.Charge(host, card))
                 session = new InferenceSession(model, options);
-            }
-            finally
-            {
-                charge.Dispose();
-            }
-            // A block of its weights the card could not give it, or its limit had no room for, was
-            // served from memory that is not the card's (see CachingAllocator): the session is not
-            // one to keep.
-            if (charge.Refusal is { } refusal)
-            {
-                session.Dispose();
-                throw refusal.ToException($"building a session of {Description}", null);
-            }
             // The values themselves are the caller's to keep alive for the session's life; this
             // keeps them reachable across the constructor, which takes them as bare handles.
             GC.KeepAlive(suppliedInitializers);
@@ -1195,25 +1180,7 @@ public abstract class OrtBackend : IShorokooBackend
         // card's name, which the execution provider then copies over on every run.
         if (_cudaDeviceId is not { } deviceId)
             return new(OrtValue.CreateAllocatedTensorValue(OrtAllocator.DefaultInstance, elementType, shape));
-        // A block the card has not free is served from host memory all the same rather than as
-        // nothing (see CachingAllocator.Allocate), so the tensor is checked for one before it is
-        // handed on, and refused as an allocation failure.
-        var charge = CachingAllocator.Charge(null, null);
-        OrtValue value;
-        try
-        {
-            value = OrtValue.CreateAllocatedTensorValue(CachingAllocator.ForCard(deviceId).Managed, elementType, shape);
-        }
-        finally
-        {
-            charge.Dispose();
-        }
-        if (charge.Refusal is { } refusal)
-        {
-            value.Dispose();
-            throw refusal.ToException($"a tensor placed by {Description}", null);
-        }
-        return new(value);
+        return new(OrtValue.CreateAllocatedTensorValue(CachingAllocator.ForCard(deviceId).Managed, elementType, shape));
     }
 
     /// <summary>

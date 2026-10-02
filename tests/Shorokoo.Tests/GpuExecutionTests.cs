@@ -222,12 +222,34 @@ public class GpuExecutionTests
         Assert.Equal((256 * MiB - 8, 256 * MiB - 8), (filled.DeviceMemory.LimitBytes!.Value, Limit()));
 
         var held = TensorData([25L << 20], new float[25 << 20]).CopyTo(ctx);
-        Assert.True(Shorokoo.Core.Utils.AllocationFailureReport.IsAllocationFailure(Assert.ThrowsAny<Exception>(() => Sum())));
+        Assert.Equal(AllocationPool.Device, AllocationFailureReport.Classify(
+            Assert.ThrowsAny<Exception>(() => Sum()), gpuBackend: false));
         Assert.Equal((156 * MiB - 8, 156 * MiB - 8), (filled.DeviceMemory.LimitBytes!.Value, Limit()));
 
         held.Delete();
         Assert.True(Sum() > 0f);
         Assert.Equal(256 * MiB - 8, Limit());
+    }
+
+    /// <summary>
+    /// A request the card cannot serve — a run's, or a tensor's placed on the card — fails as an
+    /// allocation failure on the card, the way ONNX Runtime's own allocators fail one, and leaves the
+    /// card as usable as it found it: the session that failed runs on.
+    /// </summary>
+    [CudaFact]
+    public void CudaProvider_ARequestTheCardCannotServeFailsAsACardAllocationFailureAndTheCardRunsOn()
+    {
+        using var ctx = new ComputeContext();
+        var filled = ArenaProbeModels.Filled(ctx);
+        AllocationPool Refused(Action request)
+            => AllocationFailureReport.Classify(Assert.ThrowsAny<Exception>(request), gpuBackend: false);
+        float Sum() => ArenaProbeModels.Sum(filled.Execute(ArenaProbeModels.FilledShape(1000)));
+
+        Assert.Equal(AllocationPool.Device, Refused(() => filled.Execute(ArenaProbeModels.FilledShape(1L << 50))));
+        Assert.Equal(1000f, Sum());
+        Assert.Equal(AllocationPool.Device, Refused(() => DefaultBackend.Instance.CreateUninitializedTensorInBackendMemory(
+            ShorokooTensorElementType.Float, [1L << 50])));
+        Assert.Equal(1000f, Sum());
     }
 
     /// <summary>

@@ -45,20 +45,9 @@ internal static class CudaInterop
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate int SetDevice(int device);
 
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    private delegate int HostAlloc(out IntPtr pointer, nuint count, uint flags);
-
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    private delegate int HostGetDevicePointer(out IntPtr device, IntPtr host, uint flags);
-
     /// <summary>The runtime's allocation entry points, bound together or not at all.</summary>
     private sealed record Allocation(
-        Malloc Malloc, Free Free, GetDevice GetDevice, SetDevice SetDevice, GetLastError Clear,
-        HostAlloc HostAlloc, HostGetDevicePointer HostGetDevicePointer, Free FreeHost);
-
-    // cudaHostAllocPortable | cudaHostAllocMapped: pinned host memory every context may use, mapped
-    // into the device's address space.
-    private const uint PortableMapped = 1 | 2;
+        Malloc Malloc, Free Free, GetDevice GetDevice, SetDevice SetDevice, GetLastError Clear);
 
     private const int HostToDevice = 1;
     private const int DeviceToHost = 2;
@@ -108,37 +97,6 @@ internal static class CudaInterop
         {
             if (switched) cuda.SetDevice(current);
         }
-    }
-
-    /// <summary>
-    /// <paramref name="count"/> bytes of pinned host memory mapped into CUDA device
-    /// <paramref name="deviceId"/>'s address space, by the address a kernel on the device reads and
-    /// writes it at, or <see cref="IntPtr.Zero"/> where there is not that much to pin. What a kernel
-    /// is given in place of a block of the card's that could not be given it: it works, over the bus.
-    /// </summary>
-    public static IntPtr AllocateMappedHost(int deviceId, long count)
-    {
-        if (BindAllocation() is not { } cuda) return IntPtr.Zero;
-        return OnDevice(cuda, deviceId, () =>
-            cuda.HostAlloc(out var host, (nuint)count, PortableMapped) != 0 ? IntPtr.Zero
-            : cuda.HostGetDevicePointer(out var device, host, 0) == 0 && device == host ? host
-            : Unmapped(cuda, host));
-    }
-
-    /// <summary>Releases <paramref name="host"/>, pinned memory whose device address is not its own,
-    /// which nothing here hands out.</summary>
-    private static IntPtr Unmapped(Allocation cuda, IntPtr host)
-    {
-        cuda.FreeHost(host);
-        return IntPtr.Zero;
-    }
-
-    /// <summary>Hands <paramref name="pointer"/>, which <see cref="AllocateMappedHost"/> answered,
-    /// back.</summary>
-    public static void ReleaseMappedHost(int deviceId, IntPtr pointer)
-    {
-        if (BindAllocation() is not { } cuda) return;
-        OnDevice(cuda, deviceId, () => cuda.FreeHost(pointer) == 0 ? pointer : IntPtr.Zero);
     }
 
     private static Allocation? BindAllocation()
@@ -248,19 +206,13 @@ internal static class CudaInterop
                 if (NativeLibrary.TryGetExport(handle, "cudaMalloc", out var malloc)
                     && NativeLibrary.TryGetExport(handle, "cudaFree", out var free)
                     && NativeLibrary.TryGetExport(handle, "cudaGetDevice", out var getDevice)
-                    && NativeLibrary.TryGetExport(handle, "cudaSetDevice", out var setDevice)
-                    && NativeLibrary.TryGetExport(handle, "cudaHostAlloc", out var hostAlloc)
-                    && NativeLibrary.TryGetExport(handle, "cudaHostGetDevicePointer", out var hostDevicePointer)
-                    && NativeLibrary.TryGetExport(handle, "cudaFreeHost", out var freeHost))
+                    && NativeLibrary.TryGetExport(handle, "cudaSetDevice", out var setDevice))
                     _allocation = new Allocation(
                         Marshal.GetDelegateForFunctionPointer<Malloc>(malloc),
                         Marshal.GetDelegateForFunctionPointer<Free>(free),
                         Marshal.GetDelegateForFunctionPointer<GetDevice>(getDevice),
                         Marshal.GetDelegateForFunctionPointer<SetDevice>(setDevice),
-                        clear,
-                        Marshal.GetDelegateForFunctionPointer<HostAlloc>(hostAlloc),
-                        Marshal.GetDelegateForFunctionPointer<HostGetDevicePointer>(hostDevicePointer),
-                        Marshal.GetDelegateForFunctionPointer<Free>(freeHost));
+                        clear);
             }
             return _memcpy;
         }

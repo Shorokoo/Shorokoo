@@ -910,6 +910,7 @@ public class CoreUtilsCoverageTests
         Assert.Equal(typeof(IntPtr), typeof(OrtMemoryInfo).GetProperty(OrtEnvironment.MemoryInfoPointerProperty, Instance)!.PropertyType);
         Assert.NotNull(typeof(OrtAllocator).GetConstructor(Instance, [typeof(IntPtr), typeof(bool)]));
         Assert.True(OrtEnvironment.IsBound);
+        Assert.NotNull(NativeAllocator.Locate());
 
         var host = CachingAllocator.ForHost();
         var account = host.Open("probe");
@@ -1051,6 +1052,20 @@ public class CoreUtilsCoverageTests
         var filled = ArenaProbeModels.Filled(context);
         Assert.Equal(1000f, ArenaProbeModels.Sum(filled.Execute(ArenaProbeModels.FilledShape(1000))));
         Assert.Equal(4096f, ArenaProbeModels.Sum(filled.Execute(ArenaProbeModels.FilledShape(4096))));
+    }
+
+    /// <summary>
+    /// A run asking for more than the host can give fails as a host allocation failure, the way ONNX
+    /// Runtime's own allocators fail one, and its session runs on.
+    /// </summary>
+    [Fact]
+    public void TestARunAskingMoreThanTheHostHasFailsAsAHostAllocationFailureAndItsSessionRunsOn()
+    {
+        using var context = new ComputeContext();
+        var filled = ArenaProbeModels.Filled(context);
+        var failure = Assert.ThrowsAny<Exception>(() => filled.Execute(ArenaProbeModels.FilledShape(1L << 50)));
+        Assert.Equal(AllocationPool.Host, AllocationFailureReport.Classify(failure, gpuBackend: true));
+        Assert.Equal(1000f, ArenaProbeModels.Sum(filled.Execute(ArenaProbeModels.FilledShape(1000))));
     }
 
     /// <summary>
@@ -1298,7 +1313,7 @@ public class CoreUtilsCoverageTests
         Assert.Matches(@"AppendExecutionProvider_CUDA\s*\(\s*cuda\s*\)", source);
         Assert.Matches(@"CudaProviderOptions\s*\(\s*deviceId\s*\)", source);
         Assert.Matches(@"card\.Limit\s*=\s*deviceMemory\.LimitBytes", source);
-        Assert.Matches(@"var\s+charge\s*=\s*CachingAllocator\.Charge\s*\(\s*host\s*,\s*card\s*\)\s*;\s*try\s*\{\s*session\s*=\s*new\s+InferenceSession", source);
+        Assert.Matches(@"using\s*\(\s*CachingAllocator\.Charge\s*\(\s*host\s*,\s*card\s*\)\s*\)\s*session\s*=\s*new\s+InferenceSession", source);
         Assert.Contains("\"session.use_env_allocators\", \"1\"", File.ReadAllText(
             Path.Combine(backend, "Shorokoo.OnnxRuntime", "OrtBackend.cs")));
         Assert.Matches(@"_configureExecutionProvider\s*\(\s*options\s*,\s*deviceMemory\s*\)", source);
@@ -1319,7 +1334,7 @@ public class CoreUtilsCoverageTests
         // inside the one member that does.
         var runPaths = Regex.Matches(session, @"_session\s*\.\s*Run\w*\s*\(").Count;
         Assert.Equal(runPaths, Regex.Matches(session, @"Invoke\s*\(\s*runSettings\s*,").Count);
-        Assert.Single(Regex.Matches(session, @"CachingAllocator\.Charge\s*\(\s*_hostAccount\s*,\s*_cardAccount\s*,\s*runOptions\s*\)"));
+        Assert.Single(Regex.Matches(session, @"using\s+var\s+charge\s*=\s*CachingAllocator\.Charge\s*\(\s*_hostAccount\s*,\s*_cardAccount\s*\)"));
     }
 
     /// <summary>Two shapes the guard's exemptions once let through: a span consumed by a call

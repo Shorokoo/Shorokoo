@@ -402,16 +402,10 @@ internal sealed class OrtSession : IShorokooSession
         var abortToken = runSettings.CancellationToken;
         using var runOptions = new RunOptions();
         using var abort = AbortWhenCancelled(runOptions, abortToken);
-        var charge = CachingAllocator.Charge(_hostAccount, _cardAccount, runOptions);
-        T result;
+        using var charge = CachingAllocator.Charge(_hostAccount, _cardAccount);
         try
         {
-            result = run(runOptions);
-        }
-        // A request the allocator would not serve stopped the run: that is what it failed of.
-        catch (OnnxRuntimeException cause) when (charge.Refusal is not null)
-        {
-            throw charge.Refusal.ToException($"a run of a session of {_backend.Description}", cause);
+            return run(runOptions);
         }
         catch (OnnxRuntimeException cause) when (WasStopped(cause, abortToken))
         {
@@ -419,17 +413,8 @@ internal sealed class OrtSession : IShorokooSession
         }
         finally
         {
-            charge.Dispose();
             GC.KeepAlive(feeds);
         }
-        // Refused in its last node, with no next one to be stopped at: it fails all the same, its
-        // outputs let go of.
-        if (charge.Refusal is { } refusal)
-        {
-            (result as IDisposable)?.Dispose();
-            throw refusal.ToException($"a run of a session of {_backend.Description}", null);
-        }
-        return result;
     }
 
     /// <summary>A run of a session whose outputs all stay in host memory, writing nothing into what

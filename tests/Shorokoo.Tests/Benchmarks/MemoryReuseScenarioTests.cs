@@ -356,6 +356,15 @@ public class MemoryReuseScenarioTests
     private sealed record FamilyFigures(
         long StepPeak, double StepMs, string StepPlans, long InferencePeak, double InferenceMs, double SharedInferenceMs, string InferencePlans);
 
+    /// <summary>A backend of the default's type whose sessions each keep thread pools of their own
+    /// (<see cref="OrtBackend.SessionsShareThreadPools"/> off), for <c>$SHOROKOO_MEMORY_REUSE_SESSION_POOLS</c>.</summary>
+    private static OrtBackend SessionPools()
+    {
+        var backend = (OrtBackend)Activator.CreateInstance(DefaultBackend.Instance.GetType())!;
+        typeof(OrtBackend).GetProperty(nameof(OrtBackend.SessionsShareThreadPools))!.SetValue(backend, false);
+        return backend;
+    }
+
     private static FamilyFigures MeasureFamily(ComputationGraph model, long[] shape, bool placing, bool onCard, string backend = "ort")
     {
         const int Warm = 4, Timed = 15;
@@ -365,6 +374,7 @@ public class MemoryReuseScenarioTests
         {
             "torch-cpu" => new ComputeContext(new Shorokoo.PyTorch.Cpu.TorchCpuBackend()) { ValuePlacement = placing },
             "torch-cuda" => new ComputeContext(new Shorokoo.PyTorch.Cuda.TorchCudaBackend()) { ValuePlacement = placing },
+            _ when Environment.GetEnvironmentVariable("SHOROKOO_MEMORY_REUSE_SESSION_POOLS") is "1" => new ComputeContext(SessionPools()) { ValuePlacement = placing },
             _ => new ComputeContext { ValuePlacement = placing },
         };
         (T, long) Observe<T>(Func<T> run) => backend == "ort" ? Observed(onCard, run) : TorchObserved(backend, run);

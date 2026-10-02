@@ -204,9 +204,9 @@ allocates; see
 [A context's device-memory budget](inference.md#a-contexts-device-memory-budget).
 That count is exact, but the card also holds:
 
-- **What the allocator keeps for reuse.** Every session on a card and runtime,
-  and every tensor placed there, allocates through one allocator, held for the
-  life of the process. A block a session lets go of is kept for that session's
+- **What the allocator keeps for reuse.** Every session on a card, whichever
+  runtime built it, and every tensor placed there, allocates through one
+  allocator, held for the life of the process. A block a session lets go of is kept for that session's
   next runs, and one a placed tensor lets go of for the next tensor placed,
   until a run hands memory back (`ShrinkArenaAfterRun`, always on under a
   budget) or the card has no room for a request. Between a budgeted context's

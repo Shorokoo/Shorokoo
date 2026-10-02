@@ -922,8 +922,9 @@ executable.
 ### Device memory (GPU backends)
 
 On ONNX Runtime every session allocates through an allocator of Shorokoo's — one per device, the
-host or a card, and per runtime — rather than through an arena of its own, and the tensors a
-context places on a card come from the same one. Every block it hands out is an allocation of its
+host or a card, for the whole process, whichever runtime or backend built the session — rather
+than through an arena of its own, and the tensors a context places on a card come from the same
+one. Every block it hands out is an allocation of its
 own, never a piece of a larger one, its request rounded up to a size class: a multiple of 512
 bytes up to a mebibyte, and of an eighth of the power of two below it above that.
 

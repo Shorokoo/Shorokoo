@@ -729,13 +729,15 @@ public class ComputeContextLifetimeCoverageTests
         return new ValueInfoProto { Name = name, Type = new TypeProto { TensorType = tensor } };
     }
 
-    internal static NodeProto Op(string op, string inputs, string outputs, string domain = "", GraphProto? body = null)
+    internal static NodeProto Op(string op, string inputs, string outputs, string domain = "", GraphProto? body = null, (string Name, long Value)? attribute = null)
     {
         var node = new NodeProto { OpType = op, Domain = domain };
         node.Inputs.AddRange(Names(inputs));
         node.Outputs.AddRange(Names(outputs));
         if (body is not null)
             node.Attributes.Add(new AttributeProto { Name = "then_branch", Type = AttributeProto.AttributeType.Graph, G = body });
+        if (attribute is { } a)
+            node.Attributes.Add(new AttributeProto { Name = a.Name, Type = AttributeProto.AttributeType.Int, I = a.Value });
         return node;
     }
 
@@ -780,6 +782,101 @@ public class ComputeContextLifetimeCoverageTests
         Assert.False(Proves(GraphOf("a b", "O a", Op("Sub", "a b", "O"))));
         Assert.False(Proves(GraphOf("a b", "O O", Op("Sub", "a b", "O"))));
         Assert.False(Proves(GraphOf("a b", "O", Op("Sub", "a b", "O", domain: "custom"))));
+    }
+
+    private static PlacementProof PlacementsOver(GraphProto graph, string consumed)
+    {
+        var inputs = graph.Inputs.Where(i => i.Type?.TensorType?.Shape is not null).ToDictionary(
+            i => i.Name, i => (i.Type.TensorType.Shape.Dims.Select(d => d.DimValue).ToArray(), i.Type.TensorType.ElemType));
+        var shapes = PlacementShapes.Evaluate(graph, inputs);
+        return new PlacementProof(graph, Names(consumed).ToDictionary(n => n, n => shapes[n].Bytes), shapes);
+    }
+
+    private static bool Places(GraphProto graph, string consumed, params Placement[] placements)
+        => PlacementsOver(graph, consumed).Prove(placements).Count == placements.Length;
+
+    private static Placement At(string value, string block, long offset, long bytes = 16) => new(value, block, offset, bytes);
+
+    private static GraphProto WithInts(GraphProto graph, string name, params long[] values)
+    {
+        graph.Initializers.Add(new TensorProto { Name = name, data_type = (int)TensorProto.DataType.Int64, Dims = [values.Length], Int64Datas = values });
+        return graph;
+    }
+
+    private static GraphProto Halves()
+        => WithInts(WithInts(WithInts(GraphOf("a:float[4] b:float[4] c:float[2]", "O",
+            Op("Slice", "b zero two zero", "x"), Op("Neg", "c", "y"), Op("Concat", "x y", "O", attribute: ("axis", 0))),
+            "zero", 0), "two", 2), "four", 4);
+
+    [Fact]
+    public void TestAPlacementIsProvedOnlyForAValueOfItsOwnInsideItsBlockAtItsSize()
+    {
+        Assert.True(Places(GraphOf("a:float[4] b:float[4]", "O", Op("Neg", "a", "O")), "a", At("O", "a", 0)));
+        Assert.False(Places(GraphOf("a:float[4] b:float[4]", "O", Op("Neg", "a", "O")), "a", At("O", "a", 4)));
+        Assert.False(Places(GraphOf("a:float[4] b:float[4]", "O", Op("Neg", "a", "O")), "a", At("O", "a", 0, 8)));
+        Assert.False(Places(GraphOf("a:float[4] b:float[4]", "O", Op("Neg", "a", "O")), "b", At("O", "a", 0)));
+        Assert.False(Places(GraphOf("a:float[4] b:float[4]", "O O", Op("Neg", "a", "O")), "a", At("O", "a", 0)));
+        Assert.False(Places(GraphOf("a:float[4] b:float[4]", "b", Op("Neg", "a", "O")), "a", At("b", "a", 0)));
+        Assert.False(Places(Initializing("k", GraphOf("a:float[4]", "k")), "a", At("k", "a", 0)));
+        Assert.False(Places(GraphOf("a:float[4] b:float[4]", "O", Op("Flatten", "b", "O")), "a", At("O", "a", 0)));
+        Assert.False(Places(GraphOf("a:float[4] b:float[4]", "O", Op("Foo", "b", "O", domain: "custom")), "a", At("O", "a", 0)));
+        Assert.False(Places(GraphOf("a:float[4] c", "O", Op("If", "c", "O", body: GraphOf("", "t", Op("Neg", "a", "t")))), "a", At("O", "a", 0)));
+    }
+
+    [Fact]
+    public void TestAPlacementIsRefusedWhereAnythingReadsTheBytesItOverwritesWithoutRunningFirst()
+    {
+        Assert.False(Places(GraphOf("a:float[4]", "O Z", Op("Neg", "a", "O"), Op("Exp", "a", "Z")), "a", At("O", "a", 0)));
+        Assert.True(Places(GraphOf("a:float[4]", "O", Op("Exp", "a", "t"), Op("Neg", "t", "O")), "a", At("O", "a", 0)));
+        Assert.False(Places(GraphOf("a:float[4]", "O Z", Op("Exp", "a", "t"), Op("Shape", "t", "s"), Op("ConstantOfShape", "s", "O"), Op("Neg", "t", "Z")), "a", At("O", "a", 0)));
+        Assert.False(Places(GraphOf("a:float[4]", "O Z", Op("Flatten", "a", "v"), Op("Neg", "a", "O"), Op("Exp", "v", "Z")), "a", At("O", "a", 0)));
+        Assert.False(Places(GraphOf("a:float[4] c", "O Z", Op("Neg", "a", "O"), Op("If", "c", "Z", body: GraphOf("", "t", Op("Identity", "a", "t")))), "a", At("O", "a", 0)));
+        Assert.False(Places(GraphOf("a:float[4]", "O a", Op("Neg", "a", "O")), "a", At("O", "a", 0)));
+        Assert.False(Places(GraphOf("a:float[4]", "O P", Op("Neg", "a", "O"), Op("Exp", "O", "P")), "a", At("O", "a", 0), At("P", "a", 0)));
+        Assert.True(Places(GraphOf("a:float[4]", "P", Op("Neg", "a", "O"), Op("Exp", "O", "P")), "a", At("O", "a", 0), At("P", "a", 0)));
+        Assert.False(Places(GraphOf("a:float[4]", "P Z", Op("Neg", "a", "O"), Op("Exp", "O", "P"), Op("Abs", "O", "Z")), "a", At("O", "a", 0), At("P", "a", 0)));
+        Assert.False(Places(GraphOf("a:float[4] b:float[4]", "x y", Op("Split", "b", "x y")), "a", At("x", "a", 0, 8), At("y", "a", 0, 8)));
+    }
+
+    [Fact]
+    public void TestAWriterMayOverwriteWhatItReadsOnlyWhereItReadsEachByteInThePositionItWritesIt()
+    {
+        Assert.False(Places(GraphOf("a:float[2,2]", "O", Op("Transpose", "a", "O")), "a", At("O", "a", 0)));
+        Assert.False(Places(GraphOf("a:float[2,2] b:float[2,2]", "O", Op("MatMul", "a b", "O")), "a", At("O", "a", 0)));
+        Assert.False(Places(GraphOf("a:float[4] b:float[4] c:bool[4]", "O", Op("Where", "c a b", "O")), "a", At("O", "a", 0)));
+        Assert.False(Places(GraphOf("a:float[4] b:float[4] c:float[4]", "O", Op("Sum", "a b c", "O")), "a", At("O", "a", 0)));
+        Assert.True(Places(GraphOf("a:float[4] b:float[4]", "O", Op("Sum", "a b", "O")), "a", At("O", "a", 0)));
+        Assert.True(Places(GraphOf("a:float[4] b:float[4]", "O", Op("Sub", "b a", "O")), "a", At("O", "a", 0)));
+        Assert.False(Places(GraphOf("a:float[4]", "O", Op("Neg", "a", "O", domain: "custom")), "a", At("O", "a", 0)));
+        Assert.False(Places(GraphOf("a:float[4]", "O", Op("Softmax", "a", "O")), "a", At("O", "a", 0)));
+        Assert.True(Places(Halves(), "b", At("x", "b", 0, 8), At("y", "b", 8, 8), At("O", "b", 0)));
+        Assert.False(Places(Halves(), "b", At("x", "b", 4, 8)));
+    }
+
+    [Fact]
+    public void TestAPlacementInsideWhatASliceDoesNotReadNeedsNoOrderAndAConcatenationIsInPlaceOnlyWherePartsLieInTheirSlots()
+    {
+        var sliced = WithInts(WithInts(WithInts(GraphOf("a:float[4] c:float[2]", "O Z", Op("Slice", "a two four zero", "Z"), Op("Neg", "c", "O")), "zero", 0), "two", 2), "four", 4);
+        Assert.True(Places(sliced, "a", At("O", "a", 0, 8)));
+        Assert.False(Places(sliced, "a", At("O", "a", 4, 8)));
+        var swapped = WithInts(WithInts(GraphOf("a:float[4] b:float[4] c:float[2]", "O",
+            Op("Slice", "b zero two zero", "x"), Op("Neg", "c", "y"), Op("Concat", "y x", "O", attribute: ("axis", 0))), "zero", 0), "two", 2);
+        Assert.False(Places(swapped, "b", At("x", "b", 0, 8), At("y", "b", 8, 8), At("O", "b", 0)));
+        Assert.False(Places(swapped, "b", At("x", "b", 0, 8), At("O", "b", 0)));
+        Assert.True(Places(swapped, "b", At("x", "b", 8, 8), At("O", "b", 0)));
+    }
+
+    [Fact]
+    public void TestThePlannerPlacesTheTwoHalvesScenarioWithNothingLeftToAllocate()
+    {
+        var graph = ProtoBuf.Serializer.Deserialize<ModelProto>(new MemoryStream(
+            Benchmarks.MemoryReuseScenarioTests.Scenario(Benchmarks.MemoryReuseScenarioTests.Shapes.Computed, exposeIntermediates: false))).Graph;
+        var shapes = PlacementShapes.Evaluate(graph, new Dictionary<string, (long[], int)> { ["A"] = ([8, 4], 1), ["B"] = ([8, 4], 1) });
+        var plan = new PlacementProof(graph, new Dictionary<string, long> { ["A"] = 128, ["B"] = 128 }, shapes).Plan(smallest: 64, idleOutputBytes: 0);
+        Assert.Equal(
+            ["A_half@A+0", "B_half@A+64", "C0@B+0", "C1@B+0", "C2@B+0", "C3@B+0", "L0@B+0", "L1@B+0", "L2@B+0", "L@B+0"],
+            plan.Select(p => $"{p.Value}@{p.Block}+{p.Offset}").Order(StringComparer.Ordinal));
+        Assert.Empty(new PlacementProof(graph, new Dictionary<string, long> { ["A"] = 128 }, shapes).Plan(smallest: 64, idleOutputBytes: 0).Where(p => p.Value == "L"));
     }
 
     [Fact]

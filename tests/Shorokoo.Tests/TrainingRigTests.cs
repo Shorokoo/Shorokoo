@@ -737,7 +737,7 @@ public class TrainingRigFromScratchCoverageTests
             Shorokoo.Modules.Optimizers.AdamWOptimizer.ComputationGraph, [sample],
             new Shorokoo.Modules.Optimizers.AdamWOptimizerHyperparameters { LearningRate = 0.001f }, runtimeContext: context);
         var step = Benchmarks.MemoryPassBenchmarkTests.RigModel(rig.TrainingStepPureGraph, rig.OptimizationInputShapes);
-        var modelled = context.ResolvedBackend.ModelledRunPeak(step, []);
+        var modelled = context.ResolvedBackend.ModelledRunPeak(step, [], PrecisionSettings.Default);
         var account = Shorokoo.OnnxRuntime.RuntimeAllocator.ForHost().Shared.Open("modelled-against-run");
         try
         {

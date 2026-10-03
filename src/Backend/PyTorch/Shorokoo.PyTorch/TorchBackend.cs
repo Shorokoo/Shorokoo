@@ -63,8 +63,10 @@ public abstract class TorchBackend : IShorokooBackend
         => format is TrainingFormats.Onnx or TrainingFormats.OnnxAutoGrad;
 
     /// <summary>What a run of the model's translation holds at once beyond its inputs
-    /// (<see cref="TorchRunMemory"/>).</summary>
-    long? IShorokooBackend.ModelledRunPeak(Shorokoo.Core.Factory.IR.ModelProto model, IReadOnlyList<OutputAlias> outputAliases)
+    /// (<see cref="TorchRunMemory"/>), in either precision: measured on a card, a training step
+    /// holds the same under TensorFloat-32 as in full precision.</summary>
+    long? IShorokooBackend.ModelledRunPeak(Shorokoo.Core.Factory.IR.ModelProto model, IReadOnlyList<OutputAlias> outputAliases,
+        PrecisionSettings precision)
         => TorchRunMemory.Peak(model, outputAliases, onHost: !OnCuda);
 
     /// <summary>A translation's: each value freed at its last read, its views and its writes over

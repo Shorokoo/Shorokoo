@@ -268,15 +268,16 @@ public interface IShorokooBackend
     string? KernelWorkaroundSet => null;
 
     // The most a run of `model` holds at once beyond its inputs -- with the outputs of
-    // `outputAliases` written into the inputs they are paired with -- as this backend lays a run's
-    // values out, or null where this backend has no such model. `model`'s inputs state their shapes
-    // in full. The training rig's memory-aware pass judges the steps it weighs by this where it is
+    // `outputAliases` written into the inputs they are paired with, computing in `precision` -- as
+    // this backend lays a run's values out, or null where this backend has no such model. `model`'s
+    // inputs state their shapes in full. The training rig's memory-aware pass judges the steps it weighs by this where it is
     // not null, so that a step it hands a backend holds least on that backend, rather than in the
     // pass's own model of a run, which charges the graph it hands over in the order it predicts the
     // backend takes, where the backend may rewrite that graph and run it in another.
     //
     // A decorator forwards this, as it forwards every member with a default body.
-    internal long? ModelledRunPeak(Shorokoo.Core.Factory.IR.ModelProto model, IReadOnlyList<OutputAlias> outputAliases) => null;
+    internal long? ModelledRunPeak(Shorokoo.Core.Factory.IR.ModelProto model, IReadOnlyList<OutputAlias> outputAliases,
+        PrecisionSettings precision) => null;
 
     // How this backend lays a run's values out in memory, as the training rig's memory-aware pass
     // charges them while it searches (see ModelledRunPeak for how it then judges). ONNX Runtime's

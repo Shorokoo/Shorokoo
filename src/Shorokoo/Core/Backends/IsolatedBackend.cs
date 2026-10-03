@@ -449,8 +449,9 @@ public static class IsolatedBackend
 
         public string? KernelWorkaroundSet => _inner.KernelWorkaroundSet;
 
-        long? IShorokooBackend.ModelledRunPeak(Shorokoo.Core.Factory.IR.ModelProto model, IReadOnlyList<OutputAlias> outputAliases)
-            => _inner.ModelledRunPeak(model, outputAliases);
+        long? IShorokooBackend.ModelledRunPeak(Shorokoo.Core.Factory.IR.ModelProto model, IReadOnlyList<OutputAlias> outputAliases,
+            PrecisionSettings precision)
+            => _inner.ModelledRunPeak(model, outputAliases, precision);
 
         Shorokoo.Core.AutoDiffCheckpointing.RunLayout IShorokooBackend.RunLayout => _inner.RunLayout;
 

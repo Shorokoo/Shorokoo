@@ -215,7 +215,7 @@ namespace Shorokoo
                     ? [.. candidates.Where(c => c.Output < step.Outputs.Count && c.Input < step.Inputs.Count)
                         .Select(c => new OutputAlias(step.Outputs[c.Output].Name, step.Inputs[c.Input].Name))]
                     : [];
-                return backend.ModelledRunPeak(model, OutputAliasProof.Prove(step, named));
+                return backend.ModelledRunPeak(model, OutputAliasProof.Prove(step, named), context.Precision);
             };
         }
 

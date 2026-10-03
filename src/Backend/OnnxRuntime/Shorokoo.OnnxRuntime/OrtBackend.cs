@@ -158,10 +158,11 @@ public abstract class OrtBackend : IShorokooBackend
     /// What a run of <paramref name="model"/> — a training step's — holds at once beyond its inputs
     /// on this backend: the graph a session built from it as a training step's session is writes
     /// out, laid out as ONNX Runtime runs it (<see cref="OrtRunMemory"/>), with the pairs of
-    /// <paramref name="outputAliases"/> that graph proves written in place. Null where the session
-    /// cannot be built or its graph written, or a value's shape cannot be told.
+    /// <paramref name="outputAliases"/> that graph proves written in place, the session built in
+    /// <paramref name="precision"/> as the step's own is. Null where the session cannot be built or
+    /// its graph written, or a value's shape cannot be told.
     /// </summary>
-    long? IShorokooBackend.ModelledRunPeak(ModelProto model, IReadOnlyList<OutputAlias> outputAliases)
+    long? IShorokooBackend.ModelledRunPeak(ModelProto model, IReadOnlyList<OutputAlias> outputAliases, PrecisionSettings precision)
     {
         if (model.Graph is not { } handed) return null;
         var inputs = new Dictionary<string, (long[] Shape, int ElementType)>(StringComparer.Ordinal);
@@ -178,7 +179,7 @@ public abstract class OrtBackend : IShorokooBackend
             using var stream = new MemoryStream();
             ProtoBuf.Serializer.Serialize(stream, model);
             Discard(NewSession(stream.ToArray(), ShorokooGraphOptimization.TrainingStep, ShorokooLogSeverity.Fatal,
-                DeviceMemorySettings.Default, DiagnosticSettings.Default, directory, 0, [], PrecisionSettings.Default));
+                DeviceMemorySettings.Default, DiagnosticSettings.Default, directory, 0, [], precision));
             ModelProto run;
             using (var written = File.OpenRead(Path.Combine(directory, OptimizedModelFile)))
                 run = ProtoBuf.Serializer.Deserialize<ModelProto>(written);

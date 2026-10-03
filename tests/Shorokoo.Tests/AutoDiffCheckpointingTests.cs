@@ -391,6 +391,7 @@ public class AutoDiffCheckpointingCoverageTests
         }));
         Assert.Equal(3 * Mb + 8, PeaksByLayout(x => OnnxOp.Add(OnnxOp.ReduceSum(x), OnnxOp.ReduceSum(OnnxOp.Reshape(OnnxOp.Transpose(OnnxOp.Exp(x), null), Vector(512L * 512L), allowZero: false)))).Translation);
         Assert.Equal(2 * Mb + 8, PeaksByLayout(x => OnnxOp.Add(OnnxOp.ReduceSum(x), OnnxOp.ReduceSum(OnnxOp.Reshape(OnnxOp.Exp(x), Vector(512L * 512L), allowZero: false)))).Translation);
+        Assert.Equal(3 * Mb + 8, PeaksByLayout(x => OnnxOp.Add(OnnxOp.ReduceSum(x), OnnxOp.ReduceSum(OnnxOp.Reshape(OnnxOp.Neg(OnnxOp.Transpose(x, null)), Vector(512L * 512L), allowZero: false)))).Translation);
     }
 
     /// <summary>The peak of a graph of one [512, 512] input, under ONNX Runtime's layout on a card,

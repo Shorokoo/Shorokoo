@@ -19,7 +19,8 @@ namespace Shorokoo.OnnxRuntime;
 /// shape the graph does not fix (<see cref="ShapesNotFixed"/>), which takes a buffer of its own;</item>
 /// <item>an output the run writes into the input it is paired with takes nothing, and every other
 /// output is held to the run's end;</item>
-/// <item>on the host, a kernel's own scratch for the node's length (<see cref="HostScratch"/>).</item>
+/// <item>a kernel's own scratch for the node's length: on the host as <see cref="HostScratch"/> says,
+/// on a card as <see cref="CardScratch"/> does.</item>
 /// </list>
 /// </summary>
 internal static class OrtRunMemory
@@ -79,7 +80,7 @@ internal static class OrtRunMemory
         for (int k = 0; k < nodes.Count; k++)
         {
             var node = nodes[k];
-            if (onHost) scratch[k] = HostScratch(node, shapes);
+            scratch[k] = onHost ? HostScratch(node, shapes) : CardScratch(node, shapes);
             foreach (var o in node.Outputs.Where(o => o.Length > 0))
             {
                 if (RootOf(o) != o || intoInputs.Contains(o) || shapes[o].Bytes <= 0) continue;
@@ -163,6 +164,30 @@ internal static class OrtRunMemory
                 foreach (var output in node.Outputs.Where(o => o.Length > 0)) unfixed.Add(output);
         }
         return unfixed;
+    }
+
+    /// <summary>
+    /// What a kernel of ONNX Runtime's CUDA provider takes for its own use while
+    /// <paramref name="node"/> runs, measured kernel by kernel through Shorokoo's allocator in strict
+    /// float32: a reduction over axes that are neither the leading nor the trailing ones of its
+    /// input — those of more than one element — a workspace of its input's size; one over leading or
+    /// trailing axes, which the provider sums as the rows or columns of a matrix, none.
+    /// </summary>
+    internal static long CardScratch(NodeProto node, IReadOnlyDictionary<string, PlacementShapes.Value> shapes)
+    {
+        if (!OutputAliasProof.IsStandard(node) || !node.OpType.StartsWith("Reduce", StringComparison.Ordinal)
+            || node.Inputs.Count == 0 || !shapes.TryGetValue(node.Inputs[0], out var input)) return 0;
+        var rank = input.Shape.Length;
+        long[]? axes = node.Inputs.Count > 1 && node.Inputs[1].Length > 0
+            ? shapes.TryGetValue(node.Inputs[1], out var given) ? given.Ints : null
+            : node.Attributes.FirstOrDefault(a => a.Name == "axes")?.Ints;
+        if (axes is null || axes.Length == 0) return 0;
+        var reduced = axes.Select(a => (int)((a % rank + rank) % rank)).ToHashSet();
+        var counted = Enumerable.Range(0, rank).Where(d => input.Shape[d] != 1).ToList();
+        var flags = counted.Select(reduced.Contains).ToList();
+        var leading = flags.SkipWhile(f => f).All(f => !f);
+        var trailing = flags.SkipWhile(f => !f).All(f => f);
+        return leading || trailing ? 0 : Math.Max(input.Bytes, 0);
     }
 
     /// <summary>

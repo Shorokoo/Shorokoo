@@ -34,7 +34,7 @@ Related: [core-types.md](core-types.md) · [defining-models.md](defining-models.
 - **`float32` is computed in full `float32` precision on every backend and device.** A context
   that sets `Precision = new PrecisionSettings { AllowTensorFloat32 = true }` lets a CUDA card
   compute its `float32` products, convolutions and recurrent layers in TensorFloat-32 instead:
-  faster, and about three decimal digits less precise — [Precision](#precision-gpu-backends).
+  faster, and hundreds of times less precise — [Precision](#precision-gpu-backends).
 
 ## Workflow: one-shot evaluation
 
@@ -1012,8 +1012,8 @@ var fast = new ComputeContext(new LinuxGpuBackend())
 };
 ```
 
-The same three operators then land up to 2.5e-3 from the host's — about three decimal digits short
-of `float32`'s seven. What full precision costs against it, measured on an RTX 4090: a 4096-square
+The same three operators then land up to 2.5e-3 from the host's, some five hundred times further
+than in full precision. What full precision costs against it, measured on an RTX 4090: a 4096-square
 `MatMul` takes 1.57 times as long, and a convolutional network's training step 2.6 times as long
 on ONNX Runtime and 2.3 times on PyTorch; the training steps of the other model families measured
 were within their run-to-run noise.
@@ -1031,8 +1031,8 @@ were within their run-to-run noise.
 - **It allows TF32, and never requires it.** A backend uses it where its kernels choose to: XLA
   puts a small product through a full-precision kernel all the same, and a convolution through
   whichever kernel it timed fastest, which may be either.
-- **Only `float32` changes.** `Float16` and `BFloat16` products run on the tensor cores in either
-  case, and `Double` never does.
+- **Only `float32` changes.** Products of `Float16`, `BFloat16` and `Double` operands compute as
+  they do either way.
 - **PyTorch's switches are the whole process's.** A run on a card sets them from its own session as
   it starts, so a session's precision does not depend on what ran before it, nor on code of your own
   that sets them. Runs of sessions that set them differently do not overlap: while a run that allows

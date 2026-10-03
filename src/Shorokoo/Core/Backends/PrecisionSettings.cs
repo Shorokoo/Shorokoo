@@ -33,9 +33,10 @@ public sealed record PrecisionSettings
     /// <summary>
     /// Whether a CUDA card may compute <c>float32</c> products, convolutions and recurrent layers in
     /// TensorFloat-32: on its tensor cores, with each operand's significand rounded to 11 bits and
-    /// the sums kept in <c>float32</c>. Off by default. On, a card from Ampere on runs them several
-    /// times faster where they are large, and the result is about three decimal digits
-    /// short of <c>float32</c>'s.
+    /// the sums kept in <c>float32</c>. Off by default. On, a card from Ampere on runs large ones up
+    /// to a few times faster, and less precisely: measured on an RTX 4090, a 1024-square product's
+    /// largest difference from the host's result is 2.5e-3 of its largest value, against 4e-6 in full
+    /// precision.
     ///
     /// <para>It allows, and does not require: what each backend does with it is in the user guide
     /// (<c>inference.md</c>, "Precision"). On the ONNX Runtime CUDA backend it is the provider's

@@ -221,6 +221,98 @@ public class MemoryReuseScenarioTests
     }
 
     /// <summary>
+    /// What the memory-aware pass buys each benchmark family's training step on the backend
+    /// <c>$SHOROKOO_MEMORY_REUSE_BACKEND</c> names, measured against what it models: the step it
+    /// chose and the step it was handed (its graph swapped in for the chosen one), each run as a
+    /// resident step (AdamW, L2 loss, the batch fed <c>.Shared()</c>) in turn —
+    /// <c>$SHOROKOO_MEMORY_REUSE_ROUNDS</c> times — for its peak (as
+    /// <see cref="RecordWhatBoundsATrainingStepsPeak"/> reads it) and its median time; beside the
+    /// pass's own figures for both (its evaluator's peak and compute) and, where the backend models a
+    /// run, the backend's peak. <c>$SHOROKOO_MEMORY_REUSE_SCALE</c> multiplies each family's batch.
+    /// </summary>
+    [Fact]
+    public void RecordWhatThePassBuysOnEachBackend()
+    {
+        var backend = Environment.GetEnvironmentVariable("SHOROKOO_MEMORY_REUSE_BACKEND") ?? "ort";
+        var onCard = backend == "torch-cuda"
+                     || (backend == "ort" && DefaultBackend.Instance.GetType().Assembly.GetName().Name?.EndsWith("GPU", StringComparison.Ordinal) == true);
+        var scale = long.TryParse(Environment.GetEnvironmentVariable("SHOROKOO_MEMORY_REUSE_SCALE"), out var s) ? s : 1;
+        var rounds = int.TryParse(Environment.GetEnvironmentVariable("SHOROKOO_MEMORY_REUSE_ROUNDS"), out var r) ? r : 2;
+        var only = Environment.GetEnvironmentVariable("SHOROKOO_MEMORY_REUSE_FAMILIES")?.Split(',');
+        var where = backend == "ort" ? $"ONNX Runtime on the {(onCard ? "card" : "host")}" : backend;
+        var lines = new List<string>
+        {
+            $"# What the memory-aware pass buys a training step, {where}, batch x{scale}", "",
+            "| family | chosen | real peak, handed -> chosen | step ms, handed -> chosen | pass's model, handed -> chosen | backend's model, handed -> chosen | modelled compute, chosen / handed |",
+            "|---|---|---|---|---|---|---|",
+        };
+        const int Warm = 3, Timed = 9;
+        foreach (var (family, model, benchmarkShape) in MemoryPassBenchmarkTests.Suite)
+        {
+            if (only is not null && !only.Contains(family)) continue;
+            long[] shape = [benchmarkShape[0] * scale, .. benchmarkShape[1..]];
+            var count = (int)shape.Aggregate(1L, (a, d) => a * d);
+            float[] Values(int seed) => [.. Enumerable.Range(0, count).Select(i => ((i * 7 + seed) % 101) / 101f - 0.5f)];
+            using var context = backend switch
+            {
+                "torch-cpu" => new ComputeContext(new Shorokoo.PyTorch.Cpu.TorchCpuBackend()),
+                "torch-cuda" => new ComputeContext(new Shorokoo.PyTorch.Cuda.TorchCudaBackend()),
+                _ => new ComputeContext(),
+            };
+            var sample = TensorData(shape, Values(0));
+            var concrete = model().ToConcreteArchitecture([sample]).ToConcreteModel();
+            var predicted = context.Execute(concrete, sample.Shared())[0].ToTensorData();
+            long[] dims = [.. predicted.Shape.Dims.Select(d => (long)d)];
+            predicted.Delete();
+            var rig = TrainingRig.FromScratch(
+                model(), Shorokoo.Modules.Losses.L2Loss.ComputationGraph, Shorokoo.Modules.Optimizers.AdamWOptimizer.ComputationGraph,
+                [sample.CopyTo(ComputeContext.Host)], new Shorokoo.Modules.Optimizers.AdamWOptimizerHyperparameters { LearningRate = 0.001f },
+                runtimeContext: context);
+            var result = rig.OptimizationResult;
+            var chosenAt = result.AllStrategies.Select((x, i) => (x, i)).First(p => ReferenceEquals(p.x.Graph, result.OptimizedGraph)).i;
+            var chosen = rig.TrainingStepPureGraph;
+            var handed = rig.PreOptimizationGraph;
+            var input = rig.InputDef.FromOrderedData(sample.CopyTo(context));
+            var targets = rig.TargetDef.FromOrderedData(TensorData(dims, new float[dims.Aggregate(1L, (a, d) => a * d)]).CopyTo(context));
+            var steps = typeof(TrainingRig).GetField("_compiledTrainSteps", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
+            var graphOf = typeof(TrainingRig).GetProperty(nameof(TrainingRig.TrainingStepPureGraph))!;
+            var peaks = new Dictionary<bool, List<long>> { [false] = [], [true] = [] };
+            var times = new Dictionary<bool, List<double>> { [false] = [], [true] = [] };
+            foreach (var asChosen in Enumerable.Range(0, 2 * rounds).Select(k => k % 2 == 1))
+            {
+                graphOf.SetValue(rig, asChosen ? chosen : handed);
+                var compiled = (System.Collections.IDictionary)steps.GetValue(rig)!;
+                lock (compiled) compiled.Clear();
+                using var run = rig.BeginResidentRun(rig.CreateInitialCheckpoint());
+                for (int i = 0; i < Warm; i++) run.Step(input.Shared(), targets.Shared());
+                peaks[asChosen].Add(backend switch
+                {
+                    "ort" => Observed(onCard, () => { run.Step(input.Shared(), targets.Shared()); return 0; }).Peak,
+                    _ => TorchObserved(backend, () => { run.Step(input.Shared(), targets.Shared()); return 0; }).Peak,
+                });
+                var t = new List<double>();
+                for (int i = 0; i < Timed; i++)
+                {
+                    var watch = Stopwatch.StartNew();
+                    run.Step(input.Shared(), targets.Shared());
+                    t.Add(watch.Elapsed.TotalMilliseconds);
+                }
+                t.Sort();
+                times[asChosen].Add(t[t.Count / 2]);
+            }
+            graphOf.SetValue(rig, chosen);
+            string Pair(Func<bool, string> of) => $"{of(false)} -> {of(true)}";
+            static string Ms(double ms) => ms.ToString("0.0", CultureInfo.InvariantCulture);
+            var backendPeaks = result.BackendPeakBytes;
+            lines.Add($"| {family} | {result.StrategyName} | {Pair(c => string.Join("/", peaks[c].Select(Mib)))} | {Pair(c => string.Join("/", times[c].Select(Ms)))} "
+                      + $"| {Mib(result.AllStrategies[0].Evaluation.PeakMemoryBytes)} -> {Mib(result.Evaluation.PeakMemoryBytes)} "
+                      + $"| {(backendPeaks is null ? "-" : $"{Mib(backendPeaks[0])} -> {Mib(backendPeaks[chosenAt])}")} "
+                      + $"| {result.Evaluation.TotalComputeTime / result.AllStrategies[0].Evaluation.TotalComputeTime:0.000} |");
+            File.WriteAllText(Path.Combine(OutputDirectory(), $"what-the-pass-buys-{(backend == "ort" ? onCard ? "card" : "host" : backend)}-x{scale}.md"), string.Join("\n", lines) + "\n");
+        }
+    }
+
+    /// <summary>
     /// What bounds each benchmark family's training step's peak: the step (AdamW, L2 loss, state
     /// written over itself, batch fed <c>.Shared()</c>) measured on the backend
     /// <c>$SHOROKOO_MEMORY_REUSE_BACKEND</c> names — the most its allocator handed out beyond what it

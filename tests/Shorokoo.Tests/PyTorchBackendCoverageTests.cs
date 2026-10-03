@@ -1216,6 +1216,21 @@ public class PyTorchBackendCoverageTests
     }
 
     [Fact]
+    public void TestATorchRunIsModelledHoldingTheCopiesItsMatMulMakesOfOperandsItCannotReadInPlace()
+    {
+        var rows = ComputeContextLifetimeCoverageTests.WithInts(GraphOn("x:float[16,1,8] w:float[8,4]", "O", Op("Exp", "x", "e"), Op("Expand", "e s", "r"), Op("MatMul", "r w", "O")), "s", 16, 32, 8);
+        Assert.Equal(25088, RunPeak(rows, onHost: false));
+        Assert.Equal(8704, RunPeak(rows, onHost: true));
+        var heads = GraphOn("x:float[2,8,4,4] w:float[2,4,4,8]", "O", Op("Exp", "x", "e"),
+            ComputeContextLifetimeCoverageTests.With(Op("Transpose", "e", "t"), "perm", 0, 2, 1, 3), Op("MatMul", "t w", "O"));
+        Assert.Equal(4096, RunPeak(heads, onHost: false));
+        Assert.Equal(4096, RunPeak(heads, onHost: true));
+        var folded = GraphOn("x:float[8,8,16] w:float[8,4]", "O", Op("Exp", "x", "e"),
+            ComputeContextLifetimeCoverageTests.With(Op("Transpose", "e", "t"), "perm", 1, 2, 0), Op("MatMul", "t w", "O"));
+        Assert.Equal(6144, RunPeak(folded, onHost: false));
+    }
+
+    [Fact]
     public void TestATorchRunIsModelledCopyingAReshapeOfAViewItsStridesCannotReshape()
     {
         Assert.Equal(4096, RunPeak(ComputeContextLifetimeCoverageTests.WithInts(GraphOn("x:float[4,8,16]", "O", Op("Exp", "x", "e"),
@@ -1242,6 +1257,9 @@ public class PyTorchBackendCoverageTests
     /// once beyond its inputs, with <paramref name="aliases"/>' outputs written into their
     /// inputs.</summary>
     private static long? RunPeak(GraphProto graph, params OutputAlias[] aliases) => TorchRunMemory.Peak(new ModelProto { Graph = graph }, aliases);
+
+    /// <summary><see cref="RunPeak(GraphProto, OutputAlias[])"/> on the host or a card.</summary>
+    private static long? RunPeak(GraphProto graph, bool onHost) => TorchRunMemory.Peak(new ModelProto { Graph = graph }, [], onHost);
 
     /// <summary>Whether the training step a rig on a torch context runs holds no more at its peak
     /// than the step before the memory-aware pass would, each as the translation runs it: in its

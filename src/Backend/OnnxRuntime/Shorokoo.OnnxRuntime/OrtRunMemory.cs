@@ -181,12 +181,33 @@ internal static class OrtRunMemory
     /// <summary>
     /// What a kernel of ONNX Runtime's CUDA provider takes for its own use while
     /// <paramref name="node"/> runs, measured kernel by kernel through Shorokoo's allocator in strict
-    /// float32: a reduction over axes that are neither the leading nor the trailing ones of its
-    /// input — those of more than one element — a workspace of its input's size; one over leading or
-    /// trailing axes, which the provider sums as the rows or columns of a matrix, none.
+    /// float32:
+    /// <list type="bullet">
+    /// <item>a reduction over axes that are neither the leading nor the trailing ones of its input —
+    /// those of more than one element — a workspace of its input's size; one over leading or trailing
+    /// axes, which the provider sums as the rows or columns of a matrix, none;</item>
+    /// <item>an <c>LSTM</c> of one direction, of hidden size H over a sequence of T steps of B rows of
+    /// I inputs, its weights packed for cuDNN — 4H(I + H) + 8H elements — and cuDNN's workspace:
+    /// 8 MiB and 256 bytes, T·B(5H + I), B(10H + 2) and 4H(H + I) elements, as requested of the
+    /// allocator on twenty shapes, exactly; a bidirectional one twice that and a value of its output's
+    /// size, which falls 10–15% short of the five shapes measured.</item>
+    /// </list>
     /// </summary>
     internal static long CardScratch(NodeProto node, IReadOnlyDictionary<string, PlacementShapes.Value> shapes)
     {
+        if (OutputAliasProof.IsStandard(node) && node.OpType == "LSTM" && node.Inputs.Count > 0
+            && shapes.TryGetValue(node.Inputs[0], out var x) && x.Shape.Length == 3
+            && node.Attributes.FirstOrDefault(a => a.Name == "hidden_size")?.I is long h and > 0)
+        {
+            var batchFirst = (node.Attributes.FirstOrDefault(a => a.Name == "layout")?.I ?? 0) != 0;
+            long steps = x.Shape[batchFirst ? 1 : 0], rows = x.Shape[batchFirst ? 0 : 1], inputs = x.Shape[2];
+            long element = x.Elements > 0 ? x.Bytes / x.Elements : 4;
+            var packed = (4 * h * (inputs + h) + 8 * h) * element;
+            var workspace = (8L << 20) + 256 + (steps * rows * (5 * h + inputs) + rows * (10 * h + 2) + 4 * h * (h + inputs)) * element;
+            var bidirectional = node.Attributes.FirstOrDefault(a => a.Name == "direction")?.S is { } d
+                && System.Text.Encoding.UTF8.GetString(d) == "bidirectional";
+            return bidirectional ? 2 * (packed + workspace) + steps * rows * 2 * h * element : packed + workspace;
+        }
         if (!OutputAliasProof.IsStandard(node) || !node.OpType.StartsWith("Reduce", StringComparison.Ordinal)
             || node.Inputs.Count == 0 || !shapes.TryGetValue(node.Inputs[0], out var input)) return 0;
         var rank = input.Shape.Length;

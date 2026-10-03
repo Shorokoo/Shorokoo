@@ -1022,14 +1022,15 @@ were within their run-to-run noise.
 |---|---|---|
 | ONNX Runtime CUDA (`WinGpuBackend`, `LinuxGpuBackend`) | the CUDA provider's `use_tf32` is `0` | `use_tf32` is `1`: cuBLAS products and cuDNN convolutions and recurrent layers in TF32 |
 | [PyTorch](pytorch-backend.md#runs) CUDA | each run sets `torch.backends.cuda.matmul.allow_tf32` and `torch.backends.cudnn.allow_tf32` off as it starts | each run sets both on: products, cuDNN convolutions and recurrent layers in TF32 |
-| [JAX](jax-backend.md#runs) CUDA | every product and convolution is compiled at `Precision.HIGHEST` | compiled at `Precision.HIGH`: products in TF32; XLA computes convolutions in full precision at every precision |
+| [JAX](jax-backend.md#runs) CUDA | every product and convolution is compiled at `Precision.HIGHEST` | compiled at `Precision.HIGH`: products and recurrent layers in TF32; each convolution in TF32 or in full precision, whichever kernel XLA's autotuner finds faster when it compiles the program |
 | every CPU backend | full precision | no effect: full precision |
 
 - **It is read when a session is built**, like [`DeviceMemory`](#device-memory-gpu-backends): a
   graph compiled on the context keeps the precision the context carries, and a training rig's steps
   compute in its `runtimeContext`'s. Set it on the context from the start.
-- **It allows TF32, and never requires it.** A backend uses it where its kernels can: XLA puts a
-  small product, or any convolution, through a full-precision kernel all the same.
+- **It allows TF32, and never requires it.** A backend uses it where its kernels choose to: XLA
+  puts a small product through a full-precision kernel all the same, and a convolution through
+  whichever kernel it timed fastest, which may be either.
 - **Only `float32` changes.** `Float16` and `BFloat16` products run on the tensor cores in either
   case, and `Double` never does.
 - **PyTorch's switches are the whole process's.** A run on a card sets them from its own session as

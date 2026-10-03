@@ -157,7 +157,7 @@ session binds no output aliases.
 | **Arena statistics** | none | JAX's allocator on the device (`Device.memory_stats`) |
 | **`TraceNodePlacement`** | every node on `cpu` | every node on `cuda:N` |
 | **`DeterministicCompute`** | not applied | not applied: XLA's kernels run as they otherwise would |
-| **`Precision.AllowTensorFloat32`** | no effect: `float32` in full precision | off by default: every product and convolution is compiled at `Precision.HIGHEST`; on, at `Precision.HIGH`, which XLA computes in TensorFloat-32 for products and in full precision for convolutions |
+| **`Precision.AllowTensorFloat32`** | no effect: `float32` in full precision | off by default: every product and convolution is compiled at `Precision.HIGHEST`; on, at `Precision.HIGH`: XLA computes products in TensorFloat-32, and each convolution in TensorFloat-32 or in full precision, whichever kernel its autotuner finds faster when it compiles the program |
 | **Log severity** | Python warnings a run raises are shown at `Warning` and below, not above | same |
 
 Floating-point products and convolutions run in the operands' full precision unless the context

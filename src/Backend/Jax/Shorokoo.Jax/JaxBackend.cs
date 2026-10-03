@@ -177,7 +177,8 @@ public abstract class JaxBackend : IShorokooBackend
     /// each product and convolution into the program: <c>HIGHEST</c>, full <c>float32</c> precision,
     /// unless <see cref="PrecisionSettings.AllowTensorFloat32"/> allows TensorFloat-32 on a card, where
     /// it is compiled at <c>HIGH</c>. XLA computes a <c>float32</c> product at <c>HIGH</c> in
-    /// TensorFloat-32 on a card that has it, and a convolution in full precision at every precision.
+    /// TensorFloat-32 on a card that has it, and a convolution in TensorFloat-32 or in full precision,
+    /// whichever kernel its autotuner finds faster when it compiles the program.
     /// On the CPU it is <c>HIGHEST</c> either way. JAX has no thread pool per session to size, so
     /// <paramref name="intraOpThreads"/> is unused, and it takes no initializer as a value it already
     /// holds.

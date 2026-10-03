@@ -920,7 +920,7 @@ public class AutoDiffCheckpointingCoverageTests
     private static bool FirstCommittedBatchIsMinimal(InternalComputationGraph graph, ShapeInferenceResult shapeInfo, GraphEvaluator evaluator)
     {
         var baseline = evaluator.Evaluate(graph, shapeInfo);
-        var objective = new ComputeMemoryObjective(1.0, 2.0, baseline);
+        var objective = new ComputeMemoryObjective(1.0, 4.0, baseline);
         var remat = new Rematerializer(objective, evaluator);
         remat.Apply(graph, shapeInfo);
         var log = remat.CommitLog.TakeWhile(c => c.PeakBefore == baseline.PeakMemoryBytes).ToList();

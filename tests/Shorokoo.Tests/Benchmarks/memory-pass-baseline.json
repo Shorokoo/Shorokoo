@@ -21,18 +21,18 @@
       "Strategy": "OrderedStateReads"
     },
     "conv": {
-      "UnoptimizedPeakBytes": 22454320,
-      "PeakBytes": 19476532,
-      "UnoptimizedRealPeakBytes": 30605312,
-      "RealPeakBytes": 26333184,
-      "UnoptimizedComputeTime": 76818873.55776002,
-      "ComputeTime": 76818873.55776002,
-      "UnoptimizedKernelTimeMs": 34.777,
-      "KernelTimeMs": 36.977,
-      "OrtOrderVsGraph": 0.5,
-      "OrtOrderVsReverseDfs": 0.84,
-      "Nodes": 198,
-      "Strategy": "ReorderRemat"
+      "UnoptimizedPeakBytes": 22491184,
+      "PeakBytes": 22454320,
+      "UnoptimizedRealPeakBytes": 18440192,
+      "RealPeakBytes": 18493440,
+      "UnoptimizedComputeTime": 76330231.44576001,
+      "ComputeTime": 76342159.90776001,
+      "UnoptimizedKernelTimeMs": 30.138,
+      "KernelTimeMs": 34.813,
+      "OrtOrderVsGraph": 0.5686274509803921,
+      "OrtOrderVsReverseDfs": 0.8627450980392157,
+      "Nodes": 202,
+      "Strategy": "OrderedStateReads"
     },
     "encoder1": {
       "UnoptimizedPeakBytes": 19936786,

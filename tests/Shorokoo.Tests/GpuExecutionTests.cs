@@ -598,6 +598,7 @@ public class GpuExecutionTests
             ["gpu_mem_limit"] = (136 * MiB).ToString(System.Globalization.CultureInfo.InvariantCulture),
             ["arena_extend_strategy"] = "kSameAsRequested",
         });
+        CudaLibraries.Prepare();
         options.AppendExecutionProvider_CUDA(cuda);
         using var session = new InferenceSession(model.ToArray(), options);
         using var onDevice = new OrtMemoryInfo("Cuda", OrtAllocatorType.DeviceAllocator, 0, OrtMemType.Default);

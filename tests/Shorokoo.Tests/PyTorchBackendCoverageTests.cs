@@ -1204,6 +1204,18 @@ public class PyTorchBackendCoverageTests
     }
 
     [Fact]
+    public void TestATorchRunIsModelledHoldingTheTemporariesItsKernelsMakeOnTheHost()
+    {
+        Assert.Equal(32768, RunPeak(GraphOn("x:float[64,64] s:float[64]", "O", Op("Exp", "x", "e"), Op("LayerNormalization", "e s", "O"))));
+        Assert.Equal(65536, RunPeak(GraphOn("x:float[64,64] s:float[64]", "P", Op("Exp", "x", "e"), Op("LayerNormalization", "e s", "O"), Op("Add", "e O", "P"))));
+        Assert.Equal(4096, RunPeak(GraphOn("x:float[2,3,8,8] w:float[4,3,3,3]", "O", ComputeContextLifetimeCoverageTests.With(Op("Conv", "x w", "O"), "pads", 1, 1, 1, 1))));
+        Assert.Equal(688, RunPeak(GraphOn("x:float[1,4,4,4] w:float[4,3,3,3]", "O", Op("ConvTranspose", "x w", "O"))));
+        Assert.Equal(7600, RunPeak(GraphOn("x:float[2,3,8,8] g:float[2,4,8,8]", "O", Op("Exp", "x", "a"), Op("Exp", "g", "b"),
+            ComputeContextLifetimeCoverageTests.With(Op("Transpose", "a", "at"), "perm", 1, 0, 2, 3), ComputeContextLifetimeCoverageTests.With(Op("Transpose", "b", "bt"), "perm", 1, 0, 2, 3),
+            ComputeContextLifetimeCoverageTests.With(Op("Conv", "at bt", "O"), "pads", 1, 1, 1, 1))));
+    }
+
+    [Fact]
     public void TestATorchRunIsModelledFreeingEachValueAtItsLastReadWithItsViewsWritesOverDyingOperandsAndAliasedOutputsTakingNothing()
     {
         Assert.Equal(8192, RunPeak(GraphOn("a:float[1024]", "O", Op("Exp", "a", "e"), Op("Neg", "a", "f"), Op("Add", "e f", "O"))));

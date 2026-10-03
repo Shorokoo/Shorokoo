@@ -25,8 +25,9 @@ namespace Shorokoo.Core.Backends;
 /// <see cref="CopyOpType"/> node of the <see cref="HoldDomain"/> domain — and the copies are what
 /// the loop's outputs hold.</para>
 ///
-/// <para>Null where a loop's trip count or condition cannot be told, or a sequence reaches a node
-/// other than the sequence operators and <c>Identity</c>.</para>
+/// <para>Null where a loop's trip count or condition cannot be told, a sequence reaches a node
+/// other than the sequence operators and <c>Identity</c>, or the graph holds a branch (<c>If</c>) or
+/// a <c>Scan</c>, whose bodies it does not run through.</para>
 /// </summary>
 internal static class UnrolledRun
 {
@@ -51,6 +52,7 @@ internal static class UnrolledRun
     internal static Run? Of(GraphProto graph, IReadOnlyDictionary<string, (long[] Shape, int ElementType)> inputs,
         Func<IReadOnlyList<NodeProto>, IReadOnlyList<NodeProto>> runOrder, bool copiesListsAtLoopEnd = false)
     {
+        if (Branches(graph)) return null;
         var order = runOrder(graph.Nodes);
         if (!graph.Nodes.Any(Unrolls))
             return new Run(order, PlacementShapes.Evaluate(graph, inputs), new HashSet<string>(StringComparer.Ordinal));
@@ -63,6 +65,12 @@ internal static class UnrolledRun
             if (unrolling.Lists.TryGetValue(output.Name, out var held)) unrolling.Hold(held);
         return new Run(unrolling.Order, values, unrolling.Iterated);
     }
+
+    /// <summary>Whether <paramref name="graph"/>, or a body it holds, holds an <c>If</c> or a
+    /// <c>Scan</c>.</summary>
+    private static bool Branches(GraphProto graph)
+        => graph.Nodes.Any(n => (OutputAliasProof.IsStandard(n) && n.OpType is "If" or "Scan")
+            || n.Attributes.Any(a => (a.G is { } body && Branches(body)) || a.Graphs.Any(Branches)));
 
     /// <summary>Whether <paramref name="node"/> is one a run of the graph is unrolled for.</summary>
     private static bool Unrolls(NodeProto node)

@@ -4980,8 +4980,10 @@ namespace Shorokoo
             // A context that places a run's values in what it consumes writes the state there as
             // aliasing would (PlacementProof), so the state is modelled written in place where it
             // aliases or places.
+            // The pass charges a step as the backend of the context it runs on lays a run out.
             var evaluator = new Shorokoo.Core.AutoDiffCheckpointing.GraphEvaluator(state: new StepState(
-                StateAliasCandidates(), (_runtimeContext?.OutputAliasing ?? true) || _runtimeContext?.ValuePlacement == true));
+                StateAliasCandidates(), (_runtimeContext?.OutputAliasing ?? true) || _runtimeContext?.ValuePlacement == true),
+                layout: _runtimeContext?.ResolvedBackend.RunLayout ?? RunLayout.OnnxRuntime);
             var baselineEval = evaluator.Evaluate(graph, shapeInfo);
             GraphOptimizationResult optResult;
             if (TrainingBackend.LowersAutoGrad)

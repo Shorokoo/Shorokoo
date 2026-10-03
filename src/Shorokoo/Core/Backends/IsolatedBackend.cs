@@ -452,6 +452,8 @@ public static class IsolatedBackend
         long? IShorokooBackend.ModelledRunPeak(Shorokoo.Core.Factory.IR.ModelProto model, IReadOnlyList<OutputAlias> outputAliases)
             => _inner.ModelledRunPeak(model, outputAliases);
 
+        Shorokoo.Core.AutoDiffCheckpointing.RunLayout IShorokooBackend.RunLayout => _inner.RunLayout;
+
         public IShorokooTensorValue CreateTensor<T>(T[] data, long[] shape) where T : unmanaged
             => _inner.CreateTensor(data, shape);
 

@@ -67,6 +67,10 @@ public abstract class TorchBackend : IShorokooBackend
     long? IShorokooBackend.ModelledRunPeak(Shorokoo.Core.Factory.IR.ModelProto model, IReadOnlyList<OutputAlias> outputAliases)
         => TorchRunMemory.Peak(model, outputAliases);
 
+    /// <summary>A translation's: each value freed at its last read, its views and its writes over
+    /// dying operands.</summary>
+    Shorokoo.Core.AutoDiffCheckpointing.RunLayout IShorokooBackend.RunLayout => Shorokoo.Core.AutoDiffCheckpointing.RunLayout.Translation;
+
     /// <summary>torch's name for this backend's device: <c>cpu</c> or <c>cuda:N</c>.</summary>
     public string DeviceName { get; }
 

@@ -277,6 +277,14 @@ public interface IShorokooBackend
     // A decorator forwards this, as it forwards every member with a default body.
     internal long? ModelledRunPeak(Shorokoo.Core.Factory.IR.ModelProto model, IReadOnlyList<OutputAlias> outputAliases) => null;
 
+    // How this backend lays a run's values out in memory, as the training rig's memory-aware pass
+    // charges them while it searches (see ModelledRunPeak for how it then judges). ONNX Runtime's
+    // allocation plan is the default; a backend running a model's translation lays them out as the
+    // translation does.
+    //
+    // A decorator forwards this, as it forwards every member with a default body.
+    internal Shorokoo.Core.AutoDiffCheckpointing.RunLayout RunLayout => Shorokoo.Core.AutoDiffCheckpointing.RunLayout.OnnxRuntime;
+
     IShorokooTensorValue CreateTensor<T>(T[] data, long[] shape) where T : unmanaged;
 
     IShorokooTensorValue CreateTensorFromRawBytes(

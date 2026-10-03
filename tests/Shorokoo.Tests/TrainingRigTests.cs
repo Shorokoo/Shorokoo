@@ -7151,6 +7151,7 @@ public class TrainingRigNativeJaxCoverageTests : NativeTrainingParity<JaxCpuBack
 
 [Trait("Domain", "Training")]
 [Trait("Purpose", "Hardware")]
+[Collection(ProcessWideMemory.Name)]
 public class TrainingRigNativeTorchHardwareTests
 {
     [TorchCudaFact]

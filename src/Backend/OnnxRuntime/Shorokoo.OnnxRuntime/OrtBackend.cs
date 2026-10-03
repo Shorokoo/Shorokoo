@@ -26,7 +26,7 @@ namespace Shorokoo.OnnxRuntime;
 /// </summary>
 public abstract class OrtBackend : IShorokooBackend
 {
-    private readonly Action<SessionOptions, DeviceMemorySettings> _configureExecutionProvider;
+    private readonly Action<SessionOptions, DeviceMemorySettings, PrecisionSettings> _configureExecutionProvider;
     private readonly int? _cudaDeviceId;
 
     // Whether every session runs on ONNX Runtime's own CPU provider or its CUDA provider, the two
@@ -44,8 +44,12 @@ public abstract class OrtBackend : IShorokooBackend
     /// Applied to the <see cref="SessionOptions"/> of every session this backend creates,
     /// after the log-severity and graph-optimization settings and before the session is
     /// constructed. This is where a subclass appends its execution provider. It is handed the
-    /// <see cref="DeviceMemorySettings"/> of the session being built — the settings belong to that
-    /// session, so they arrive with it rather than being read from anywhere else.
+    /// <see cref="DeviceMemorySettings"/> and the <see cref="PrecisionSettings"/> of the session
+    /// being built — the settings belong to that session, so they arrive with it rather than being
+    /// read from anywhere else. A provider that can compute <c>float32</c> in less than full
+    /// precision is to be configured to compute it in full precision unless
+    /// <see cref="PrecisionSettings.AllowTensorFloat32"/> allows otherwise, as
+    /// <see cref="AppendCuda"/> configures CUDA.
     /// </param>
     /// <param name="device">
     /// The kind of device those sessions run on. A subclass driving a provider that is neither
@@ -64,7 +68,7 @@ public abstract class OrtBackend : IShorokooBackend
     /// <exception cref="ArgumentException"><paramref name="cudaDeviceId"/> disagrees with
     /// <paramref name="device"/>, or is negative.</exception>
     protected OrtBackend(
-        Action<SessionOptions, DeviceMemorySettings> configureExecutionProvider,
+        Action<SessionOptions, DeviceMemorySettings, PrecisionSettings> configureExecutionProvider,
         ComputeDevice device,
         int? cudaDeviceId)
         : this(configureExecutionProvider, device, cudaDeviceId, stockProvider: false) { }
@@ -74,21 +78,22 @@ public abstract class OrtBackend : IShorokooBackend
     /// provider, its default, so none is appended.
     /// </summary>
     protected OrtBackend()
-        : this(static (_, _) => { }, ComputeDevice.Cpu, cudaDeviceId: null, stockProvider: true) { }
+        : this(static (_, _, _) => { }, ComputeDevice.Cpu, cudaDeviceId: null, stockProvider: true) { }
 
     /// <summary>
     /// The CUDA-backend constructor: every session gets the CUDA execution provider on
-    /// <paramref name="cudaDeviceId"/>, configured from the <see cref="DeviceMemorySettings"/>
-    /// that session is built with, and honours <see cref="RunSettings.ShrinkArenaAfterRun"/> for
-    /// what Shorokoo's allocator keeps on that device on each run.
+    /// <paramref name="cudaDeviceId"/>, configured from the <see cref="DeviceMemorySettings"/> and
+    /// <see cref="PrecisionSettings"/> that session is built with, and honours
+    /// <see cref="RunSettings.ShrinkArenaAfterRun"/> for what Shorokoo's allocator keeps on that
+    /// device on each run.
     /// </summary>
     protected OrtBackend(int cudaDeviceId)
-        : this((opts, mem) => AppendCuda(opts, cudaDeviceId, mem), ComputeDevice.Cuda, cudaDeviceId, stockProvider: true) { }
+        : this((opts, mem, precision) => AppendCuda(opts, cudaDeviceId, mem, precision), ComputeDevice.Cuda, cudaDeviceId, stockProvider: true) { }
 
     // The one the others call. Internal rather than private so a test can stand for a stock
     // provider while it watches each session being built.
     internal OrtBackend(
-        Action<SessionOptions, DeviceMemorySettings> configureExecutionProvider,
+        Action<SessionOptions, DeviceMemorySettings, PrecisionSettings> configureExecutionProvider,
         ComputeDevice device,
         int? cudaDeviceId,
         bool stockProvider)
@@ -182,7 +187,8 @@ public abstract class OrtBackend : IShorokooBackend
         ShorokooLogSeverity logSeverity,
         DeviceMemorySettings deviceMemory,
         DiagnosticSettings diagnostics)
-        => Build(modelBytes, graphOptimization, logSeverity, deviceMemory, diagnostics, outputAliases: null, intraOpThreads: 0, []);
+        => Build(modelBytes, graphOptimization, logSeverity, deviceMemory, diagnostics, outputAliases: null, intraOpThreads: 0, [],
+            PrecisionSettings.Default);
 
     /// <summary>
     /// <see cref="CreateSession(ReadOnlyMemory{byte}, ShorokooGraphOptimization, ShorokooLogSeverity, DeviceMemorySettings, DiagnosticSettings)"/>,
@@ -250,7 +256,7 @@ public abstract class OrtBackend : IShorokooBackend
         ArgumentOutOfRangeException.ThrowIfNegative(intraOpThreads);
         return Build(
             modelBytes, graphOptimization, logSeverity, deviceMemory, diagnostics,
-            outputAliases.Count == 0 ? null : outputAliases, intraOpThreads, []);
+            outputAliases.Count == 0 ? null : outputAliases, intraOpThreads, [], PrecisionSettings.Default);
     }
 
     /// <summary>
@@ -268,13 +274,36 @@ public abstract class OrtBackend : IShorokooBackend
         IReadOnlyList<OutputAlias> outputAliases,
         int intraOpThreads,
         IReadOnlyList<SuppliedInitializer> suppliedInitializers)
+        => CreateSession(
+            modelBytes, graphOptimization, logSeverity, deviceMemory, diagnostics, outputAliases, intraOpThreads,
+            suppliedInitializers, PrecisionSettings.Default);
+
+    /// <summary>
+    /// <see cref="CreateSession(ReadOnlyMemory{byte}, ShorokooGraphOptimization, ShorokooLogSeverity, DeviceMemorySettings, DiagnosticSettings, IReadOnlyList{OutputAlias}, int, IReadOnlyList{SuppliedInitializer})"/>,
+    /// computing in <paramref name="precision"/>, which reaches the execution-provider step with
+    /// <paramref name="deviceMemory"/>. On a CUDA backend
+    /// <see cref="PrecisionSettings.AllowTensorFloat32"/> is the CUDA provider's <c>use_tf32</c>
+    /// (<see cref="CudaProviderOptions"/>); a CPU session computes <c>float32</c> in full precision
+    /// whatever it says. The other overloads build in <see cref="PrecisionSettings.Default"/>.
+    /// </summary>
+    public IShorokooSession CreateSession(
+        ReadOnlyMemory<byte> modelBytes,
+        ShorokooGraphOptimization graphOptimization,
+        ShorokooLogSeverity logSeverity,
+        DeviceMemorySettings deviceMemory,
+        DiagnosticSettings diagnostics,
+        IReadOnlyList<OutputAlias> outputAliases,
+        int intraOpThreads,
+        IReadOnlyList<SuppliedInitializer> suppliedInitializers,
+        PrecisionSettings precision)
     {
         ArgumentNullException.ThrowIfNull(outputAliases);
         ArgumentNullException.ThrowIfNull(suppliedInitializers);
+        ArgumentNullException.ThrowIfNull(precision);
         ArgumentOutOfRangeException.ThrowIfNegative(intraOpThreads);
         return Build(
             modelBytes, graphOptimization, logSeverity, deviceMemory, diagnostics,
-            outputAliases.Count == 0 ? null : outputAliases, intraOpThreads, suppliedInitializers);
+            outputAliases.Count == 0 ? null : outputAliases, intraOpThreads, suppliedInitializers, precision);
     }
 
     /// <summary>
@@ -300,7 +329,8 @@ public abstract class OrtBackend : IShorokooBackend
         DiagnosticSettings diagnostics,
         IReadOnlyList<OutputAlias>? outputAliases,
         int intraOpThreads,
-        IReadOnlyList<SuppliedInitializer> suppliedInitializers)
+        IReadOnlyList<SuppliedInitializer> suppliedInitializers,
+        PrecisionSettings precision)
     {
         ArgumentNullException.ThrowIfNull(deviceMemory);
         ArgumentNullException.ThrowIfNull(diagnostics);
@@ -308,7 +338,7 @@ public abstract class OrtBackend : IShorokooBackend
         var model = modelBytes.ToArray();
         BuiltSession New(string? optimizedDirectory) => NewSession(
             model, graphOptimization, logSeverity, deviceMemory, diagnostics, optimizedDirectory, intraOpThreads,
-            suppliedInitializers);
+            suppliedInitializers, precision);
         if (outputAliases is null) return Wrap(New(optimizedDirectory: null), []);
 
         var optimizedDirectory = TempDirectory("shorokoo-optimized-");
@@ -392,7 +422,8 @@ public abstract class OrtBackend : IShorokooBackend
         DiagnosticSettings diagnostics,
         string? optimizedDirectory,
         int intraOpThreads,
-        IReadOnlyList<SuppliedInitializer> suppliedInitializers)
+        IReadOnlyList<SuppliedInitializer> suppliedInitializers,
+        PrecisionSettings precision)
     {
         // The `using` is load-bearing, not tidiness. SessionOptions is a SafeHandle, so it
         // carries a critical finalizer that calls OrtReleaseSessionOptions, and ORT takes its
@@ -427,7 +458,7 @@ public abstract class OrtBackend : IShorokooBackend
             if (profileDirectory is not null) EnableProfiling(options, profileDirectory);
             if (optimizedDirectory is not null) WriteOptimizedModel(options, optimizedDirectory);
             if (placeholderDirectory is not null) Supply(options, placeholderDirectory, suppliedInitializers, views);
-            _configureExecutionProvider(options, deviceMemory);
+            _configureExecutionProvider(options, deviceMemory, precision);
             InferenceSession session;
             using (CachingAllocator.Charge(host, card))
                 session = new InferenceSession(model, options);
@@ -729,15 +760,18 @@ public abstract class OrtBackend : IShorokooBackend
     }
 
     /// <summary>
-    /// Appends the CUDA execution provider on <paramref name="deviceId"/>. This is what the GPU
-    /// backends pass as their execution-provider step. <paramref name="deviceMemory"/> does not
-    /// reach the provider: a session of this backend allocates on the card through Shorokoo's
-    /// allocator, which enforces <see cref="DeviceMemorySettings.LimitBytes"/> itself (see
+    /// Appends the CUDA execution provider on <paramref name="deviceId"/>, computing in
+    /// <paramref name="precision"/> (<see cref="CudaProviderOptions"/>). This is what the GPU backends
+    /// pass as their execution-provider step. <paramref name="deviceMemory"/> does not reach the
+    /// provider: a session of this backend allocates on the card through Shorokoo's allocator, which
+    /// enforces <see cref="DeviceMemorySettings.LimitBytes"/> itself (see
     /// <see cref="CachingAllocator"/>), rather than through the provider's arena.
     /// </summary>
-    public static void AppendCuda(SessionOptions options, int deviceId, DeviceMemorySettings deviceMemory)
+    public static void AppendCuda(
+        SessionOptions options, int deviceId, DeviceMemorySettings deviceMemory, PrecisionSettings precision)
     {
         ArgumentNullException.ThrowIfNull(deviceMemory);
+        ArgumentNullException.ThrowIfNull(precision);
         // Before the provider is loaded: it imports cuBLAS and loads cuDNN by name, so they bind to
         // the pinned copies every CUDA backend of the process shares rather than to whatever PATH offers.
         CudaLibraries.Prepare();
@@ -746,17 +780,30 @@ public abstract class OrtBackend : IShorokooBackend
         // AppendExecutionProvider_CUDA, well after the JIT has retired the local at its .Handle
         // read, and a GC there would run the critical finalizer under the native call.
         using var cuda = new OrtCUDAProviderOptions();
-        cuda.UpdateOptions(CudaProviderOptions(deviceId));
+        cuda.UpdateOptions(CudaProviderOptions(deviceId, precision));
         options.AppendExecutionProvider_CUDA(cuda);
     }
 
     /// <summary>
-    /// The CUDA execution-provider options for a device, in ORT's own <c>provider_options</c>
-    /// spelling. Pure, and public alongside <see cref="Configure"/> so the mapping can be read and
-    /// asserted without a CUDA machine to build a session on.
+    /// The CUDA execution-provider options for a device and a precision, in ORT's own
+    /// <c>provider_options</c> spelling. Pure, and public alongside <see cref="Configure"/> so the
+    /// mapping can be read and asserted without a CUDA machine to build a session on.
+    ///
+    /// <para><c>use_tf32</c> is always named, and is <c>1</c> only where
+    /// <see cref="PrecisionSettings.AllowTensorFloat32"/> is set. The provider's own default is
+    /// <c>1</c>, which computes <c>float32</c> products and convolutions in TensorFloat-32, so a
+    /// session that left it out would compute in less than full precision without being asked
+    /// to.</para>
     /// </summary>
-    public static Dictionary<string, string> CudaProviderOptions(int deviceId)
-        => new() { ["device_id"] = deviceId.ToString(CultureInfo.InvariantCulture) };
+    public static Dictionary<string, string> CudaProviderOptions(int deviceId, PrecisionSettings precision)
+    {
+        ArgumentNullException.ThrowIfNull(precision);
+        return new()
+        {
+            ["device_id"] = deviceId.ToString(CultureInfo.InvariantCulture),
+            ["use_tf32"] = precision.AllowTensorFloat32 ? "1" : "0",
+        };
+    }
 
     /// <summary>
     /// Copies a flat managed array into an ORT tensor of the given shape. Shorokoo's

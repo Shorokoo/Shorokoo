@@ -429,6 +429,20 @@ public static class IsolatedBackend
                 modelBytes, graphOptimization, logSeverity, deviceMemory, diagnostics, outputAliases,
                 intraOpThreads, suppliedInitializers);
 
+        public IShorokooSession CreateSession(
+            ReadOnlyMemory<byte> modelBytes,
+            ShorokooGraphOptimization graphOptimization,
+            ShorokooLogSeverity logSeverity,
+            DeviceMemorySettings deviceMemory,
+            DiagnosticSettings diagnostics,
+            IReadOnlyList<OutputAlias> outputAliases,
+            int intraOpThreads,
+            IReadOnlyList<SuppliedInitializer> suppliedInitializers,
+            PrecisionSettings precision)
+            => _inner.CreateSession(
+                modelBytes, graphOptimization, logSeverity, deviceMemory, diagnostics, outputAliases,
+                intraOpThreads, suppliedInitializers, precision);
+
         public bool SuppliesInitializers => _inner.SuppliesInitializers;
 
         public bool AcceptsTrainingFormat(string format) => _inner.AcceptsTrainingFormat(format);

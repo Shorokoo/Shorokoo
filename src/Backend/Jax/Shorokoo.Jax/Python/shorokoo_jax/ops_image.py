@@ -32,7 +32,7 @@ def _present(value):
 def _matmul(a, b):
     if _rt.concrete(a, b):
         return np.matmul(a, b)
-    return jnp.matmul(a, b, precision=_rt.PRECISION)
+    return jnp.matmul(a, b, precision=_rt.precision())
 
 
 # ---- Resize ----------------------------------------------------------------------------------

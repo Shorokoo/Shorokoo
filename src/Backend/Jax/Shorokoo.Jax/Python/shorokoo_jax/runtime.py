@@ -59,9 +59,17 @@ FLOAT8 = (_DTYPES[17], _DTYPES[18], _DTYPES[19], _DTYPES[20])
 
 KIND_TENSOR = 0
 
-# Products and convolutions in full float32 precision: XLA's default on a card may round the
-# operands of a float32 product to TensorFloat-32, and the backend computes what the graph says.
-PRECISION = jax.lax.Precision.HIGHEST
+# The precision of the products and convolutions of the program being traced: the model's own,
+# which the .NET side settles from the session's PrecisionSettings -- HIGHEST, full float32 precision,
+# unless a session on a card allows TensorFloat-32, which XLA computes at HIGH. XLA's default on a
+# card rounds the operands of a float32 product to TensorFloat-32, so every product and convolution
+# names its precision rather than leaving it to that default.
+_precision = contextvars.ContextVar("shorokoo_jax_precision", default=jax.lax.Precision.HIGHEST)
+
+
+def precision():
+    """The precision a product or convolution of the program being traced is computed in."""
+    return _precision.get()
 
 
 def jax_dtype(code):
@@ -232,10 +240,11 @@ class Model:
     """A translated model loaded for one session: its `main`, its constants, and the XLA programs
     compiled from it so far, one per signature of the shapes and element types of its inputs."""
 
-    def __init__(self, main, constants, device):
+    def __init__(self, main, constants, device, precision):
         self._main = main
         self._constants = constants
         self.device = device
+        self.precision = precision
         self._large = [i for i, c in enumerate(constants) if np.size(c) > _LARGEST_LITERAL]
         self._large_values = [jax.device_put(constants[i], device) for i in self._large]
         self._programs = collections.OrderedDict()
@@ -247,10 +256,12 @@ class Model:
         for i, value in zip(self._large, large):
             self._constants[i] = value
         token = _keys.set(_Keys(jax.random.wrap_key_data(key)))
+        precision_token = _precision.set(self.precision)
         try:
             with np.errstate(all="ignore"):
                 return tuple(self._main(*args))
         finally:
+            _precision.reset(precision_token)
             _keys.reset(token)
             for i, value in zip(self._large, saved):
                 self._constants[i] = value
@@ -286,9 +297,10 @@ class Model:
         return program(_fresh_key(), self._large_values, *moved)
 
 
-def load_model(source, filename, constants, device_name):
-    """The model a translation's source defines, with `constants` bound as `_C`, on `device_name`.
-    The source's compiled Python code is cached by `filename`, which names the source's hash."""
+def load_model(source, filename, constants, device_name, precision="HIGHEST"):
+    """The model a translation's source defines, with `constants` bound as `_C`, on `device_name`,
+    its products and convolutions compiled at `precision` (a jax.lax.Precision name). The source's
+    compiled Python code is cached by `filename`, which names the source's hash."""
     code = _code.get(filename)
     if code is None:
         code = compile(source, filename, "exec")
@@ -302,7 +314,7 @@ def load_model(source, filename, constants, device_name):
     constants = list(constants)
     namespace = {"__name__": "shorokoo_model", "_C": constants}
     exec(code, namespace)
-    return Model(namespace["main"], constants, device_of(device_name))
+    return Model(namespace["main"], constants, device_of(device_name), jax.lax.Precision[precision])
 
 
 def prepare(model, inputs, severity=None):

@@ -162,9 +162,17 @@ public class SideBySideBackendHardwareTests
     }
 
     [SideBySideCudaFact]
-    public void TestFloat32ProductsAndConvolutionsOnTheCardAreComputedInFullPrecision()
-        => SideBySideModel.AssertFullPrecision(
-            SideBySideModel.LargeProducts(new ComputeContext()), SideBySideModel.LargeProducts(new ComputeContext(LoadCuda())));
+    public void TestFloat32ProductsAndConvolutionsOnTheCardAreComputedInFullPrecisionUnlessTensorFloat32IsAllowed()
+    {
+        var host = SideBySideModel.LargeProducts(new ComputeContext());
+        var cuda = LoadCuda();
+        var strict = new ComputeContext(cuda);
+        var allowed = new ComputeContext(cuda) { Precision = SideBySideModel.AllowingTensorFloat32 };
+
+        SideBySideModel.AssertFullPrecision(host, SideBySideModel.LargeProducts(strict));
+        SideBySideModel.AssertTensorFloat32(host, SideBySideModel.LargeProducts(allowed));
+        SideBySideModel.AssertFullPrecision(host, SideBySideModel.LargeProducts(strict));
+    }
 
     [SideBySideCudaFact]
     public void TestATensorLeftOnTheCardIsCopiedToHostMemoryAndRunsThere()

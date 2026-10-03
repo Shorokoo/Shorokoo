@@ -166,7 +166,7 @@ def qlinear_conv(x, x_scale, x_zero_point, w, w_scale, w_zero_point, y_scale, y_
     padding = _conv_pads(list(x.shape[2:]), kernel, strides, dilations, pads, auto_pad)
     accumulated = jax.lax.conv_general_dilated(
         shifted_x, shifted_w, window_strides=strides, padding=padding, rhs_dilation=dilations,
-        feature_group_count=group, precision=_rt.PRECISION).astype(np.int64)
+        feature_group_count=group, precision=_rt.precision()).astype(np.int64)
     if b is not None:
         accumulated = accumulated + b.astype(np.int64).reshape((channels,) + (1,) * spatial)
     scale = (x_scale.reshape(()).astype(np.float32) * per_channel(w_scale).astype(np.float32)

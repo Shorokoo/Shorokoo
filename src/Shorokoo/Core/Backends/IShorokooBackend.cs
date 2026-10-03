@@ -211,6 +211,32 @@ public interface IShorokooBackend
         return CreateSession(modelBytes, graphOptimization, logSeverity, deviceMemory, diagnostics, outputAliases, intraOpThreads);
     }
 
+    // The same session, told the floating-point precision it computes in: whether a CUDA card may
+    // compute float32 products, convolutions and recurrent layers in TensorFloat-32
+    // (PrecisionSettings.AllowTensorFloat32). Read while the session is built, like deviceMemory.
+    // Every other overload builds a session in PrecisionSettings.Default -- float32 in full float32
+    // precision -- so a session computes in anything less only where this was asked for it.
+    //
+    // The default drops the setting and builds the ordinary session. That is a backend computing in
+    // full precision where it was allowed less, which is always within what was asked: the setting
+    // allows TensorFloat-32 and never requires it.
+    IShorokooSession CreateSession(
+        ReadOnlyMemory<byte> modelBytes,
+        ShorokooGraphOptimization graphOptimization,
+        ShorokooLogSeverity logSeverity,
+        DeviceMemorySettings deviceMemory,
+        DiagnosticSettings diagnostics,
+        IReadOnlyList<OutputAlias> outputAliases,
+        int intraOpThreads,
+        IReadOnlyList<SuppliedInitializer> suppliedInitializers,
+        PrecisionSettings precision)
+    {
+        ArgumentNullException.ThrowIfNull(precision);
+        return CreateSession(
+            modelBytes, graphOptimization, logSeverity, deviceMemory, diagnostics, outputAliases, intraOpThreads,
+            suppliedInitializers);
+    }
+
     // Whether CreateSession takes supplied initializers. A decorator forwards it.
     bool SuppliesInitializers => false;
 

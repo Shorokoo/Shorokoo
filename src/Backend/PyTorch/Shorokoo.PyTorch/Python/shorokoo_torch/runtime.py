@@ -196,7 +196,7 @@ def _export(value, device, taken, ids):
 
 
 def run(main, args, wanted, run_device, constant_storages, constant_ids,
-        stop_address=0, severity=None, aliases=(), limit_bytes=-1, shrink=False):
+        stop_address=0, severity=None, aliases=(), limit_bytes=-1, shrink=False, tensor_float32=False):
     """Runs a translated model and exports the outputs at indices `wanted`, each tensor on the run's
     device and each sequence in host memory -- where the .NET side reads every input and leaves every
     output. Returns (value, description, aliased) per output.
@@ -208,8 +208,12 @@ def run(main, args, wanted, run_device, constant_storages, constant_ids,
     translation's plan, in the numbering its `_alias_write` calls use -- an index -1 where the run may
     not write that slot into a consumed input -- see _Aliasing; `limit_bytes` what the run may
     allocate on a CUDA device beyond what its allocator holds there already, or -1; `shrink` whether
-    to hand the device's unused cached blocks back once the run is over."""
+    to hand the device's unused cached blocks back once the run is over; `tensor_float32` whether a
+    run on a CUDA device may compute float32 products, convolutions and recurrent layers in
+    TensorFloat-32 -- see float32_precision."""
     run_device = torch.device(run_device)
+    if run_device.type == "cuda":
+        float32_precision(tensor_float32)
     outputs = moved = None
     try:
         tokens = [_device.set(run_device), _warning_severity.set(severity)]
@@ -234,6 +238,18 @@ def run(main, args, wanted, run_device, constant_storages, constant_ids,
         outputs = moved = None
         if shrink and run_device.type == "cuda":
             torch.cuda.empty_cache()
+
+
+def float32_precision(tensor_float32):
+    """Sets whether cuBLAS products and cuDNN convolutions and recurrent layers of float32 operands may
+    be computed in TensorFloat-32, which rounds each operand's significand to 11 bits; off, they are
+    computed in full float32 precision. torch's switches for it are the whole process's and are read
+    as each kernel is launched, so a run on a card sets them from its session as it starts, and the
+    .NET side keeps runs that set them differently apart. They are set through allow_tf32, which also
+    sets torch's fp32_precision to match; setting fp32_precision alone would leave the two
+    disagreeing, and torch then refuses to read allow_tf32."""
+    torch.backends.cuda.matmul.allow_tf32 = bool(tensor_float32)
+    torch.backends.cudnn.allow_tf32 = bool(tensor_float32)
 
 
 def _export_all(outputs, args, moved, wanted, run_device, aliasing, constant_storages, constant_ids):

@@ -145,7 +145,7 @@ public abstract class JaxBackend : IShorokooBackend
         ShorokooGraphOptimization graphOptimization,
         ShorokooLogSeverity logSeverity,
         DeviceMemorySettings deviceMemory)
-        => JaxSession.Create(this, modelBytes, logSeverity, DiagnosticSettings.Default);
+        => JaxSession.Create(this, modelBytes, logSeverity, DiagnosticSettings.Default, PrecisionSettings.Default);
 
     /// <summary>The same session, recording which device ran each node where
     /// <paramref name="diagnostics"/> asks: every node runs on this backend's device.</summary>
@@ -155,7 +155,7 @@ public abstract class JaxBackend : IShorokooBackend
         ShorokooLogSeverity logSeverity,
         DeviceMemorySettings deviceMemory,
         DiagnosticSettings diagnostics)
-        => JaxSession.Create(this, modelBytes, logSeverity, diagnostics);
+        => JaxSession.Create(this, modelBytes, logSeverity, diagnostics, PrecisionSettings.Default);
 
     /// <summary>The same session: a JAX array is never written in place, so the session binds none
     /// of <paramref name="outputAliases"/> (<see cref="IShorokooSession.BindableAliases"/> is
@@ -169,7 +169,38 @@ public abstract class JaxBackend : IShorokooBackend
         IReadOnlyList<OutputAlias> outputAliases)
     {
         ArgumentNullException.ThrowIfNull(outputAliases);
-        return JaxSession.Create(this, modelBytes, logSeverity, diagnostics);
+        return JaxSession.Create(this, modelBytes, logSeverity, diagnostics, PrecisionSettings.Default);
+    }
+
+    /// <summary>
+    /// The same session, computing in <paramref name="precision"/>. XLA compiles the precision of
+    /// each product and convolution into the program: <c>HIGHEST</c>, full <c>float32</c> precision,
+    /// unless <see cref="PrecisionSettings.AllowTensorFloat32"/> allows TensorFloat-32 on a card, where
+    /// it is compiled at <c>HIGH</c>, which XLA computes in TensorFloat-32 on a card that has it. On the
+    /// CPU it is <c>HIGHEST</c> either way. JAX has no thread pool per session to size, so
+    /// <paramref name="intraOpThreads"/> is unused, and it takes no initializer as a value it already
+    /// holds.
+    /// </summary>
+    /// <exception cref="NotSupportedException"><paramref name="suppliedInitializers"/> names
+    /// any.</exception>
+    public IShorokooSession CreateSession(
+        ReadOnlyMemory<byte> modelBytes,
+        ShorokooGraphOptimization graphOptimization,
+        ShorokooLogSeverity logSeverity,
+        DeviceMemorySettings deviceMemory,
+        DiagnosticSettings diagnostics,
+        IReadOnlyList<OutputAlias> outputAliases,
+        int intraOpThreads,
+        IReadOnlyList<SuppliedInitializer> suppliedInitializers,
+        PrecisionSettings precision)
+    {
+        ArgumentNullException.ThrowIfNull(outputAliases);
+        ArgumentNullException.ThrowIfNull(suppliedInitializers);
+        ArgumentNullException.ThrowIfNull(precision);
+        if (suppliedInitializers.Count > 0)
+            throw new NotSupportedException(
+                $"{Description} cannot take a model's initializers as values it already holds.");
+        return JaxSession.Create(this, modelBytes, logSeverity, diagnostics, precision);
     }
 
     public IShorokooTensorValue CreateTensor<T>(T[] data, long[] shape) where T : unmanaged

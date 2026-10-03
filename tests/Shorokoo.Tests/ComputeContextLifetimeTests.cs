@@ -977,10 +977,10 @@ public class ComputeContextLifetimeCoverageTests
         internal ScriptedBackend(Action<int> build) : this([0], build) { }
 
         private ScriptedBackend(int[] builds, Action<int> build)
-            : base((_, _) => build(builds[0]++), ComputeDevice.Cpu, cudaDeviceId: null) => _builds = builds;
+            : base((_, _, _) => build(builds[0]++), ComputeDevice.Cpu, cudaDeviceId: null) => _builds = builds;
 
         private ScriptedBackend(int[] builds, Action<int> build, bool stockProvider)
-            : base((_, _) => build(builds[0]++), ComputeDevice.Cpu, cudaDeviceId: null, stockProvider) => _builds = builds;
+            : base((_, _, _) => build(builds[0]++), ComputeDevice.Cpu, cudaDeviceId: null, stockProvider) => _builds = builds;
 
         internal static ScriptedBackend Stock(Action<int> build) => new([0], build, stockProvider: true);
 

@@ -149,7 +149,7 @@ public abstract class TorchBackend : IShorokooBackend
         ShorokooGraphOptimization graphOptimization,
         ShorokooLogSeverity logSeverity,
         DeviceMemorySettings deviceMemory)
-        => TorchSession.Create(this, modelBytes, logSeverity, deviceMemory, DiagnosticSettings.Default, []);
+        => TorchSession.Create(this, modelBytes, logSeverity, deviceMemory, DiagnosticSettings.Default, [], PrecisionSettings.Default);
 
     /// <summary>The same session, recording which device ran each node where
     /// <paramref name="diagnostics"/> asks (<see cref="DiagnosticSettings.TraceNodePlacement"/>):
@@ -160,7 +160,7 @@ public abstract class TorchBackend : IShorokooBackend
         ShorokooLogSeverity logSeverity,
         DeviceMemorySettings deviceMemory,
         DiagnosticSettings diagnostics)
-        => TorchSession.Create(this, modelBytes, logSeverity, deviceMemory, diagnostics, []);
+        => TorchSession.Create(this, modelBytes, logSeverity, deviceMemory, diagnostics, [], PrecisionSettings.Default);
 
     /// <summary>
     /// The same session, writing the outputs <paramref name="outputAliases"/> names into the memory
@@ -177,7 +177,38 @@ public abstract class TorchBackend : IShorokooBackend
         IReadOnlyList<OutputAlias> outputAliases)
     {
         ArgumentNullException.ThrowIfNull(outputAliases);
-        return TorchSession.Create(this, modelBytes, logSeverity, deviceMemory, diagnostics, outputAliases);
+        return TorchSession.Create(this, modelBytes, logSeverity, deviceMemory, diagnostics, outputAliases, PrecisionSettings.Default);
+    }
+
+    /// <summary>
+    /// The same session, computing in <paramref name="precision"/>: on CUDA, a session that
+    /// <see cref="PrecisionSettings.AllowTensorFloat32"/> lets compute <c>float32</c> products,
+    /// convolutions and recurrent layers in TensorFloat-32 sets torch's switches for cuBLAS and cuDNN
+    /// to allow it as each of its runs starts, and every other session sets them to forbid it (see
+    /// <see cref="TorchSession"/>); on the CPU, <c>float32</c> is computed in full precision either
+    /// way. torch has no thread pool of its own per session, so <paramref name="intraOpThreads"/> is
+    /// unused, and it takes no initializer as a value it already holds.
+    /// </summary>
+    /// <exception cref="NotSupportedException"><paramref name="suppliedInitializers"/> names
+    /// any.</exception>
+    public IShorokooSession CreateSession(
+        ReadOnlyMemory<byte> modelBytes,
+        ShorokooGraphOptimization graphOptimization,
+        ShorokooLogSeverity logSeverity,
+        DeviceMemorySettings deviceMemory,
+        DiagnosticSettings diagnostics,
+        IReadOnlyList<OutputAlias> outputAliases,
+        int intraOpThreads,
+        IReadOnlyList<SuppliedInitializer> suppliedInitializers,
+        PrecisionSettings precision)
+    {
+        ArgumentNullException.ThrowIfNull(outputAliases);
+        ArgumentNullException.ThrowIfNull(suppliedInitializers);
+        ArgumentNullException.ThrowIfNull(precision);
+        if (suppliedInitializers.Count > 0)
+            throw new NotSupportedException(
+                $"{Description} cannot take a model's initializers as values it already holds.");
+        return TorchSession.Create(this, modelBytes, logSeverity, deviceMemory, diagnostics, outputAliases, precision);
     }
 
     public IShorokooTensorValue CreateTensor<T>(T[] data, long[] shape) where T : unmanaged

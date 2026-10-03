@@ -46,11 +46,29 @@ public class PyTorchCudaHardwareTests
     }
 
     [TorchCudaFact]
-    public void TestFloat32ProductsAndConvolutionsOnTheCardAreComputedInFullPrecision()
+    public void TestFloat32ProductsAndConvolutionsOnTheCardAreComputedInFullPrecisionUnlessTensorFloat32IsAllowed()
     {
-        using var card = new ComputeContext(Cuda.Value);
+        var host = SideBySideModel.LargeProducts(new ComputeContext());
+        using var strict = new ComputeContext(Cuda.Value);
+        using var allowed = new ComputeContext(Cuda.Value) { Precision = SideBySideModel.AllowingTensorFloat32 };
 
-        SideBySideModel.AssertFullPrecision(SideBySideModel.LargeProducts(new ComputeContext()), SideBySideModel.LargeProducts(card));
+        SideBySideModel.AssertFullPrecision(host, SideBySideModel.LargeProducts(strict));
+        SideBySideModel.AssertTensorFloat32(host, SideBySideModel.LargeProducts(allowed));
+        SideBySideModel.AssertFullPrecision(host, SideBySideModel.LargeProducts(strict));
+        SideBySideModel.AssertTensorFloat32(host, SideBySideModel.LargeProducts(allowed));
+    }
+
+    [TorchCudaFact]
+    public void TestRunsOfAFullPrecisionSessionAndATensorFloat32SessionAtOnceEachComputeInTheirOwnPrecision()
+    {
+        var host = SideBySideModel.LargeProducts(new ComputeContext());
+        using var strict = new ComputeContext(Cuda.Value);
+        using var allowed = new ComputeContext(Cuda.Value) { Precision = SideBySideModel.AllowingTensorFloat32 };
+        var strictRuns = Task.Run(() => Enumerable.Range(0, 4).Select(_ => SideBySideModel.LargeProducts(strict)).ToList());
+        var allowedRuns = Task.Run(() => Enumerable.Range(0, 4).Select(_ => SideBySideModel.LargeProducts(allowed)).ToList());
+
+        Assert.All(strictRuns.Result, card => SideBySideModel.AssertFullPrecision(host, card));
+        Assert.All(allowedRuns.Result, card => SideBySideModel.AssertTensorFloat32(host, card));
     }
 
     [TorchCudaFact]

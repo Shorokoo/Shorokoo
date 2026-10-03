@@ -633,8 +633,9 @@ namespace Shorokoo.Runtime
     ///
     /// <para>It also carries how its sessions and runs are configured — <see cref="DeviceMemory"/>
     /// for the arena each session it compiles is built with and for the budget it keeps on its
-    /// device's memory, and <see cref="RunSettings"/> for what its runs do by default. Both are per
-    /// instance, so two contexts may differ and neither reaches the other's sessions.</para>
+    /// device's memory, <see cref="Precision"/> for the floating-point precision its sessions compute
+    /// in, and <see cref="RunSettings"/> for what its runs do by default. Each is per instance, so two
+    /// contexts may differ and neither reaches the other's sessions.</para>
     ///
     /// <para>The same data feeds either context and the same model runs on both, with nothing to
     /// say at the call site. A literal costs nothing to share: it is managed bytes until something
@@ -835,6 +836,26 @@ namespace Shorokoo.Runtime
         {
             get => _runSettings;
             init => _runSettings = value ?? throw new ArgumentNullException(nameof(value));
+        }
+
+        private readonly PrecisionSettings _precision = PrecisionSettings.Default;
+
+        /// <summary>
+        /// The floating-point precision this context's sessions compute in:
+        /// <see cref="PrecisionSettings.Default"/>, <c>float32</c> in full <c>float32</c> precision on
+        /// every backend and device, unless it names otherwise. Initialize-only, and read when a session
+        /// is built, exactly as <see cref="DeviceMemory"/> is: a graph compiled here, and a training
+        /// rig's steps on this context as its <c>runtimeContext</c>, compute in what this carries.
+        ///
+        /// <para><see cref="PrecisionSettings.AllowTensorFloat32"/> lets a CUDA card compute
+        /// <c>float32</c> products, convolutions and recurrent layers in TensorFloat-32, which is
+        /// faster and less precise; it changes nothing on a CPU backend.</para>
+        /// </summary>
+        /// <exception cref="ArgumentNullException">A null settings object.</exception>
+        public PrecisionSettings Precision
+        {
+            get => _precision;
+            init => _precision = value ?? throw new ArgumentNullException(nameof(value));
         }
 
         private readonly DiagnosticSettings _diagnostics = DiagnosticSettings.Default;
@@ -2215,19 +2236,15 @@ namespace Shorokoo.Runtime
 
         /// <summary>A session of <paramref name="backend"/> over <paramref name="modelData"/>, built
         /// with <paramref name="deviceMemory"/>, with what this context records about its sessions,
-        /// and with the outputs the lowering proved it may write into consumed inputs'
-        /// memory.</summary>
+        /// in its precision, and with the outputs the lowering proved it may write into consumed
+        /// inputs' memory.</summary>
         internal IShorokooSession BuildSession(
             IShorokooBackend backend, byte[] modelData, ShorokooGraphOptimization optimization,
             DeviceMemorySettings deviceMemory, IReadOnlyList<OutputAlias>? outputAliases = null,
             int intraOpThreads = 0, IReadOnlyList<SuppliedInitializer>? supplied = null)
-            => supplied is { Count: > 0 }
-                ? backend.CreateSession(
-                    modelData, optimization, ShorokooLogSeverity.Fatal, deviceMemory, Diagnostics,
-                    outputAliases ?? [], intraOpThreads, supplied)
-                : backend.CreateSession(
-                    modelData, optimization, ShorokooLogSeverity.Fatal, deviceMemory, Diagnostics,
-                    outputAliases ?? [], intraOpThreads);
+            => backend.CreateSession(
+                modelData, optimization, ShorokooLogSeverity.Fatal, deviceMemory, Diagnostics,
+                outputAliases ?? [], intraOpThreads, supplied ?? [], Precision);
 
         /// <summary>
         /// Whether the model takes no runtime input, so every node's value is already

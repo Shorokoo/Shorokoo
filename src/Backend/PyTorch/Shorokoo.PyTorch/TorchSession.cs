@@ -23,6 +23,16 @@ namespace Shorokoo.PyTorch;
 /// to it — with one exception, which is output aliasing: an output the session was built to write
 /// into an input's memory (<see cref="OutputAlias"/>), on a run that consumed that input. See
 /// <see cref="RunConsuming(IReadOnlyDictionary{string, IShorokooTensorValue}, IReadOnlyCollection{IShorokooTensorValue}, IReadOnlyList{string}, RunSettings, out IReadOnlyList{string?})"/>.</para>
+///
+/// <para><b>Precision.</b> Whether torch computes <c>float32</c> products in TensorFloat-32 on a card,
+/// and cuDNN convolutions and recurrent layers likewise, is decided by switches of the whole process
+/// (<c>torch.backends.cuda.matmul.allow_tf32</c>, <c>torch.backends.cudnn.allow_tf32</c>), which torch
+/// reads as it launches each kernel. So a run on a card sets both from its session's
+/// <see cref="PrecisionSettings"/> as it starts, under the interpreter lock: off, which is full
+/// <c>float32</c> precision, unless the session was built allowing TensorFloat-32. torch releases
+/// that lock inside each operator, so runs on cards that set the switches differently do not run at
+/// once: a run that allows TensorFloat-32 has the process's cards to itself, and runs in full
+/// precision share them. A run on the CPU reads neither switch and sets neither.</para>
 /// </summary>
 internal sealed class TorchSession : IShorokooSession
 {
@@ -34,6 +44,7 @@ internal sealed class TorchSession : IShorokooSession
     private readonly Dictionary<string, int> _outputIndex;
     private readonly ShorokooLogSeverity _logSeverity;
     private readonly long? _limitBytes;
+    private readonly bool _tensorFloat32;
     private readonly NodePlacement? _nodePlacement;
     private readonly AliasSlot[] _aliases;
     private readonly bool[] _bindable;
@@ -51,9 +62,14 @@ internal sealed class TorchSession : IShorokooSession
     // one is held to another's; runs without one share it.
     private static readonly ConcurrentDictionary<int, ReaderWriterLockSlim> DeviceRuns = new();
 
+    // torch's TensorFloat-32 switches are the whole process's, so runs on cards that set them
+    // differently must not overlap: a run allowing TensorFloat-32 holds this exclusively, and runs in
+    // full precision share it. Taken before a device's lock, by every run on a card and no other.
+    private static readonly ReaderWriterLockSlim Float32Runs = new(LockRecursionPolicy.SupportsRecursion);
+
     private TorchSession(
         TorchBackend backend, TorchRuntime runtime, TranslatedModel model, ShorokooLogSeverity logSeverity,
-        long? limitBytes, NodePlacement? nodePlacement, SessionOutputPlacement outputPlacement,
+        long? limitBytes, bool tensorFloat32, NodePlacement? nodePlacement, SessionOutputPlacement outputPlacement,
         PyObject main, PyObject constants, PyObject constantStorages, PyObject constantIds)
     {
         _backend = backend;
@@ -65,6 +81,7 @@ internal sealed class TorchSession : IShorokooSession
         for (int i = 0; i < _outputNames.Length; i++) _outputIndex.TryAdd(_outputNames[i], i);
         _logSeverity = logSeverity;
         _limitBytes = limitBytes;
+        _tensorFloat32 = tensorFloat32;
         _nodePlacement = nodePlacement;
         OutputPlacement = outputPlacement;
         // Every slot of the translation's plan, in its numbering, which the translated code's writes
@@ -84,14 +101,22 @@ internal sealed class TorchSession : IShorokooSession
         _constantIds = constantIds;
     }
 
+    /// <summary>Whether a session of <paramref name="backend"/> built with <paramref name="precision"/>
+    /// has its runs allow TensorFloat-32: on a card, where the settings allow it. A run on the CPU sets
+    /// neither of torch's switches, so there it is false whatever the settings say.</summary>
+    internal static bool TensorFloat32(TorchBackend backend, PrecisionSettings precision)
+        => backend.OnCuda && precision.AllowTensorFloat32;
+
     /// <summary>Translates <paramref name="modelBytes"/> and loads it.</summary>
     public static TorchSession Create(
         TorchBackend backend, ReadOnlyMemory<byte> modelBytes, ShorokooLogSeverity logSeverity,
-        DeviceMemorySettings deviceMemory, DiagnosticSettings diagnostics, IReadOnlyList<OutputAlias> outputAliases)
+        DeviceMemorySettings deviceMemory, DiagnosticSettings diagnostics, IReadOnlyList<OutputAlias> outputAliases,
+        PrecisionSettings precision)
     {
         ArgumentNullException.ThrowIfNull(deviceMemory);
         ArgumentNullException.ThrowIfNull(diagnostics);
         ArgumentNullException.ThrowIfNull(outputAliases);
+        ArgumentNullException.ThrowIfNull(precision);
         ModelProto proto;
         using (var stream = new MemoryStream(modelBytes.ToArray(), writable: false))
             proto = ProtoBuf.Serializer.Deserialize<ModelProto>(stream);
@@ -116,7 +141,8 @@ internal sealed class TorchSession : IShorokooSession
                 }
                 var main = PyCall.Invoke(runtime.LoadModel, model.Source, $"<shorokoo-model-{hash}>", constants);
                 return new TorchSession(backend, runtime, model, logSeverity,
-                    backend.OnCuda ? deviceMemory.LimitBytes : null, placement, OutputPlacementOf(proto.Graph!, backend.OnCuda),
+                    backend.OnCuda ? deviceMemory.LimitBytes : null, TensorFloat32(backend, precision),
+                    placement, OutputPlacementOf(proto.Graph!, backend.OnCuda),
                     main, constants, runtime.ConstantStorages.Invoke(constants), runtime.ConstantIds.Invoke(constants));
             }
             catch (PythonException ex)
@@ -305,17 +331,27 @@ internal sealed class TorchSession : IShorokooSession
                 ? DeviceRuns.GetOrAdd(_backend.CudaDeviceId, static _ => new ReaderWriterLockSlim(LockRecursionPolicy.SupportsRecursion))
                 : null;
             if (device is null) return Invoke(feeds, wanted, outputNames, targets, stop, runSettings, out aliasedInputs);
-            var capped = _limitBytes is not null;
-            if (capped) device.EnterWriteLock();
-            else device.EnterReadLock();
+            if (_tensorFloat32) Float32Runs.EnterWriteLock();
+            else Float32Runs.EnterReadLock();
             try
             {
-                return Invoke(feeds, wanted, outputNames, targets, stop, runSettings, out aliasedInputs);
+                var capped = _limitBytes is not null;
+                if (capped) device.EnterWriteLock();
+                else device.EnterReadLock();
+                try
+                {
+                    return Invoke(feeds, wanted, outputNames, targets, stop, runSettings, out aliasedInputs);
+                }
+                finally
+                {
+                    if (capped) device.ExitWriteLock();
+                    else device.ExitReadLock();
+                }
             }
             finally
             {
-                if (capped) device.ExitWriteLock();
-                else device.ExitReadLock();
+                if (_tensorFloat32) Float32Runs.ExitWriteLock();
+                else Float32Runs.ExitReadLock();
             }
         }
         finally
@@ -408,7 +444,8 @@ internal sealed class TorchSession : IShorokooSession
             {
                 results = PyCall.Invoke(_runtime.Run,
                     _main, args, wantedList, _backend.DeviceName, _constantStorages, _constantIds,
-                    stop.ToInt64(), (int)_logSeverity, aliases, _limitBytes ?? -1L, runSettings.ShrinkArenaAfterRun);
+                    stop.ToInt64(), (int)_logSeverity, aliases, _limitBytes ?? -1L, runSettings.ShrinkArenaAfterRun,
+                    _tensorFloat32);
             }
             catch (PythonException ex) when (ex.Type.Name == TorchRuntime.RunStopped && runSettings.CancellationToken.IsCancellationRequested)
             {

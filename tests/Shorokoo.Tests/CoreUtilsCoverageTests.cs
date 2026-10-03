@@ -593,20 +593,20 @@ public class CoreUtilsCoverageTests
 
     private sealed class CpuBackendProbe : OrtBackend
     {
-        public CpuBackendProbe() : base(static (_, _) => { }, ComputeDevice.Cpu, cudaDeviceId: null) { }
+        public CpuBackendProbe() : base(static (_, _, _) => { }, ComputeDevice.Cpu, cudaDeviceId: null) { }
     }
 
     private sealed class OtherDeviceBackendProbe : OrtBackend
     {
-        public OtherDeviceBackendProbe() : base(static (_, _) => { }, ComputeDevice.Other, cudaDeviceId: null) { }
+        public OtherDeviceBackendProbe() : base(static (_, _, _) => { }, ComputeDevice.Other, cudaDeviceId: null) { }
     }
 
     /// <summary>A CPU backend whose execution-provider step records the settings it is handed,
-    /// which is where a GPU backend would read the arena budget out of them.</summary>
+    /// which is where a GPU backend would read the arena budget and the precision out of them.</summary>
     private sealed class CapturingBackendProbe : OrtBackend
     {
-        public CapturingBackendProbe(List<DeviceMemorySettings> seen)
-            : base((_, mem) => seen.Add(mem), ComputeDevice.Cpu, cudaDeviceId: null) { }
+        public CapturingBackendProbe(List<(DeviceMemorySettings, PrecisionSettings)> seen)
+            : base((_, mem, precision) => { lock (seen) seen.Add((mem, precision)); }, ComputeDevice.Cpu, cudaDeviceId: null) { }
     }
 
     /// <summary>Records the settings each run was handed. No outputs, so every run returns nothing
@@ -630,10 +630,16 @@ public class CoreUtilsCoverageTests
     }
 
     [Fact]
-    public void TestTheCudaProviderOptionsNameTheDeviceAndFullFloat32PrecisionAndNothingOfItsMemory()
+    public void TestTheCudaProviderOptionsNameTheDeviceAndTensorFloat32OnlyWhereAllowedAndNothingOfItsMemory()
     {
-        Assert.Equal([("device_id", "0"), ("use_tf32", "0")], OrtBackend.CudaProviderOptions(0).Select(o => (o.Key, o.Value)));
-        Assert.Equal([("device_id", "3"), ("use_tf32", "0")], OrtBackend.CudaProviderOptions(3).Select(o => (o.Key, o.Value)));
+        var tensorFloat32 = new PrecisionSettings { AllowTensorFloat32 = true };
+        Assert.Equal([("device_id", "0"), ("use_tf32", "0")], OrtBackend.CudaProviderOptions(0, PrecisionSettings.Default).Select(o => (o.Key, o.Value)));
+        Assert.Equal([("device_id", "3"), ("use_tf32", "0")], OrtBackend.CudaProviderOptions(3, new PrecisionSettings()).Select(o => (o.Key, o.Value)));
+        Assert.Equal([("device_id", "0"), ("use_tf32", "1")], OrtBackend.CudaProviderOptions(0, tensorFloat32).Select(o => (o.Key, o.Value)));
+        Assert.False(PrecisionSettings.Default.AllowTensorFloat32);
+        Assert.Equal(PrecisionSettings.Default, new ComputeContext().Precision);
+        Assert.Equal(tensorFloat32, new ComputeContext { Precision = tensorFloat32 }.Precision);
+        Assert.Throws<ArgumentNullException>(() => new ComputeContext { Precision = null! });
     }
 
     [Fact]
@@ -671,15 +677,44 @@ public class CoreUtilsCoverageTests
         var model = new MemoryStream();
         ProtoBuf.Serializer.Serialize(model, proto);
 
-        var seen = new List<DeviceMemorySettings>();
+        var seen = new List<(DeviceMemorySettings, PrecisionSettings)>();
         var probe = new CapturingBackendProbe(seen);
         var budget = new DeviceMemorySettings { LimitBytes = 8L << 30 };
+        var tensorFloat32 = new PrecisionSettings { AllowTensorFloat32 = true };
 
         using (probe.CreateSession(model.ToArray(), ShorokooGraphOptimization.EnableAll, ShorokooLogSeverity.Fatal, budget)) { }
-        Assert.Equal(budget, Assert.Single(seen));
+        using (probe.CreateSession(model.ToArray(), ShorokooGraphOptimization.EnableAll, ShorokooLogSeverity.Fatal, budget,
+            DiagnosticSettings.Default, [], 0, [], tensorFloat32)) { }
+        Assert.Equal([(budget, PrecisionSettings.Default), (budget, tensorFloat32)], seen);
 
         Assert.Throws<ArgumentNullException>(() => probe.CreateSession(
             model.ToArray(), ShorokooGraphOptimization.EnableAll, ShorokooLogSeverity.Fatal, null!));
+    }
+
+    [Fact]
+    public void TestAContextsPrecisionReachesEverySessionItBuildsATrainingRigsStepsIncluded()
+    {
+        var tensorFloat32 = new PrecisionSettings { AllowTensorFloat32 = true };
+        List<(DeviceMemorySettings, PrecisionSettings)> strict = [], allowed = [];
+        using var strictContext = new ComputeContext(new CapturingBackendProbe(strict));
+        using var allowedContext = new ComputeContext(new CapturingBackendProbe(allowed)) { Precision = tensorFloat32 };
+        var x = InputVector<float32>("x");
+        var graph = new InternalComputationGraph([x], [x + x]);
+        var input = TrainingRigHelpers.Input([4L], 1f, 2f, 3f, 4f);
+        foreach (var context in (ComputeContext[])[strictContext, allowedContext])
+        {
+            context.Execute(graph, TensorData([2L], 1f, 2f));
+            context.Compile(graph).Execute(TensorData([2L], 1f, 2f));
+            var rig = TrainingRig.FromScratch(ScalarMultiplyModel.ComputationGraph, Shorokoo.Modules.Losses.L2Loss.ComputationGraph,
+                Shorokoo.Modules.Optimizers.SGDOptimizer.ComputationGraph, TrainingRigHelpers.SampleOf(input), [0.05f],
+                mergeContext: context, runtimeContext: context);
+            rig.TrainStep(rig.CreateInitialCheckpoint(), input.Shared(), TrainingRigHelpers.Target([4L], 2f, 4f, 6f, 8f));
+        }
+
+        Assert.True(strict.Count > 2);
+        Assert.Equal(strict.Count, allowed.Count);
+        Assert.All(strict, built => Assert.Equal(PrecisionSettings.Default, built.Item2));
+        Assert.All(allowed, built => Assert.Equal(tensorFloat32, built.Item2));
     }
 
     /// <summary>
@@ -1477,12 +1512,12 @@ public class CoreUtilsCoverageTests
         // reaches the session, not how many other things travel with it.
         Assert.Matches(@"new\s+OrtSession\s*\(\s*session\s*,\s*_cudaDeviceId\s*[,)]", source);
         Assert.Matches(@"AppendExecutionProvider_CUDA\s*\(\s*cuda\s*\)", source);
-        Assert.Matches(@"CudaProviderOptions\s*\(\s*deviceId\s*\)", source);
+        Assert.Matches(@"CudaProviderOptions\s*\(\s*deviceId\s*,\s*precision\s*\)", source);
         Assert.Matches(@"card\.Limit\s*=\s*deviceMemory\.LimitBytes", source);
         Assert.Matches(@"using\s*\(\s*CachingAllocator\.Charge\s*\(\s*host\s*,\s*card\s*\)\s*\)\s*session\s*=\s*new\s+InferenceSession", source);
         Assert.Contains("\"session.use_env_allocators\", \"1\"", File.ReadAllText(
             Path.Combine(backend, "Shorokoo.OnnxRuntime", "OrtBackend.cs")));
-        Assert.Matches(@"_configureExecutionProvider\s*\(\s*options\s*,\s*deviceMemory\s*\)", source);
+        Assert.Matches(@"_configureExecutionProvider\s*\(\s*options\s*,\s*deviceMemory\s*,\s*precision\s*\)", source);
 
         var context = StripCommentsAndStrings(File.ReadAllText(
             Path.Combine(ProductSourceRoot(), "Shorokoo", "Core", "ComputeContext.cs")));

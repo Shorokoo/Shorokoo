@@ -181,7 +181,7 @@ def _hidden(r, hidden_size):
 
 
 def _matmul_t(v, m):
-    return jnp.matmul(v, m.T, precision=_rt.PRECISION)
+    return jnp.matmul(v, m.T, precision=_rt.precision())
 
 
 def rnn(x, w, r, b=None, sequence_lens=None, initial_h=None, /, *, activation_alpha=None,

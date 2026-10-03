@@ -798,9 +798,21 @@ internal static class SideBySideModel
         => expected.Zip(actual, (want, got) => Math.Abs((double)want - got)).Max() / expected.Max(v => Math.Abs((double)v));
 
     /// <summary>What <see cref="LargeProducts"/> may deviate by from the host's where the card computes
-    /// float32 in full float32 precision.</summary>
-    internal const double FullPrecisionTolerance = 1e-5;
+    /// float32 in full float32 precision, and so only adds its terms up in another order. Measured on an
+    /// RTX 4090, on ONNX Runtime and PyTorch alike: 3.9e-6 for the product and 3.8e-6 for the
+    /// convolution.</summary>
+    internal const double FullPrecisionTolerance = 2e-5;
+
+    /// <summary>What <see cref="LargeProducts"/> may deviate by from the host's where the card computes
+    /// float32 in TensorFloat-32, rounding each operand's significand to 11 bits. Measured on an RTX 4090,
+    /// on ONNX Runtime and PyTorch alike: 2.5e-3 for the product and 1.8e-3 for the convolution.</summary>
+    internal const double TensorFloat32Tolerance = 1e-2;
 
     internal static void AssertFullPrecision(float[][] host, float[][] card)
         => Assert.All(host.Zip(card), pair => Assert.True(Deviation(pair.First, pair.Second) <= FullPrecisionTolerance));
+
+    internal static void AssertTensorFloat32(float[][] host, float[][] card)
+        => Assert.All(host.Zip(card), pair => Assert.InRange(Deviation(pair.First, pair.Second), FullPrecisionTolerance, TensorFloat32Tolerance));
+
+    internal static PrecisionSettings AllowingTensorFloat32 { get; } = new() { AllowTensorFloat32 = true };
 }

@@ -541,6 +541,23 @@ public class PyTorchBackendCoverageTests
     }
 
     [Fact]
+    public void TestARunOnACardSetsTorchsTensorFloat32SwitchesFromItsSessionAndARunOnTheCpuSetsNeither()
+    {
+        var allowing = SideBySideModel.AllowingTensorFloat32;
+        using var session = Torch.CreateSession(Onnx("Neg", (int)ShorokooTensorElementType.Float), default, default, DeviceMemorySettings.Default);
+        using var x = Torch.CreateTensor([1f], [1]);
+        const string Switches = "(torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32)";
+        const string Set = "__import__('shorokoo_torch.runtime', fromlist=['runtime']).float32_precision";
+
+        Assert.Equal((false, false, true), (TorchSession.TensorFloat32(Torch, allowing), TorchSession.TensorFloat32(new TorchCudaBackend(), PrecisionSettings.Default),
+            TorchSession.TensorFloat32(new TorchCudaBackend(), allowing)));
+        Assert.Equal("(True, True)", Evaluated($"({Set}(True), {Switches})[1]"));
+        session.Run(new Dictionary<string, IShorokooTensorValue> { ["x0"] = x }, ["y"], RunSettings.Default)[0].Dispose();
+        Assert.Equal("(True, True)", Evaluated(Switches));
+        Assert.Equal("(False, False)", Evaluated($"({Set}(False), {Switches})[1]"));
+    }
+
+    [Fact]
     public void TestEveryConsumedFeedIsReleasedExactlyOnceHoweverTheRunEnds()
     {
         using var session = Torch.CreateSession(Onnx("Neg", (int)ShorokooTensorElementType.Float), default, default, DeviceMemorySettings.Default);

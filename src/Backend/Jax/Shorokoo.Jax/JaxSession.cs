@@ -23,6 +23,11 @@ namespace Shorokoo.Jax;
 ///
 /// <para><b>Stopping.</b> A run is one compiled program, which cannot be stopped part way: a run
 /// whose token is cancelled before it starts is refused, and one cancelled while it runs finishes.</para>
+///
+/// <para><b>Precision.</b> The precision of every product and convolution is compiled into the
+/// program, from the <see cref="PrecisionSettings"/> the session was built with: full <c>float32</c>
+/// precision, unless it allows TensorFloat-32 and the session is on a card (see
+/// <see cref="Float32Precision"/>).</para>
 /// </summary>
 internal sealed class JaxSession : IShorokooSession
 {
@@ -54,12 +59,21 @@ internal sealed class JaxSession : IShorokooSession
         _model = loaded;
     }
 
+    /// <summary>The precision XLA compiles the products and convolutions of a session of
+    /// <paramref name="backend"/> in, as JAX names it: <c>HIGH</c> — TensorFloat-32 for <c>float32</c>
+    /// on a card that has it — where <paramref name="precision"/> allows TensorFloat-32 and the backend
+    /// is on a card, and otherwise <c>HIGHEST</c>, full precision.</summary>
+    internal static string Float32Precision(JaxBackend backend, PrecisionSettings precision)
+        => backend.OnCuda && precision.AllowTensorFloat32 ? "HIGH" : "HIGHEST";
+
     /// <summary>Translates <paramref name="modelBytes"/>, loads it, and compiles it where its inputs'
     /// shapes are fixed.</summary>
     public static JaxSession Create(
-        JaxBackend backend, ReadOnlyMemory<byte> modelBytes, ShorokooLogSeverity logSeverity, DiagnosticSettings diagnostics)
+        JaxBackend backend, ReadOnlyMemory<byte> modelBytes, ShorokooLogSeverity logSeverity, DiagnosticSettings diagnostics,
+        PrecisionSettings precision)
     {
         ArgumentNullException.ThrowIfNull(diagnostics);
+        ArgumentNullException.ThrowIfNull(precision);
         ModelProto proto;
         using (var stream = new MemoryStream(modelBytes.ToArray(), writable: false))
             proto = ProtoBuf.Serializer.Deserialize<ModelProto>(stream);
@@ -82,7 +96,8 @@ internal sealed class JaxSession : IShorokooSession
                     using var value = ConstantValue(runtime, constant);
                     constants.Append(value);
                 }
-                loaded = PyCall.Invoke(runtime.LoadModel, model.Source, $"<shorokoo-model-{hash}>", constants, backend.DeviceName);
+                loaded = PyCall.Invoke(runtime.LoadModel, model.Source, $"<shorokoo-model-{hash}>", constants, backend.DeviceName,
+                    Float32Precision(backend, precision));
                 if (signature is not null)
                 {
                     using var inputs = new PyList();

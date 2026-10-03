@@ -1216,6 +1216,17 @@ public class PyTorchBackendCoverageTests
     }
 
     [Fact]
+    public void TestATorchRunIsModelledCopyingAReshapeOfAViewItsStridesCannotReshape()
+    {
+        Assert.Equal(4096, RunPeak(ComputeContextLifetimeCoverageTests.WithInts(GraphOn("x:float[4,8,16]", "O", Op("Exp", "x", "e"),
+            ComputeContextLifetimeCoverageTests.With(Op("Transpose", "e", "t"), "perm", 1, 0, 2), Op("Reshape", "t shape", "O")), "shape", 8, 64)));
+        Assert.Equal(2048, RunPeak(ComputeContextLifetimeCoverageTests.WithInts(GraphOn("x:float[4,8,16]", "O", Op("Exp", "x", "e"),
+            ComputeContextLifetimeCoverageTests.With(Op("Transpose", "e", "t"), "perm", 1, 0, 2), Op("Reshape", "t shape", "O")), "shape", 8, 4, 4, 4)));
+        Assert.Equal(2048, RunPeak(ComputeContextLifetimeCoverageTests.WithInts(GraphOn("x:float[4,8,16]", "O", Op("Exp", "x", "e"),
+            Op("Reshape", "e shape", "O")), "shape", 32, 16)));
+    }
+
+    [Fact]
     public void TestATorchRunIsModelledFreeingEachValueAtItsLastReadWithItsViewsWritesOverDyingOperandsAndAliasedOutputsTakingNothing()
     {
         Assert.Equal(8192, RunPeak(GraphOn("a:float[1024]", "O", Op("Exp", "a", "e"), Op("Neg", "a", "f"), Op("Add", "e f", "O"))));

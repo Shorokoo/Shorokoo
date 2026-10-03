@@ -530,8 +530,413 @@ public class MemoryReuseScenarioTests
         "Relu", "Sigmoid", "Tanh", "Elu", "LeakyRelu", "HardSigmoid", "Selu", "Softplus", "Softsign", "ThresholdedRelu",
     };
 
-    /// <summary>The graph ONNX Runtime runs for <paramref name="model"/>, built as a training step's
-    /// session is — on the card's provider where <paramref name="onCard"/> — and written out.</summary>
+    /// <summary>
+    /// Where ONNX Runtime's run of each benchmark family's training step holds other than the
+    /// memory-aware pass's model of it, kernel by kernel: the step the pass chose for a rig on the
+    /// default context (host or card, by the build), at <c>$SHOROKOO_MEMORY_REUSE_SCALE</c> times the
+    /// batch (16 by default), built with the pass's own value names and run once as a training
+    /// step's session runs it, its allocations through Shorokoo's allocator each put to the kernel
+    /// running as it was made. Per kernel, beside the model's figure at the node the kernel's output
+    /// comes from: what the run held as the kernel began, the most it held during it, what it held
+    /// after, and the blocks it took. The inputs are left out of both sides, and the run's outputs
+    /// that the step writes into its inputs out of the run's.
+    /// </summary>
+    [Fact]
+    public void RecordWhereOnnxRuntimeHoldsOtherThanThePassModels()
+    {
+        var onCard = DefaultBackend.Instance.GetType().Assembly.GetName().Name?.EndsWith("GPU", StringComparison.Ordinal) == true;
+        var scale = long.TryParse(Environment.GetEnvironmentVariable("SHOROKOO_MEMORY_REUSE_SCALE"), out var sc) ? sc : 16;
+        var only = Environment.GetEnvironmentVariable("SHOROKOO_MEMORY_REUSE_FAMILIES")?.Split(',');
+        var where = onCard ? "card" : "host";
+        var summary = new List<string>
+        {
+            $"# Where ONNX Runtime holds other than the pass models, on the {where}, batch x{scale}", "",
+            "| family | real peak (resident run) | run peak (one run, outputs into inputs left out) | its graph at that kernel, freed at last read | its graph planned as the pass plans, in the run's order | the same, in the order the pass predicts | the pass's modelled peak | the pass's model at that kernel's node | scratch over 1 MiB, by operator |",
+            "|---|---|---|---|---|---|---|---|---|",
+        };
+        var detail = new StringBuilder();
+        foreach (var (family, model, benchmarkShape) in MemoryPassBenchmarkTests.Suite)
+        {
+            if (only is not null && !only.Contains(family)) continue;
+            long[] shape = [benchmarkShape[0] * scale, .. benchmarkShape[1..]];
+            var count = (int)shape.Aggregate(1L, (a, d) => a * d);
+            using var context = new ComputeContext();
+            var sample = TensorData(shape, [.. Enumerable.Range(0, count).Select(i => ((i * 7) % 101) / 101f - 0.5f)]);
+            var rig = TrainingRig.FromScratch(
+                model(), Shorokoo.Modules.Losses.L2Loss.ComputationGraph, Shorokoo.Modules.Optimizers.AdamWOptimizer.ComputationGraph,
+                [sample.CopyTo(ComputeContext.Host)], new Shorokoo.Modules.Optimizers.AdamWOptimizerHyperparameters { LearningRate = 0.001f },
+                runtimeContext: context);
+
+            // The real peak of a resident step, as the pass's figures are compared with elsewhere.
+            var shapes = rig.OptimizationInputShapes;
+            var concrete = model().ToConcreteArchitecture([sample]).ToConcreteModel();
+            var predicted = context.Execute(concrete, sample.Shared())[0].ToTensorData();
+            long[] outDims = [.. predicted.Shape.Dims.Select(d => (long)d)];
+            predicted.Delete();
+            var input = rig.InputDef.FromOrderedData(sample.CopyTo(context));
+            var targets = rig.TargetDef.FromOrderedData(TensorData(outDims, new float[outDims.Aggregate(1L, (a, d) => a * d)]).CopyTo(context));
+            long real;
+            using (var run = rig.BeginResidentRun(rig.CreateInitialCheckpoint()))
+            {
+                for (int i = 0; i < 3; i++) run.Step(input.Shared(), targets.Shared());
+                real = Observed(onCard, () => { run.Step(input.Shared(), targets.Shared()); return 0; }).Peak;
+            }
+
+            // The pass's model, node by node, in the order it walks the step it chose; each value by
+            // the name a session's model gives it, which the preparation of that model renumbers.
+            var result = rig.OptimizationResult;
+            var workarounds = Shorokoo.Core.Lowering.KernelWorkarounds.KernelWorkaroundRegistry.For(context.ResolvedBackend.KernelWorkaroundSet);
+            var graph = result.OptimizedGraph;
+            var prepared = graph.Clone();
+            var keyOf = prepared.Nodes.ToDictionary(n => n, n => n.Key, ReferenceEqualityComparer.Instance);
+            Shorokoo.Core.Nodes.Processors.Fast.FastIdentityWrapping.WrapAliasedOutputs(prepared);
+            typeof(Shorokoo.Core.Factory.FastOnnxModelBuilder).GetMethod("RunPrePasses", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!
+                .Invoke(null, [prepared, true, true, workarounds, true, (Func<InternalComputationGraph, bool>)(_ => true), false]);
+            var renamed = prepared.Nodes.Where(keyOf.ContainsKey).ToDictionary(n => keyOf[n], n => n.Key);
+            var details = result.Evaluation.NodeDetails;
+            long inputBytes = 0;
+            var positionOf = new Dictionary<string, int>(StringComparer.Ordinal);
+            for (int p = 0; p < details.Count; p++)
+                foreach (var output in graph.Nodes[details[p].NodeIndex].Outputs)
+                    if (output is { } key && renamed.TryGetValue(key.FastNodeKey, out var newKey))
+                        positionOf[new Shorokoo.Core.Graph.FastTensorKey(newKey, key.OutputIndex).ToString()] = p;
+            long ModelAt(int p) => p < 0 ? 0 : details[p].CurrentMemoryBytes + details[p].ExtraMemoryBytes - inputBytes;
+            var modelPeakAt = Enumerable.Range(0, details.Count).MaxBy(ModelAt);
+
+            // The run, kernel by kernel.
+            var stepModel = Shorokoo.Core.Factory.FastOnnxModelBuilder.BuildInternalOnnxModel(graph, prepForOnnx: true,
+                inputDims: [.. shapes.Select(s => (long[]?)s.Shape.Dims.Select(d => (long)d).ToArray())], workarounds: workarounds);
+            var timeline = OrtTimeline(stepModel, onCard, shapes);
+            var ran = timeline.Graph;
+            var given = new Dictionary<string, (long[], int)>(StringComparer.Ordinal);
+            for (int i = 0; i < ran.Inputs.Count && i < shapes.Length; i++)
+                given[ran.Inputs[i].Name] = ([.. shapes[i].Shape.Dims.Select(d => (long)d)], ran.Inputs[i].Type?.TensorType?.ElemType ?? 1);
+            var valueShapes = PlacementShapes.Evaluate(ran, given);
+            long BytesOf(string v) => valueShapes.TryGetValue(v, out var x) ? Math.Max(x.Bytes, 0) : 0;
+            inputBytes = ran.Inputs.Sum(i => BytesOf(i.Name));
+            var stateOutputs = ran.Outputs.Take(rig.UpdatedParamFieldCount + rig.UpdatedStateFieldCount + rig.UpdatedOptimizerStateFieldCount)
+                .Select(o => o.Name).ToHashSet(StringComparer.Ordinal);
+            detail.Append($"\n## {family} {string.Join("x", shape)}: {ran.Nodes.Count} nodes run ({graph.Nodes.Count} modelled); inputs {Mib(inputBytes)}; "
+                          + $"real {Mib(real)}; modelled peak {Mib(ModelAt(modelPeakAt))} at {details[modelPeakAt].OpCode} #{modelPeakAt}\n\n");
+            detail.Append("operators run, against modelled: "
+                          + string.Join(", ", ran.Nodes.GroupBy(n => n.OpType).Select(g => (g.Key, Run: g.Count(), Model: details.Count(d => d.OpCode == g.Key)))
+                              .Where(c => c.Run != c.Model).OrderBy(c => c.Key).Select(c => $"{c.Key} {c.Run}/{c.Model}"))
+                          + "; modelled, not run: " + string.Join(", ", details.GroupBy(d => d.OpCode).Where(g => ran.Nodes.All(n => n.OpType != g.Key)).Select(g => $"{g.Key} {g.Count()}")) + "\n\n");
+            detail.Append("| # | kernel | outputs | run before / most / after | its graph, freed at last read | its graph, as the pass plans | run - planned | pass's model at its node | blocks taken |\n|---|---|---|---|---|---|---|---|---|\n");
+
+            // The graph the run ran, its values freed after their last reader in the order its
+            // kernels ran: a view (ONNX Runtime's reshapes) as its input's memory, an activation
+            // over its input where that dies there, the inputs and the outputs the step writes
+            // into its inputs taking nothing, every other output held to the end.
+            var order = timeline.Kernels.Select(k => k.Node).ToList();
+            var kernelAt = new Dictionary<int, int>();
+            for (int k = 0; k < order.Count; k++) kernelAt[order[k]] = k;
+            var root = new Dictionary<string, string>(StringComparer.Ordinal);
+            string RootOf(string v) => root.TryGetValue(v, out var r) && r != v ? root[v] = RootOf(r) : v;
+            foreach (var n in order)
+            {
+                var node = ran.Nodes[n];
+                for (int o = 0; o < node.Outputs.Count; o++)
+                    for (int i = 0; i < node.Inputs.Count; i++)
+                        if (node.Outputs[o].Length > 0 && node.Inputs[i].Length > 0 && OutputAliasProof.Shares(node, i, o))
+                        {
+                            root[node.Outputs[o]] = RootOf(node.Inputs[i]);
+                            break;
+                        }
+            }
+            var lastRead = new Dictionary<string, int>(StringComparer.Ordinal);
+            foreach (var output in ran.Outputs) lastRead[RootOf(output.Name)] = int.MaxValue;
+            for (int k = 0; k < order.Count; k++)
+                foreach (var v in ran.Nodes[order[k]].Inputs.Where(v => v.Length > 0))
+                    lastRead[RootOf(v)] = Math.Max(lastRead.GetValueOrDefault(RootOf(v), -1), k);
+            var notCounted = ran.Inputs.Select(i => i.Name).Concat(ran.Initializers.Select(i => i.Name)).Concat(stateOutputs).ToHashSet(StringComparer.Ordinal);
+            var alive = new Dictionary<string, long>(StringComparer.Ordinal);
+            long liveBytes = 0;
+            var planned = PlannedOccupancy(ran, order, valueShapes, notCounted);
+            var plannedInItsOrder = PlannedOccupancy(ran, new StepAnatomy(ran, 0, 0, 0).OrtOrder(), valueShapes, notCounted);
+
+            long stateSoFar = 0, previousDelta = 0, runPeak = 0, modelAtRunPeak = 0, graphAtRunPeak = 0;
+            int position = -1, runPeakAt = 0;
+            var heldAtRunPeak = new List<string>();
+            var scratch = new Dictionary<string, (int Count, long Bytes)>(StringComparer.Ordinal);
+            for (int k = 0; k < timeline.Kernels.Count; k++)
+            {
+                var kernel = timeline.Kernels[k];
+                var node = ran.Nodes[kernel.Node];
+                var outputs = node.Outputs.Where(o => o.Length > 0).ToList();
+                foreach (var o in outputs)
+                {
+                    if (positionOf.TryGetValue(o, out var p)) position = p;
+                    if (RootOf(o) != o || notCounted.Contains(o)) continue;
+                    var bytes = BytesOf(o);
+                    var over = slotOver(node);
+                    if (over is { } slot && slot < node.Inputs.Count && node.Inputs[slot] is { Length: > 0 } operand
+                        && alive.TryGetValue(RootOf(operand), out var operandBytes) && operandBytes == bytes && lastRead.GetValueOrDefault(RootOf(operand), -1) == k)
+                    {
+                        alive.Remove(RootOf(operand));
+                        root[RootOf(operand)] = o;
+                        alive[o] = bytes;
+                        continue;
+                    }
+                    alive[o] = bytes;
+                    liveBytes += bytes;
+                }
+                var liveDuring = liveBytes;
+                foreach (var v in node.Inputs.Concat(node.Outputs).Where(v => v.Length > 0).Distinct())
+                {
+                    var r = RootOf(v);
+                    if (alive.TryGetValue(r, out var size) && lastRead.GetValueOrDefault(r, k) <= k)
+                    {
+                        alive.Remove(r);
+                        liveBytes -= size;
+                    }
+                }
+                var outputBytes = outputs.Sum(BytesOf);
+                var most = kernel.Most - stateSoFar;
+                var before = kernel.Before - stateSoFar;
+                stateSoFar += outputs.Where(stateOutputs.Contains).Sum(BytesOf);
+                var after = kernel.After - stateSoFar;
+                var transient = most - Math.Max(before, after);
+                var op = $"{node.Domain}:{node.OpType}".TrimStart(':');
+                if (transient >= Big)
+                {
+                    var was = scratch.GetValueOrDefault(op);
+                    scratch[op] = (was.Count + 1, Math.Max(was.Bytes, transient));
+                }
+                var modelled = ModelAt(position);
+                if (most > runPeak)
+                {
+                    runPeakAt = k;
+                    (runPeak, modelAtRunPeak, graphAtRunPeak) = (most, modelled, liveDuring);
+                    heldAtRunPeak = [.. alive.Where(a => a.Value >= Big).OrderByDescending(a => a.Value)
+                        .Select(a => $"{Mib(a.Value)} {ProducerOf(a.Key)}")];
+                }
+                var delta = most - planned[k];
+                if (Math.Abs(delta - previousDelta) >= Big / 2 || transient >= Big)
+                    detail.Append($"| {k} | {op} | {Mib(outputBytes)} | {Mib(before)} / {Mib(most)} / {Mib(after)} | {Mib(liveDuring)} | {Mib(planned[k])} | {Mib(delta)} | {Mib(modelled)} "
+                                  + $"| {string.Join(" ", kernel.Taken.Where(b => b >= Big / 4).Select(Mib))} |\n");
+                previousDelta = delta;
+            }
+            string ProducerOf(string v) => ran.Nodes.FirstOrDefault(n => n.Outputs.Contains(v)) is { } p ? $"{p.OpType}#{kernelAt.GetValueOrDefault(ran.Nodes.IndexOf(p), -1)}" : "input";
+            int? slotOver(NodeProto n) => OrtWritesOver.Contains(n.OpType) ? 0 : null;
+            detail.Append($"\nsession built in {SessionBuildMs:0} ms; before the first kernel: {Mib(timeline.BeforeFirst)} taken\n\nheld at the run's peak ({Mib(runPeak)}; its graph {Mib(graphAtRunPeak)}): {string.Join(", ", heldAtRunPeak)}\n");
+            detail.Append($"\nblocks of a mebibyte or more the run held at its peak, kernel {runPeakAt}: "
+                + string.Join(", ", timeline.Blocks.Where(b => b.Size >= Big && b.Taken <= runPeakAt && (b.Freed < 0 || b.Freed > runPeakAt))
+                    .Select(b => $"{Mib(b.Size)} taken in {OpAt(b.Taken)}, freed in {(b.Freed < 0 ? "-" : OpAt(b.Freed))}")) + "\n");
+            string OpAt(int k) => k < 0 ? "-" : $"{ran.Nodes[order[k]].OpType}#{k}";
+            summary.Add($"| {family} | {Mib(real)} | {Mib(runPeak)} | {Mib(graphAtRunPeak)} | {Mib(planned.Max())} | {Mib(plannedInItsOrder.Max())} | {Mib(ModelAt(modelPeakAt))} | {Mib(modelAtRunPeak)} "
+                        + $"| {string.Join(", ", scratch.OrderByDescending(x => x.Value.Bytes).Select(x => $"{x.Key} x{x.Value.Count} up to {Mib(x.Value.Bytes)}"))} |");
+            File.WriteAllText(Path.Combine(OutputDirectory(), $"ort-against-model-{where}-x{scale}.md"), string.Join("\n", summary) + "\n");
+            File.WriteAllText(Path.Combine(OutputDirectory(), $"ort-against-model-{where}-x{scale}-detail.md"), detail.ToString());
+        }
+    }
+
+    /// <summary>
+    /// What a run of <paramref name="graph"/> in <paramref name="order"/> (node indices) holds after
+    /// each node, laid out as the memory-aware pass models ONNX Runtime's allocation plan: a view as
+    /// its input's memory, an activation over its input where that dies there, and a dead value's
+    /// buffer kept for the next value of its exact shape and type — occupied from its first value's
+    /// birth to its last one's death — or given back where none takes it. The values named in
+    /// <paramref name="notCounted"/> take nothing; every other graph output is held to the end.
+    /// </summary>
+    private static long[] PlannedOccupancy(GraphProto graph, IReadOnlyList<int> order, Dictionary<string, PlacementShapes.Value> shapes, HashSet<string> notCounted)
+    {
+        var root = new Dictionary<string, string>(StringComparer.Ordinal);
+        string RootOf(string v) => root.TryGetValue(v, out var r) && r != v ? root[v] = RootOf(r) : v;
+        foreach (var n in order)
+        {
+            var node = graph.Nodes[n];
+            for (int o = 0; o < node.Outputs.Count; o++)
+                for (int i = 0; i < node.Inputs.Count; i++)
+                    if (node.Outputs[o].Length > 0 && node.Inputs[i].Length > 0 && OutputAliasProof.Shares(node, i, o))
+                    {
+                        root[node.Outputs[o]] = RootOf(node.Inputs[i]);
+                        break;
+                    }
+        }
+        var outputs = graph.Outputs.Select(o => RootOf(o.Name)).ToHashSet(StringComparer.Ordinal);
+        var lastRead = new Dictionary<string, int>(StringComparer.Ordinal);
+        for (int k = 0; k < order.Count; k++)
+            foreach (var v in graph.Nodes[order[k]].Inputs.Where(v => v.Length > 0))
+                lastRead[RootOf(v)] = k;
+        var buffers = new List<(long Bytes, string Shape, int Start, int End)>();
+        var bufferOf = new Dictionary<string, int>(StringComparer.Ordinal);
+        var users = new Dictionary<int, int>();
+        var free = new List<int>();
+        for (int k = 0; k < order.Count; k++)
+        {
+            var node = graph.Nodes[order[k]];
+            foreach (var o in node.Outputs.Where(o => o.Length > 0))
+            {
+                if (RootOf(o) != o || notCounted.Contains(o) || !shapes.TryGetValue(o, out var value) || value.Bytes <= 0) continue;
+                var shape = $"{value.ElementType}[{string.Join(",", value.Shape)}]";
+                if (OrtWritesOver.Contains(node.OpType) && node.Inputs.Count > 0 && node.Inputs[0] is { Length: > 0 } operand
+                    && bufferOf.TryGetValue(RootOf(operand), out var over) && users[over] == 1 && lastRead.GetValueOrDefault(RootOf(operand), -1) == k
+                    && buffers[over].Shape == shape)
+                {
+                    bufferOf[o] = over;
+                    users[over]++;
+                    continue;
+                }
+                var taken = free.FindLastIndex(b => buffers[b].Shape == shape);
+                if (taken >= 0)
+                {
+                    var id = free[taken];
+                    free.RemoveAt(taken);
+                    buffers[id] = buffers[id] with { End = int.MaxValue };
+                    bufferOf[o] = id;
+                    users[id] = 1;
+                    continue;
+                }
+                buffers.Add((value.Bytes, shape, k, int.MaxValue));
+                bufferOf[o] = buffers.Count - 1;
+                users[buffers.Count - 1] = 1;
+            }
+            foreach (var v in node.Inputs.Concat(node.Outputs).Where(v => v.Length > 0).Select(RootOf).Distinct())
+            {
+                if (!bufferOf.TryGetValue(v, out var id) || outputs.Contains(v) || lastRead.GetValueOrDefault(v, k) > k) continue;
+                bufferOf.Remove(v);
+                if (--users[id] > 0) continue;
+                buffers[id] = buffers[id] with { End = k };
+                free.Add(id);
+            }
+        }
+        var occupancy = new long[order.Count];
+        foreach (var (bytes, _, start, end) in buffers)
+            for (int k = start; k <= Math.Min(end, order.Count - 1); k++)
+                occupancy[k] += bytes;
+        return occupancy;
+    }
+
+    /// <summary>One kernel of a profiled run: its node in the graph run, and what the run held as
+    /// it began, at most during it, and after it, with the blocks it took.</summary>
+    /// <summary>How long the last session <see cref="OrtTimeline"/> built took to build.</summary>
+    private static double SessionBuildMs;
+
+    private sealed record OrtKernel(int Node, long Before, long Most, long After, List<long> Taken);
+
+    /// <summary>
+    /// The graph ONNX Runtime runs for <paramref name="model"/>, built as a training step's session
+    /// is — on the card's provider where <paramref name="onCard"/> — and one run of it fed
+    /// <paramref name="shapes"/>, kernel by kernel: every block the run took or gave back through
+    /// Shorokoo's allocator, put to the kernel running at the time on the run's own clock, and
+    /// what was taken before the first kernel (the feeds' copies on a card).
+    /// </summary>
+    private static (GraphProto Graph, List<OrtKernel> Kernels, long BeforeFirst, List<(long Size, int Taken, int Freed)> Blocks) OrtTimeline(ModelProto model, bool onCard, (Shape Shape, DType DType)[] shapes)
+    {
+        var directory = Path.Combine(Path.GetTempPath(), $"shorokoo-ort-timeline-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        try
+        {
+            using var stream = new MemoryStream();
+            ProtoBuf.Serializer.Serialize(stream, model);
+            string profile;
+            var host = RuntimeAllocator.ForHost().Shared.Open("timeline");
+            var card = onCard ? RuntimeAllocator.ForCard(0).Shared.Open("timeline") : null;
+            var events = new List<(long Ticks, bool Allocation, IntPtr Address, long Size)>();
+            long runStart;
+            using (var options = new SessionOptions())
+            {
+                OrtBackend.Configure(options, ShorokooGraphOptimization.TrainingStep, ShorokooLogSeverity.Fatal);
+                options.AddSessionConfigEntry("session.use_env_allocators", "1");
+                options.OptimizedModelFilePath = Path.Combine(directory, "optimized.onnx");
+                options.ProfileOutputPathPrefix = Path.Combine(directory, "profile");
+                options.EnableProfiling = true;
+                if (onCard) OrtBackend.AppendCuda(options, 0, DeviceMemorySettings.Default);
+                InferenceSession session;
+                var built = Stopwatch.StartNew();
+                using (CachingAllocator.Charge(host, card))
+                    session = new InferenceSession(stream.ToArray(), options);
+                SessionBuildMs = built.Elapsed.TotalMilliseconds;
+                using (session)
+                {
+                    var feeds = new Dictionary<string, OrtValue>();
+                    for (var i = 0; i < session.InputNames.Count; i++)
+                        feeds[session.InputNames[i]] = Shorokoo.Tests.Utils.SyntheticFeed.Tensor(shapes[i].Shape, shapes[i].DType, i);
+                    using var runOptions = new RunOptions();
+                    using (CachingAllocator.Charge(host, card))
+                        foreach (var output in session.Run(runOptions, feeds, session.OutputNames)) output.Dispose();
+                    CachingAllocator.Observer = e =>
+                    {
+                        if (e.OnCard != onCard) return;
+                        lock (events) events.Add((Stopwatch.GetTimestamp(), e.Allocation, e.Address, e.Size));
+                    };
+                    runStart = Stopwatch.GetTimestamp();
+                    try
+                    {
+                        using (CachingAllocator.Charge(host, card))
+                            foreach (var output in session.Run(runOptions, feeds, session.OutputNames)) output.Dispose();
+                    }
+                    finally
+                    {
+                        CachingAllocator.Observer = null;
+                    }
+                    foreach (var feed in feeds.Values) feed.Dispose();
+                    profile = session.EndProfiling();
+                }
+            }
+            GraphProto graph;
+            using (var written = File.OpenRead(Path.Combine(directory, "optimized.onnx")))
+                graph = ProtoBuf.Serializer.Deserialize<ModelProto>(written).Graph;
+            var index = new Dictionary<string, int>(StringComparer.Ordinal);
+            for (int n = 0; n < graph.Nodes.Count; n++) index.TryAdd(graph.Nodes[n].Name, n);
+            var profiled = JArray.Parse(File.ReadAllText(profile));
+            var runEvent = profiled.Where(e => (string?)e["cat"] == "Session" && (string?)e["name"] == "model_run").OrderBy(e => (long)e["ts"]!).Last();
+            var kernels = profiled
+                .Where(e => (string?)e["cat"] == "Node" && ((string?)e["name"])?.EndsWith("_kernel_time", StringComparison.Ordinal) == true
+                            && (long)e["ts"]! >= (long)runEvent["ts"]!)
+                .Select(e => (Name: ((string)e["name"]!)[..^"_kernel_time".Length], Ts: (long)e["ts"]!))
+                .Where(k => index.ContainsKey(k.Name))
+                .OrderBy(k => k.Ts).ToList();
+            long Us(long ticks) => (long)runEvent["ts"]! + (ticks - runStart) * 1_000_000 / Stopwatch.Frequency;
+            var live = new Dictionary<IntPtr, long>();
+            long held = 0, beforeFirst = 0;
+            var result = new List<OrtKernel>();
+            var blocks = new List<(long Size, int Taken, int Freed)>();
+            var blockAt = new Dictionary<IntPtr, int>();
+            var next = 0;
+            var current = -1;
+            void Apply((long Ticks, bool Allocation, IntPtr Address, long Size) ev, List<long>? taken)
+            {
+                if (ev.Allocation)
+                {
+                    live[ev.Address] = ev.Size; held += ev.Size; taken?.Add(ev.Size);
+                    blockAt[ev.Address] = blocks.Count;
+                    blocks.Add((ev.Size, current, -1));
+                }
+                else if (live.Remove(ev.Address, out var was))
+                {
+                    held -= was;
+                    if (blockAt.Remove(ev.Address, out var b)) blocks[b] = blocks[b] with { Freed = current };
+                }
+            }
+            while (next < events.Count && (kernels.Count == 0 || Us(events[next].Ticks) < kernels[0].Ts))
+            {
+                if (events[next].Allocation) beforeFirst += events[next].Size;
+                Apply(events[next++], null);
+            }
+            for (int k = 0; k < kernels.Count; k++)
+            {
+                current = k;
+                var before = held;
+                var most = held;
+                var taken = new List<long>();
+                var end = k + 1 < kernels.Count ? kernels[k + 1].Ts : long.MaxValue;
+                while (next < events.Count && Us(events[next].Ticks) < end)
+                {
+                    Apply(events[next++], taken);
+                    most = Math.Max(most, held);
+                }
+                result.Add(new OrtKernel(index[kernels[k].Name], before, most, held, taken));
+            }
+            return (graph, result, beforeFirst, blocks);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
     /// <summary>The graph ONNX Runtime runs for <paramref name="model"/>, built as a training step's
     /// session is — on the card's provider where <paramref name="onCard"/> — and written out, and
     /// the order its kernels ran in on a run fed <paramref name="shapes"/>, read off its profile, by

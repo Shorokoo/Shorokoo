@@ -18,7 +18,10 @@ Related: [inference.md](inference.md) · [core-types.md](core-types.md) · [skpt
   `checkpoint.Save` (`TrainingCheckpoint.Save`, used by
   `Persistence.SaveTrainingCheckpoint`), `OnnxModelExporter`,
   `SafeTensorLoader.SaveSafeTensors` and `CompressedFormatUtils`. The target's directory
-  must already exist.
+  must already exist. A save tolerates a file another process holds for a moment, as an
+  antivirus scanner or the search indexer on Windows often does just after a write: a
+  commit rename that meets a sharing or lock violation is retried for up to about 0.3 s
+  before the save fails with that error. Any other failure fails it at once.
 
 ## Export to ONNX
 

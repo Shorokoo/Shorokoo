@@ -998,7 +998,9 @@ var more = rig.Fit(inputs, targets, numEpochs: 5, ckpt);  // continues where it 
 - **Saves are atomic.** `checkpoint.Save` (and `Persistence.SaveTrainingCheckpoint`) writes a
   `.tmp-` sibling, flushes it, and renames it into place, so a crash mid-save leaves the old or the
   new file, never a truncated one. The target **directory must exist** (it is not created); a
-  leftover `.tmp-` sibling is swept by the next successful save. `.skpt` saves are atomic too — see
+  leftover `.tmp-` sibling is swept by the next successful save. A file held for a moment by
+  another process (an antivirus scanner, the search indexer) does not fail the save; see
+  [onnx-and-weights.md](onnx-and-weights.md#facts). `.skpt` saves are atomic too — see
   [skpt-checkpoints.md](skpt-checkpoints.md#the-directory-form) for the directory form's one
   exception.
 - **`.skpt` container.** `Persistence.SaveTrainingCheckpointToSkpt(checkpoint, "run.skpt")` (or the

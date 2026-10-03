@@ -46,6 +46,14 @@ public class PyTorchCudaHardwareTests
     }
 
     [TorchCudaFact]
+    public void TestFloat32ProductsAndConvolutionsOnTheCardAreComputedInFullPrecision()
+    {
+        using var card = new ComputeContext(Cuda.Value);
+
+        SideBySideModel.AssertFullPrecision(SideBySideModel.LargeProducts(new ComputeContext()), SideBySideModel.LargeProducts(card));
+    }
+
+    [TorchCudaFact]
     public void TestEveryOutputStaysOnTheCardAndAnInputInHostMemoryIsRefused()
     {
         using var session = Cuda.Value.CreateSession(NegModel(), default, default, DeviceMemorySettings.Default);

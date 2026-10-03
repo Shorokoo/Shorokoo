@@ -162,6 +162,11 @@ public class SideBySideBackendHardwareTests
     }
 
     [SideBySideCudaFact]
+    public void TestFloat32ProductsAndConvolutionsOnTheCardAreComputedInFullPrecision()
+        => SideBySideModel.AssertFullPrecision(
+            SideBySideModel.LargeProducts(new ComputeContext()), SideBySideModel.LargeProducts(new ComputeContext(LoadCuda())));
+
+    [SideBySideCudaFact]
     public void TestATensorLeftOnTheCardIsCopiedToHostMemoryAndRunsThere()
     {
         var a = InputVector<float32>("a");

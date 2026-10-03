@@ -630,10 +630,10 @@ public class CoreUtilsCoverageTests
     }
 
     [Fact]
-    public void TestTheCudaProviderOptionsNameTheDeviceAndNothingOfItsMemory()
+    public void TestTheCudaProviderOptionsNameTheDeviceAndFullFloat32PrecisionAndNothingOfItsMemory()
     {
-        Assert.Equal([("device_id", "0")], OrtBackend.CudaProviderOptions(0).Select(o => (o.Key, o.Value)));
-        Assert.Equal([("device_id", "3")], OrtBackend.CudaProviderOptions(3).Select(o => (o.Key, o.Value)));
+        Assert.Equal([("device_id", "0"), ("use_tf32", "0")], OrtBackend.CudaProviderOptions(0).Select(o => (o.Key, o.Value)));
+        Assert.Equal([("device_id", "3"), ("use_tf32", "0")], OrtBackend.CudaProviderOptions(3).Select(o => (o.Key, o.Value)));
     }
 
     [Fact]

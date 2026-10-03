@@ -42,6 +42,14 @@ public class JaxCudaHardwareTests
     }
 
     [JaxCudaFact]
+    public void TestFloat32ProductsAndConvolutionsOnTheCardAreComputedInFullPrecision()
+    {
+        using var card = new ComputeContext(Cuda.Value);
+
+        SideBySideModel.AssertFullPrecision(SideBySideModel.LargeProducts(new ComputeContext()), SideBySideModel.LargeProducts(card));
+    }
+
+    [JaxCudaFact]
     public void TestEveryOutputStaysOnTheCardAnInputInHostMemoryIsRefusedAndTheSessionReadsTheAllocator()
     {
         using var session = Cuda.Value.CreateSession(PyTorchBackendCoverageTests.Onnx("Neg", 1), default, default, DeviceMemorySettings.Default);

@@ -774,4 +774,33 @@ internal static class SideBySideModel
         foreach (var (want, got) in expected.Zip(actual))
             Assert.True(Math.Abs(want - got) <= tolerance * Math.Max(1.0, Math.Abs(want)));
     }
+
+    /// <summary>A float32 product of two 1024-square matrices and a 3×3 convolution of a
+    /// 4×64×64×64 batch with 64 filters, on <paramref name="context"/>: sums of 1024 and 576 terms,
+    /// large enough for a card to run them on its tensor cores.</summary>
+    internal static float[][] LargeProducts(ComputeContext context)
+    {
+        var a = InputTensor<float32>("a", rank: 2);
+        var b = InputTensor<float32>("b", rank: 2);
+        var x = InputTensor<float32>("x", rank: 4);
+        var w = InputTensor<float32>("w", rank: 4);
+        var graph = new InternalComputationGraph([a, b, x, w], [OnnxOp.MatMul(a, b), OnnxOp.Conv(x, w, null!, AutoPad.NotSet,
+            dilations: [1L, 1L], group: 1, kernelShape: [3L, 3L], pads: [1L, 1L, 1L, 1L], strides: [1L, 1L])]);
+        static TensorData Waves(long[] shape, float frequency)
+            => TensorData(shape, [.. Enumerable.Range(0, (int)shape.Aggregate((p, d) => p * d)).Select(i => MathF.Sin(frequency * i))]);
+        return [.. context.Execute(graph, Waves([1024L, 1024L], 0.37f), Waves([1024L, 1024L], 0.11f),
+            Waves([4L, 64L, 64L, 64L], 0.23f), Waves([64L, 64L, 3L, 3L], 0.71f)).Select(Floats)];
+    }
+
+    /// <summary>How far <paramref name="actual"/> is from <paramref name="expected"/>: the largest
+    /// difference, over the largest magnitude expected.</summary>
+    internal static double Deviation(float[] expected, float[] actual)
+        => expected.Zip(actual, (want, got) => Math.Abs((double)want - got)).Max() / expected.Max(v => Math.Abs((double)v));
+
+    /// <summary>What <see cref="LargeProducts"/> may deviate by from the host's where the card computes
+    /// float32 in full float32 precision.</summary>
+    internal const double FullPrecisionTolerance = 1e-5;
+
+    internal static void AssertFullPrecision(float[][] host, float[][] card)
+        => Assert.All(host.Zip(card), pair => Assert.True(Deviation(pair.First, pair.Second) <= FullPrecisionTolerance));
 }

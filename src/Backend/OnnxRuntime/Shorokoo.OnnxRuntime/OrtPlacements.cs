@@ -16,7 +16,9 @@ namespace Shorokoo.OnnxRuntime;
 /// hand ONNX Runtime the range each one goes to, and charging the session's own allocator accounts.</para>
 ///
 /// <para><b>Built from the graph that runs.</b> The plan is made over the graph ONNX Runtime runs
-/// for this session — written out once, with its initializers, by a probe build of the model. Where
+/// for this session — written out once, with its initializers, by a probe build of the model, or by
+/// the session itself as it was built where it shares the weights it carries with its variants
+/// (<see cref="OrtBackend"/>, a model over <see cref="ModelBytesKept"/> on a card). Where
 /// every value the plan places is a value of the model as handed over, the variant is first built
 /// over that model, optimized as the plain session is, which runs its nodes in the plain session's
 /// order; otherwise, or where that variant does not hold the plan, it is built from the graph that
@@ -28,9 +30,10 @@ namespace Shorokoo.OnnxRuntime;
 ///
 /// <para><b>The model is kept</b> to build the probe and the variants from: in memory up to
 /// <see cref="ModelBytesKept"/>, and a larger one in a file of its own, written as the session is
-/// built and deleted with it, so that its weights are not held a second time. A variant of such a
-/// model is built from the graph that runs alone, which reads its weights from the files the probe
-/// wrote rather than from a copy of the model.</para>
+/// built and deleted with it, so that its weights are not held a second time — or not at all where
+/// the session wrote the graph it runs itself. A variant of a larger model is built from the graph
+/// that runs alone, which reads its weights from the files written beside that graph rather than from
+/// a copy of the model, or from the copies the session shares with it.</para>
 ///
 /// <para><b>In the order the session runs.</b> ONNX Runtime runs a session's nodes one at a time
 /// (<see cref="OrtBackend.Configure"/> asks for sequential execution), on each of its streams in the
@@ -604,8 +607,8 @@ internal sealed class OrtPlacements : IDisposable
     }
 
     /// <summary>The graph ONNX Runtime runs for the plain session, with its initializers in files
-    /// beside it: written out by a probe build of the model, once, into a folder kept until the
-    /// session goes.</summary>
+    /// beside it: written out by the session as it was built, or else by a probe build of the model,
+    /// once, into a folder kept until the session goes.</summary>
     private ModelProto RunGraph()
     {
         if (_runs is not null) return _runs;

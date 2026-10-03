@@ -1059,9 +1059,9 @@ public abstract class OrtBackend : IShorokooBackend
     /// Builds an ORT tensor of <paramref name="elementType"/> and
     /// <paramref name="shape"/> by reinterpreting a fixed-stride byte buffer.
     ///
-    /// <para>In host memory, whatever device this backend computes on — ORT's default allocator is
-    /// the CPU one on every execution provider. <see cref="CreateTensorInBackendMemory"/> is the
-    /// one that builds it where this backend's tensors are meant to live.</para>
+    /// <para>In host memory, whatever device this backend computes on: Shorokoo's host allocator's,
+    /// as every host tensor of this backend is. <see cref="CreateTensorInBackendMemory"/> is the one
+    /// that builds it where this backend's tensors are meant to live.</para>
     /// </summary>
     /// <exception cref="NotSupportedException">
     /// The element type has no fixed byte stride — <see cref="ShorokooTensorElementType.String"/>

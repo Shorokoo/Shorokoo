@@ -1231,6 +1231,16 @@ public class PyTorchBackendCoverageTests
     }
 
     [Fact]
+    public void TestATorchRunIsModelledLayingAnElementWiseResultOutAsItsOperandsAreLaidOut()
+    {
+        NodeProto Heads() => ComputeContextLifetimeCoverageTests.With(Op("Transpose", "e", "t"), "perm", 0, 2, 1, 3);
+        Assert.Equal(3072, RunPeak(ComputeContextLifetimeCoverageTests.WithInts(GraphOn("x:float[2,8,4,4] s:float[1]", "O", Op("Exp", "x", "e"), Heads(),
+            Op("Mul", "t s", "m"), Op("Reshape", "m k", "r"), Op("Reshape", "e k", "v"), Op("Add", "r v", "O")), "k", 2, 4, 32)));
+        Assert.Equal(3072, RunPeak(GraphOn("x:float[2,8,4,4] s:float[1]", "O", Op("Exp", "x", "e"), Heads(),
+            Op("Mul", "t s", "m"), Op("Neg", "m", "n"), Op("Add", "n t", "O"))));
+    }
+
+    [Fact]
     public void TestATorchRunIsModelledCopyingAReshapeOfAViewItsStridesCannotReshape()
     {
         Assert.Equal(4096, RunPeak(ComputeContextLifetimeCoverageTests.WithInts(GraphOn("x:float[4,8,16]", "O", Op("Exp", "x", "e"),

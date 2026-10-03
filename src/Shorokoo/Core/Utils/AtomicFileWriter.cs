@@ -49,6 +49,16 @@ namespace Shorokoo.Core.Utils
         [ThreadStatic]
         internal static Action<string>? RotationFaultInjection;
 
+        /// <summary>
+        /// Test hook: invoked with the source and destination of every rename a save makes — a
+        /// commit, a previous target renamed aside, and its restore — before each attempt at it.
+        /// Throwing here fails that attempt as the rename itself would. Thread-scoped, so a hook
+        /// installed by one parallel test is invisible to every other thread; still reset it in a
+        /// <c>finally</c>.
+        /// </summary>
+        [ThreadStatic]
+        internal static Action<string, string>? RenameFaultInjection;
+
         /// <summary>True if <paramref name="name"/> is a staged (uncommitted) sibling name.</summary>
         internal static bool IsTempName(string name) =>
             name.StartsWith(TempPrefix, StringComparison.Ordinal);
@@ -97,7 +107,7 @@ namespace Shorokoo.Core.Utils
                     flushed = clock.Elapsed;
                 }
                 CommitFaultInjection?.Invoke(tempPath);
-                File.Move(tempPath, fullTarget, overwrite: true);
+                MoveFile(tempPath, fullTarget, overwrite: true);
             }
             catch
             {
@@ -170,9 +180,9 @@ namespace Shorokoo.Core.Utils
                     if (File.Exists(t.FullTarget))
                     {
                         aside = Path.Combine(t.Directory, StageName(t.Name));
-                        File.Move(t.FullTarget, aside);
+                        MoveFile(t.FullTarget, aside);
                     }
-                    File.Move(t.TempPath, t.FullTarget, overwrite: true);
+                    MoveFile(t.TempPath, t.FullTarget, overwrite: true);
                     committed.Add((t.FullTarget, aside));
                 }
             }
@@ -209,7 +219,7 @@ namespace Shorokoo.Core.Utils
                 try
                 {
                     if (aside is null) File.Delete(fullTarget);
-                    else File.Move(aside, fullTarget, overwrite: true);
+                    else MoveFile(aside, fullTarget, overwrite: true);
                 }
                 catch (Exception e)
                 {
@@ -274,7 +284,7 @@ namespace Shorokoo.Core.Utils
                     // A staged-shaped aside name, so a crash between the two renames leaves it
                     // recognizable as uncommitted debris for the post-commit sweep.
                     string asidePath = Path.Combine(directory, StageName(name));
-                    Directory.Move(fullTarget, asidePath);
+                    MoveDirectory(fullTarget, asidePath);
                     // The rename preserves the old tree's timestamps, which would make the aside
                     // look abandoned to a concurrent same-target saver's post-commit sweep the
                     // instant it exists. Touch it so the activity grace period protects the
@@ -287,14 +297,14 @@ namespace Shorokoo.Core.Utils
                     try
                     {
                         ReplaceFaultInjection?.Invoke(tempPath);
-                        Directory.Move(tempPath, fullTarget);
+                        MoveDirectory(tempPath, fullTarget);
                     }
                     catch
                     {
                         // Roll the previous checkpoint back into place, so a failed replace
                         // leaves the target exactly as it was. If even the rollback fails, the
                         // previous tree was last seen under the aside name — say where to look.
-                        try { Directory.Move(asidePath, fullTarget); }
+                        try { MoveDirectory(asidePath, fullTarget); }
                         catch (Exception rollbackFailure)
                         {
                             (onWarning ?? (static _ => { }))(
@@ -313,7 +323,7 @@ namespace Shorokoo.Core.Utils
                 }
                 else
                 {
-                    Directory.Move(tempPath, fullTarget);
+                    MoveDirectory(tempPath, fullTarget);
                 }
             }
             catch
@@ -504,6 +514,20 @@ namespace Shorokoo.Core.Utils
                     "temp copy inside the target's directory (so the commit rename stays on one filesystem); " +
                     "create the directory first.");
             return (directory, name, fullTarget);
+        }
+
+        /// <summary>Renames a file for the commit protocol.</summary>
+        private static void MoveFile(string source, string destination, bool overwrite = false)
+        {
+            RenameFaultInjection?.Invoke(source, destination);
+            File.Move(source, destination, overwrite);
+        }
+
+        /// <summary>Renames a directory for the commit protocol.</summary>
+        private static void MoveDirectory(string source, string destination)
+        {
+            RenameFaultInjection?.Invoke(source, destination);
+            Directory.Move(source, destination);
         }
 
         /// <summary>Staged sibling name for a target name; unique so concurrent savers never collide.</summary>

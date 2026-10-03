@@ -2533,6 +2533,108 @@ public class CoreUtilsCoverageTests
         finally { Directory.Delete(clean, recursive: true); }
     }
 
+    private enum Saver { File, Pair, Tree }
+
+    private enum Rename { Aside, In, Restore }
+
+    [Fact]
+    public void TestAtomicFileWriterRetriesATransientlyLockedRenameAndLeavesEveryTargetOldOrNew()
+    {
+        const int Sharing = unchecked((int)0x80070020), Lock = unchecked((int)0x80070021);
+        const int Denied = unchecked((int)0x80070005), Always = int.MaxValue;
+        (Saver Saver, Rename Rename, int HResult, int Times, string Expected)[] cases =
+        [
+            (Saver.File, Rename.In, Sharing, 3, "new ok 4 clean"),
+            (Saver.File, Rename.In, Lock, 3, "new ok 4 clean"),
+            (Saver.File, Rename.In, Sharing, Always, "old 80070020 6 clean"),
+            (Saver.File, Rename.In, Denied, 1, "old 80070005 1 clean"),
+            (Saver.Pair, Rename.Aside, Sharing, 3, "new new ok 4 clean"),
+            (Saver.Pair, Rename.In, Sharing, 3, "new new ok 4 clean"),
+            (Saver.Pair, Rename.In, Denied, 1, "old old 80070005 1 clean"),
+            (Saver.Pair, Rename.Restore, Sharing, 3, "old old 80131620 4 clean"),
+            (Saver.Tree, Rename.Aside, Sharing, 3, "new ok 4 clean"),
+            (Saver.Tree, Rename.In, Sharing, 3, "new ok 4 clean"),
+            (Saver.Tree, Rename.Restore, Sharing, 3, "old 80131620 4 clean"),
+        ];
+        string[] expected = [.. cases.Select(c => c.Expected)];
+        string[] actual = [.. cases.Select(c => AfterALockedRename(c.Saver, c.Rename, c.HResult, c.Times))];
+        Assert.Equal(expected, actual);
+    }
+
+    /// <summary>Saves "new" over "old" with the chosen rename of the first target failing
+    /// <paramref name="times"/> times with <paramref name="hResult"/> (a restore is reached by
+    /// crashing the commit after it), and reports what each target holds, what the save threw,
+    /// how many attempts that rename got, and whether any staged entry was left behind.</summary>
+    private static string AfterALockedRename(Saver saver, Rename rename, int hResult, int times)
+    {
+        var dir = NewScratchDir();
+        try
+        {
+            string[] targets = saver == Saver.Pair
+                ? [Path.Combine(dir, "a"), Path.Combine(dir, "b")]
+                : [Path.Combine(dir, "a")];
+            string Content(string target) => saver == Saver.Tree ? Path.Combine(target, "f") : target;
+            foreach (var target in targets)
+            {
+                if (saver == Saver.Tree) Directory.CreateDirectory(target);
+                File.WriteAllText(Content(target), "old");
+            }
+
+            string? aside = null;
+            int tries = 0;
+            string thrown = "ok";
+            try
+            {
+                AtomicFileWriter.RenameFaultInjection = (from, to) =>
+                {
+                    if (from == targets[0]) aside = to;
+                    bool hit = rename switch
+                    {
+                        Rename.Aside => from == targets[0],
+                        Rename.In => to == targets[0] && from != aside,
+                        _ => from == aside,
+                    };
+                    if (hit && tries++ < times) throw new IOException("simulated lock", hResult);
+                };
+                if (rename == Rename.Restore)
+                {
+                    AtomicFileWriter.CommitFaultInjection = temp =>
+                    {
+                        if (Path.GetFileName(temp).StartsWith(".tmp-b-", StringComparison.Ordinal))
+                            throw new IOException("simulated crash");
+                    };
+                    AtomicFileWriter.ReplaceFaultInjection = _ => throw new IOException("simulated crash");
+                }
+                switch (saver)
+                {
+                    case Saver.File:
+                        AtomicFileWriter.WriteFile(targets[0], s => s.Write("new"u8));
+                        break;
+                    case Saver.Pair:
+                        AtomicFileWriter.WriteFiles(
+                            [.. targets.Select(t => (t, (Action<Stream>)(s => s.Write("new"u8))))]);
+                        break;
+                    default:
+                        AtomicFileWriter.WriteDirectory(targets[0], d => File.WriteAllText(Path.Combine(d, "f"), "new"));
+                        break;
+                }
+            }
+            catch (Exception e) { thrown = $"{e.HResult:x8}"; }
+            finally
+            {
+                AtomicFileWriter.RenameFaultInjection = null;
+                AtomicFileWriter.CommitFaultInjection = null;
+                AtomicFileWriter.ReplaceFaultInjection = null;
+            }
+
+            string debris = Directory.GetFileSystemEntries(dir, ".tmp-*").Length == 0 ? "clean" : "debris";
+            string[] report = [.. targets.Select(t => File.Exists(Content(t)) ? File.ReadAllText(Content(t)) : "gone"),
+                thrown, $"{tries}", debris];
+            return string.Join(' ', report);
+        }
+        finally { Directory.Delete(dir, recursive: true); }
+    }
+
     [Fact]
     public void TestEveryDebugRequestPointProducesItsSnapshot()
     {

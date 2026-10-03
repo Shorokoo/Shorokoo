@@ -251,7 +251,15 @@ public class MemoryReuseScenarioTests
             "|---|---|---|---|---|---|---|",
         };
         const int Warm = 3, Timed = 9;
-        foreach (var (family, model, benchmarkShape) in MemoryPassBenchmarkTests.Suite)
+        // Beside the benchmark's families, its encoders and dense attention with each layer, or the
+        // whole attention, a [Module(Checkpoint = true)] segment: what recomputation buys.
+        (string, Func<ComputationGraph>, long[])[] checkpointed =
+        [
+            ("encoder1-ckpt", () => Shorokoo.Tests.Modules.CheckpointedEncoder1.ComputationGraph, [8L, 128L, 128L]),
+            ("encoder2-ckpt", () => Shorokoo.Tests.Modules.CheckpointedEncoder2.ComputationGraph, [8L, 128L, 128L]),
+            ("attn-dense-ckpt", () => Shorokoo.Tests.Modules.CheckpointedMeanPooledAttention.ComputationGraph, [2L, 4L, 256L, 32L]),
+        ];
+        foreach (var (family, model, benchmarkShape) in MemoryPassBenchmarkTests.Suite.Concat(checkpointed))
         {
             if (only is not null && !only.Contains(family)) continue;
             long[] shape = [benchmarkShape[0] * scale, .. benchmarkShape[1..]];

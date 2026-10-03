@@ -96,3 +96,43 @@ public partial class PlainNarrowMlpStack
     }
 }
 
+
+// ---------------------------------------------------------------------------
+// The memory-pass benchmark's encoders and dense attention with each layer (or the whole
+// attention) a [Module(Checkpoint = true)] segment, for measuring what recomputing them buys.
+// ---------------------------------------------------------------------------
+
+[Module(Checkpoint = true)]
+public partial class CheckpointedEncoderLayer
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+        => TransformerEncoderLayer.Model(Scalar(128L), Scalar(4L), Scalar(512L), Scalar(true)).Call(x);
+}
+
+[Module]
+public partial class CheckpointedEncoder1
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)   // [N, L, E]
+    {
+        Vector<int64> seq = [Scalar(1L)];
+        return CheckpointedEncoderLayer.Call(x).Reduce(ReduceKind.Mean, seq, keepDims: false);
+    }
+}
+
+[Module]
+public partial class CheckpointedEncoder2
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)   // [N, L, E]
+    {
+        var y = CheckpointedEncoderLayer.Call(CheckpointedEncoderLayer.Call(x));
+        Vector<int64> seq = [Scalar(1L)];
+        return y.Reduce(ReduceKind.Mean, seq, keepDims: false);
+    }
+}
+
+[Module(Checkpoint = true)]
+public partial class CheckpointedMeanPooledAttention
+{
+    public static Tensor<float32> Inline(Tensor<float32> input)   // [N, H, L, d]
+        => AttentionTestGraphs.MeanPooledAttention(input, queryChunks: 1);
+}

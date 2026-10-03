@@ -273,7 +273,11 @@ internal class MemoryAwareGraphOptimizer
     /// strategy's graph (<see cref="_backendPeak"/>), the strategy scoring least by the same
     /// objective with that backend's peaks, its first entry (the graph as handed over) scoring the
     /// weights' sum: so the step handed back never holds more on that backend than the one handed
-    /// over, unless it buys that with less compute at the objective's rate.
+    /// over, unless it buys that with less compute at the objective's rate. Where the pass kept the
+    /// graph with its state's updates ordered after their readers (<see cref="OrderedStateReads"/>),
+    /// that graph stands for the one handed over unless the backend's model has it holding more:
+    /// the ordering costs a few empty kernels and keeps state pairs written in place, which the run's
+    /// peak shows only where it falls at the updates.
     /// </summary>
     private GraphOptimizationResult Chosen(
         List<(string Name, GraphEvaluationResult Evaluation, InternalComputationGraph Graph, ShapeInferenceResult ShapeInfo)> strategies,
@@ -297,7 +301,8 @@ internal class MemoryAwareGraphOptimizer
         {
             var onBackend = new ComputeMemoryObjective(_computeFactor, _memoryFactor,
                 new GraphEvaluationResult { TotalComputeTime = strategies[0].Evaluation.TotalComputeTime, PeakMemoryBytes = peaks[0], NodeDetails = [] });
-            chosen = Enumerable.Range(0, strategies.Count).MinBy(i => onBackend.Score(
+            var ordered = strategies.FindIndex(s => s.Name == OrderedStateReads);
+            chosen = Enumerable.Range(0, strategies.Count).Where(i => i != 0 || ordered < 0 || peaks[0] < peaks[ordered]).MinBy(i => onBackend.Score(
                 new GraphEvaluationResult { TotalComputeTime = strategies[i].Evaluation.TotalComputeTime, PeakMemoryBytes = peaks[i], NodeDetails = [] }));
         }
         var best = strategies[chosen];

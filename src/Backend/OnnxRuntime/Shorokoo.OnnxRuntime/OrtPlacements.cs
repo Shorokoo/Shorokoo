@@ -169,6 +169,12 @@ internal sealed class OrtPlacements : IDisposable
     /// read; null where nothing listens.</summary>
     internal static Action<Entry>? Settled;
 
+    /// <summary>For a test: asked as a placed run of this thread is about to run on its variant, and
+    /// what it answers is thrown there, as a failure of the run would be; null on every thread but one
+    /// a test sets it on.</summary>
+    [ThreadStatic]
+    internal static Func<Exception?>? PlacedRunFault;
+
     /// <summary>Every signature planned so far, for a test to read.</summary>
     internal IReadOnlyList<Entry> Entries
     {
@@ -319,6 +325,7 @@ internal sealed class OrtPlacements : IDisposable
                     bindings[placement.Value] = new OrtSession.PlacedBinding(over, null);
                 }
             }
+            if (PlacedRunFault?.Invoke() is { } fault) throw fault;
             var results = variant.Measured(() => placed(variant, bindings), out peak);
             // The run is over: what of each block no output it handed back stands on goes back.
             foreach (var (block, _) in shared.Values) block.Settle();

@@ -989,6 +989,28 @@ public class ComputeContextLifetimeCoverageTests
     }
 
     [Fact]
+    public void TestASignatureWhosePlacedRunFailsRunsAsUsualFromThen()
+    {
+        const int Rows = 1024, Columns = 1024;
+        var (a, b, l) = TwoHalvesValues(Rows, Columns);
+        using var context = new ComputeContext();
+        var compiled = context.Compile(TwoHalves());
+        var failures = 1;
+        OrtPlacements.PlacedRunFault = () => failures-- > 0 ? new InvalidOperationException() : null;
+        try
+        {
+            Assert.Throws<InvalidOperationException>(() => compiled.Execute(TensorData([(long)Rows, Columns], a), TensorData([(long)Rows, Columns], b)));
+            var outputs = compiled.Execute(TensorData([(long)Rows, Columns], a), TensorData([(long)Rows, Columns], b));
+            Assert.Equal(OrtPlacements.Stage.Refused, Assert.Single(((OrtSession)compiled.Session).Placements!.Entries).Stage);
+            Assert.True(l.Zip(Floats(outputs[0].ToTensorData()), (x, y) => MathF.Abs(x - y) < 1e-5f).All(x => x));
+        }
+        finally
+        {
+            OrtPlacements.PlacedRunFault = null;
+        }
+    }
+
+    [Fact]
     public void TestACardSessionsNodesWritingHostMemoryAreTheHostOnesWhateverTheyRead()
     {
         string[] Host(GraphProto graph) => [.. OrtPlacements.HostNodes(graph).Select(n => n.OpType).Order()];

@@ -94,14 +94,15 @@ namespace Shorokoo
         /// copy the host keeps adds nothing: one of a dtype the target's runs read from host memory,
         /// a string among them. What a composite placement is refused on before any of it is placed;
         /// <paramref name="handedOver"/> is what the composite hands over as it stands so far, so a
-        /// tensor it holds twice is counted once.
+        /// tensor it holds twice is counted once, and so is a shared block two of its tensors stand
+        /// on.
         /// </summary>
         internal long BytesPlacedOnto(ComputeContext target, bool copying, HashSet<TensorData>? handedOver = null)
         {
             var space = target.MemorySpace;
             if (space.IsHost) return 0;
             if (!copying && target.CanAddress(this))
-                return Space == space && !target.Attaches(this) && (handedOver?.Add(this) ?? true) ? target.BooksBytesOf(this) : 0;
+                return Space == space && !target.Attaches(this) && (handedOver?.Add(this) ?? true) ? target.BooksBytesOf(this, handedOver) : 0;
             return RunMemoryOf(target.ResolvedBackend, DType).Space.IsHost ? 0 : ByteCount;
         }
 

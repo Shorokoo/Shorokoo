@@ -334,10 +334,11 @@ namespace Shorokoo.Runtime
         internal DevicePlan Plan()
         {
             var targets = _targets ?? throw new InvalidOperationException("A run was planned before it was prepared.");
-            var (attached, attachedTensors) = _context.AttachedIn();
+            HashSet<SharedBlock>? blocks = null;
+            var (attached, attachedTensors) = _context.AttachedIn(ref blocks);
 
             // What the run adds is what is not on the books already, each once however many inputs
-            // it is read through.
+            // it is read through, and a shared block once however many of them stand on it.
             long added = 0;
             HashSet<TensorData>? adding = null;
             bool Adds(TensorData tensor)
@@ -357,7 +358,7 @@ namespace Shorokoo.Runtime
                     // context: where it is in the context's memory too -- another runtime's
                     // allocation on the same card -- the books carry both for the run. A tried feed
                     // may yet be read, so it is counted as one.
-                    if (target.Mode != FeedMode.Consume && Adds(tensor)) added += _context.BooksBytesOf(tensor);
+                    if (target.Mode != FeedMode.Consume && Adds(tensor)) added += ComputeContext.BooksBytesOf(tensor, ref blocks);
                     var where = TensorData.RunMemoryOf(_backend, tensor.DType);
                     if (where.Space != _space) continue;
                     // Read through the copy the tensor holds there, or through a fresh one.
@@ -369,7 +370,7 @@ namespace Shorokoo.Runtime
                         continue;
                     }
                 }
-                if (Adds(resident)) added += _context.BooksBytesOf(resident);
+                if (Adds(resident)) added += ComputeContext.BooksBytesOf(resident, ref blocks);
             }
             return new DevicePlan(attached, attachedTensors, added);
         }

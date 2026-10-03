@@ -87,10 +87,17 @@ namespace Shorokoo.Runtime
         /// </summary>
         internal (long Bytes, int Tensors) AttachedIn()
         {
+            HashSet<SharedBlock>? blocks = null;
+            return AttachedIn(ref blocks);
+        }
+
+        /// <summary><see cref="AttachedIn()"/>, adding to <paramref name="blocks"/> the shared blocks
+        /// those tensors stand on.</summary>
+        internal (long Bytes, int Tensors) AttachedIn(ref HashSet<SharedBlock>? blocks)
+        {
             var space = MemorySpace;
             long bytes = 0;
             var tensors = 0;
-            HashSet<SharedBlock>? blocks = null;
             foreach (var tensor in _attached.Snapshot())
             {
                 if (tensor.IsDisposed || tensor.Space != space) continue;
@@ -107,15 +114,29 @@ namespace Shorokoo.Runtime
         /// <summary>
         /// What putting <paramref name="tensor"/> on this context's books adds to them: its own
         /// bytes, or for a tensor standing on a shared block, what of the block is still held where
-        /// no live tensor on this context's books stands on it already, and nothing where one does.
+        /// no live tensor on this context's books stands on it already, nor another of
+        /// <paramref name="alongside"/>, put on them with it, and nothing where one does.
         /// </summary>
-        internal long BooksBytesOf(TensorData tensor)
+        internal long BooksBytesOf(TensorData tensor, IEnumerable<TensorData>? alongside = null)
         {
             if (tensor.Block is not { } block) return tensor.ByteCount;
             foreach (var attached in _attached.Snapshot())
                 if (!attached.IsDisposed && ReferenceEquals(attached.Block, block)) return 0;
+            foreach (var other in alongside ?? [])
+                if (!ReferenceEquals(other, tensor) && !other.IsDisposed && ReferenceEquals(other.Block, block)) return 0;
             return block.HeldBytes;
         }
+
+        /// <summary>
+        /// What putting <paramref name="tensor"/> on the books adds to them where
+        /// <paramref name="blocks"/> holds every shared block they stand on, those already on them
+        /// (<see cref="AttachedIn(ref HashSet{SharedBlock}?)"/>) and those put on them with it: its
+        /// own bytes, or for a tensor standing on a block not among them, what of the block is still
+        /// held, the block joining them.
+        /// </summary>
+        internal static long BooksBytesOf(TensorData tensor, ref HashSet<SharedBlock>? blocks)
+            => tensor.Block is not { } block ? tensor.ByteCount
+               : (blocks ??= new(ReferenceEqualityComparer.Instance)).Add(block) ? block.HeldBytes : 0;
 
         /// <summary>
         /// Enters this context's budget gate when its memory is under a budget, and answers null — having entered nothing — when it is not. From here to the

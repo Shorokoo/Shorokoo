@@ -356,6 +356,26 @@ public class GpuExecutionTests
         Assert.True(block.IsReleased);
     }
 
+    [CudaFact]
+    public void CudaProvider_ARunFedTwoTensorsStandingOnOneBlockCountsTheBlockOnce()
+    {
+        const long MiB = 1024 * 1024;
+        var backend = DefaultBackend.Instance;
+        var owner = (OrtTensorValue)backend.CreateTensorInBackendMemory(ShorokooTensorElementType.Float, new byte[16 * MiB], [4L << 20]);
+        var block = new SharedBlock(16 * MiB, () => backend.Release(owner));
+        TensorData On(long offset) => TensorData.Create((long[])[1L << 20], DType.Float32, OrtBackend.View(owner, offset, ShorokooTensorElementType.Float, [1L << 20], 4 * MiB, block, offset), backend);
+        var (first, second) = (On(0), On(8 * MiB));
+        using var budgeted = new ComputeContext { DeviceMemory = new DeviceMemorySettings { LimitBytes = 28 * MiB } };
+        var a = InputTensor<float32>("A", rank: 1);
+        var b = InputTensor<float32>("B", rank: 1);
+        var sum = budgeted.Compile(new InternalComputationGraph([a, b], [OnnxOp.Add(a, b)])).Execute(first.Shared(), second.Shared());
+        Assert.Equal(new DeviceMemoryUse(20 * MiB, 3, 28 * MiB), budgeted.ReadDeviceMemoryUse());
+        ComputeContext.ReleaseOutputs(sum);
+        first.Delete();
+        second.Delete();
+        Assert.True(block.IsReleased);
+    }
+
     /// <summary>
     /// What a run's session may allocate is capped at exactly the budget less what the context holds
     /// on the card for the run — here the eight-byte copy of the shape it is fed: with nothing else

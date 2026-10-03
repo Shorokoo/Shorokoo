@@ -9,8 +9,8 @@ namespace Shorokoo.PyTorch;
 /// values out: each value takes its bytes when the node writing it runs, in the order the
 /// translation runs the nodes (<see cref="OnnxToPythonTranslator.RunOrder"/>), and gives them back
 /// after the last node reading it — torch's caching allocator has them again at once. A value
-/// handed back over an input (<see cref="PlacementMemory.PyTorch"/>: a slice, a reshape, a
-/// transpose, an expansion, a reduction of no axis) is that input's memory — a reduction only where
+/// handed back over an input (<see cref="Views"/>: a slice, a reshape, a transpose, an expansion, a
+/// reduction of no axis) is that input's memory — a reduction only where
 /// it is of its input's size, since one reducing an axis computes a value of its own, and a reshape
 /// only where torch can view what it reshapes, by its strides, since it copies it otherwise — an
 /// element-wise result lying as its operands do (<see cref="TorchStrides.OfElementwise"/>). A node
@@ -38,18 +38,19 @@ internal static class TorchRunMemory
             if (shape.Dims.Any(d => d.DimValue <= 0 && d.DimParam is { Length: > 0 })) return null;
             given[input.Name] = ([.. shape.Dims.Select(d => d.DimValue)], tensor.ElemType);
         }
-        Dictionary<string, PlacementShapes.Value> shapes;
+        TorchUnrolledRun.Run? run;
         try
         {
-            shapes = PlacementShapes.Evaluate(graph, given);
+            run = TorchUnrolledRun.Of(graph, given);
         }
         catch (ArgumentException)
         {
             return null;
         }
-        if (graph.Nodes.Any(n => n.Outputs.Any(o => o.Length > 0 && !shapes.ContainsKey(o)))) return null;
+        if (run is null) return null;
+        var (order, shapes) = (run.Order, run.Shapes);
+        if (order.Any(n => n.Outputs.Any(o => o.Length > 0 && !shapes.ContainsKey(o)))) return null;
 
-        var order = OnnxToPythonTranslator.RunOrder(graph.Nodes);
         var position = new Dictionary<NodeProto, int>(ReferenceEqualityComparer.Instance);
         for (int k = 0; k < order.Count; k++) position[order[k]] = k;
         var held = graph.Inputs.Select(i => i.Name).Concat(graph.Initializers.Select(i => i.Name)).ToHashSet(StringComparer.Ordinal);
@@ -71,7 +72,7 @@ internal static class TorchRunMemory
                 var output = node.Outputs[o];
                 if (output.Length == 0) continue;
                 for (int i = 0; i < node.Inputs.Count; i++)
-                    if (node.Inputs[i].Length > 0 && PlacementMemory.PyTorch.SharesUnlessPlaced(node, i, o)
+                    if (node.Inputs[i].Length > 0 && Views(node, i, o, shapes)
                         && !(node.OpType.StartsWith("Reduce", StringComparison.Ordinal)
                              && shapes.TryGetValue(node.Inputs[i], out var reduced) && reduced.Bytes != shapes[output].Bytes))
                     {
@@ -167,7 +168,9 @@ internal static class TorchRunMemory
     /// copy of its output, a convolution of two transposed views — the gradient of another's weights,
     /// which the translation computes as torch does — a copy of each of the values they view, and a
     /// transposed convolution a copy of its input; a <c>MatMul</c> the copies it makes of operands it
-    /// cannot read where they lie (<see cref="TorchStrides.MatMulCopies"/>).
+    /// cannot read where they lie (<see cref="TorchStrides.MatMulCopies"/>); a recurrent layer — an
+    /// <c>LSTM</c>, <c>GRU</c> or <c>RNN</c> — one value of its hidden states' size, the list of each
+    /// step's or each direction's outputs it stacks into the next.
     /// </summary>
     internal static long Scratch(NodeProto node, IReadOnlyDictionary<string, PlacementShapes.Value> shapes,
         IReadOnlyDictionary<string, NodeProto> producer, Func<string, long[]?> stridesOf, bool writtenOver, bool onHost)
@@ -189,12 +192,39 @@ internal static class TorchRunMemory
             }
             case "ConvTranspose" when onHost:
                 return input;
+            case "LSTM" or "GRU" or "RNN" when shapes.TryGetValue(node.Inputs[0], out var x) && x.Shape.Length == 3 && node.Inputs.Count > 2
+                    && shapes.TryGetValue(node.Inputs[2], out var r) && r.Shape.Length == 3:
+            {
+                var batchFirst = (node.Attributes.FirstOrDefault(at => at.Name == "layout")?.I ?? 0) != 0;
+                return x.Shape[batchFirst ? 1 : 0] * x.Shape[batchFirst ? 0 : 1] * r.Shape[0] * r.Shape[2] * PlacementShapes.ElementBytes(x.ElementType);
+            }
             case "MatMul" when node.Inputs.Count == 2 && shapes.TryGetValue(node.Inputs[0], out var a) && shapes.TryGetValue(node.Inputs[1], out var b)
                     && stridesOf(node.Inputs[0]) is { } aStrides && stridesOf(node.Inputs[1]) is { } bStrides:
                 return TorchStrides.MatMulCopies(a.Shape, aStrides, b.Shape, bStrides, !onHost) * PlacementShapes.ElementBytes(a.ElementType);
             default:
                 return 0;
         }
+    }
+
+    /// <summary>
+    /// Whether the translation hands <paramref name="node"/>'s output <paramref name="output"/> back
+    /// over its input <paramref name="input"/>: a slice, a reshape, a transpose, an expansion or a
+    /// split of its first input, a cast to the type it has, a one-input sum, mean, maximum or minimum, a
+    /// clip without bounds, a reduction — of no axis, as the caller tells by size — and a branch, which
+    /// may hand back what it captured (<see cref="PlacementMemory.PyTorch"/>), as anything the model
+    /// does not know may. Every other operator computes a result of its own.
+    /// </summary>
+    private static bool Views(NodeProto node, int input, int output, IReadOnlyDictionary<string, PlacementShapes.Value> shapes)
+    {
+        if (!OutputAliasProof.IsStandard(node)) return PlacementMemory.PyTorch.SharesUnlessPlaced(node, input, output);
+        return node.OpType switch
+        {
+            "Slice" or "Identity" or "Reshape" or "Squeeze" or "Unsqueeze" or "Flatten" or "Transpose" or "Expand" or "Split" => input == 0,
+            "Cast" => input == 0 && shapes.TryGetValue(node.Inputs[0], out var from) && shapes.TryGetValue(node.Outputs[output], out var to)
+                      && from.ElementType == to.ElementType,
+            "Max" or "Min" or "Sum" or "Mean" or "Clip" or "If" => PlacementMemory.PyTorch.SharesUnlessPlaced(node, input, output),
+            _ => node.OpType.StartsWith("Reduce", StringComparison.Ordinal) && PlacementMemory.PyTorch.SharesUnlessPlaced(node, input, output),
+        };
     }
 
     /// <summary>Whether the translation writes <paramref name="node"/>'s output into the input it

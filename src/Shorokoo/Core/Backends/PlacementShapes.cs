@@ -56,6 +56,19 @@ internal static class PlacementShapes
     internal static Dictionary<string, Value> Evaluate(
         GraphProto graph, IReadOnlyDictionary<string, (long[] Shape, int ElementType)> inputs)
     {
+        var (values, symbols) = Start(graph, inputs);
+        Run(graph, values, symbols);
+        return values;
+    }
+
+    /// <summary>
+    /// The values <paramref name="graph"/>'s nodes read from outside them — its initializers, and
+    /// its inputs as <paramref name="inputs"/> give them or as the graph states them — and the
+    /// dimensions its inputs name, for nodes to be evaluated one at a time (<see cref="Step"/>).
+    /// </summary>
+    internal static (Dictionary<string, Value> Values, Dictionary<string, long> Symbols) Start(
+        GraphProto graph, IReadOnlyDictionary<string, (long[] Shape, int ElementType)> inputs)
+    {
         var values = new Dictionary<string, Value>(StringComparer.Ordinal);
         var symbols = new Dictionary<string, long>(StringComparer.Ordinal);
         foreach (var initializer in graph.Initializers)
@@ -72,9 +85,7 @@ internal static class PlacementShapes
             else if (!values.ContainsKey(input.Name) && Stated(input, symbols) is { } stated)
                 values[input.Name] = stated;
         }
-
-        Run(graph, values, symbols);
-        return values;
+        return (values, symbols);
     }
 
     /// <summary>Evaluates <paramref name="graph"/>'s nodes into <paramref name="values"/>, which holds
@@ -85,26 +96,33 @@ internal static class PlacementShapes
         foreach (var info in graph.ValueInfoes.Concat(graph.Outputs)) statedTypes.TryAdd(info.Name, info);
 
         foreach (var node in graph.Nodes)
+            Step(node, values, symbols, statedTypes);
+    }
+
+    /// <summary>Evaluates <paramref name="node"/>'s outputs into <paramref name="values"/>, which
+    /// holds what it reads; an output it cannot evaluate takes the shape <paramref name="statedTypes"/>
+    /// states for it, where that shape is known.</summary>
+    internal static void Step(NodeProto node, Dictionary<string, Value> values, Dictionary<string, long> symbols,
+        IReadOnlyDictionary<string, ValueInfoProto>? statedTypes = null)
+    {
+        Value?[] read = [.. node.Inputs.Select(name => name.Length > 0 && values.TryGetValue(name, out var v) ? v : null)];
+        Value?[] made;
+        try
         {
-            Value?[] read = [.. node.Inputs.Select(name => name.Length > 0 && values.TryGetValue(name, out var v) ? v : null)];
-            Value?[] made;
-            try
-            {
-                made = node.OpType == "If" && node.Domain is "" or "ai.onnx" ? Branched(node, read, values, symbols) : Infer(node, read);
-            }
-            catch (Exception exception) when (exception is ArgumentException or InvalidOperationException
-                                                  or IndexOutOfRangeException or OverflowException or DivideByZeroException)
-            {
-                made = [];
-            }
-            for (int o = 0; o < node.Outputs.Count; o++)
-            {
-                var name = node.Outputs[o];
-                if (name.Length == 0) continue;
-                var value = o < made.Length ? made[o] : null;
-                if (value is null && statedTypes.TryGetValue(name, out var info)) value = Stated(info, symbols);
-                if (value is not null && value.Shape.All(d => d >= 0)) values[name] = value;
-            }
+            made = node.OpType == "If" && node.Domain is "" or "ai.onnx" ? Branched(node, read, values, symbols) : Infer(node, read);
+        }
+        catch (Exception exception) when (exception is ArgumentException or InvalidOperationException
+                                              or IndexOutOfRangeException or OverflowException or DivideByZeroException)
+        {
+            made = [];
+        }
+        for (int o = 0; o < node.Outputs.Count; o++)
+        {
+            var name = node.Outputs[o];
+            if (name.Length == 0) continue;
+            var value = o < made.Length ? made[o] : null;
+            if (value is null && statedTypes is not null && statedTypes.TryGetValue(name, out var info)) value = Stated(info, symbols);
+            if (value is not null && value.Shape.All(d => d >= 0)) values[name] = value;
         }
     }
 

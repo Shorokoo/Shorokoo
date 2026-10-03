@@ -46,26 +46,26 @@ public class PyTorchCudaHardwareTests
     }
 
     [TorchCudaFact]
-    public void TestFloat32ProductsAndConvolutionsOnTheCardAreComputedInFullPrecisionUnlessTensorFloat32IsAllowed()
+    public void TestFloat32ProductsConvolutionsAndRecurrentLayersOnTheCardAreComputedInFullPrecisionUnlessTensorFloat32IsAllowed()
     {
-        var host = SideBySideModel.LargeProducts(new ComputeContext());
+        var host = SideBySideModel.LargeLayers(new ComputeContext());
         using var strict = new ComputeContext(Cuda.Value);
         using var allowed = new ComputeContext(Cuda.Value) { Precision = SideBySideModel.AllowingTensorFloat32 };
 
-        SideBySideModel.AssertFullPrecision(host, SideBySideModel.LargeProducts(strict));
-        SideBySideModel.AssertTensorFloat32(host, SideBySideModel.LargeProducts(allowed));
-        SideBySideModel.AssertFullPrecision(host, SideBySideModel.LargeProducts(strict));
-        SideBySideModel.AssertTensorFloat32(host, SideBySideModel.LargeProducts(allowed));
+        SideBySideModel.AssertFullPrecision(host, SideBySideModel.LargeLayers(strict));
+        SideBySideModel.AssertTensorFloat32(host, SideBySideModel.LargeLayers(allowed));
+        SideBySideModel.AssertFullPrecision(host, SideBySideModel.LargeLayers(strict));
+        SideBySideModel.AssertTensorFloat32(host, SideBySideModel.LargeLayers(allowed));
     }
 
     [TorchCudaFact]
     public void TestRunsOfAFullPrecisionSessionAndATensorFloat32SessionAtOnceEachComputeInTheirOwnPrecision()
     {
-        var host = SideBySideModel.LargeProducts(new ComputeContext());
+        var host = SideBySideModel.LargeLayers(new ComputeContext());
         using var strict = new ComputeContext(Cuda.Value);
         using var allowed = new ComputeContext(Cuda.Value) { Precision = SideBySideModel.AllowingTensorFloat32 };
-        var strictRuns = Task.Run(() => Enumerable.Range(0, 4).Select(_ => SideBySideModel.LargeProducts(strict)).ToList());
-        var allowedRuns = Task.Run(() => Enumerable.Range(0, 4).Select(_ => SideBySideModel.LargeProducts(allowed)).ToList());
+        var strictRuns = Task.Run(() => Enumerable.Range(0, 4).Select(_ => SideBySideModel.LargeLayers(strict)).ToList());
+        var allowedRuns = Task.Run(() => Enumerable.Range(0, 4).Select(_ => SideBySideModel.LargeLayers(allowed)).ToList());
 
         Assert.All(strictRuns.Result, card => SideBySideModel.AssertFullPrecision(host, card));
         Assert.All(allowedRuns.Result, card => SideBySideModel.AssertTensorFloat32(host, card));

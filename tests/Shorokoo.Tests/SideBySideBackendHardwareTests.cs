@@ -162,16 +162,16 @@ public class SideBySideBackendHardwareTests
     }
 
     [SideBySideCudaFact]
-    public void TestFloat32ProductsAndConvolutionsOnTheCardAreComputedInFullPrecisionUnlessTensorFloat32IsAllowed()
+    public void TestFloat32ProductsConvolutionsAndRecurrentLayersOnTheCardAreComputedInFullPrecisionUnlessTensorFloat32IsAllowed()
     {
-        var host = SideBySideModel.LargeProducts(new ComputeContext());
+        var host = SideBySideModel.LargeLayers(new ComputeContext());
         var cuda = LoadCuda();
         var strict = new ComputeContext(cuda);
         var allowed = new ComputeContext(cuda) { Precision = SideBySideModel.AllowingTensorFloat32 };
 
-        SideBySideModel.AssertFullPrecision(host, SideBySideModel.LargeProducts(strict));
-        SideBySideModel.AssertTensorFloat32(host, SideBySideModel.LargeProducts(allowed));
-        SideBySideModel.AssertFullPrecision(host, SideBySideModel.LargeProducts(strict));
+        SideBySideModel.AssertFullPrecision(host, SideBySideModel.LargeLayers(strict));
+        SideBySideModel.AssertTensorFloat32(host, SideBySideModel.LargeLayers(allowed));
+        SideBySideModel.AssertFullPrecision(host, SideBySideModel.LargeLayers(strict));
     }
 
     [SideBySideCudaFact]

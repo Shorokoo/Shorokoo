@@ -2,7 +2,8 @@ namespace Shorokoo.Core.Backends;
 
 /// <summary>
 /// The strides torch gives a view, as far as a model of a translation's memory asks: whether a
-/// reshape of a view is a view, or a copy torch makes because the view's strides cannot be reshaped.
+/// reshape of a view is a view, or a copy torch makes because the view's strides cannot be reshaped,
+/// and which operands a matrix product copies.
 /// </summary>
 internal static class TorchStrides
 {
@@ -48,6 +49,50 @@ internal static class TorchStrides
             default:
                 return shape.SequenceEqual(target) ? strides : Contiguous(target);
         }
+    }
+
+    /// <summary>
+    /// The elements torch's <c>matmul</c> copies of its operands, of <paramref name="aShape"/> and
+    /// <paramref name="bShape"/> laid out by <paramref name="aStrides"/> and
+    /// <paramref name="bStrides"/>, before it multiplies them, as ATen's <c>_matmul_impl</c> and its
+    /// BLAS calls do: a product of matrices with more than two axes whose leading axes it cannot fold
+    /// into rows as a view is a batched one, each operand broadcast to the batch and reshaped into
+    /// one batch axis — a copy where its strides cannot be reshaped so; and on a card, cuBLAS reads a
+    /// matrix only where one of its axes steps by one element and the other steps past it, and torch
+    /// copies one it cannot read so.
+    /// </summary>
+    internal static long MatMulCopies(IReadOnlyList<long> aShape, IReadOnlyList<long> aStrides,
+        IReadOnlyList<long> bShape, IReadOnlyList<long> bStrides, bool onCard)
+    {
+        if (aShape.Count < 2 || bShape.Count < 2 || aStrides.Count != aShape.Count || bStrides.Count != bShape.Count) return 0;
+        static long Count(IEnumerable<long> shape) => shape.Aggregate(1L, (a, d) => a * d);
+        long Unread(long rows, long columns, long rowStep, long columnStep, long elements)
+            => !onCard || (columnStep == 1 || columns == 1) && (rowStep >= Math.Max(1, columns) || rows == 1)
+                || (rowStep == 1 || rows == 1) && (columnStep >= Math.Max(1, rows) || columns == 1) ? 0 : elements;
+        long Matrix(IReadOnlyList<long> shape, IReadOnlyList<long> strides)
+            => Unread(shape[^2], shape[^1], strides[^2], strides[^1], Count(shape));
+        if (aShape.Count == 2 && bShape.Count == 2) return Matrix(aShape, aStrides) + Matrix(bShape, bStrides);
+        if (bShape.Count == 2 && Enumerable.Range(0, aShape.Count - 2).All(d => aStrides[d] == aStrides[d + 1] * aShape[d + 1]))
+            return Unread(Count(aShape.Take(aShape.Count - 1)), aShape[^1], aStrides[^2], aStrides[^1], Count(aShape))
+                + Matrix(bShape, bStrides);
+        var rank = Math.Max(aShape.Count, bShape.Count) - 2;
+        var batch = new long[rank];
+        for (int d = 0; d < rank; d++)
+        {
+            long Axis(IReadOnlyList<long> shape) => d - (rank - (shape.Count - 2)) is var at && at >= 0 ? shape[at] : 1;
+            batch[d] = Math.Max(Axis(aShape), Axis(bShape));
+        }
+        var product = Count(batch);
+        long Batched(IReadOnlyList<long> shape, IReadOnlyList<long> strides)
+        {
+            long[] expandedShape = [.. batch, shape[^2], shape[^1]];
+            var expanded = OfView("Expand", null, shape, [.. strides], expandedShape)!;
+            long[] merged = [product, shape[^2], shape[^1]];
+            return Reshaped(expandedShape, expanded, merged) is { } viewed
+                ? Matrix(merged, viewed)
+                : Count(merged);
+        }
+        return Batched(aShape, aStrides) + Batched(bShape, bStrides);
     }
 
     /// <summary>The strides torch gives a view of a tensor of <paramref name="shape"/> and

@@ -131,7 +131,7 @@ internal static class TorchRunMemory
                 alive[output] = bytes;
                 live += bytes;
             }
-            peak = Math.Max(peak, live + Scratch(node, shapes, producer, writtenOver, onHost));
+            peak = Math.Max(peak, live + Scratch(node, shapes, producer, StridesOf, writtenOver, onHost));
             foreach (var value in node.Inputs.Concat(node.Outputs).Where(v => v.Length > 0).Distinct())
             {
                 var r = RootOf(value);
@@ -153,10 +153,11 @@ internal static class TorchRunMemory
     /// its input's size; on the host, where oneDNN computes in a layout of its own, a convolution a
     /// copy of its output, a convolution of two transposed views — the gradient of another's weights,
     /// which the translation computes as torch does — a copy of each of the values they view, and a
-    /// transposed convolution a copy of its input.
+    /// transposed convolution a copy of its input; a <c>MatMul</c> the copies it makes of operands it
+    /// cannot read where they lie (<see cref="TorchStrides.MatMulCopies"/>).
     /// </summary>
     internal static long Scratch(NodeProto node, IReadOnlyDictionary<string, PlacementShapes.Value> shapes,
-        IReadOnlyDictionary<string, NodeProto> producer, bool writtenOver, bool onHost)
+        IReadOnlyDictionary<string, NodeProto> producer, Func<string, long[]?> stridesOf, bool writtenOver, bool onHost)
     {
         long BytesOf(string name) => name.Length > 0 && shapes.TryGetValue(name, out var value) ? Math.Max(value.Bytes, 0) : 0;
         if (!OutputAliasProof.IsStandard(node) || node.Inputs.Count == 0) return 0;
@@ -175,6 +176,9 @@ internal static class TorchRunMemory
             }
             case "ConvTranspose" when onHost:
                 return input;
+            case "MatMul" when node.Inputs.Count == 2 && shapes.TryGetValue(node.Inputs[0], out var a) && shapes.TryGetValue(node.Inputs[1], out var b)
+                    && stridesOf(node.Inputs[0]) is { } aStrides && stridesOf(node.Inputs[1]) is { } bStrides:
+                return TorchStrides.MatMulCopies(a.Shape, aStrides, b.Shape, bStrides, !onHost) * PlacementShapes.ElementBytes(a.ElementType);
             default:
                 return 0;
         }

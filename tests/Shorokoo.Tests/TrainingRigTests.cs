@@ -684,6 +684,60 @@ internal static class TrainingRigHelpers
 public class TrainingRigFromScratchCoverageTests
 {
     [Fact]
+    public void TestOnnxRuntimeOnTheHostIsModelledHoldingWhatItsRunOfATrainingStepHolds()
+    {
+        Assert.True(ModelledAgainstRun(Benchmarks.MemoryPassEncoder1.ComputationGraph, [8L, 128L, 128L]));
+        Assert.True(ModelledAgainstRun(SdpaMeanPoolModel.ComputationGraph, [2L, 4L, 256L, 32L]));
+        Assert.True(ModelledAgainstRun(Benchmarks.MemoryPassConv.ComputationGraph, [8L, 3L, 64L, 64L]));
+    }
+
+    /// <summary>Whether the host backend's model of a run of the training step a rig builds for
+    /// <paramref name="model"/> comes within a thirty-second of the most a session's run of that step
+    /// asks of its own account, every output held.</summary>
+    private static bool ModelledAgainstRun(ComputationGraph model, long[] shape)
+    {
+        using var context = new ComputeContext();
+        var sample = TensorData(shape, new float[shape.Aggregate(1L, (a, d) => a * d)]);
+        var rig = TrainingRig.FromScratch(model, Shorokoo.Modules.Losses.L2Loss.ComputationGraph,
+            Shorokoo.Modules.Optimizers.AdamWOptimizer.ComputationGraph, [sample],
+            new Shorokoo.Modules.Optimizers.AdamWOptimizerHyperparameters { LearningRate = 0.001f }, runtimeContext: context);
+        var step = Benchmarks.MemoryPassBenchmarkTests.RigModel(rig.TrainingStepPureGraph, rig.OptimizationInputShapes);
+        var modelled = context.ResolvedBackend.ModelledRunPeak(step, []);
+        var account = Shorokoo.OnnxRuntime.RuntimeAllocator.ForHost().Shared.Open("modelled-against-run");
+        try
+        {
+            using var stream = new MemoryStream();
+            ProtoBuf.Serializer.Serialize(stream, step);
+            using var options = new SessionOptions();
+            Shorokoo.OnnxRuntime.OrtBackend.Configure(options, ShorokooGraphOptimization.TrainingStep, ShorokooLogSeverity.Fatal);
+            options.AddSessionConfigEntry("session.use_env_allocators", "1");
+            InferenceSession session;
+            using (CachingAllocator.Charge(account, null))
+                session = new InferenceSession(stream.ToArray(), options);
+            using (session)
+            {
+                var shapes = rig.OptimizationInputShapes;
+                var feeds = Enumerable.Range(0, session.InputNames.Count).ToDictionary(i => session.InputNames[i], i => Utils.SyntheticFeed.Tensor(shapes[i].Shape, shapes[i].DType, i));
+                using var runOptions = new RunOptions();
+                void Run()
+                {
+                    using (CachingAllocator.Charge(account, null))
+                        foreach (var output in session.Run(runOptions, feeds, session.OutputNames)) output.Dispose();
+                }
+                Run();
+                account.BeginPeak();
+                Run();
+                foreach (var feed in feeds.Values) feed.Dispose();
+                return modelled is long m && Math.Abs(m - account.Peak) * 32 <= account.Peak;
+            }
+        }
+        finally
+        {
+            Shorokoo.OnnxRuntime.RuntimeAllocator.ForHost().Shared.Close(account);
+        }
+    }
+
+    [Fact]
     public void TestTheMemoryAwarePassHandsAnOnnxRuntimeHostContextNoStepHoldingMoreThanTheStepItWasHanded()
         => Assert.True(HostStepPeak(Benchmarks.MemoryPassConv.ComputationGraph, [8L, 3L, 64L, 64L], handed: false)
                        <= HostStepPeak(Benchmarks.MemoryPassConv.ComputationGraph, [8L, 3L, 64L, 64L], handed: true));

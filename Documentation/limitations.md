@@ -421,8 +421,8 @@ Runtime, for at most a few percent more computation; on PyTorch it can trade mor
 computation. A step containing a scope — a recurrent op's backward pass is a loop
 — is searched only where the backend's model answers for it, which it does for a
 loop whose trip count follows from the shapes fed, and for no branch (`If`); a
-one-layer LSTM's step then holds about a tenth less on PyTorch and a fifth less on
-ONNX Runtime's host, by reordering alone. Any other step with a scope gets only
+one-layer LSTM's step then holds about a tenth less on PyTorch and a sixth to a
+fifth less on ONNX Runtime, by reordering alone. Any other step with a scope gets only
 its checkpoint attributes applied. Separately, the
 training-step session is compiled for the shapes it is fed, which removes most
 shape arithmetic from the executed graph.

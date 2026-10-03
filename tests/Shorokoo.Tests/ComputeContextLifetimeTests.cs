@@ -989,6 +989,36 @@ public class ComputeContextLifetimeCoverageTests
     }
 
     [Fact]
+    public void TestABlockWhoseLastPagePassesItsTensorCountsWhatItStillHoldsOfTheTensor()
+    {
+        var backend = DefaultBackend.Instance;
+        const long Floats = (1 << 18) + 1;
+        var owner = (OrtTensorValue)backend.CreateTensorInBackendMemory(ShorokooTensorElementType.Float, new byte[Floats * 4], [Floats]);
+        var block = OrtBackend.BlockOver(owner, Floats * 4, () => backend.Release(owner));
+        var first = OrtBackend.View(owner, 0, ShorokooTensorElementType.Float, [1L << 17], 512L << 10, block, 0);
+        var second = OrtBackend.View(owner, 512L << 10, ShorokooTensorElementType.Float, [1L << 17], 512L << 10, block, 512L << 10);
+        second.Dispose();
+        Assert.Equal(512L << 10, block.HeldBytes);
+        first.Dispose();
+    }
+
+    [Fact]
+    public void TestASequenceThatFailsToTakeACopyOfAViewLetsGoOfTheCopiesItMade()
+    {
+        var (first, second, _, _) = Halved();
+        var backend = (OrtBackend)DefaultBackend.Instance;
+        var host = RuntimeAllocator.ForHost();
+        var account = host.Shared.Open("probe");
+        var a = (OrtTensorValue)((IOnnxData)first).Value;
+        var b = (OrtTensorValue)((IOnnxData)second).Value;
+        b.Dispose();
+        using (CachingAllocator.Charge(account, null))
+            Assert.ThrowsAny<Exception>(() => backend.CreateSequence([a, b]));
+        Assert.Equal(0L, host.Shared.Statistics(account).InUseBytes);
+        host.Shared.Close(account);
+    }
+
+    [Fact]
     public void TestATensorStandingOnABlockMovesSavesLoadsAndJoinsASequenceAsItsOwnRange()
     {
         var (first, second, block, _) = Halved();

@@ -1215,6 +1215,26 @@ public class PyTorchBackendCoverageTests
         Assert.True(result.BackendPeakBytes![chosen] <= 217L << 20);
     }
 
+    [Fact]
+    public void TestTheMemoryAwarePassTakesARecurrentStepTorchModelsBelowItsPeakComputingWhatItWasHanded()
+    {
+        using var context = new ComputeContext(Torch);
+        long[] shape = [32L, 32L, 64L];
+        var sample = TensorData(shape, [.. Enumerable.Range(0, 32 * 32 * 64).Select(i => (i % 13) / 13f - 0.5f)]);
+        var rig = TrainingRig.FromScratch(Benchmarks.MemoryPassLstm.ComputationGraph, Shorokoo.Modules.Losses.L2Loss.ComputationGraph,
+            Shorokoo.Modules.Optimizers.AdamWOptimizer.ComputationGraph, [sample],
+            new Shorokoo.Modules.Optimizers.AdamWOptimizerHyperparameters { LearningRate = 0.001f }, runtimeContext: context);
+        var result = rig.OptimizationResult;
+        var chosen = result.AllStrategies.Select(s => s.Graph).ToList().FindIndex(g => ReferenceEquals(g, result.OptimizedGraph));
+        Assert.True(result.BackendPeakBytes![chosen] < result.BackendPeakBytes[0]);
+        TensorData[] feeds = [.. rig.OptimizationInputShapes.Select(s => s.DType == DType.Float32
+            ? (TensorData)TensorData([.. s.Shape.Dims.Select(d => (long)d)], [.. Enumerable.Range(0, (int)s.Shape.Count).Select(i => (i % 7) / 7f)])
+            : TensorData([.. s.Shape.Dims.Select(d => (long)d)], new long[s.Shape.Count]))];
+        float[][] Outputs(ComputationGraph step) => [.. context.Execute(step, [.. feeds.Select(f => f.Shared())]).Select(o => o.ToTensorData())
+            .Where(t => t.DType == DType.Float32).Select(t => t.As<float32>().CopyMemory<float>())];
+        Assert.Equal(Outputs(rig.PreOptimizationGraph), Outputs(rig.TrainingStepPureGraph));
+    }
+
     /// <summary>Torch on the CPU, its steps judged by torch's model of a run on a card.</summary>
     private sealed class JudgedAsOnACard() : TorchBackend(() => PythonEnvironmentLock.Cpu, null, cudaDeviceId: null), IShorokooBackend
     {

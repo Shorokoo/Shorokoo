@@ -237,12 +237,14 @@ internal class MemoryAwareGraphOptimizer
                 strategies.Add((OrderedStateReads, startEval, start.Graph, start.ShapeInfo));
         }
 
-        // The evaluator walks a Loop/If body once, but ORT runs a Loop body per iteration and
+        // The evaluator walks a Loop/If body once, but a backend runs a Loop body per iteration and
         // allocates per iteration; the pass would be optimizing a number that is not what runs.
-        // Measured on the LSTM training step, letting it act raised the real peak by a quarter
-        // while the model claimed a small saving. Until bodies are modelled per iteration, a
-        // graph with a scope is handed back as it came.
-        if (baselineEval.PeakMemoryBytes < MinimumPeakBytesToOptimize || graph.Nodes.Any(n => n.IsOpenNode()))
+        // Measured on the LSTM training step with no judge, letting it act raised ONNX Runtime's
+        // real peak by a quarter while the evaluator claimed a small saving. So a graph with a scope
+        // is handed back as it came, unless the backend's own model of a run answers for it -- one
+        // that runs each loop's body per iteration, as torch's does -- and then every step the
+        // search takes is judged by that model.
+        if (baselineEval.PeakMemoryBytes < MinimumPeakBytesToOptimize || (graph.Nodes.Any(n => n.IsOpenNode()) && judge?.Peak(graph) is null))
             return Chosen(strategies, strategies.Count - 1, judge);
 
         var scheduler = new MemoryAwareScheduler();

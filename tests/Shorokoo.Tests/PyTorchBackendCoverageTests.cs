@@ -1204,6 +1204,25 @@ public class PyTorchBackendCoverageTests
     }
 
     [Fact]
+    public void TestTheMemoryAwarePassTakesATwoLayerEncodersStepAsLowAsTorchsModelOfACardRunSeesIt()
+    {
+        using var context = new ComputeContext(new JudgedAsOnACard());
+        var sample = TensorData([128L, 128L, 128L], new float[128 * 128 * 128]);
+        var result = TrainingRig.FromScratch(Benchmarks.MemoryPassEncoder2.ComputationGraph, Shorokoo.Modules.Losses.L2Loss.ComputationGraph,
+            Shorokoo.Modules.Optimizers.AdamWOptimizer.ComputationGraph, [sample],
+            new Shorokoo.Modules.Optimizers.AdamWOptimizerHyperparameters { LearningRate = 0.001f }, runtimeContext: context).OptimizationResult;
+        var chosen = result.AllStrategies.Select(s => s.Graph).ToList().FindIndex(g => ReferenceEquals(g, result.OptimizedGraph));
+        Assert.True(result.BackendPeakBytes![chosen] <= 217L << 20);
+    }
+
+    /// <summary>Torch on the CPU, its steps judged by torch's model of a run on a card.</summary>
+    private sealed class JudgedAsOnACard() : TorchBackend(() => PythonEnvironmentLock.Cpu, null, cudaDeviceId: null), IShorokooBackend
+    {
+        long? IShorokooBackend.ModelledRunPeak(ModelProto model, IReadOnlyList<OutputAlias> outputAliases, PrecisionSettings precision)
+            => TorchRunMemory.Peak(model, outputAliases, onHost: false);
+    }
+
+    [Fact]
     public void TestATorchRunIsModelledHoldingTheTemporariesItsKernelsMakeOnTheHost()
     {
         Assert.Equal(32768, RunPeak(GraphOn("x:float[64,64] s:float[64]", "O", Op("Exp", "x", "e"), Op("LayerNormalization", "e s", "O"))));

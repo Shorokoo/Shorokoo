@@ -99,6 +99,9 @@ internal sealed class Arena
     /// <summary>The bytes carved into blocks now.</summary>
     internal long CarvedBytes { get; private set; }
 
+    /// <summary>The bytes of address space the arena holds reserved now.</summary>
+    internal long ReservedBytes { get; private set; }
+
     /// <summary>The granule the arena's memory is committed in.</summary>
     internal long Granule => _granule;
 
@@ -210,6 +213,7 @@ internal sealed class Arena
             if (_chunks[i] is not { CarvedUnits: 0 } chunk) continue;
             RemoveFree((chunk.Units, chunk.Index, 0));
             _backing.Release(chunk.Base, chunk.Bytes, chunk.State);
+            ReservedBytes -= chunk.Bytes;
             _chunks[i] = null;
         }
     }
@@ -364,6 +368,7 @@ internal sealed class Arena
         bytes = RoundUp(bytes, _granule);
         var @base = _backing.Reserve(bytes, out var state);
         if (@base == IntPtr.Zero) return null;
+        ReservedBytes += bytes;
         var index = _chunks.IndexOf(null);
         if (index < 0)
         {

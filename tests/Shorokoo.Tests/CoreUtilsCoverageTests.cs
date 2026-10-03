@@ -1003,18 +1003,18 @@ public class CoreUtilsCoverageTests
     public void TestABlockTheHostAllocatorHandsBackIsNoLongerTheProcesssMemory()
     {
         var host = RuntimeAllocator.ForHost();
-        IntPtr HandedBack(long floats)
+        bool HeldOnceHandedBack(long floats)
         {
             var account = host.Shared.Open("probe");
+            using var holdingTheArena = HostBlock(host, account, 16L << 10);
             IntPtr address;
-            using (CachingAllocator.Charge(account, null))
-            using (var value = OrtValue.CreateAllocatedTensorValue(host.Managed, Microsoft.ML.OnnxRuntime.Tensors.TensorElementType.Float, [floats]))
+            using (var value = HostBlock(host, account, floats))
                 address = OrtBackend.AddressOf(value);
             host.Shared.Close(account);
-            return address;
+            return ProcessMemory.Holds(address);
         }
 
-        Assert.Equal([false, false, false], ((long[])[1L << 20, 64L << 10, 16L << 10]).Select(floats => ProcessMemory.Holds(HandedBack(floats))));
+        Assert.Equal([false, false, false], ((long[])[1L << 20, 64L << 10, 16L << 10]).Select(HeldOnceHandedBack));
     }
 
     [Fact]
@@ -1022,19 +1022,32 @@ public class CoreUtilsCoverageTests
     {
         var host = RuntimeAllocator.ForHost();
         var account = host.Shared.Open("probe");
+        var holdingTheArena = HostBlock(host, account, 16L << 10);
         (IntPtr Address, long Held) Take(long floats)
         {
-            using (CachingAllocator.Charge(account, null))
-            using (var value = OrtValue.CreateAllocatedTensorValue(host.Managed, Microsoft.ML.OnnxRuntime.Tensors.TensorElementType.Float, [floats]))
-                return (OrtBackend.AddressOf(value), host.Shared.Statistics(account).TotalAllocatedBytes);
+            using var value = HostBlock(host, account, floats);
+            return (OrtBackend.AddressOf(value), host.Shared.Statistics(account).TotalAllocatedBytes);
         }
 
         var large = Take(1L << 20);
         var small = Take(64L << 10);
         host.Shared.Close(account);
+        var held = ProcessMemory.Holds(large.Address);
+        holdingTheArena.Dispose();
 
-        Assert.Equal((large.Address, 4L << 20), small);
-        Assert.False(ProcessMemory.Holds(large.Address));
+        Assert.Equal((large.Address, (4L << 20) + (64L << 10)), small);
+        Assert.Equal((false, 0L), (held, account.Arena!.ReservedBytes));
+    }
+
+    /// <summary>A host block of <paramref name="floats"/> charged to <paramref name="account"/>, every
+    /// page of it written.</summary>
+    private static OrtValue HostBlock(RuntimeAllocator host, CachingAllocator.Account account, long floats)
+    {
+        OrtValue value;
+        using (CachingAllocator.Charge(account, null))
+            value = OrtValue.CreateAllocatedTensorValue(host.Managed, Microsoft.ML.OnnxRuntime.Tensors.TensorElementType.Float, [floats]);
+        value.GetTensorMutableDataAsSpan<float>().Fill(1f);
+        return value;
     }
 
     /// <summary>
@@ -3043,8 +3056,13 @@ internal static class ArenaProbeModels
         => outputs[0].ToTensorData().As<float32>().ValueAt<float>(0);
 }
 
-/// <summary>Whether the process holds the memory at an address: committed on Windows, mapped on
-/// Linux.</summary>
+/// <summary>
+/// Whether the process holds the memory at an address: committed on Windows, resident on Linux.
+/// The system answers for whatever is at the address now, so the answer is about a block only
+/// while the address lies in address space the block's arena still holds reserved: address space
+/// handed back is the whole process's again, and anything running beside the caller may be given
+/// it and write there.
+/// </summary>
 internal static class ProcessMemory
 {
     internal static bool Holds(IntPtr address)
@@ -3053,7 +3071,8 @@ internal static class ProcessMemory
             return VirtualQuery(address, out var info, (nuint)Marshal.SizeOf<MemoryBasicInformation>()) != 0
                 && info.State == MemCommit;
         var page = (nint)Environment.SystemPageSize;
-        return mincore(address & ~(page - 1), (nuint)page, new byte[1]) == 0;
+        var resident = new byte[1];
+        return mincore(address & ~(page - 1), (nuint)page, resident) == 0 && (resident[0] & 1) != 0;
     }
 
     private const uint MemCommit = 0x1000;

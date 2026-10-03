@@ -83,8 +83,8 @@ public class MemoryReuseScenarioTests
     /// and executing it — on the backend <c>$SHOROKOO_MEMORY_REUSE_BACKEND</c> names: <c>ort</c> (the
     /// default; the host, or the card in a <c>-p:ShorokooGpuTests=true</c> build), <c>torch-cpu</c> or
     /// <c>torch-cuda</c>, each in a process of its own, since a process has one Python environment.
-    /// Every run is measured twice over: fed inputs it may not consume (shared), which runs the way a
-    /// run always ran, and fed inputs it consumes, which places. What is measured beyond the inputs is
+    /// Every run is measured twice over: fed inputs it may not consume (shared), which runs unplaced,
+    /// and fed inputs it consumes, which places. What is measured beyond the inputs is
     /// what the run asked of the backend's allocator: the ONNX Runtime session's allocator account,
     /// torch's CPU allocations as its profiler records them, or torch's CUDA allocator's peak.
     /// With <c>$SHOROKOO_MEMORY_REUSE_LOG</c> set, every block of a mebibyte or more Shorokoo's
@@ -94,6 +94,8 @@ public class MemoryReuseScenarioTests
     public void RecordTheScenarioThroughTheComputeContext()
     {
         var backend = Environment.GetEnvironmentVariable("SHOROKOO_MEMORY_REUSE_BACKEND") ?? "ort";
+        File.Delete(Path.Combine(OutputDirectory(), $"allocations-{backend}.txt"));
+        File.Delete(Path.Combine(OutputDirectory(), "torch-profile.txt"));
         var rows = (int)(2 * N);
         var columns = (int)M;
         var a = new float[rows * columns];
@@ -121,8 +123,16 @@ public class MemoryReuseScenarioTests
             var log = new List<CachingAllocator.Event>();
             if (measure && Environment.GetEnvironmentVariable("SHOROKOO_MEMORY_REUSE_LOG") is not null)
                 CachingAllocator.Observer = e => { lock (log) log.Add(e); };
-            var (outputs, peak, allocated) = measure ? Measured(backend, compiled, Execute) : (Execute(), 0L, 0L);
-            CachingAllocator.Observer = null;
+            NamedModelParam[] outputs;
+            long peak, allocated;
+            try
+            {
+                (outputs, peak, allocated) = measure ? Measured(backend, compiled, Execute) : (Execute(), 0L, 0L);
+            }
+            finally
+            {
+                CachingAllocator.Observer = null;
+            }
             if (log.Count > 0)
                 File.AppendAllText(Path.Combine(OutputDirectory(), $"allocations-{backend}.txt"),
                     $"{(consume ? "consumed" : "shared")}: " + string.Join(" ", log.Where(e => e.Size >= Big).Select(e => $"{(e.Allocation ? "+" : "-")}{Mib(e.Size)}{(e.Allocation && !e.Fresh ? "(kept)" : "")}")) + Environment.NewLine);
@@ -163,8 +173,8 @@ public class MemoryReuseScenarioTests
 
     /// <summary>
     /// Placement across the memory-pass benchmark's model families (<see cref="MemoryPassBenchmarkTests.Suite"/>)
-    /// on ONNX Runtime, through the public API, with placement off — every session running as it
-    /// always ran — and on: a resident training step (AdamW, the rig's state written over the state
+    /// on ONNX Runtime, through the public API, with placement off — every session running unplaced —
+    /// and on: a resident training step (AdamW, the rig's state written over the state
     /// it consumes), and inference of the same model on an input each run consumes. A step's or a
     /// run's peak is what Shorokoo's allocator had handed out at most beyond what it had as the
     /// step began, on the card in a <c>-p:ShorokooGpuTests=true</c> build and on the host otherwise,
@@ -180,6 +190,7 @@ public class MemoryReuseScenarioTests
     {
         var only = Environment.GetEnvironmentVariable("SHOROKOO_MEMORY_REUSE_FAMILIES")?.Split(',');
         var backend = Environment.GetEnvironmentVariable("SHOROKOO_MEMORY_REUSE_BACKEND") ?? "ort";
+        File.Delete(Path.Combine(OutputDirectory(), "refusals.md"));
         var onCard = backend == "torch-cuda"
                      || (backend == "ort" && DefaultBackend.Instance.GetType().Assembly.GetName().Name?.EndsWith("GPU", StringComparison.Ordinal) == true);
         var where = backend == "ort" ? $"ONNX Runtime on the {(onCard ? "card" : "host")}" : backend;
@@ -382,6 +393,7 @@ public class MemoryReuseScenarioTests
         var torchSettled = new List<TorchPlacements.Entry>();
         OrtPlacements.Settled = entry => { lock (settled) settled.Add(entry); };
         TorchPlacements.Settled = entry => { lock (torchSettled) torchSettled.Add(entry); };
+        using var unhook = new Unhook();
         string Settled()
         {
             lock (torchSettled)
@@ -459,9 +471,16 @@ public class MemoryReuseScenarioTests
             Release(each);
             kept.Delete();
         }
-        OrtPlacements.Settled = null;
-        TorchPlacements.Settled = null;
         return new FamilyFigures(stepPeak, Median(stepTimes), stepPlans, inferencePeak, Median(inferenceTimes), sharedTimes.Count == 0 ? 0 : Median(sharedTimes), Settled());
+    }
+
+    private sealed class Unhook : IDisposable
+    {
+        public void Dispose()
+        {
+            OrtPlacements.Settled = null;
+            TorchPlacements.Settled = null;
+        }
     }
 
     private static void Release(NamedModelParam[] outputs)
@@ -511,7 +530,9 @@ public class MemoryReuseScenarioTests
                   peak = sum(e.self_cpu_memory_usage for e in prof.events() if not transfer(e) and e.self_cpu_memory_usage > 0)
                   import os
                   if os.environ.get("SHOROKOO_MEMORY_REUSE_LOG"):
-                      with open(os.path.join(os.environ["SHOROKOO_MEMORY_REUSE_DIR"], "torch-profile.txt"), "a") as f:
+                      import tempfile
+                      directory = os.environ.get("SHOROKOO_MEMORY_REUSE_DIR") or os.path.join(tempfile.gettempdir(), "shorokoo-memory-reuse")
+                      with open(os.path.join(directory, "torch-profile.txt"), "a") as f:
                           f.write(f"{len(prof.events())} events, {sum(e.self_cpu_memory_usage for e in prof.events() if e.self_cpu_memory_usage > 0)} allocated, peak {peak}" + chr(10))
                   """);
             return (result, scope.Get<long>("peak"));
@@ -622,7 +643,8 @@ public class MemoryReuseScenarioTests
     {
         var dir = OutputDirectory();
         var root = AppContext.BaseDirectory;
-        while (!File.Exists(Path.Combine(root, "Shorokoo.sln"))) root = Path.GetDirectoryName(root)!;
+        while (!File.Exists(Path.Combine(root, "Shorokoo.sln")))
+            root = Path.GetDirectoryName(root) ?? throw new DirectoryNotFoundException("No folder above the tests holds Shorokoo.sln.");
         PythonEnvironment environment;
         try
         {

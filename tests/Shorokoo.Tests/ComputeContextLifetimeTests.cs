@@ -1090,11 +1090,17 @@ public class ComputeContextLifetimeCoverageTests
         using var stream = new MemoryStream();
         SafeTensorLoader.SaveSafeTensorsToStream(stream, [new("first", first, "F32", [4L]), new("second", second, "F32", [4L])]);
         var path = Path.Combine(Path.GetTempPath(), $"halves-{Guid.NewGuid():N}.safetensors");
-        File.WriteAllBytes(path, stream.ToArray());
-        var loaded = SafeTensorLoader.LoadTensorDictionary(path);
-        File.Delete(path);
-        Assert.Equal([1f, 2f, 3f, 4f], Floats(loaded["first"]));
-        Assert.Equal([5f, 6f, 7f, 8f], Floats(loaded["second"]));
+        try
+        {
+            File.WriteAllBytes(path, stream.ToArray());
+            var loaded = SafeTensorLoader.LoadTensorDictionary(path);
+            Assert.Equal([1f, 2f, 3f, 4f], Floats(loaded["first"]));
+            Assert.Equal([5f, 6f, 7f, 8f], Floats(loaded["second"]));
+        }
+        finally
+        {
+            File.Delete(path);
+        }
         var backend = DefaultBackend.Instance;
         using var sequence = backend.CreateSequence([OrtBackend.View((OrtTensorValue)((IOnnxData)first).Value, 8, ShorokooTensorElementType.Float, [2], 8, block, 8)]);
         Assert.Equal(2, block.Leases);
@@ -1373,8 +1379,11 @@ public class ComputeContextLifetimeCoverageTests
     [Fact]
     public void TestASessionRunsEachProvidersNodesInTheOrderOfTheGraphItWritesOutBuiltFromAModelOrFromAWrittenGraph()
     {
-        foreach (var family in (string[])["encoder2", "attn-chunk4"])
-            Assert.All(RunOrders(family), order => Assert.Equal(order.Written, order.Ran));
+        foreach (var orders in ((string[])["encoder2", "attn-chunk4"]).Select(RunOrders))
+        {
+            Assert.NotEmpty(orders);
+            Assert.All(orders, order => Assert.Equal(order.Written, order.Ran));
+        }
     }
 
     [Fact]

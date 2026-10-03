@@ -1169,7 +1169,6 @@ public class PyTorchBackendCoverageTests
             : Torch.CreateTensor([.. Enumerable.Range(0, count).Select(i => ((i * 7 + seed) % 1000) * 0.001f - 0.4f)], shape);
     }
 
-
     [Fact]
     public void TestAnInitializerWhoseRawDataIsNotItsShapesSizeIsRefusedAtSessionCreation()
     {

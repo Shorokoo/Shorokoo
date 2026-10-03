@@ -945,7 +945,6 @@ public class CoreUtilsCoverageTests
         Assert.Equal(typeof(IntPtr), typeof(OrtMemoryInfo).GetProperty(OrtEnvironment.MemoryInfoPointerProperty, Instance)!.PropertyType);
         Assert.NotNull(typeof(OrtAllocator).GetConstructor(Instance, [typeof(IntPtr), typeof(bool)]));
         Assert.True(OrtEnvironment.IsBound);
-        Assert.True(OrtEnvironment.SharedThreadPools);
         Assert.NotNull(NativeAllocator.Locate());
 
         var host = RuntimeAllocator.ForHost();

@@ -89,12 +89,6 @@ public class TrainingPerfBaselineTests
             measured.TrainStepsPerSecond, baseline.TrainStepsPerSecond, baseline.SlowdownFactor);
     }
 
-    /// <summary>
-    /// A loop alternating runs that consume their input with runs that share it, over one compile
-    /// of the two-layer encoder of the memory-pass benchmark at sixteen times its batch, takes no
-    /// longer per pair with placement on — the consuming runs placed, on a second session — than
-    /// with it off, on the session alone. Best of three loops each, off and on alternating.
-    /// </summary>
     [Fact]
     public void AlternatingConsumingAndSharedRunsOfOneCompileTakeNoLongerPlacedThanNot()
     {
@@ -120,6 +114,7 @@ public class TrainingPerfBaselineTests
                 Run();
                 least = Math.Min(least, watch.Elapsed.TotalMilliseconds);
             }
+            shared.Delete();
             return least;
         }
 

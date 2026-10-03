@@ -230,10 +230,14 @@ public class GpuExecutionTests
         const long MiB = 1024 * 1024;
         var (a, b, l) = ComputeContextLifetimeCoverageTests.TwoHalvesValues(Rows, Columns);
         static float[] Read(NamedModelParam p) => [.. p.ToTensorData().ToHost().As<float32>().AccessMemory<float>()];
+        NamedModelParam[] Run(ComputeContext on)
+            => on.Compile(ComputeContextLifetimeCoverageTests.TwoHalves())
+                .Execute(TensorData([(long)Rows, Columns], a).CopyTo(on), TensorData([(long)Rows, Columns], b).CopyTo(on));
+        using var unplaced = new ComputeContext { ValuePlacement = false, DeviceMemory = new DeviceMemorySettings { LimitBytes = 6 * MiB } };
         using var context = new ComputeContext { DeviceMemory = new DeviceMemorySettings { LimitBytes = 6 * MiB } };
-        var compiled = context.Compile(ComputeContextLifetimeCoverageTests.TwoHalves());
-        var outputs = compiled.Execute(TensorData([(long)Rows, Columns], a).CopyTo(context), TensorData([(long)Rows, Columns], b).CopyTo(context));
 
+        Assert.ThrowsAny<Exception>(() => Run(unplaced));
+        var outputs = Run(context);
         Assert.True(l.Zip(Read(outputs[0]), (x, y) => MathF.Abs(x - y) < 1e-5f).All(x => x));
         Assert.Equal(a[..(Rows / 2 * Columns)], Read(outputs[1]));
         Assert.Equal(b[(Rows / 2 * Columns)..], Read(outputs[2]));
@@ -277,8 +281,11 @@ public class GpuExecutionTests
     [CudaFact]
     public void CudaProvider_ASessionRunsEachProvidersNodesInTheOrderOfTheGraphItWritesOutBuiltFromAModelOrFromAWrittenGraph()
     {
-        foreach (var family in (string[])["encoder2", "attn-chunk4"])
-            Assert.All(ComputeContextLifetimeCoverageTests.RunOrders(family), order => Assert.Equal(order.Written, order.Ran));
+        foreach (var orders in ((string[])["encoder2", "attn-chunk4"]).Select(ComputeContextLifetimeCoverageTests.RunOrders))
+        {
+            Assert.NotEmpty(orders);
+            Assert.All(orders, order => Assert.Equal(order.Written, order.Ran));
+        }
     }
 
     [CudaFact]
@@ -876,9 +883,9 @@ public class GpuExecutionTests
         DeviceMemory.ResetPeak();
         try
         {
-            StepPeaks(aliasing: true);
+            StepPeaks(aliasing: true, placing: false);
             var plain = StepPeaks(aliasing: false);
-            var aliased = StepPeaks(aliasing: true);
+            var aliased = StepPeaks(aliasing: true, placing: false);
 
             Assert.True(plain.Arena - aliased.Arena >= aliased.State - (1L << 20));
             Assert.True(plain.Card - aliased.Card >= aliased.State - (1L << 20));
@@ -895,9 +902,9 @@ public class GpuExecutionTests
         DeviceMemory.ResetPeak();
         try
         {
-            StepPeaks(aliasing: true);
+            StepPeaks(aliasing: true, placing: false);
             var plain = StepPeaks(aliasing: false);
-            var aliased = StepPeaks(aliasing: true);
+            var aliased = StepPeaks(aliasing: true, placing: false);
             var placed = StepPeaks(aliasing: false, placing: true);
 
             Assert.True(plain.Arena - placed.Arena >= placed.State - (1L << 20));

@@ -42,14 +42,16 @@ public class JaxCudaHardwareTests
     }
 
     [JaxCudaFact]
-    public void TestFloat32ProductsConvolutionsAndRecurrentLayersOnTheCardAreComputedInFullPrecisionUnlessTensorFloat32IsAllowed()
+    public void TestFloat32ProductsConvolutionsAndRecurrentLayersOnTheCardAreComputedInFullPrecisionUnlessTensorFloat32IsAllowedForProducts()
     {
         var host = SideBySideModel.LargeLayers(new ComputeContext());
         using var strict = new ComputeContext(Cuda.Value);
         using var allowed = new ComputeContext(Cuda.Value) { Precision = SideBySideModel.AllowingTensorFloat32 };
+        var tensorFloat32 = SideBySideModel.LargeLayers(allowed);
 
         SideBySideModel.AssertFullPrecision(host, SideBySideModel.LargeLayers(strict));
-        SideBySideModel.AssertTensorFloat32(host, SideBySideModel.LargeLayers(allowed));
+        SideBySideModel.AssertTensorFloat32([host[0], host[2]], [tensorFloat32[0], tensorFloat32[2]]);
+        SideBySideModel.AssertFullPrecision([host[1]], [tensorFloat32[1]]);
     }
 
     [JaxCudaFact]

@@ -201,6 +201,9 @@ None of these shows in a small first run. Each can end a long one.
 - **Device-memory readings.** They are one record for the whole process and read device 0 only,
   and this process's share of the card can be unavailable in a container:
   [limitations.md](limitations.md#device-memory-readings-are-process-wide-and-device-0s).
+- **Speed on a card.** `float32` is computed in full precision on a GPU too, which on a
+  convolutional network costs the step 2.3 to 2.6 times what TensorFloat-32 does. A context can
+  allow TensorFloat-32 for its runs: [Precision](inference.md#precision-gpu-backends).
 - **Reproducibility.** A fixed seed reproduces a run bit for bit on the CPU backend, including
   across a save and resume. On a GPU it does so only on the ONNX Runtime backends, and only on a
   context that asks for deterministic compute: [Seeding the run](training.md#seeding-the-run).

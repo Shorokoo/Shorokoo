@@ -791,9 +791,9 @@ public abstract class OrtBackend : IShorokooBackend
     ///
     /// <para><c>use_tf32</c> is always named, and is <c>1</c> only where
     /// <see cref="PrecisionSettings.AllowTensorFloat32"/> is set. The provider's own default is
-    /// <c>1</c>, which computes <c>float32</c> products and convolutions in TensorFloat-32, so a
-    /// session that left it out would compute in less than full precision without being asked
-    /// to.</para>
+    /// <c>1</c>, which computes <c>float32</c> products, convolutions and recurrent layers in
+    /// TensorFloat-32, so a session that left it out would compute in less than full precision
+    /// without being asked to.</para>
     /// </summary>
     public static Dictionary<string, string> CudaProviderOptions(int deviceId, PrecisionSettings precision)
     {

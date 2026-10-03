@@ -229,6 +229,7 @@ What a run does with the settings every backend is handed, on each device:
 | **Arena statistics** / `RunStats` | none | torch's caching allocator on the device |
 | **`TraceNodePlacement`** | every node on `cpu` | every node on `cuda:N` |
 | **`DeterministicCompute`** | not applied | not applied: torch's kernels run as they otherwise would |
+| **`Precision.AllowTensorFloat32`** | no effect: `float32` in full precision | off by default: each run sets `torch.backends.cuda.matmul.allow_tf32` and `torch.backends.cudnn.allow_tf32` off as it starts; on, it sets both on, and products, cuDNN convolutions and recurrent layers run in TensorFloat-32 |
 | **Log severity** | Python warnings a run raises are shown at `Warning` and below, not above | same |
 
 **Output aliasing.** An output paired with a consumed input (as the training rig pairs each
@@ -258,6 +259,13 @@ so the per-session settings map only partly:
 
 **Cancellation** is checked before every node (once per iteration inside a `Loop`) and throws
 `OperationCanceledException` carrying the token. One long kernel is not interrupted.
+
+**Precision on CUDA.** `float32` is computed in full `float32` precision unless the context allows
+TensorFloat-32 ([Precision](inference.md#precision-gpu-backends)). torch's two switches for it are
+the whole process's, so a run sets them from its session as it starts — about 0.3 µs — whatever
+they were before, and runs of sessions that set them differently do not overlap: while a run that
+allows TensorFloat-32 is running, the other runs on the cards wait, and the other way round. A run
+on the CPU sets neither.
 
 ## Limitations
 

@@ -689,7 +689,9 @@ a per-call override, so all share one set of compiled sessions (one per input sh
 derivations keep both. The rig's `TrainingBackend`, also never persisted, decides who computes the
 gradient — see [training-backends.md](training-backends.md).
 
-Each context carries its backend, its `DeviceMemory` (a device-memory budget) and `RunSettings` — see [Device memory](inference.md#device-memory-gpu-backends). So a rig can
+Each context carries its backend, its `DeviceMemory` (a device-memory budget), its `Precision`
+(`float32` in full precision unless it allows TensorFloat-32 on a card — see
+[Precision](inference.md#precision-gpu-backends)) and `RunSettings` — see [Device memory](inference.md#device-memory-gpu-backends). So a rig can
 build on one device and train on another:
 
 ```csharp
@@ -712,7 +714,7 @@ what the running step's session allocates, which is held to what the state and b
 see [A context's device-memory budget](inference.md#a-contexts-device-memory-budget). The rig keeps a
 compiled step for up to four input shapes; further shapes share one shape-generic step.
 
-A context's settings are fixed at construction: budget, `ShrinkArenaAfterRun` (implied by a budget), and the `CancellationToken` that abandons the step running — see
+A context's settings are fixed at construction: budget, precision, `ShrinkArenaAfterRun` (implied by a budget), and the `CancellationToken` that abandons the step running — see
 [Stopping a run](inference.md#stopping-a-run); to stop a `Fit` or `Train` and keep its progress, pass
 its own `cancellationToken` instead ([Stopping and watching a run](#stopping-and-watching-a-run)). Put them on the `runtimeContext` you pass to
 `FromScratch`. To watch a run near the card's limit, read the static `DeviceMemory` class and the

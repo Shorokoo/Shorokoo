@@ -747,21 +747,16 @@ internal static class SideBySideModel
     internal const double RuntimeTolerance = AutoTest.Tolerance;
 
     /// <summary>
-    /// What the host and the card may differ by, which is a good deal more. An NVIDIA card from
-    /// Ampere on puts an fp32 MatMul through its tensor cores in TF32 unless told otherwise --
-    /// ten mantissa bits against fp32's twenty-three -- so its answer sits a long way from a CPU
-    /// that really did the sum in fp32, and no amount of correctness on either side closes that
-    /// gap.
+    /// What the host and the card may differ by. Both compute float32 in full float32 precision
+    /// (<see cref="Shorokoo.Core.Backends.PrecisionSettings"/>), so they differ only in the order
+    /// the card adds its terms up in.
     ///
-    /// <para>Measured rather than guessed: this model deviates by 8.3e-4 over one pass on an
-    /// RTX 4090, and by 2.5e-3 where a value the card produced is fed back through it, the input
-    /// error and the arithmetic error compounding. Running the same test under
-    /// <c>NVIDIA_TF32_OVERRIDE=0</c> brings every arm back inside
-    /// <see cref="RuntimeTolerance"/>, which is what identifies TF32 as the cause. The bound is
-    /// set clear of the worst of those with room to spare, and is still four orders of magnitude
-    /// tighter than a backend that had genuinely miscomputed the model would land.</para>
+    /// <para>Measured on an RTX 4090, the same on the ONNX Runtime, PyTorch and JAX CUDA backends:
+    /// this model deviates by 1.2e-7 over one pass, and by 3.6e-7 where a value one device produced
+    /// is fed back through the model on the other. On ONNX Runtime and PyTorch a card allowed
+    /// TensorFloat-32 lands at 8.3e-4 and 2.5e-3, so the bound sits well clear of both.</para>
     /// </summary>
-    internal const double DeviceTolerance = 5e-3;
+    internal const double DeviceTolerance = 2e-6;
 
     /// <summary>
     /// Asserts two backends answered alike, to <paramref name="tolerance"/> -- absolute near
@@ -808,13 +803,14 @@ internal static class SideBySideModel
 
     /// <summary>What <see cref="LargeLayers"/> may deviate by from the host's where the card computes
     /// float32 in full float32 precision, and so only adds its terms up in another order. Measured on an
-    /// RTX 4090, on ONNX Runtime and PyTorch alike: 3.9e-6 for the product and 3.8e-6 for the
-    /// convolution.</summary>
+    /// RTX 4090 on every CUDA backend, Windows and Linux: at most 4.0e-6 for the product, 4.2e-6 for the
+    /// convolution and 1.1e-6 for the LSTM.</summary>
     internal const double FullPrecisionTolerance = 2e-5;
 
     /// <summary>What <see cref="LargeLayers"/> may deviate by from the host's where the card computes
-    /// float32 in TensorFloat-32, rounding each operand's significand to 11 bits. Measured on an RTX 4090,
-    /// on ONNX Runtime and PyTorch alike: 2.5e-3 for the product and 1.8e-3 for the convolution.</summary>
+    /// float32 in TensorFloat-32, rounding each operand's significand to 11 bits. Measured on an RTX 4090:
+    /// 2.5e-3 for the product, 1.8e-3 for the convolution and 1.3e-3 for the LSTM on ONNX Runtime and
+    /// PyTorch, and 2.5e-3 for the product and 8.5e-4 for the LSTM on JAX.</summary>
     internal const double TensorFloat32Tolerance = 1e-2;
 
     internal static void AssertFullPrecision(float[][] host, float[][] card)

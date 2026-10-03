@@ -31,6 +31,10 @@ Related: [core-types.md](core-types.md) · [defining-models.md](defining-models.
   which the allocator its sessions allocate through holds each run to —
   [Device memory](#device-memory-gpu-backends). Diagnostics start at
   [What one session's allocator did](#what-one-sessions-allocator-did).
+- **`float32` is computed in full `float32` precision on every backend and device.** A context
+  that sets `Precision = new PrecisionSettings { AllowTensorFloat32 = true }` lets a CUDA card
+  compute its `float32` products, convolutions and recurrent layers in TensorFloat-32 instead:
+  faster, and about three decimal digits less precise — [Precision](#precision-gpu-backends).
 
 ## Workflow: one-shot evaluation
 
@@ -984,6 +988,56 @@ name, from the machine's CUDA 13 runtime or the copy the process already holds u
 and PyTorch loads its environment's. Two copies of these run side by side: they call one another
 only through public, versioned entry points, and both work in the card's one context per process,
 so memory either one allocates is good to the other.
+
+### Precision (GPU backends)
+
+`float32` is computed in full `float32` precision on every backend and every device: a product, a
+convolution or a recurrent layer of `float32` operands is computed in `float32` throughout, so a
+model computes the same on a card as on the host, but for the order its sums are added in. Measured
+on an RTX 4090, a 1024-square `MatMul`, a 64-channel 3×3 `Conv` and a 256-unit `LSTM` land within
+5e-6 of the host's results (the largest difference over the largest value), on every CUDA
+backend.
+
+A card from NVIDIA's Ampere generation on can compute those operators faster in **TensorFloat-32**
+(TF32): on its tensor cores, with each operand's significand rounded from 24 bits to 11 and the sums
+kept in `float32`. A context asks for it with its `Precision`:
+
+```csharp
+using Shorokoo.Core.Backends;
+using Shorokoo.Runtime;
+
+var fast = new ComputeContext(new LinuxGpuBackend())
+{
+    Precision = new PrecisionSettings { AllowTensorFloat32 = true },
+};
+```
+
+The same three operators then land up to 2.5e-3 from the host's — about three decimal digits short
+of `float32`'s seven. What full precision costs against it, measured on an RTX 4090: a 4096-square
+`MatMul` takes 1.57 times as long, and a convolutional network's training step 2.6 times as long
+on ONNX Runtime and 2.3 times on PyTorch; the training steps of the other model families measured
+were within their run-to-run noise.
+
+| Backend | By default | With `AllowTensorFloat32` |
+|---|---|---|
+| ONNX Runtime CUDA (`WinGpuBackend`, `LinuxGpuBackend`) | the CUDA provider's `use_tf32` is `0` | `use_tf32` is `1`: cuBLAS products and cuDNN convolutions and recurrent layers in TF32 |
+| [PyTorch](pytorch-backend.md#runs) CUDA | each run sets `torch.backends.cuda.matmul.allow_tf32` and `torch.backends.cudnn.allow_tf32` off as it starts | each run sets both on: products, cuDNN convolutions and recurrent layers in TF32 |
+| [JAX](jax-backend.md#runs) CUDA | every product and convolution is compiled at `Precision.HIGHEST` | compiled at `Precision.HIGH`: products in TF32; XLA computes convolutions in full precision at every precision |
+| every CPU backend | full precision | no effect: full precision |
+
+- **It is read when a session is built**, like [`DeviceMemory`](#device-memory-gpu-backends): a
+  graph compiled on the context keeps the precision the context carries, and a training rig's steps
+  compute in its `runtimeContext`'s. Set it on the context from the start.
+- **It allows TF32, and never requires it.** A backend uses it where its kernels can: XLA puts a
+  small product, or any convolution, through a full-precision kernel all the same.
+- **Only `float32` changes.** `Float16` and `BFloat16` products run on the tensor cores in either
+  case, and `Double` never does.
+- **PyTorch's switches are the whole process's.** A run on a card sets them from its own session as
+  it starts, so a session's precision does not depend on what ran before it, nor on code of your own
+  that sets them. Runs of sessions that set them differently do not overlap: while a run that allows
+  TF32 is running, runs on the cards that do not wait, and the other way round.
+- **`NVIDIA_TF32_OVERRIDE=0`** in a process's environment turns TF32 off in cuBLAS and cuDNN for the
+  whole process, a context that allows it included.
 
 ### Device memory (GPU backends)
 

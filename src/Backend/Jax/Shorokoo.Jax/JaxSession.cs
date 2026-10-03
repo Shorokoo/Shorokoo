@@ -60,9 +60,10 @@ internal sealed class JaxSession : IShorokooSession
     }
 
     /// <summary>The precision XLA compiles the products and convolutions of a session of
-    /// <paramref name="backend"/> in, as JAX names it: <c>HIGH</c> — TensorFloat-32 for <c>float32</c>
-    /// on a card that has it — where <paramref name="precision"/> allows TensorFloat-32 and the backend
-    /// is on a card, and otherwise <c>HIGHEST</c>, full precision.</summary>
+    /// <paramref name="backend"/> in, as JAX names it: <c>HIGH</c> — TensorFloat-32 for a
+    /// <c>float32</c> product on a card that has it — where <paramref name="precision"/> allows
+    /// TensorFloat-32 and the backend is on a card, and otherwise <c>HIGHEST</c>, full
+    /// precision.</summary>
     internal static string Float32Precision(JaxBackend backend, PrecisionSettings precision)
         => backend.OnCuda && precision.AllowTensorFloat32 ? "HIGH" : "HIGHEST";
 

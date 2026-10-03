@@ -157,10 +157,13 @@ session binds no output aliases.
 | **Arena statistics** | none | JAX's allocator on the device (`Device.memory_stats`) |
 | **`TraceNodePlacement`** | every node on `cpu` | every node on `cuda:N` |
 | **`DeterministicCompute`** | not applied | not applied: XLA's kernels run as they otherwise would |
+| **`Precision.AllowTensorFloat32`** | no effect: `float32` in full precision | off by default: every product and convolution is compiled at `Precision.HIGHEST`; on, at `Precision.HIGH`, which XLA computes in TensorFloat-32 for products and in full precision for convolutions |
 | **Log severity** | Python warnings a run raises are shown at `Warning` and below, not above | same |
 
-Floating-point products and convolutions run in the operands' full precision; `float32`
-operands are never rounded to TensorFloat-32.
+Floating-point products and convolutions run in the operands' full precision unless the context
+allows TensorFloat-32 ([Precision](inference.md#precision-gpu-backends)): the precision is compiled
+into each program, from the session's context, so sessions of either kind run side by side. A
+determinant (`Det`) and its gradient are factorized in full precision either way.
 
 ## Limitations
 

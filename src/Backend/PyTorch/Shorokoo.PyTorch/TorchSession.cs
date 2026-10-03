@@ -31,8 +31,8 @@ namespace Shorokoo.PyTorch;
 /// <see cref="PrecisionSettings"/> as it starts, under the interpreter lock: off, which is full
 /// <c>float32</c> precision, unless the session was built allowing TensorFloat-32. torch releases
 /// that lock inside each operator, so runs on cards that set the switches differently do not run at
-/// once: a run that allows TensorFloat-32 has the process's cards to itself, and runs in full
-/// precision share them. A run on the CPU reads neither switch and sets neither.</para>
+/// once: a run that allows TensorFloat-32 is the only torch run on a card while it runs, and runs in
+/// full precision run beside one another. A run on the CPU reads neither switch and sets neither.</para>
 /// </summary>
 internal sealed class TorchSession : IShorokooSession
 {

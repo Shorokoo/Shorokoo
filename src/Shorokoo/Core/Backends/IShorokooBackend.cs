@@ -279,8 +279,9 @@ public interface IShorokooBackend
 
     // How this backend lays a run's values out in memory, as the training rig's memory-aware pass
     // charges them while it searches (see ModelledRunPeak for how it then judges). ONNX Runtime's
-    // allocation plan is the default; a backend running a model's translation lays them out as the
-    // translation does.
+    // allocation plan is the default; ONNX Runtime on the host adds what its CPU kernels hold beside
+    // their outputs, and a backend running a model's translation lays them out as the translation
+    // does.
     //
     // A decorator forwards this, as it forwards every member with a default body.
     internal Shorokoo.Core.AutoDiffCheckpointing.RunLayout RunLayout => Shorokoo.Core.AutoDiffCheckpointing.RunLayout.OnnxRuntime;

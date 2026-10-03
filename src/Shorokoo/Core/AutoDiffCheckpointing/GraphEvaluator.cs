@@ -43,6 +43,13 @@ internal enum RunLayout
     OnnxRuntime,
 
     /// <summary>
+    /// ONNX Runtime's on the host: as <see cref="OnnxRuntime"/>, and its CPU <c>Where</c> selects
+    /// each operand into a temporary of the output's size before merging the two into the output,
+    /// so the node holds two values of its output's size beside it.
+    /// </summary>
+    OnnxRuntimeHost,
+
+    /// <summary>
     /// A model translation's (PyTorch's): every value is freed after its last read, which the
     /// caching allocator has again at once; a slice, reshape, transpose, expansion or split, a cast to
     /// the type it has and a one-input sum, mean, maximum or minimum is its input's memory; and an
@@ -118,7 +125,7 @@ internal class GraphEvaluator
         RunLayout layout = RunLayout.OnnxRuntime)
     {
         _perfRegistry = perfRegistry ?? new OpPerfRegistry();
-        _modelOrtBufferReuse = modelOrtBufferReuse && layout == RunLayout.OnnxRuntime;
+        _modelOrtBufferReuse = modelOrtBufferReuse && layout != RunLayout.Translation;
         _state = state;
         _layout = layout;
     }
@@ -243,6 +250,9 @@ internal class GraphEvaluator
             var perfInput = BuildOpPerfInput(node, pos, shapeInfo, tensorLastUse, consumerOpCodes);
             var perfResult = _perfRegistry.Estimate(perfInput);
             extraAtPos[pos] = perfResult.ExtraMemoryBytes;
+            if (_layout == RunLayout.OnnxRuntimeHost && node.OpCode == Shorokoo.Core.Nodes.NodeDefinitions.OpCodes.WHERE
+                && nodeOutputs.Count > 0 && nodeOutputs[0] is { } selected && shapeInfo.GetTensorInfo(selected) is { } selectedInfo)
+                extraAtPos[pos] += 2 * selectedInfo.MemoryBytes;
 
             // Step 3: Add output tensor memory (accounting for in-place reuse)
             var inPlaceReuse = perfResult.InPlaceBufferReuse;

@@ -183,6 +183,11 @@ namespace Shorokoo
             }
         }
 
+        /// <summary>The memory weight the memory-aware pass of a rig built on this thread weighs its
+        /// strategies with, in place of its default (a measurement's hook); null for the
+        /// default.</summary>
+        internal static readonly AsyncLocal<double?> PassMemoryWeight = new();
+
         /// <summary>
         /// What the backend of the context this rig's steps run on holds at the peak of a run of a
         /// step graph, at the shapes of <paramref name="exemplars"/> — the model it would be handed,
@@ -4989,8 +4994,9 @@ namespace Shorokoo
             if (TrainingBackend.LowersAutoGrad)
             {
                 Stage("OptimizeTrainingStepGraph");
-                var optimizer = new MemoryAwareGraphOptimizer(evaluator: evaluator, shapeInference: shapeInferencer,
-                    backendPeak: BackendPeakOf(allInputs));
+                var optimizer = new MemoryAwareGraphOptimizer(
+                    memoryFactor: PassMemoryWeight.Value ?? MemoryAwareGraphOptimizer.DefaultMemoryWeight,
+                    evaluator: evaluator, shapeInference: shapeInferencer, backendPeak: BackendPeakOf(allInputs));
                 optResult = optimizer.OptimizeWithShapeInfo(graph, shapeInfo);
             }
             else

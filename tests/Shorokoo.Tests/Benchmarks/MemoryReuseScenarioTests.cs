@@ -228,11 +228,15 @@ public class MemoryReuseScenarioTests
     /// <c>$SHOROKOO_MEMORY_REUSE_ROUNDS</c> times — for its peak (as
     /// <see cref="RecordWhatBoundsATrainingStepsPeak"/> reads it) and its median time; beside the
     /// pass's own figures for both (its evaluator's peak and compute) and, where the backend models a
-    /// run, the backend's peak. <c>$SHOROKOO_MEMORY_REUSE_SCALE</c> multiplies each family's batch.
+    /// run, the backend's peak. <c>$SHOROKOO_MEMORY_REUSE_SCALE</c> multiplies each family's batch;
+    /// <c>$SHOROKOO_MEMORY_REUSE_MEMORY_WEIGHT</c> sets the pass's memory weight.
     /// </summary>
     [Fact]
     public void RecordWhatThePassBuysOnEachBackend()
     {
+        TrainingRig.PassMemoryWeight.Value = double.TryParse(Environment.GetEnvironmentVariable("SHOROKOO_MEMORY_REUSE_MEMORY_WEIGHT"),
+            NumberStyles.Float, CultureInfo.InvariantCulture, out var weight) ? weight : null;
+        var weightName = TrainingRig.PassMemoryWeight.Value?.ToString(CultureInfo.InvariantCulture) ?? "default";
         var backend = Environment.GetEnvironmentVariable("SHOROKOO_MEMORY_REUSE_BACKEND") ?? "ort";
         var onCard = backend == "torch-cuda"
                      || (backend == "ort" && DefaultBackend.Instance.GetType().Assembly.GetName().Name?.EndsWith("GPU", StringComparison.Ordinal) == true);
@@ -242,7 +246,7 @@ public class MemoryReuseScenarioTests
         var where = backend == "ort" ? $"ONNX Runtime on the {(onCard ? "card" : "host")}" : backend;
         var lines = new List<string>
         {
-            $"# What the memory-aware pass buys a training step, {where}, batch x{scale}", "",
+            $"# What the memory-aware pass buys a training step, {where}, batch x{scale}, memory weight {weightName}", "",
             "| family | chosen | real peak, handed -> chosen | step ms, handed -> chosen | pass's model, handed -> chosen | backend's model, handed -> chosen | modelled compute, chosen / handed |",
             "|---|---|---|---|---|---|---|",
         };
@@ -308,7 +312,7 @@ public class MemoryReuseScenarioTests
                       + $"| {Mib(result.AllStrategies[0].Evaluation.PeakMemoryBytes)} -> {Mib(result.Evaluation.PeakMemoryBytes)} "
                       + $"| {(backendPeaks is null ? "-" : $"{Mib(backendPeaks[0])} -> {Mib(backendPeaks[chosenAt])}")} "
                       + $"| {result.Evaluation.TotalComputeTime / result.AllStrategies[0].Evaluation.TotalComputeTime:0.000} |");
-            File.WriteAllText(Path.Combine(OutputDirectory(), $"what-the-pass-buys-{(backend == "ort" ? onCard ? "card" : "host" : backend)}-x{scale}.md"), string.Join("\n", lines) + "\n");
+            File.WriteAllText(Path.Combine(OutputDirectory(), $"what-the-pass-buys-{(backend == "ort" ? onCard ? "card" : "host" : backend)}-x{scale}-w{weightName}.md"), string.Join("\n", lines) + "\n");
         }
     }
 

@@ -154,6 +154,12 @@ public abstract class OrtBackend : IShorokooBackend
         ? KernelWorkaroundSets.OnnxRuntime
         : KernelWorkaroundSets.OnnxRuntimeCuda;
 
+    /// <summary>ONNX Runtime's allocation plan, with what its CPU kernels hold beside their outputs
+    /// where this backend runs on the host.</summary>
+    Shorokoo.Core.AutoDiffCheckpointing.RunLayout IShorokooBackend.RunLayout => _cudaDeviceId is null
+        ? Shorokoo.Core.AutoDiffCheckpointing.RunLayout.OnnxRuntimeHost
+        : Shorokoo.Core.AutoDiffCheckpointing.RunLayout.OnnxRuntime;
+
     /// <summary>
     /// Creates an ORT inference session over a serialized ONNX model, on this backend's
     /// execution provider.

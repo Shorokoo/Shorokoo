@@ -381,25 +381,25 @@ public class AutoDiffCheckpointingCoverageTests
     }
 
     [Fact]
-    public void TestATranslationsLayoutHoldsAViewAsItsInputAndWritesAWhereOverItsDyingValueCoverage()
+    public void TestEachLayoutChargesWhatItsBackendHoldsAViewAWhereAndItsTemporariesCoverage()
     {
-        Assert.Equal((2 * Mb, Mb + 4), PeaksByLayout(x => OnnxOp.ReduceSum(OnnxOp.Transpose(x, null))));
-        Assert.Equal((9 * Mb / 4 + 4, 2 * Mb + 8), PeaksByLayout(x =>
+        Assert.Equal((2 * Mb, 2 * Mb, Mb + 4), PeaksByLayout(x => OnnxOp.ReduceSum(OnnxOp.Transpose(x, null))));
+        Assert.Equal((9 * Mb / 4 + 4, 17 * Mb / 4 + 4, 2 * Mb + 8), PeaksByLayout(x =>
         {
             var e = OnnxOp.Exp(x);
             return OnnxOp.ReduceSum(OnnxOp.Where(OnnxOp.Greater(e, Scalar(1f)), e, Scalar(0f)));
         }));
     }
 
-    /// <summary>The peak of a graph of one [512, 512] input, under ONNX Runtime's layout and a
-    /// translation's.</summary>
-    private static (long OnnxRuntime, long Translation) PeaksByLayout(Func<Tensor<float32>, Variable> body)
+    /// <summary>The peak of a graph of one [512, 512] input, under ONNX Runtime's layout on a card,
+    /// on the host, and a translation's.</summary>
+    private static (long OnnxRuntime, long OnnxRuntimeHost, long Translation) PeaksByLayout(Func<Tensor<float32>, Variable> body)
     {
         var x = InputTensor<float32>("x", rank: 2);
         var graph = new InternalComputationGraph([x], [body(x)]);
         var shapeInfo = Infer(graph, [512, 512]);
-        return (new GraphEvaluator().Evaluate(graph, shapeInfo).PeakMemoryBytes,
-            new GraphEvaluator(layout: RunLayout.Translation).Evaluate(graph, shapeInfo).PeakMemoryBytes);
+        long Peak(RunLayout layout) => new GraphEvaluator(layout: layout).Evaluate(graph, shapeInfo).PeakMemoryBytes;
+        return (Peak(RunLayout.OnnxRuntime), Peak(RunLayout.OnnxRuntimeHost), Peak(RunLayout.Translation));
     }
 
     private static readonly StepState StateInPlace = new([(0, 0)], WrittenInPlace: true);

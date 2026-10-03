@@ -736,6 +736,8 @@ public class TrainingRigFromScratchCoverageTests
         Assert.Equal(2160, OrtPeak("x:float[1,4,4,4] w:float[4,3,3,3]", "O", true, [], Op("ConvTranspose", "x w", "O")));
         Assert.Equal(1000, OrtPeak("x:float[4,2,3] w:float[1,20,3] r:float[1,20,5]", "O", true, [],
             ComputeContextLifetimeCoverageTests.Op("LSTM", "x w r", "O", attribute: ("hidden_size", 5))));
+        Assert.Equal(8391776, OrtPeak("x:float[4,2,3] w:float[1,20,3] r:float[1,20,5]", "O", false, [],
+            ComputeContextLifetimeCoverageTests.Op("LSTM", "x w r", "O", attribute: ("hidden_size", 5))));
         Assert.Equal(16896, OrtPeak("x:float[4,8,16,4]", "O", false, [], Op("Exp", "x", "e"), Op("ReduceMean", "e two", "O")));
         Assert.Equal(10240, OrtPeak("x:float[4,8,16,4]", "O", false, [], Op("Exp", "x", "e"), Op("ReduceMean", "e three", "O")));
         Assert.Equal(8704, OrtPeak("x:float[4,8,16,4]", "O", true, [], Op("Exp", "x", "e"), Op("ReduceMean", "e two", "O")));

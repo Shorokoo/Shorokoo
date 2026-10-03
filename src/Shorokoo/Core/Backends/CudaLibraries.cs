@@ -38,7 +38,9 @@ public static class CudaLibraries
     /// </summary>
     /// <exception cref="InvalidOperationException">A pinned library is in neither the cache nor a copy
     /// that matches it exactly, and its wheel could not be fetched; the message names the library,
-    /// where it was looked for and the size of the download.</exception>
+    /// where it was looked for and the size of the download. Or the process already holds another
+    /// release of a pinned library, which something loaded before this was called, and the pinned
+    /// one cannot load beside it; the message names the copies held.</exception>
     /// <exception cref="InvalidDataException">The wheel fetched is not the one pinned.</exception>
     /// <exception cref="TimeoutException">Another process has been filling the cache folder for longer
     /// than an hour.</exception>
@@ -60,7 +62,23 @@ public static class CudaLibraries
                 // In the pinned order, which puts what a file imports by name ahead of it. Loaded for
                 // the life of the process, like every library a backend binds.
                 foreach (var file in pin.Files)
-                    NativeLibrary.Load(Path.Combine(directory, file.FileName));
+                {
+                    try
+                    {
+                        NativeLibrary.Load(Path.Combine(directory, file.FileName));
+                    }
+                    catch (DllNotFoundException ex) when (Conflict(directory, PinnedFileNames(pins), LoadedModules()) is { } held)
+                    {
+                        throw new InvalidOperationException(
+                            $"The pinned {pin} cannot be loaded from '{directory}' ({ex.Message}). This process "
+                            + $"already holds another release of some of its libraries ({held}), loaded before the "
+                            + "CUDA backend prepared the pinned one. Those libraries load one another by name, so "
+                            + "the pinned copies bind to the ones held, and two releases do not mix. Call "
+                            + $"{nameof(CudaLibraries)}.{nameof(Prepare)}() before anything else in the process loads "
+                            + "cuDNN or cuBLAS: a CUDA session of your own, or another framework's CUDA backend.",
+                            ex);
+                    }
+                }
             }
             _prepared = true;
         }
@@ -74,12 +92,21 @@ public static class CudaLibraries
     internal static string? Conflict(string directory)
     {
         if (!OperatingSystem.IsWindows() || CudaLibraryPins.Current is not { } pins) return null;
+        return Conflict(directory, PinnedFileNames(pins), LoadedModules());
+    }
+
+    private static IEnumerable<string> PinnedFileNames(CudaLibraryPins pins)
+        => pins.Libraries.SelectMany(pin => pin.Files).Select(file => file.FileName);
+
+    /// <summary>The file of every module this process has loaded.</summary>
+    private static List<string> LoadedModules()
+    {
         using var process = Process.GetCurrentProcess();
         var loaded = new List<string>();
         foreach (ProcessModule module in process.Modules)
             using (module)
                 loaded.Add(module.FileName);
-        return Conflict(directory, pins.Libraries.SelectMany(pin => pin.Files).Select(file => file.FileName), loaded);
+        return loaded;
     }
 
     /// <summary>The same, for the files <paramref name="loaded"/> lists as the ones the process

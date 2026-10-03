@@ -1193,6 +1193,17 @@ public class PyTorchBackendCoverageTests
     }
 
     [Fact]
+    public void TestTheMemoryAwarePassTakesATwoLayerEncodersStepOnATorchContextBelowTwoThirdsOfItsPeak()
+    {
+        using var context = new ComputeContext(Torch);
+        var sample = TensorData([128L, 128L, 128L], new float[128 * 128 * 128]);
+        var result = TrainingRig.FromScratch(Benchmarks.MemoryPassEncoder2.ComputationGraph, Shorokoo.Modules.Losses.L2Loss.ComputationGraph,
+            Shorokoo.Modules.Optimizers.AdamWOptimizer.ComputationGraph, [sample],
+            new Shorokoo.Modules.Optimizers.AdamWOptimizerHyperparameters { LearningRate = 0.001f }, runtimeContext: context).OptimizationResult;
+        Assert.True(3 * result.Evaluation.PeakMemoryBytes <= 2 * result.AllStrategies[0].Evaluation.PeakMemoryBytes);
+    }
+
+    [Fact]
     public void TestATorchRunIsModelledFreeingEachValueAtItsLastReadWithItsViewsWritesOverDyingOperandsAndAliasedOutputsTakingNothing()
     {
         Assert.Equal(8192, RunPeak(GraphOn("a:float[1024]", "O", Op("Exp", "a", "e"), Op("Neg", "a", "f"), Op("Add", "e f", "O"))));

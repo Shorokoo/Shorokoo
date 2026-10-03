@@ -73,7 +73,10 @@ internal sealed class OrtPlacements : IDisposable
 
     // The model as handed over: in memory where it is small, and otherwise in a file of its own.
     private readonly byte[]? _model;
-    private string? _modelFile;
+    // The files kept on disk to build from: the model, where it is large, and the graph ONNX Runtime
+    // runs with its initializers.
+    private readonly KeptFiles _files = new();
+    private readonly object _sources = new();
     private readonly VariantBuilder _build;
     private readonly OrtBackend _backend;
     // What the session and its variants hold of the allocator accounts they share, read either side
@@ -85,7 +88,6 @@ internal sealed class OrtPlacements : IDisposable
     // The graph ONNX Runtime runs for the plain session, as a probe build wrote it out, and the folder
     // it is in with its initializers, kept for the session's life to build variants from.
     private ModelProto? _runs;
-    private string? _runsDirectory;
     private string? _broken;
     private bool _disposed;
 
@@ -100,7 +102,7 @@ internal sealed class OrtPlacements : IDisposable
         string runsDirectory, ModelProto runs, IReadOnlySet<string> sharedWeights, VariantBuilder build, OrtBackend backend,
         Func<long> held)
     {
-        _runsDirectory = runsDirectory;
+        _files.Runs = runsDirectory;
         _runs = runs;
         _sharedWeights = sharedWeights;
         _build = build;
@@ -120,15 +122,15 @@ internal sealed class OrtPlacements : IDisposable
         else
             try
             {
-                _modelFile = Path.Combine(Path.GetTempPath(), "shorokoo-model-" + Guid.NewGuid().ToString("N") + ".onnx");
-                File.WriteAllBytes(_modelFile, model);
+                _files.Model = Path.Combine(Path.GetTempPath(), "shorokoo-model-" + Guid.NewGuid().ToString("N") + ".onnx");
+                File.WriteAllBytes(_files.Model, model);
             }
             catch (Exception unwritable) when (unwritable is IOException or UnauthorizedAccessException)
             {
                 // Placing is a saving and never a requirement: a model that cannot be kept is not
                 // placed in.
                 _broken = $"the model could not be kept in a file: {unwritable.Message}";
-                DeleteModelFile();
+                _files.Delete();
             }
         _backend = backend;
         _held = held;
@@ -153,6 +155,11 @@ internal sealed class OrtPlacements : IDisposable
         internal Dictionary<string, (long[] Shape, ShorokooTensorElementType Type)> Shapes = new(StringComparer.Ordinal);
         internal OrtSession? Variant;
         internal string? Refusal;
+        // Taken while the signature is planned, so that planning holds back its own runs alone; how
+        // many runs are on the variant now; and whether its first placed run was measured.
+        internal readonly object Planning = new();
+        internal int Running;
+        internal bool Measured;
 
         // What the entry was planned over, for a measurement to read: the graph ONNX Runtime runs
         // for the plain session, the shapes the run's inputs came in, and its blocks.
@@ -239,11 +246,13 @@ internal sealed class OrtPlacements : IDisposable
     }
 
     /// <summary>
-    /// Runs <paramref name="owner"/> on a signature <paramref name="entry"/> stands for, the way the
-    /// entry's stage says: plain while it is measured or once refused, placed on its variant while
-    /// that is tried or once adopted. <paramref name="kept"/> answers the consumed values a placed
-    /// output stands on, which the run does not release: the block each became releases it with its
-    /// last output.
+    /// Runs <paramref name="owner"/> on a signature <paramref name="entry"/> stands for, planning it
+    /// first where nothing has: placed on its variant once adopted, plain once refused. Planning a
+    /// signature holds back only its own runs. The first placed run is measured; a placed run that
+    /// fails refuses the signature, so the runs after it run plain, and a refused signature's variant
+    /// goes once no run is on it. <paramref name="kept"/> answers the consumed values a placed output
+    /// stands on, which the run does not release: the block each became releases it with its last
+    /// output.
     /// </summary>
     internal IReadOnlyList<IShorokooTensorValue> Run(
         OrtSession owner, Entry entry, IReadOnlyDictionary<string, IShorokooTensorValue> inputs,
@@ -253,33 +262,56 @@ internal sealed class OrtPlacements : IDisposable
         out HashSet<IShorokooTensorValue>? kept)
     {
         kept = null;
-        OrtSession? variant;
-        bool first;
-        lock (_gate)
+        lock (entry.Planning)
         {
             if (entry.Stage == Stage.Unplanned)
             {
                 Prepare(entry, inputs, blocks, outputNames);
                 Settled?.Invoke(entry);
             }
-            variant = entry.Stage == Stage.Adopted ? entry.Variant : null;
-            first = entry.PlacedPeak == 0;
+        }
+        OrtSession? variant = null;
+        var first = false;
+        lock (_gate)
+        {
+            if (entry.Stage == Stage.Adopted && entry.Variant is { } adopted)
+            {
+                variant = adopted;
+                entry.Running++;
+                first = !entry.Measured;
+                entry.Measured = true;
+            }
         }
         if (variant is null) return plain();
-        var results = RunPlaced(variant, entry, blocks, outputNames, placed, out kept, out var peak);
-        if (first)
-            lock (_gate)
-            {
-                if (entry.Stage == Stage.Adopted && entry.PlacedPeak == 0)
+        try
+        {
+            var results = RunPlaced(variant, entry, blocks, outputNames, placed, first, out kept, out var peak);
+            if (first)
+                lock (_gate)
                 {
                     entry.PlacedPeak = Math.Max(peak, 1);
                     // The model was wrong where the placed run asked for more than it said the plain
                     // one would: the runs after this one run plain.
-                    if (peak + entry.VariantHeld + Margin(entry.PredictedPlainPeak) > entry.PredictedPlainPeak)
+                    if (entry.Stage == Stage.Adopted && peak + entry.VariantHeld + Margin(entry.PredictedPlainPeak) > entry.PredictedPlainPeak)
                         Refuse(entry, $"placed, the run asked {peak} bytes against {entry.PredictedPlainPeak} modelled plain");
                 }
+            return results;
+        }
+        catch (Exception failure) when (failure is not OperationCanceledException)
+        {
+            lock (_gate)
+                if (entry.Stage == Stage.Adopted)
+                    Refuse(entry, $"the placed run failed: {failure.GetType().Name}: {failure.Message}");
+            throw;
+        }
+        finally
+        {
+            lock (_gate)
+            {
+                entry.Running--;
+                if (entry.Running == 0 && (entry.Stage != Stage.Adopted || _disposed)) LetGoOfVariant(entry);
             }
-        return results;
+        }
     }
 
     /// <summary>The least a plan must save to be kept: a mebibyte, or a sixty-fourth of the plain
@@ -292,8 +324,9 @@ internal sealed class OrtPlacements : IDisposable
     private IReadOnlyList<IShorokooTensorValue> RunPlaced(
         OrtSession variant, Entry entry, Dictionary<string, OrtTensorValue> blocks, IReadOnlyList<string> outputNames,
         Func<OrtSession, IReadOnlyDictionary<string, OrtSession.PlacedBinding>, IReadOnlyList<IShorokooTensorValue>> placed,
-        out HashSet<IShorokooTensorValue>? kept, out long peak)
+        bool measure, out HashSet<IShorokooTensorValue>? kept, out long peak)
     {
+        peak = 0;
         kept = new HashSet<IShorokooTensorValue>(ReferenceEqualityComparer.Instance);
         var asked = new HashSet<string>(outputNames, StringComparer.Ordinal);
         var shared = new Dictionary<string, (SharedBlock Block, long Base)>(StringComparer.Ordinal);
@@ -326,7 +359,7 @@ internal sealed class OrtPlacements : IDisposable
                 }
             }
             if (PlacedRunFault?.Invoke() is { } fault) throw fault;
-            var results = variant.Measured(() => placed(variant, bindings), out peak);
+            var results = measure ? variant.Measured(() => placed(variant, bindings), out peak) : placed(variant, bindings);
             // The run is over: what of each block no output it handed back stands on goes back.
             foreach (var (block, _) in shared.Values) block.Settle();
             return results;
@@ -456,7 +489,7 @@ internal sealed class OrtPlacements : IDisposable
         try
         {
             var heldBefore = _held();
-            variant = _build(WithOutputs(model, exposed, shapes), directory, fromRuns ? _runsDirectory : null, true);
+            variant = _build(WithOutputs(model, exposed, shapes), directory, fromRuns ? _files.Runs : null, true);
             var variantHeld = _held() - heldBefore;
             var graph = ReadOptimized(directory).Graph!;
             entry.VariantGraph = graph;
@@ -490,8 +523,19 @@ internal sealed class OrtPlacements : IDisposable
                               + $"{entry.PredictedPlacedPeak} placed in the variant's order, {variantHeld} held by the variant");
                 return (null, false);
             }
-            entry.Variant = variant;
-            entry.Stage = Stage.Adopted;
+            lock (_gate)
+            {
+                // A session let go of while this was planned keeps no variant: the finally below lets
+                // go of it.
+                if (_disposed)
+                {
+                    entry.Stage = Stage.Refused;
+                    entry.Refusal = "the session was let go of";
+                    return (null, false);
+                }
+                entry.Variant = variant;
+                entry.Stage = Stage.Adopted;
+            }
             variant = null;
             return (plan, true);
         }
@@ -504,8 +548,15 @@ internal sealed class OrtPlacements : IDisposable
 
     /// <summary>Whether <paramref name="entry"/>'s plan saves, by the model, at least the margin
     /// beyond <paramref name="held"/>, what its variant holds of its own.</summary>
-    private static bool Pays(Entry entry, long held)
-        => entry.PredictedPlainPeak - entry.PredictedPlacedPeak - held >= Margin(entry.PredictedPlainPeak);
+    private bool Pays(Entry entry, long held)
+        => entry.PredictedPlainPeak - entry.PredictedPlacedPeak - held - OtherVariantsHeld(entry) >= Margin(entry.PredictedPlainPeak);
+
+    /// <summary>What the variants of the signatures other than <paramref name="entry"/> adopted hold
+    /// of their own: the session holds them all at once, so a plan pays for them too.</summary>
+    private long OtherVariantsHeld(Entry entry)
+    {
+        lock (_gate) return _entries.Values.Where(e => e != entry && e.Stage == Stage.Adopted).Sum(e => e.VariantHeld);
+    }
 
     /// <summary>The bytes of the initializers of <paramref name="model"/> a session built over it
     /// reads in itself: every one but those the session is handed (<see cref="SuppliedInitializer"/>).</summary>
@@ -519,10 +570,17 @@ internal sealed class OrtPlacements : IDisposable
         return bytes;
     }
 
+    /// <summary>Refuses <paramref name="entry"/>: its runs run plain from now on, and its variant
+    /// goes as the last run on it ends, at once where none is.</summary>
     private static void Refuse(Entry entry, string why)
     {
         entry.Stage = Stage.Refused;
         entry.Refusal = why;
+        if (entry.Running == 0) LetGoOfVariant(entry);
+    }
+
+    private static void LetGoOfVariant(Entry entry)
+    {
         entry.Variant?.Dispose();
         entry.Variant = null;
     }
@@ -595,7 +653,7 @@ internal sealed class OrtPlacements : IDisposable
     /// <summary>The model as handed to the backend, for a measurement to read.</summary>
     internal ModelProto OriginalModel
     {
-        get { lock (_gate) return Original(); }
+        get { return Original(); }
     }
 
     /// <summary>The model as handed to the backend, parsed once. One kept in a file is kept parsed
@@ -603,14 +661,19 @@ internal sealed class OrtPlacements : IDisposable
     /// plan over, and never one to build from.</summary>
     private ModelProto Original()
     {
+        lock (_sources) return OriginalUnderLock();
+    }
+
+    private ModelProto OriginalUnderLock()
+    {
         if (_original is not null) return _original;
-        if (_model is null && _modelFile is null) return _original = _runs!;
+        if (_model is null && _files.Model is null) return _original = _runs!;
         if (_model is not null)
         {
             using var stream = new MemoryStream(_model, writable: false);
             return _original = ProtoBuf.Serializer.Deserialize<ModelProto>(stream);
         }
-        using (var file = File.OpenRead(_modelFile!))
+        using (var file = File.OpenRead(_files.Model!))
             _original = ProtoBuf.Serializer.Deserialize<ModelProto>(file);
         foreach (var tensor in _original.Graph?.Initializers ?? [])
             if (tensor.RawData is { Length: > 1024 }) tensor.RawData = [];
@@ -621,19 +684,41 @@ internal sealed class OrtPlacements : IDisposable
     }
 
     /// <summary>The model's bytes, as handed to the backend.</summary>
-    private byte[] ModelBytes() => _model ?? File.ReadAllBytes(_modelFile!);
+    private byte[] ModelBytes() => _model ?? File.ReadAllBytes(_files.Model!);
 
-    private void DeleteModelFile()
+    /// <summary>
+    /// The files a session's placements keep on disk, deleted as the placements are let go of — or,
+    /// where the session is collected without being disposed, as this is finalized: a compiled graph
+    /// held weakly goes that way, and each would otherwise leave a model's worth of files behind. A
+    /// file still mapped by a variant ONNX Runtime has not released yet stays.
+    /// </summary>
+    private sealed class KeptFiles
     {
-        if (_modelFile is null) return;
-        try { File.Delete(_modelFile); } catch (Exception) { }
-        _modelFile = null;
+        internal string? Model;
+        internal string? Runs;
+
+        ~KeptFiles() => Delete();
+
+        internal void Delete()
+        {
+            if (Model is { } model)
+                try { File.Delete(model); } catch (Exception) { }
+            if (Runs is { } runs)
+                try { Directory.Delete(runs, recursive: true); } catch (Exception) { }
+            Model = null;
+            Runs = null;
+        }
     }
 
     /// <summary>The graph ONNX Runtime runs for the plain session, with its initializers in files
     /// beside it: written out by the session as it was built, or else by a probe build of the model,
     /// once, into a folder kept until the session goes.</summary>
     private ModelProto RunGraph()
+    {
+        lock (_sources) return RunGraphUnderLock();
+    }
+
+    private ModelProto RunGraphUnderLock()
     {
         if (_runs is not null) return _runs;
         var directory = Path.Combine(Path.GetTempPath(), "shorokoo-runs-" + Guid.NewGuid().ToString("N"));
@@ -642,7 +727,7 @@ internal sealed class OrtPlacements : IDisposable
         {
             _build(ModelBytes(), directory, null, false).Dispose();
             _runs = ReadOptimized(directory);
-            _runsDirectory = directory;
+            _files.Runs = directory;
             return _runs;
         }
         catch (Exception failure)
@@ -730,17 +815,14 @@ internal sealed class OrtPlacements : IDisposable
         lock (_gate)
         {
             _disposed = true;
+            // A variant a run is on goes as that run ends.
             foreach (var entry in _entries.Values)
-            {
-                entry.Variant?.Dispose();
-                entry.Variant = null;
-            }
-            if (_runsDirectory is not null)
-            {
-                try { Directory.Delete(_runsDirectory, recursive: true); } catch (Exception) { }
-                _runsDirectory = null;
-            }
-            DeleteModelFile();
+                if (entry.Running == 0) LetGoOfVariant(entry);
+        }
+        lock (_sources)
+        {
+            _files.Delete();
+            GC.SuppressFinalize(_files);
         }
     }
 }

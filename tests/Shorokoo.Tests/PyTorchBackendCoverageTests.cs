@@ -1192,6 +1192,23 @@ public class PyTorchBackendCoverageTests
         Assert.True(PassHoldsNoMoreOnTorch(ChunkedSdpaMeanPoolModel.ComputationGraph, [2L, 4L, 256L, 32L]));
     }
 
+    [Fact]
+    public void TestATorchRunIsModelledFreeingEachValueAtItsLastReadWithItsViewsWritesOverDyingOperandsAndAliasedOutputsTakingNothing()
+    {
+        Assert.Equal(8192, RunPeak(GraphOn("a:float[1024]", "O", Op("Exp", "a", "e"), Op("Neg", "a", "f"), Op("Add", "e f", "O"))));
+        Assert.Equal(4096, RunPeak(GraphOn("a:float[1024]", "O", Op("Exp", "a", "e"), Op("Neg", "e", "O"))));
+        Assert.Equal(4096, RunPeak(GraphOn("a:float[32,32]", "O", Op("Exp", "a", "e"), Op("Transpose", "e", "O"))));
+        Assert.Equal(0, RunPeak(GraphOn("a:float[1024] b:float[1024]", "O", Op("Add", "a b", "O")), new OutputAlias("O", "a")));
+        Assert.Equal(4096, RunPeak(GraphOn("a:float[1024] b:float[1024]", "O", Op("Add", "a b", "O"))));
+        Assert.Equal(263168, RunPeak(ComputeContextLifetimeCoverageTests.WithInts(GraphOn("a:float[256,256]", "O",
+            Op("Exp", "a", "e"), Op("ReduceSum", "e axes", "s"), Op("Mul", "a s", "O")), "axes", 1)));
+    }
+
+    /// <summary>What <see cref="TorchRunMemory"/> models a run of <paramref name="graph"/> holding at
+    /// once beyond its inputs, with <paramref name="aliases"/>' outputs written into their
+    /// inputs.</summary>
+    private static long? RunPeak(GraphProto graph, params OutputAlias[] aliases) => TorchRunMemory.Peak(new ModelProto { Graph = graph }, aliases);
+
     /// <summary>Whether the training step a rig on a torch context runs holds no more at its peak
     /// than the step before the memory-aware pass would, each as the translation runs it: in its
     /// order, a view as its input's memory, and a node written over an operand dying there.</summary>

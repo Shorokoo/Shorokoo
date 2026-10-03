@@ -391,13 +391,22 @@ objective. It charges a step's memory as the backend of the rig's runtime contex
 lays a run out: ONNX Runtime's allocation plan, with the temporaries its CPU
 kernels hold beside their outputs on the host; on PyTorch, the translation's —
 each value freed after its last read, a view as its input's memory, a result
-written over an operand dying there. On PyTorch it also judges the steps it weighs
+written over a contiguous operand dying there. It then judges the steps it weighs
 by the backend's own model of a run, so that by that model the step it hands over
-holds no more there than the one it was handed. It is conservative and has no
+holds no more there than the one it was handed. ONNX Runtime's model reads the
+graph ONNX Runtime optimizes and runs, in the order it runs it, with the buffers
+its allocation plan keeps for later values of the same shape and the scratch its
+kernels take: convolutions' and recurrent layers' working buffers on the host, and
+on a card a reduction over inner axes. PyTorch's adds to the translation's layout
+the temporaries of a layer normalization and, on the CPU, of a convolution, and the
+copies torch makes of a value whose strides a reshape or a matrix product cannot
+use as they lie — an element-wise result lies as its operands do, so a product of
+transposed attention heads is transposed too. Where a model cannot tell a value's
+shape, as through a loop, the pass's own figures decide. It is conservative and has no
 opt-out; use the attribute to force a trade it would not take. It picks the
 tensors it recomputes, but not whole-module segments: checkpointing each layer of
-a two-layer transformer encoder holds a further 4–5% less than the pass alone on
-ONNX Runtime, for a fifth more step time or more, and nothing less on PyTorch. The
+a two-layer transformer encoder holds a further 5–6% less than the pass alone on
+ONNX Runtime, for a tenth more step time or more, and 4% less on PyTorch. The
 pass cuts a step's peak memory by anywhere from nothing to about a third on ONNX
 Runtime, for at most a few percent more computation; on PyTorch it can trade more
 — a two-layer encoder's step holds over 40% less, for about a fifth more

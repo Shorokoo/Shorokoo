@@ -714,8 +714,9 @@ namespace Shorokoo.Runtime
         /// explicit context is supplied. Settable to swap in a custom context.
         ///
         /// <para>This names <i>which</i> context is the fallback; it is not a way to reconfigure
-        /// one. A context's <see cref="DeviceMemory"/> and <see cref="RunSettings"/> are
-        /// initialize-only, so assigning here cannot alter a context anything else already holds,
+        /// one. A context's <see cref="DeviceMemory"/>, <see cref="Precision"/> and
+        /// <see cref="RunSettings"/> are initialize-only, so assigning here cannot alter a context
+        /// anything else already holds,
         /// and cannot reach a session that has already been compiled — including those compiled by
         /// the context being replaced. Code that wants a configuration of its own should hold its
         /// own context rather than assign this one.</para>

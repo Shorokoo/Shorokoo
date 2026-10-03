@@ -748,6 +748,12 @@ public class TrainingRigFromScratchCoverageTests
             Op("SequenceAt", "S zero", "O")];
         Assert.Equal(384, OrtPeak("x:float[4,8]", "O", true, [], listed));
         Assert.Equal(768, OrtPeak("x:float[4,8]", "O", false, [], listed));
+        NodeProto[] twoLists = [Op("SequenceEmpty", "", "s"), Op("SequenceEmpty", "", "r"), ComputeContextLifetimeCoverageTests.Loop("three s r", "S R",
+            ComputeContextLifetimeCoverageTests.GraphOf("i c t v", "k u w", Op("Neg", "x", "n"), Op("Exp", "x", "e"),
+                Op("SequenceInsert", "t n", "u"), Op("SequenceInsert", "v e", "w"), Op("Identity", "c", "k"))),
+            Op("SequenceAt", "S zero", "a"), Op("SequenceAt", "R zero", "b"), Op("Add", "a b", "O")];
+        Assert.Equal(768, OrtPeak("x:float[4,8]", "O", true, [], twoLists));
+        Assert.Equal(1536, OrtPeak("x:float[4,8]", "O", false, [], twoLists));
     }
 
     private static NodeProto Op(string op, string inputs, string outputs) => ComputeContextLifetimeCoverageTests.Op(op, inputs, outputs);

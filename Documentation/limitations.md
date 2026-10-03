@@ -393,17 +393,18 @@ kernels hold beside their outputs on the host; on PyTorch, the translation's —
 each value freed after its last read, a view as its input's memory, a result
 written over an operand dying there. On PyTorch it also judges the steps it weighs
 by the backend's own model of a run, so that by that model the step it hands over
-holds no more there than the one it was handed. It is conservative and has no opt-out; use the
-attribute to force a trade it would not take. It recomputes single tensors and
-does not choose whole-module segments itself: checkpointing each layer of a
-two-layer transformer encoder holds a further 4–5% less than the pass alone, and
-costs step time of its own. The pass cuts a step's peak memory by anywhere
-from nothing to about a third on ONNX Runtime, for at most a few percent more
-computation; on PyTorch it can trade more — a two-layer encoder's step holds over
-40% less, for about a fifth more computation. A graph containing a scope (a
-recurrent op in its backward pass, or a forward `If`) gets only its checkpoint
-attributes applied. Separately, the training-step session is compiled for the
-shapes it is fed, which removes most shape arithmetic from the executed graph.
+holds no more there than the one it was handed. It is conservative and has no
+opt-out; use the attribute to force a trade it would not take. It picks the
+tensors it recomputes, but not whole-module segments: checkpointing each layer of
+a two-layer transformer encoder holds a further 4–5% less than the pass alone on
+ONNX Runtime, for a fifth more step time or more, and nothing less on PyTorch. The
+pass cuts a step's peak memory by anywhere from nothing to about a third on ONNX
+Runtime, for at most a few percent more computation; on PyTorch it can trade more
+— a two-layer encoder's step holds over 40% less, for about a fifth more
+computation. A graph containing a scope (a recurrent op in its backward pass, or a
+forward `If`) gets only its checkpoint attributes applied. Separately, the
+training-step session is compiled for the shapes it is fed, which removes most
+shape arithmetic from the executed graph.
 
 The `Shorokoo.Core.AutoDiffCheckpointing` namespace is internal despite being
 public in the assembly; no API returns its types, so do not build on them. Ten other

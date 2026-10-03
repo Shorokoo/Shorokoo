@@ -2115,10 +2115,9 @@ namespace Shorokoo.Runtime
                 }
                 var optimization = SessionOptimization(
                     HasOptionalOps(model.Graph) || IsFullyConstant(model.Graph), trainingStep: false);
-                session = BuildSession(backend, modelData, optimization, deviceMemory);
                 // Built for one run: placing that run's values would build two more sessions over
                 // the model for it, the graph the runtime runs and the one that places.
-                session.StopPlacing();
+                session = BuildSession(backend, modelData, optimization, deviceMemory, placing: false);
                 outputNames.Value = [.. session.OutputNames];
                 var onnxInputNameByOriginal = SessionNamesOf(originalInputNames, session);
                 string SessionNameOf(string name)
@@ -2253,16 +2252,21 @@ namespace Shorokoo.Runtime
         /// <summary>A session of <paramref name="backend"/> over <paramref name="modelData"/>, built
         /// with <paramref name="deviceMemory"/>, with what this context records about its sessions,
         /// in its precision, and with the outputs the lowering proved it may write into consumed
-        /// inputs' memory.</summary>
+        /// inputs' memory — placing its runs' values in that memory where <paramref name="placing"/>
+        /// and this context place (<see cref="ValuePlacement"/>), and otherwise built without what
+        /// placing asks of a build (<see cref="SessionPlacing"/>).</summary>
         internal IShorokooSession BuildSession(
             IShorokooBackend backend, byte[] modelData, ShorokooGraphOptimization optimization,
             DeviceMemorySettings deviceMemory, IReadOnlyList<OutputAlias>? outputAliases = null,
-            int intraOpThreads = 0, IReadOnlyList<SuppliedInitializer>? supplied = null)
+            int intraOpThreads = 0, IReadOnlyList<SuppliedInitializer>? supplied = null, bool placing = true)
         {
-            var session = backend.CreateSession(
-                modelData, optimization, ShorokooLogSeverity.Fatal, deviceMemory, Diagnostics,
-                outputAliases ?? [], intraOpThreads, supplied ?? [], Precision);
-            if (!(ValuePlacement ?? OutputAliasing)) session.StopPlacing();
+            var off = !placing || !(ValuePlacement ?? OutputAliasing);
+            IShorokooSession session;
+            using (SessionPlacing.Suppress(off))
+                session = backend.CreateSession(
+                    modelData, optimization, ShorokooLogSeverity.Fatal, deviceMemory, Diagnostics,
+                    outputAliases ?? [], intraOpThreads, supplied ?? [], Precision);
+            if (off) session.StopPlacing();
             return session;
         }
 

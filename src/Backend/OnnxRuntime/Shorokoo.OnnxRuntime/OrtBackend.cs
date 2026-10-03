@@ -358,7 +358,7 @@ public abstract class OrtBackend : IShorokooBackend
         ArgumentNullException.ThrowIfNull(diagnostics);
         // One copy for however many sessions are built from it: ORT takes the model as an array.
         var model = modelBytes.ToArray();
-        if (WeightsToShare(model, outputAliases, suppliedInitializers) is { } weights
+        if (!SessionPlacing.Suppressed && WeightsToShare(model, outputAliases, suppliedInitializers) is { } weights
             && BuildSharingWeights(model, weights, graphOptimization, logSeverity, deviceMemory, diagnostics, intraOpThreads, suppliedInitializers, precision) is { } sharing)
             return sharing;
         BuiltSession New(string? optimizedDirectory) => NewSession(
@@ -372,7 +372,7 @@ public abstract class OrtBackend : IShorokooBackend
         // as one session's, whichever of them ran it. Not where its sessions allocate through ONNX
         // Runtime's own arena, a comparison's alone: what a placed run saves is measured on
         // Shorokoo's allocator.
-        if (_stockProvider && !SessionsUseOrtArena)
+        if (_stockProvider && !SessionsUseOrtArena && !SessionPlacing.Suppressed)
             session.Placements = new OrtPlacements(
                 model,
                 (variant, directory, externalData, shared) => Wrap(NewSession(
@@ -425,8 +425,9 @@ public abstract class OrtBackend : IShorokooBackend
     /// this backend's (<see cref="WeightsToShare"/>), with the placements of its runs built over the
     /// graph it writes out as it is built — its larger initializers in a file beside it, so that
     /// writing it holds no second copy of them — and handed the copies its graph still reads; those
-    /// ONNX Runtime's rewrites left unread are let go of. Null where the folder to write into cannot
-    /// be made, for the caller to build the session as any other.
+    /// ONNX Runtime's rewrites left unread are let go of. Null where the session cannot be built that
+    /// way — the folder to write into cannot be made, or the build or the graph it writes fails — for
+    /// the caller to build the session as any other.
     /// </summary>
     private OrtSession? BuildSharingWeights(
         byte[] model, IReadOnlyList<TensorProto> weights, ShorokooGraphOptimization graphOptimization, ShorokooLogSeverity logSeverity,
@@ -464,10 +465,13 @@ public abstract class OrtBackend : IShorokooBackend
                 else built.SharedWeights[i].Dispose();
             session = Wrap(built with { SharedWeights = [.. kept.Select(k => k.Value)] }, []);
         }
-        catch
+        catch (Exception failure) when (failure is not OutOfMemoryException)
         {
+            // Sharing the weights is a saving and never a requirement: a build that cannot write its
+            // graph out -- a full disk -- is built again as any other, where a fault of the model's
+            // own fails it again, as it would have anyway.
             DeleteDirectory(directory);
-            throw;
+            return null;
         }
         IReadOnlyList<SuppliedInitializer> handed = [.. suppliedInitializers, .. kept.Select(k => new SuppliedInitializer(k.Name, k.Value))];
         session.Placements = new OrtPlacements(

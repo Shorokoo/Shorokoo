@@ -387,9 +387,20 @@ backward pass, at a compute cost; see
 
 Building a training rig also runs an automatic memory-aware pass that reorders
 nodes and recomputes tensors where that improves a combined compute-and-memory
-objective. It is conservative and has no opt-out; use the attribute to force a
-trade it would not take. It cuts a step's peak memory by anywhere from nothing to
-about 25%, for at most a few percent more kernel time. A graph containing a scope (a
+objective. It charges a step's memory as the backend of the rig's runtime context
+lays a run out: ONNX Runtime's allocation plan, with the temporaries its CPU
+kernels hold beside their outputs on the host; on PyTorch, the translation's —
+each value freed after its last read, a view as its input's memory, a result
+written over an operand dying there. On PyTorch it also judges the steps it weighs
+by the backend's own model of a run, so that by that model the step it hands over
+holds no more there than the one it was handed. It is conservative and has no opt-out; use the
+attribute to force a trade it would not take. It recomputes single tensors and
+does not choose whole-module segments itself: checkpointing each layer of a
+two-layer transformer encoder holds a further 4–5% less than the pass alone, and
+costs step time of its own. The pass cuts a step's peak memory by anywhere
+from nothing to about a third on ONNX Runtime, for at most a few percent more
+computation; on PyTorch it can trade more — a two-layer encoder's step holds over
+40% less, for about a fifth more computation. A graph containing a scope (a
 recurrent op in its backward pass, or a forward `If`) gets only its checkpoint
 attributes applied. Separately, the training-step session is compiled for the
 shapes it is fed, which removes most shape arithmetic from the executed graph.

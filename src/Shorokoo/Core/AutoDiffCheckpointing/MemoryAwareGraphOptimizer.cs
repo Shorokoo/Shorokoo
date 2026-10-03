@@ -24,11 +24,6 @@ public class GraphOptimizationResult
     /// </summary>
     internal IReadOnlyList<long>? BackendPeakBytes { get; init; }
 
-    /// <summary>What the backend the step runs on holds at the peak of a run of the chosen
-    /// strategy's graph (<see cref="BackendPeakBytes"/>' entry for it); null where the pass chose by
-    /// its own evaluation.</summary>
-    internal long? ChosenBackendPeakBytes { get; init; }
-
     /// <summary>
     /// The optimized <see cref="InternalComputationGraph"/> produced by the selected strategy.
     /// </summary>
@@ -290,7 +285,6 @@ internal class MemoryAwareGraphOptimizer
             Evaluation = best.Evaluation,
             AllStrategies = strategies.Select(s => (s.Name, s.Evaluation, s.Graph)).ToList(),
             BackendPeakBytes = peaks,
-            ChosenBackendPeakBytes = peaks?[chosen],
         };
     }
 

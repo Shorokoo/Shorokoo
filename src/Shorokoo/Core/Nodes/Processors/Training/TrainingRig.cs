@@ -183,39 +183,6 @@ namespace Shorokoo
             }
         }
 
-        /// <summary>The memory weights the memory-aware pass is run again with, in turn, for a step
-        /// that does not fit its context's device-memory budget: each one a heavier trade of compute
-        /// for memory, the last weighing memory alone.</summary>
-        private static readonly double[] BudgetMemoryWeights = [8, 64, 1e6];
-
-        /// <summary>
-        /// <paramref name="chosen"/>, where it fits the device-memory budget of the context this
-        /// rig's steps run on (<see cref="DeviceMemorySettings.LimitBytes"/>), or there is none;
-        /// otherwise the pass run again (<paramref name="passWith"/>) with memory weighed more, each
-        /// of <see cref="BudgetMemoryWeights"/> in turn, until a step fits — the first that does,
-        /// which trades the least compute for it — or, where none fits, the step that needs least.
-        /// What a step needs is the backend's model of a run of it, where the backend models one,
-        /// with its inputs (<paramref name="inputBytes"/>), which the budget counts as attached;
-        /// the pass's own peak, which holds them, otherwise.
-        /// </summary>
-        private GraphOptimizationResult WithinBudget(
-            GraphOptimizationResult chosen, Func<double, GraphOptimizationResult> passWith, long inputBytes)
-        {
-            if (_runtimeContext is not { } context || context.DeviceMemory.LimitBytes is not long limit
-                || context.ResolvedBackend.MemorySpace.IsHost) return chosen;
-            long Need(GraphOptimizationResult result)
-                => result.ChosenBackendPeakBytes is long peak ? inputBytes + peak : result.Evaluation.PeakMemoryBytes;
-            if (Need(chosen) <= limit) return chosen;
-            var least = chosen;
-            foreach (var weight in BudgetMemoryWeights)
-            {
-                var result = passWith(weight);
-                if (Need(result) <= limit) return result;
-                if (Need(result) < Need(least)) least = result;
-            }
-            return least;
-        }
-
         /// <summary>The memory weight the memory-aware pass of a rig built on this thread weighs its
         /// strategies with, in place of its default (a measurement's hook); null for the
         /// default.</summary>
@@ -5027,12 +4994,10 @@ namespace Shorokoo
             if (TrainingBackend.LowersAutoGrad)
             {
                 Stage("OptimizeTrainingStepGraph");
-                var backendPeak = BackendPeakOf(allInputs);
-                GraphOptimizationResult Pass(double memoryWeight) => new MemoryAwareGraphOptimizer(
-                    memoryFactor: memoryWeight, evaluator: evaluator, shapeInference: shapeInferencer, backendPeak: backendPeak)
-                    .OptimizeWithShapeInfo(graph, shapeInfo);
-                var inputBytes = graph.Inputs.Sum(input => shapeInfo.GetTensorInfo(input)?.MemoryBytes ?? 0);
-                optResult = WithinBudget(Pass(PassMemoryWeight.Value ?? MemoryAwareGraphOptimizer.DefaultMemoryWeight), Pass, inputBytes);
+                var optimizer = new MemoryAwareGraphOptimizer(
+                    memoryFactor: PassMemoryWeight.Value ?? MemoryAwareGraphOptimizer.DefaultMemoryWeight,
+                    evaluator: evaluator, shapeInference: shapeInferencer, backendPeak: BackendPeakOf(allInputs));
+                optResult = optimizer.OptimizeWithShapeInfo(graph, shapeInfo);
             }
             else
             {

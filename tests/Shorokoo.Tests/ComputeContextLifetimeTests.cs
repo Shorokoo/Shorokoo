@@ -1003,6 +1003,51 @@ public class ComputeContextLifetimeCoverageTests
     }
 
     [Fact]
+    public void TestEverySessionAPlacedRunIsBuiltWithIsBuiltInItsContextsPrecision()
+    {
+        const int Rows = 1024, Columns = 1024;
+        var (a, b, l) = TwoHalvesValues(Rows, Columns);
+        foreach (var allowed in (bool[])[false, true])
+        {
+            var seen = new List<PrecisionSettings>();
+            using var context = new ComputeContext(new PrecisionRecordingBackend(seen)) { Precision = new PrecisionSettings { AllowTensorFloat32 = allowed } };
+            var compiled = context.Compile(TwoHalves());
+            var outputs = compiled.Execute(TensorData([(long)Rows, Columns], a), TensorData([(long)Rows, Columns], b));
+            Assert.Equal(OrtPlacements.Stage.Adopted, Assert.Single(((OrtSession)compiled.Session).Placements!.Entries).Stage);
+            Assert.NotNull(outputs[0].ToTensorData().Block);
+            Assert.Equal([allowed], seen.Select(p => p.AllowTensorFloat32).Distinct());
+            Assert.True(l.Zip(Floats(outputs[0].ToTensorData()), (x, y) => MathF.Abs(x - y) < 1e-5f).All(x => x));
+        }
+    }
+
+    internal sealed class PrecisionRecordingBackend(List<PrecisionSettings> seen)
+        : OrtBackend((_, _, precision) => { lock (seen) seen.Add(precision); }, ComputeDevice.Cpu, cudaDeviceId: null, stockProvider: true);
+
+    internal static InternalComputationGraph ProductIntoConsumed()
+    {
+        var a = InputTensor<float32>("A", rank: 2);
+        var b = InputTensor<float32>("B", rank: 2);
+        var e = InputTensor<float32>("E", rank: 2);
+        return new InternalComputationGraph([a, b, e], [OnnxOp.Add(OnnxOp.MatMul(a, b), e)]);
+    }
+
+    internal static (float[] Values, bool Placed) RunProductIntoConsumed(ComputeContext context)
+    {
+        static TensorData Waves(long rows, long columns, float frequency)
+            => TensorData([rows, columns], [.. Enumerable.Range(0, (int)(rows * columns)).Select(i => MathF.Sin(frequency * i))]);
+        var output = context.Compile(ProductIntoConsumed()).Execute(
+            Waves(1024, 1024, 0.37f).CopyTo(context), Waves(1024, 512, 0.11f).CopyTo(context),
+            TensorData([1024L, 512L], new float[1 << 19]).CopyTo(context)).Single().ToTensorData();
+        return ([.. output.ToHost().As<float32>().AccessMemory<float>()], output.Block is not null);
+    }
+
+    internal static float[] ProductIntoConsumedOnTheHost()
+    {
+        using var host = new ComputeContext(new PrecisionRecordingBackend([]));
+        return RunProductIntoConsumed(host).Values;
+    }
+
+    [Fact]
     public void TestASessionOfAContextThatPlacesNothingKeepsNothingToPlaceWith()
     {
         const int Rows = 1024, Columns = 1024;

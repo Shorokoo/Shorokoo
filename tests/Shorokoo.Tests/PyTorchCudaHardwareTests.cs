@@ -217,6 +217,20 @@ public class PyTorchCudaHardwareTests
     }
 
     [TorchCudaFact]
+    public void TestAPlacedRunComputesInItsContextsPrecision()
+    {
+        var host = ComputeContextLifetimeCoverageTests.ProductIntoConsumedOnTheHost();
+        using var strictContext = new ComputeContext(Cuda.Value);
+        using var allowedContext = new ComputeContext(Cuda.Value) { Precision = SideBySideModel.AllowingTensorFloat32 };
+        var strict = ComputeContextLifetimeCoverageTests.RunProductIntoConsumed(strictContext);
+        var allowed = ComputeContextLifetimeCoverageTests.RunProductIntoConsumed(allowedContext);
+
+        Assert.Equal((true, true), (strict.Placed, allowed.Placed));
+        SideBySideModel.AssertFullPrecision([host], [strict.Values]);
+        SideBySideModel.AssertTensorFloat32([host], [allowed.Values]);
+    }
+
+    [TorchCudaFact]
     public void TestTheTwoHalvesScenarioWritesEveryValueIntoTheMemoryItConsumesOnTheCardAndItsOutputsOutliveTheSession()
     {
         const int Rows = 512, Columns = 1024;

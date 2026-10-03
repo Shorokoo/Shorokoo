@@ -364,6 +364,20 @@ public class GpuExecutionTests
     }
 
     [CudaFact]
+    public void CudaProvider_APlacedRunComputesInItsContextsPrecision()
+    {
+        var host = ComputeContextLifetimeCoverageTests.ProductIntoConsumedOnTheHost();
+        using var strictContext = new ComputeContext();
+        using var allowedContext = new ComputeContext { Precision = SideBySideModel.AllowingTensorFloat32 };
+        var strict = ComputeContextLifetimeCoverageTests.RunProductIntoConsumed(strictContext);
+        var allowed = ComputeContextLifetimeCoverageTests.RunProductIntoConsumed(allowedContext);
+
+        Assert.Equal((true, true), (strict.Placed, allowed.Placed));
+        SideBySideModel.AssertFullPrecision([host], [strict.Values]);
+        SideBySideModel.AssertTensorFloat32([host], [allowed.Values]);
+    }
+
+    [CudaFact]
     public void CudaProvider_ARunFedTwoTensorsStandingOnOneBlockCountsTheBlockOnce()
     {
         const long MiB = 1024 * 1024;

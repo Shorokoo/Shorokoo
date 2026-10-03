@@ -851,7 +851,7 @@ public class MemoryReuseScenarioTests
                 options.OptimizedModelFilePath = Path.Combine(directory, "optimized.onnx");
                 options.ProfileOutputPathPrefix = Path.Combine(directory, "profile");
                 options.EnableProfiling = true;
-                if (onCard) OrtBackend.AppendCuda(options, 0, DeviceMemorySettings.Default);
+                if (onCard) OrtBackend.AppendCuda(options, 0, DeviceMemorySettings.Default, PrecisionSettings.Default);
                 InferenceSession session;
                 var built = Stopwatch.StartNew();
                 using (CachingAllocator.Charge(host, card))
@@ -973,7 +973,7 @@ public class MemoryReuseScenarioTests
                 options.OptimizedModelFilePath = Path.Combine(directory, "optimized.onnx");
                 options.ProfileOutputPathPrefix = Path.Combine(directory, "profile");
                 options.EnableProfiling = true;
-                if (onCard) OrtBackend.AppendCuda(options, 0, DeviceMemorySettings.Default);
+                if (onCard) OrtBackend.AppendCuda(options, 0, DeviceMemorySettings.Default, PrecisionSettings.Default);
                 InferenceSession session;
                 using (CachingAllocator.Charge(host, card))
                     session = new InferenceSession(stream.ToArray(), options);

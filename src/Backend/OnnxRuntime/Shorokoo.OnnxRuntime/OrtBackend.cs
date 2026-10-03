@@ -178,7 +178,7 @@ public abstract class OrtBackend : IShorokooBackend
             using var stream = new MemoryStream();
             ProtoBuf.Serializer.Serialize(stream, model);
             Discard(NewSession(stream.ToArray(), ShorokooGraphOptimization.TrainingStep, ShorokooLogSeverity.Fatal,
-                DeviceMemorySettings.Default, DiagnosticSettings.Default, directory, 0, []));
+                DeviceMemorySettings.Default, DiagnosticSettings.Default, directory, 0, [], PrecisionSettings.Default));
             ModelProto run;
             using (var written = File.OpenRead(Path.Combine(directory, OptimizedModelFile)))
                 run = ProtoBuf.Serializer.Deserialize<ModelProto>(written);

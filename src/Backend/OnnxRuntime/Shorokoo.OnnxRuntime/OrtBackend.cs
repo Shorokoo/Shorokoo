@@ -364,7 +364,8 @@ public abstract class OrtBackend : IShorokooBackend
         BuiltSession New(string? optimizedDirectory) => NewSession(
             model, graphOptimization, logSeverity, deviceMemory, diagnostics, optimizedDirectory, intraOpThreads,
             suppliedInitializers, precision);
-        var session = BuildSession(model, New, outputAliases);
+        var placing = _stockProvider && !SessionsUseOrtArena && !SessionPlacing.Suppressed;
+        var session = BuildSession(model, New, outputAliases, placing, out var written);
         // A session of a stock provider can place the values of a run that consumes inputs in the
         // memory of what it consumes (see OrtPlacements), through sessions of its own built over the
         // same model the same way. They charge the session's own
@@ -372,9 +373,10 @@ public abstract class OrtBackend : IShorokooBackend
         // as one session's, whichever of them ran it. Not where its sessions allocate through ONNX
         // Runtime's own arena, a comparison's alone: what a placed run saves is measured on
         // Shorokoo's allocator.
-        if (_stockProvider && !SessionsUseOrtArena && !SessionPlacing.Suppressed)
+        if (placing)
             session.Placements = new OrtPlacements(
                 model,
+                written,
                 (variant, directory, externalData, shared) => Wrap(NewSession(
                     variant, externalData is null ? graphOptimization : ShorokooGraphOptimization.DisableAll, logSeverity,
                     deviceMemory, diagnostics with { TraceNodePlacement = false },
@@ -486,8 +488,18 @@ public abstract class OrtBackend : IShorokooBackend
         return session;
     }
 
-    private OrtSession BuildSession(byte[] model, Func<string?, BuiltSession> New, IReadOnlyList<OutputAlias>? outputAliases)
+    /// <summary>
+    /// A session over <paramref name="model"/>, binding the pairs of <paramref name="outputAliases"/>
+    /// the graph ONNX Runtime runs still proves. Where it wrote that graph out to prove them and the
+    /// session will place values (<paramref name="keep"/>), <paramref name="written"/> answers the
+    /// folder it is in and the graph, for the placements to build from in place of a build of their
+    /// own; null otherwise, the folder then deleted.
+    /// </summary>
+    private OrtSession BuildSession(
+        byte[] model, Func<string?, BuiltSession> New, IReadOnlyList<OutputAlias>? outputAliases, bool keep,
+        out OrtPlacements.Written? written)
     {
+        written = null;
         if (outputAliases is null) return Wrap(New(null), []);
 
         var optimizedDirectory = TempDirectory("shorokoo-optimized-");
@@ -527,17 +539,21 @@ public abstract class OrtBackend : IShorokooBackend
                 return Wrap(New(null), []);
             }
 
-            var (proved, initializerBytes) = ProvedAgain(optimizedDirectory, outputAliases);
+            var (proved, initializerBytes, graph) = ProvedAgain(optimizedDirectory, outputAliases);
             if (initializerBytes > InitializersKeptTwice && _stockProvider)
             {
                 Discard(built);
                 built = New(null);
             }
-            return Wrap(built, proved);
+            var session = Wrap(built, proved);
+            // The graph a build of the same model with the same options writes, whether or not the
+            // session was built again without writing it.
+            if (keep && graph is not null) written = new OrtPlacements.Written(optimizedDirectory, graph);
+            return session;
         }
         finally
         {
-            DeleteDirectory(optimizedDirectory);
+            if (written is null) DeleteDirectory(optimizedDirectory);
         }
     }
 
@@ -775,10 +791,10 @@ public abstract class OrtBackend : IShorokooBackend
     /// <paramref name="directory"/> still proves, each with the shape that graph states for its
     /// output, and the bytes of initializers the graph holds, in the file beside it and inline.
     /// Where it wrote nothing that can be read, no pairs — a pair this cannot prove is not bound,
-    /// which costs the memory and never the result — and initializers of any size, which rules
-    /// out keeping them twice unseen.
+    /// which costs the memory and never the result — initializers of any size, which rules out
+    /// keeping them twice unseen, and no graph.
     /// </summary>
-    private static (IReadOnlyList<OrtSession.ProvedAlias> Proved, long InitializerBytes) ProvedAgain(
+    private static (IReadOnlyList<OrtSession.ProvedAlias> Proved, long InitializerBytes, ModelProto? Graph) ProvedAgain(
         string directory, IReadOnlyList<OutputAlias> outputAliases)
     {
         try
@@ -786,18 +802,19 @@ public abstract class OrtBackend : IShorokooBackend
             ModelProto model;
             using (var stream = File.OpenRead(Path.Combine(directory, OptimizedModelFile)))
                 model = ProtoBuf.Serializer.Deserialize<ModelProto>(stream);
-            if (model.Graph is not { } graph) return ([], long.MaxValue);
+            if (model.Graph is not { } graph) return ([], long.MaxValue, null);
             var stated = new Dictionary<string, TypeProto?>(StringComparer.Ordinal);
             foreach (var output in graph.Outputs) stated.TryAdd(output.Name, output.Type);
             var aside = new FileInfo(Path.Combine(directory, OptimizedInitializersFile));
             return (
                 [.. OutputAliasProof.Prove(graph, outputAliases).Select(alias =>
                     new OrtSession.ProvedAlias(alias, StatedShape(stated.GetValueOrDefault(alias.Output))))],
-                (aside.Exists ? aside.Length : 0) + graph.Initializers.Sum(InlineBytes));
+                (aside.Exists ? aside.Length : 0) + graph.Initializers.Sum(InlineBytes),
+                model);
         }
         catch (Exception)
         {
-            return ([], long.MaxValue);
+            return ([], long.MaxValue, null);
         }
     }
 

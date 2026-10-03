@@ -85,8 +85,9 @@ internal sealed class OrtPlacements : IDisposable
     private readonly object _gate = new();
     private readonly Dictionary<string, Entry> _entries = new(StringComparer.Ordinal);
     private ModelProto? _original;
-    // The graph ONNX Runtime runs for the plain session, as a probe build wrote it out, and the folder
-    // it is in with its initializers, kept for the session's life to build variants from.
+    // The graph ONNX Runtime runs for the plain session, as the session's build or a probe build wrote
+    // it out; the folder it is in with its initializers is kept for the session's life to build
+    // variants from.
     private ModelProto? _runs;
     private string? _broken;
     private bool _disposed;
@@ -114,9 +115,24 @@ internal sealed class OrtPlacements : IDisposable
     // variant holds of its own.
     private readonly IReadOnlySet<string> _sharedWeights = new HashSet<string>();
 
-    internal OrtPlacements(byte[] model, VariantBuilder build, OrtBackend backend, Func<long> held)
+    /// <summary>A graph ONNX Runtime wrote out as it built a session, and the folder it is in with its
+    /// larger initializers.</summary>
+    internal sealed record Written(string Directory, ModelProto Runs);
+
+    /// <summary>
+    /// The placements of a session built from <paramref name="model"/>: the variants are built from
+    /// it, or from the graph ONNX Runtime runs for the session — <paramref name="written"/> where the
+    /// session's build wrote it out, the folder then kept, and deleted with these; otherwise written
+    /// out by a probe build the first time a plan asks for it.
+    /// </summary>
+    internal OrtPlacements(byte[] model, Written? written, VariantBuilder build, OrtBackend backend, Func<long> held)
     {
         _build = build;
+        if (written is not null)
+        {
+            _files.Runs = written.Directory;
+            _runs = written.Runs;
+        }
         if (model.Length <= ModelBytesKept)
             _model = model;
         else

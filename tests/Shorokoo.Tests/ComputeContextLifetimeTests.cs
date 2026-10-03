@@ -1003,6 +1003,18 @@ public class ComputeContextLifetimeCoverageTests
     }
 
     [Fact]
+    public void TestASessionOfAContextThatPlacesNothingKeepsNothingToPlaceWith()
+    {
+        const int Rows = 1024, Columns = 1024;
+        var (a, b, l) = TwoHalvesValues(Rows, Columns);
+        using var context = new ComputeContext { ValuePlacement = false };
+        var compiled = context.Compile(TwoHalves());
+        var outputs = compiled.Execute(TensorData([(long)Rows, Columns], a), TensorData([(long)Rows, Columns], b));
+        Assert.Null(((OrtSession)compiled.Session).Placements);
+        Assert.True(l.Zip(Floats(outputs[0].ToTensorData()), (x, y) => MathF.Abs(x - y) < 1e-5f).All(x => x));
+    }
+
+    [Fact]
     public void TestASignatureWhosePlacedRunFailsRunsAsUsualFromThen()
     {
         const int Rows = 1024, Columns = 1024;

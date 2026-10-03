@@ -1260,6 +1260,28 @@ public class PyTorchBackendCoverageTests
     }
 
     [Fact]
+    public void TestATorchRunIsModelledHoldingWhatItsLoopsListsAndStacksHoldAndWhatItsRecurrentLayersStack()
+    {
+        Assert.Equal(768, RunPeak(ComputeContextLifetimeCoverageTests.WithInts(GraphOn("x:float[4,8]", "O", Op("SequenceEmpty", "", "s"),
+            Loop("m s", "S", GraphOn("i c t", "k u", Op("Neg", "x", "n"), Op("SequenceInsert", "t n", "u"), Op("Identity", "c", "k"))),
+            ComputeContextLifetimeCoverageTests.Op("ConcatFromSequence", "S", "O", attribute: ("axis", 0))), "m", 3)));
+        Assert.Equal(512, RunPeak(ComputeContextLifetimeCoverageTests.WithInts(GraphOn("x:float[4,8]", "O",
+            Loop("m", "O", GraphOn("i c", "k e", Op("Exp", "x", "e"), Op("Identity", "c", "k")))), "m", 2)));
+        Assert.Equal(256, RunPeak(GraphOn("x:float[4,2,3] w:float[1,16,3] r:float[1,16,4]", "Y",
+            ComputeContextLifetimeCoverageTests.Op("LSTM", "x w r", "Y", attribute: ("hidden_size", 4)))));
+    }
+
+    /// <summary>A <c>Loop</c> of <paramref name="inputs"/> — its trip count and its carried values,
+    /// with no condition — making <paramref name="outputs"/> by <paramref name="body"/>.</summary>
+    private static NodeProto Loop(string inputs, string outputs, GraphProto body)
+    {
+        var loop = Op("Loop", inputs, outputs);
+        loop.Inputs.Insert(1, "");
+        loop.Attributes.Add(new AttributeProto { Name = "body", Type = AttributeProto.AttributeType.Graph, G = body });
+        return loop;
+    }
+
+    [Fact]
     public void TestATorchRunIsModelledCopyingAReshapeOfAViewItsStridesCannotReshape()
     {
         Assert.Equal(4096, RunPeak(ComputeContextLifetimeCoverageTests.WithInts(GraphOn("x:float[4,8,16]", "O", Op("Exp", "x", "e"),

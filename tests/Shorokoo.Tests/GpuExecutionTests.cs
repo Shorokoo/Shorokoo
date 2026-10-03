@@ -57,7 +57,7 @@ public partial class SquareStackModel
 /// </summary>
 [Trait("Domain", "Core")]
 [Trait("Purpose", "Hardware")]
-[Collection(DeviceMemoryPeak.Name)]
+[Collection(ProcessWideMemory.Name)]
 public class GpuExecutionTests
 {
     /// <summary>

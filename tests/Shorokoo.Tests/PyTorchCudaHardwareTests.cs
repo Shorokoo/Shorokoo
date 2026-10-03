@@ -15,6 +15,7 @@ namespace Shorokoo.Tests;
 /// </summary>
 [Trait("Domain", "Core")]
 [Trait("Purpose", "Hardware")]
+[Collection(ProcessWideMemory.Name)]
 public class PyTorchCudaHardwareTests
 {
     private static readonly Lazy<TorchCudaBackend> Cuda = new(() => new TorchCudaBackend());

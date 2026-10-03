@@ -1248,7 +1248,25 @@ public abstract class OrtBackend : IShorokooBackend
         // on a shared block owns none of its memory: such an element goes in as a copy of its own,
         // and the value it was made from is released here, its lease with it.
         if (values.Any(v => v is OrtTensorValue { Range: not null }))
-            values = [.. values.Select(v => v is OrtTensorValue { Range: not null, IsInDeviceMemory: false } view ? Owned(view) : v)];
+        {
+            var owned = new IShorokooTensorValue[values.Count];
+            var made = 0;
+            try
+            {
+                for (; made < values.Count; made++)
+                    owned[made] = values[made] is OrtTensorValue { Range: not null, IsInDeviceMemory: false } view ? Owned(view) : values[made];
+            }
+            catch
+            {
+                // As any failure does, this lets go of everything it was handed: the copies made so
+                // far in place of their values, the values not reached yet, and -- released by the
+                // copy that failed -- the value it was copying.
+                for (var i = 0; i < made; i++) owned[i].Dispose();
+                for (var i = made + 1; i < values.Count; i++) values[i].Dispose();
+                throw;
+            }
+            values = owned;
+        }
         var inner = new List<OrtValue>(values.Count);
         try
         {

@@ -543,19 +543,36 @@ internal sealed class OrtPlacements : IDisposable
     /// <summary>
     /// The nodes of <paramref name="graph"/>, a graph a session on a card runs, whose outputs are in
     /// host memory: a copy to the host, a shape or a size, and every node of the CPU provider's. ONNX
-    /// Runtime hands a node only values in its provider's memory, copying one across where it is not,
-    /// so a node reading a value in the card's memory — an input, a copy onto the card, or the output
-    /// of a node reading one — is the CUDA provider's; and of the nodes reading none, only its
-    /// generators, where no copy onto the card takes what they write.
+    /// Runtime hands a node values in its provider's memory: across a copy node where one provider's
+    /// node reads another's output, and for a graph input, by copying the feed as the run starts —
+    /// to the host where a CPU-provider node reads it, the card's readers then reading it through a
+    /// copy onto the card. So a node whose output a copy onto the card reads is the CPU provider's,
+    /// and so is every node writing what such a node reads; a node reading the output of a node of
+    /// the card's, an input no copy onto the card reads, or a copy onto the card is the CUDA
+    /// provider's; and of the nodes reading none of those, only its generators, where no copy onto
+    /// the card takes what they write.
     /// </summary>
     internal static HashSet<NodeProto> HostNodes(GraphProto graph)
     {
-        var onCard = graph.Inputs.Select(i => i.Name).ToHashSet(StringComparer.Ordinal);
         var copiedOn = graph.Nodes.Where(n => n.OpType == "MemcpyFromHost").SelectMany(n => n.Inputs).ToHashSet(StringComparer.Ordinal);
+        var producer = new Dictionary<string, NodeProto>(StringComparer.Ordinal);
+        foreach (var node in graph.Nodes)
+            foreach (var output in node.Outputs)
+                if (output.Length > 0) producer[output] = node;
         var host = new HashSet<NodeProto>(ReferenceEqualityComparer.Instance);
+        var pending = new Stack<NodeProto>(graph.Nodes.Where(n => n.OpType != "MemcpyToHost" && n.Outputs.Any(copiedOn.Contains)));
+        while (pending.TryPop(out var node))
+        {
+            if (!host.Add(node)) continue;
+            foreach (var input in node.Inputs)
+                if (input.Length > 0 && producer.TryGetValue(input, out var writer)
+                    && writer.OpType is not ("MemcpyFromHost" or "MemcpyToHost" or "Shape" or "Size"))
+                    pending.Push(writer);
+        }
+        var onCard = graph.Inputs.Select(i => i.Name).Where(i => !copiedOn.Contains(i)).ToHashSet(StringComparer.Ordinal);
         foreach (var node in graph.Nodes)
         {
-            var card = node.OpType switch
+            var card = !host.Contains(node) && node.OpType switch
             {
                 "MemcpyFromHost" => true,
                 "MemcpyToHost" or "Shape" or "Size" => false,

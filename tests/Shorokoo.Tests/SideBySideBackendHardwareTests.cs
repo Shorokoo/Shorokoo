@@ -80,6 +80,12 @@ public class SideBySideBackendHardwareTests
             ProbeDirectory = CudaBackendDirectory,
         });
 
+    /// <summary>Whether the copy of the ONNX Runtime backend that built <paramref name="session"/>
+    /// made its runtime's environment with thread pools its sessions share.</summary>
+    private static bool SharesThreadPools(IShorokooSession session)
+        => (bool)session.GetType().Assembly.GetType("Shorokoo.OnnxRuntime.OrtEnvironment")!
+            .GetProperty("SharedThreadPools", BindingFlags.Static | BindingFlags.NonPublic)!.GetValue(null)!;
+
     [SideBySideCudaFact]
     public void TestOneModelRunsOnTheCpuAndOnTheCardInOneProcess()
     {
@@ -106,6 +112,8 @@ public class SideBySideBackendHardwareTests
         // A compiled session stays on the backend that built it, and re-runs there.
         var onCard = cuda.Compile(graph);
         Assert.Equal("cuda:0", onCard.Backend.Name);
+        Assert.True(SharesThreadPools(onCard.Session));
+        Assert.True(SharesThreadPools(cpu.Compile(graph).Session));
         Assert.Equal(expected, Floats(onCard.Execute(ta.Shared(), tb.Shared())[0]));
         Assert.Equal(expected, Floats(onCard.Execute(ta.Shared(), tb.Shared())[0]));
 

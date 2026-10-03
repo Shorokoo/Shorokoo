@@ -552,7 +552,9 @@ internal sealed unsafe class CachingAllocator
     /// served, and whether the device gave it fresh rather than out of what was kept.</summary>
     internal readonly record struct Event(bool Allocation, bool OnCard, IntPtr Address, long Requested, long Size, bool Fresh);
 
-    /// <summary>Told of every block every allocator hands out and takes back, under the allocator's
+    /// <summary>Told of every block every allocator hands out and takes back — and of each part of
+    /// a block taken back while the rest is in use (<see cref="ReleaseRange"/>), at the part's own
+    /// address, the block's own taking back then telling only what was left — under the allocator's
     /// lock and on the thread making the call. Null tells nothing; the memory-reuse measurements
     /// set it for the length of a run.</summary>
     internal static Action<Event>? Observer;
@@ -599,7 +601,7 @@ internal sealed unsafe class CachingAllocator
         using (_gate.Hold())
         {
             if (!_blocks.Remove(pointer, out var block)) return;
-            Observer?.Invoke(new Event(false, OnCard, pointer, block.Requested, block.Size, Fresh: false));
+            Observer?.Invoke(new Event(false, OnCard, pointer, block.Requested - block.ReleasedRequested, block.Size - block.ReleasedBytes, Fresh: false));
             var account = block.Account;
             account.InUse -= block.Size - block.ReleasedBytes;
             account.Requested -= block.Requested - block.ReleasedRequested;
@@ -694,8 +696,9 @@ internal sealed unsafe class CachingAllocator
     /// block let go of does: still committed, for the
     /// account's next request to be carved from, and shed as what the account keeps is. On a card,
     /// where this thread's call charges the block's account, the card is waited for first: work the
-    /// call queued may still read the range. Answers the bytes handed back: none for a block of its
-    /// own from the device, and none for a part handed back already.
+    /// call queued may still read the range. Answers the bytes handed back that lie in the part —
+    /// up to what was asked for of the block, where it runs on to the end, not the rest of the last
+    /// unit — none for a block of its own from the device, and none for a part handed back already.
     /// </summary>
     internal long ReleaseRange(IntPtr pointer, long offset, long length, bool toTheEnd)
     {
@@ -714,12 +717,15 @@ internal sealed unsafe class CachingAllocator
             var pieces = Outside(block.Released, start, end);
             if (pieces.Count == 0) return 0;
             if (OnCard && scope is not null && scope.Charges(account)) CudaRuntime.Synchronize(_device);
-            long released = 0;
+            long released = 0, inside = 0;
+            var partEnd = toTheEnd ? block.Requested : offset + length;
             foreach (var (from, to) in pieces)
             {
                 arena.Uncarve(pointer + (nint)from, to - from);
                 released += to - from;
+                inside += Math.Max(0, Math.Min(to, partEnd) - Math.Max(from, offset));
                 var asked = Math.Max(0, Math.Min(to, block.Requested) - from);
+                Observer?.Invoke(new Event(false, OnCard, pointer + (nint)from, asked, to - from, Fresh: false));
                 block.ReleasedRequested += asked;
                 account.Requested -= asked;
             }
@@ -730,7 +736,7 @@ internal sealed unsafe class CachingAllocator
             // Nothing of a closed account's is kept: what went back to its arena goes back to the
             // device.
             if (account.Closed) Emptied(account, block.Source);
-            return released;
+            return inside;
         }
     }
 

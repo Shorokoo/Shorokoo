@@ -68,8 +68,9 @@ internal class Rematerializer
     private readonly bool _pruneBatches;
     private readonly BackendJudge? _judge;
 
-    /// <summary>The trials of a plateau weighed by the backend's model, where there is one.</summary>
-    internal const int PlateauWidth = 4;
+    /// <summary>The trials of a plateau weighed by the backend's model, where there is one: the
+    /// fewest that find what four and eight find on the benchmark's families.</summary>
+    internal const int PlateauWidth = 3;
 
     /// <param name="objective">What a commit must score better by.</param>
     /// <param name="evaluator">The evaluator every trial is scored with; the default when null.</param>

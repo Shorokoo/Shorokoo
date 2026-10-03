@@ -63,7 +63,7 @@ public static class PythonRuntime
 
             try
             {
-                Runtime.PythonDLL = environment.LibPython;
+                Python.Runtime.Runtime.PythonDLL = environment.LibPython;
                 PythonEngine.PythonHome = environment.PythonHome;
                 PythonEngine.Initialize();
                 // Initializing leaves the lock held by this thread, and it is let go of however the

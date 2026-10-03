@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
+using Shorokoo.Core.Backends;
 
 namespace Shorokoo.PythonHost;
 
@@ -84,7 +85,7 @@ public static class PythonEnvironmentResolver
     {
         var root = CacheRoot(options, variables);
         var directory = Path.Combine(root, lockFile.CacheKey);
-        if (IsComplete(directory, lockFile))
+        if (IsComplete(directory, lockFile) && CudaLibrariesLinked(directory))
             return PythonEnvironment.Open(directory, lockFile.PythonVersion, PythonEnvironmentSource.Provisioned);
 
         try
@@ -109,12 +110,56 @@ public static class PythonEnvironmentResolver
             // environment built by the process it waited for needs none.
             if (!IsComplete(directory, lockFile))
                 Build(FindUv(options, variables), lockFile, directory, options.ProvisioningTimeout, deadline);
+            LinkCudaLibraries(directory, lockFile, options.ProvisioningTimeout);
         }
         finally
         {
             gate.Release();
         }
         return PythonEnvironment.Open(directory, lockFile.PythonVersion, PythonEnvironmentSource.Provisioned);
+    }
+
+    /// <summary>Whether the environment's copies of the NVIDIA libraries every CUDA backend shares
+    /// are links into the shared cache already, or there are none to link.</summary>
+    private static bool CudaLibrariesLinked(string directory)
+    {
+        if (CudaLibraryPins.Current is not { } pins) return true;
+        var marker = Path.Combine(directory, CudaLibraryCache.LinkedMarker);
+        try
+        {
+            return File.Exists(marker) && File.ReadAllText(marker) == pins.Identity;
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Makes the environment's copies of the pinned cuDNN and cuBLAS — PyTorch's <c>torch\lib</c> on
+    /// Windows, the <c>nvidia</c> wheels' folders on Linux — hard links to the shared cache's, so a
+    /// process that runs PyTorch beside another CUDA backend loads one copy of each, whichever starts
+    /// first. The cache is filled from these very copies where it is empty, which downloads nothing.
+    /// Called holding the environment's lock; a copy another process has loaded stays a copy of the
+    /// same release, and is linked by a later call.
+    /// </summary>
+    private static void LinkCudaLibraries(string directory, PythonEnvironmentLock lockFile, TimeSpan timeout)
+    {
+        if (CudaLibraryPins.Current is not { } pins) return;
+        var windows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
+        var sitePackages = PythonEnvironment.SitePackagesOf(directory, Version.Parse(lockFile.PythonVersion), windows);
+        try
+        {
+            CudaLibraryCache.LinkEnvironment(directory, sitePackages, pins, CudaLibraryCache.DefaultRoot,
+                pin => CudaLibraryCache.InstalledCandidates(pin, Environment.GetEnvironmentVariable, windows), timeout);
+        }
+        // Linking only saves the second copy: the environment's own are the pinned release, byte for
+        // byte, and serve as they are. So a cache that cannot be filled or written leaves them be,
+        // and a later start tries again.
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException
+                                       or InvalidDataException or TimeoutException)
+        {
+        }
     }
 
     private static bool IsComplete(string directory, PythonEnvironmentLock lockFile)

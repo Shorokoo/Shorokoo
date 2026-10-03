@@ -43,6 +43,7 @@ public class PyTorchBackendCoverageTests
         Assert.Equal(12, running.PythonVersion.Minor);
         Assert.True(File.Exists(running.LibPython));
         Assert.Equal(running.Directory, new TorchCpuBackend(new() { EnvironmentPath = running.Directory + Path.DirectorySeparatorChar }).Start().Directory);
+        Assert.Equal(OperatingSystem.IsWindows() ? Path.Combine(running.SitePackages, "torch", "lib") : null, running.CudaLibraryDirectory);
     }
 
     [Fact]
@@ -72,6 +73,30 @@ public class PyTorchBackendCoverageTests
         {
             Directory.Delete(root, recursive: true);
         }
+    }
+
+    [Fact]
+    public void TestTheSharedCudaLibrariesAreTheReleasesTheCudaEnvironmentsPyTorchCarries()
+    {
+        var windows = CudaLibraryPins.ForPlatform("win-x64");
+        var linux = CudaLibraryPins.ForPlatform("linux-x64");
+        string Record(CudaLibraryFile file) => $"{file.FileName} {file.Sha256} {file.Size}";
+
+        Assert.Equal(["cudnn", "cublas"], windows.Libraries.Select(library => library.Name));
+        Assert.Equal(["cudnn", "cublas"], linux.Libraries.Select(library => library.Name));
+        Assert.All(windows.Libraries.Concat(linux.Libraries), library => Assert.Equal(13, library.CudaMajor));
+        Assert.Equal(windows.Libraries[0].Version, linux.Libraries[0].Version);
+        Assert.Equal(windows.Libraries.SelectMany(library => library.Files).Select(Record).Order(), windows.Bundled.Select(Record).Order());
+        Assert.Contains(windows.BundledWheelSha256!, LockedHashes("win-x64", windows.BundledBy!));
+        Assert.All(linux.Libraries, library => Assert.Contains(library.WheelSha256, LockedHashes("linux-x64", $"{library.Package}=={library.Version}")));
+    }
+
+    private static string[] LockedHashes(string platform, string requirement)
+    {
+        var lines = PythonEnvironmentLock.ForPlatform("cu13", platform).Requirements.Split('\n');
+        var at = Array.FindIndex(lines, line => line.StartsWith(requirement + " ", StringComparison.Ordinal));
+        return at < 0 ? [] : [.. lines.Skip(at + 1).Select(line => line.Trim().TrimEnd('\\').Trim())
+            .TakeWhile(line => line.StartsWith("--hash=sha256:", StringComparison.Ordinal)).Select(line => line["--hash=sha256:".Length..])];
     }
 
     [Fact]

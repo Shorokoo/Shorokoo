@@ -1,8 +1,10 @@
+using System.Diagnostics;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using Shorokoo.Core.Backends;
 using Shorokoo.Modules.Losses;
 using Shorokoo.Modules.Optimizers;
+using Shorokoo.PyTorch.Cuda;
 using Shorokoo.Runtime;
 
 namespace Shorokoo.Tests;
@@ -417,6 +419,81 @@ public class SideBySideBackendHardwareTests
         using var element = sequence.GetValue(0);
         Assert.Equal([1f, 2f], element.GetTensorDataAsSpan<float>().ToArray());
     }
+
+    [SideBySideCudaFact]
+    public void TestTheOnnxRuntimeAndPyTorchCudaBackendsShareOneProcessWhicheverStartsFirst()
+    {
+        Assert.Equal(0, InAChildProcess([], "cuda-backends", "onnxruntime-first"));
+        Assert.Equal(0, InAChildProcess([], "cuda-backends", "pytorch-first"));
+    }
+
+    [SideBySideCudaFact]
+    public void TestAConvolutionOnTheCardEndsInAResultOrAnExceptionWithNoOtherCudaMajorOnThePath()
+    {
+        Assert.Equal(0, InAChildProcess(WithNoOtherCudaMajorOnThePathAndNoPythonEnvironment(), "onnxruntime-convolution"));
+    }
+
+    /// <summary>What <c>dotnet Shorokoo.Tests.dll</c> runs: one case of a test that needs a process of
+    /// its own, because what it covers is which native libraries a process loads, and from where.</summary>
+    public static int Main(string[] args) => args switch
+    {
+        ["cuda-backends", var first] => BothCudaBackendsRun(pytorchFirst: first == "pytorch-first") ? 0 : 1,
+        ["onnxruntime-convolution"] => AConvolutionEndsInAResultOrAnException(),
+        _ => 1,
+    };
+
+    private static int InAChildProcess(Dictionary<string, string?> environment, params string[] args)
+    {
+        var dotnet = Path.Combine(RuntimeEnvironment.GetRuntimeDirectory(), "..", "..", "..", Windows ? "dotnet.exe" : "dotnet");
+        var start = new ProcessStartInfo(dotnet, [typeof(SideBySideBackendHardwareTests).Assembly.Location, .. args])
+            { RedirectStandardOutput = true, RedirectStandardError = true };
+        foreach (var (name, value) in environment) start.Environment[name] = value;
+        using var child = Process.Start(start)!;
+        child.BeginOutputReadLine();
+        child.BeginErrorReadLine();
+        child.WaitForExit();
+        return child.ExitCode;
+    }
+
+    private static Dictionary<string, string?> WithNoOtherCudaMajorOnThePathAndNoPythonEnvironment() => new()
+    {
+        ["PATH"] = string.Join(Path.PathSeparator, (Environment.GetEnvironmentVariable("PATH") ?? "")
+            .Split(Path.PathSeparator)
+            .Where(folder => !Directory.Exists(folder)
+                || !Directory.EnumerateFiles(folder, "cublasLt64_*.dll").Any(f => !f.EndsWith("_13.dll")))),
+        ["SHOROKOO_PYTHON_ENV"] = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString()),
+    };
+
+    private static bool ConvolutionRuns(IShorokooBackend backend)
+    {
+        var x = InputTensor<float32>("x", rank: 4);
+        var w = InputTensor<float32>("w", rank: 4);
+        var conv = new InternalComputationGraph([x, w], [OnnxOp.Conv(x, w, null!, AutoPad.NotSet,
+            dilations: [1L, 1L], group: 1, kernelShape: [3L, 3L], pads: [0L, 0L, 0L, 0L], strides: [1L, 1L])]);
+        float[] image = [.. Enumerable.Range(0, 16).Select(i => (float)i)];
+        return Floats(new ComputeContext(backend).Execute(conv,
+                TensorData([1L, 1L, 4L, 4L], image), TensorData([1L, 1L, 3L, 3L], Enumerable.Repeat(1f, 9).ToArray()))[0])
+            .Zip((float[])[45f, 54f, 81f, 90f]).All(p => Math.Abs(p.First - p.Second) < 1e-3f);
+    }
+
+    private static bool BothCudaBackendsRun(bool pytorchFirst)
+    {
+        IShorokooBackend[] inOrder = pytorchFirst ? [new TorchCudaBackend(), LoadCuda()] : [LoadCuda(), new TorchCudaBackend()];
+        return inOrder.All(ConvolutionRuns) && OneCopyOfEachCudaLibrary();
+    }
+
+    private static int AConvolutionEndsInAResultOrAnException()
+    {
+        try { return ConvolutionRuns(LoadCuda()) ? 0 : 1; }
+        catch (Exception) { return 0; }
+    }
+
+    private static bool OneCopyOfEachCudaLibrary()
+        => Process.GetCurrentProcess().Modules.Cast<ProcessModule>()
+            .Where(m => ((string[])["cublas", "cudnn", "libcublas", "libcudnn"])
+                .Any(family => m.ModuleName.StartsWith(family, StringComparison.OrdinalIgnoreCase)))
+            .GroupBy(m => m.ModuleName, StringComparer.OrdinalIgnoreCase)
+            .All(copies => copies.Select(m => m.FileName).Distinct().Count() == 1);
 
     /// <summary>The allocator ONNX Runtime made this value's buffer from, and the device it is on.
     /// Through the backend's own types, which an isolated backend loads privately, so the route to

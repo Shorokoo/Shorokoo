@@ -47,6 +47,10 @@ public enum PythonEnvironmentFailure
     /// <summary>No environment lock exists for this platform: the Python-based backends run on
     /// Linux and Windows on x64.</summary>
     UnsupportedPlatform,
+
+    /// <summary>The framework cannot load the CUDA libraries its environment ships, because the
+    /// process already holds another release of them.</summary>
+    CudaLibraryConflict,
 }
 
 /// <summary>

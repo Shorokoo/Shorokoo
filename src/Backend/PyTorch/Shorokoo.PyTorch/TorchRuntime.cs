@@ -1,4 +1,5 @@
 using Python.Runtime;
+using Shorokoo.Core.Backends;
 using Shorokoo.PythonHost;
 
 namespace Shorokoo.PyTorch;
@@ -101,6 +102,7 @@ internal sealed class TorchRuntime
 
     private static TorchRuntime Import(PythonEnvironment environment)
     {
+        var cudaLibraries = environment.CudaLibraryDirectory;
         using (PythonRuntime.Gil())
         {
             try
@@ -115,6 +117,17 @@ internal sealed class TorchRuntime
                     $"The Python environment at '{environment.Directory}' cannot import what the PyTorch "
                     + $"backend needs ({ex.Message}). Install torch and numpy into it, or leave "
                     + $"{PythonEnvironmentResolver.EnvironmentVariable} unset to have an environment provisioned.",
+                    ex);
+            }
+            catch (PythonException ex) when (cudaLibraries is not null && CudaLibraries.Conflict(cudaLibraries) is { } held)
+            {
+                throw new PythonEnvironmentException(PythonEnvironmentFailure.CudaLibraryConflict,
+                    $"PyTorch cannot load the CUDA libraries in '{cudaLibraries}' ({ex.Message}). This process "
+                    + $"already holds another release of some of them ({held}). Those libraries load one another "
+                    + "by name, so PyTorch's copies bind to the ones held, and two releases do not mix. Shorokoo's "
+                    + "CUDA backends load the pinned release, which a provisioned environment's PyTorch carries; "
+                    + "so either something else in this process loaded the copies held, or this environment's "
+                    + "PyTorch bundles another release than the pinned one.",
                     ex);
             }
         }

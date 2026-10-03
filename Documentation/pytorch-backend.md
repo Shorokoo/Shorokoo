@@ -115,6 +115,21 @@ or one that sees no device, saying which. Starting the backend on such a machine
 `PythonEnvironmentFailure.DeviceUnavailable` *before* anything is provisioned, so it never
 downloads the CUDA libraries for a card that is not there.
 
+**Beside an ONNX Runtime CUDA backend.** A process can run `TorchCudaBackend` together with
+`WinGpuBackend`, `LinuxGpuBackend` or a CUDA backend loaded through `IsolatedBackend`, whichever
+starts first: every CUDA backend runs on one pinned copy of cuDNN and cuBLAS, which is the release
+the CUDA environment's PyTorch carries — see
+[The NVIDIA libraries the CUDA backends run on](inference.md#the-nvidia-libraries-the-cuda-backends-run-on).
+When the CUDA environment is provisioned, or first used, its copies of those libraries become
+hard links to the shared cache's, filling the cache from them if it is empty, so nothing more is
+downloaded and PyTorch loads the very same files as the other backends. An environment you name
+is never modified: one whose PyTorch carries the pinned release runs beside another CUDA backend
+on its own copy of that release. On Windows, one whose PyTorch bundles another release cannot load
+it into a process that already holds the pinned one, and starting it there fails with
+`PythonEnvironmentFailure.CudaLibraryConflict`, naming the copies held; on Linux its PyTorch binds
+to the pinned copy already loaded, and runs where that release is at least the one it was built
+against.
+
 ## The Python environment
 
 ### How it is resolved
@@ -170,6 +185,7 @@ whose message names what is missing:
 | `InterpreterFailed` | CPython itself would not start |
 | `DeviceUnavailable` | a CUDA backend, and no NVIDIA driver fit for CUDA 13, or PyTorch sees no such device |
 | `UnsupportedPlatform` | the machine is not Linux or Windows on x64, the platforms there are lock files for |
+| `CudaLibraryConflict` | PyTorch cannot load the CUDA libraries its environment ships, because the process already holds another release of them; the message names the copies held |
 
 ## Training
 

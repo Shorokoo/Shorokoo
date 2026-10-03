@@ -346,7 +346,7 @@ public class GpuExecutionTests
     }
 
     [CudaFact]
-    public void CudaProvider_ABudgetCountsABlockOnceWholeForAsLongAsAnyTensorOnItIsAttached()
+    public void CudaProvider_ABudgetCountsABlockOnceForAsLongAsAnyTensorOnItIsAttached()
     {
         const long MiB = 1024 * 1024;
         using var budgeted = new ComputeContext { DeviceMemory = new DeviceMemorySettings { LimitBytes = 64 * MiB } };

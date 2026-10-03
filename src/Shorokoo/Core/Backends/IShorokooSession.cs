@@ -9,10 +9,13 @@ namespace Shorokoo.Core.Backends;
 // place surfaces as an error rather than as a copy nobody asked for. Every output it returns is in
 // that memory too, wherever the runtime computed it, and goes to the caller as it is.
 //
-// And every output it returns holds its own bytes and nothing of the session's -- no block of an
-// arena the run computed in, no workspace -- so a caller that keeps an output keeps nothing else
-// alive, whether the session goes on running, sits idle, or is disposed. It is where the runtime
-// wrote it, never a copy made after the run.
+// And every output it returns holds nothing of the session's -- no block of an arena the run
+// computed in, no workspace -- so a caller that keeps an output keeps nothing of the session alive,
+// whether the session goes on running, sits idle, or is disposed. It is where the runtime wrote it,
+// never a copy made after the run: its own bytes, or a range of the memory of a value the run
+// consumed (RunConsuming below), which it holds with the run's other outputs placed there -- on a
+// backend that hands such memory back by ranges, the part no output has let go of -- until the
+// last of them goes.
 public interface IShorokooSession : IDisposable
 {
     IReadOnlyList<string> InputNames { get; }
@@ -37,8 +40,9 @@ public interface IShorokooSession : IDisposable
     // one that fails before it reaches the native call, its refusal of an input outside its run
     // memory included -- and the caller never touches it again, not even to release it. The backend
     // must release each consumed value exactly once, through its own IShorokooBackend.Release, as
-    // soon as the run no longer reads it: before this returns its outputs, and before it rethrows a
-    // failure. That is the contract IShorokooBackend.CreateSequence has for the values it is handed,
+    // soon as nothing reads it: before this returns its outputs, and before it rethrows a failure --
+    // or, for one the overload below placed an output in, with the last output standing on it. That
+    // is the contract IShorokooBackend.CreateSequence has for the values it is handed,
     // and for the same reason: a caller that hands memory over cannot also be the one to free it. A
     // value may appear under several input names; it appears in `consumed` once.
     //
@@ -72,10 +76,13 @@ public interface IShorokooSession : IDisposable
     // which is what a run that aliases nothing answers without allocating. This is the call every
     // run makes.
     //
-    // The contract on `consumed` is RunConsuming's, unchanged: each value is released exactly once,
-    // through the backend, before this returns or rethrows. An aliased output is a value of its own
-    // that holds the memory it was written into, so releasing the consumed value leaves the output
-    // whole -- ONNX Runtime counts the references to a buffer, and releases it with the last.
+    // It may also place values in consumed memory: write outputs, and values only the run reads, into
+    // ranges of a consumed value where the session proved that safe for the run. The contract on
+    // `consumed` is RunConsuming's: each value is released exactly once, through the backend -- one an
+    // output was placed in with the last output standing on it, every other before this returns or
+    // rethrows. An aliased output is a value of its own that holds the memory it was written into, so
+    // releasing the consumed value leaves the output whole -- ONNX Runtime counts the references to a
+    // buffer, and releases it with the last.
     //
     // A session binds a pair only on a run that consumed the input, where no other input is fed the
     // same value, and where the value is of the output's element type and its shape: an output that

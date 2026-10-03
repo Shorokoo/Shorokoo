@@ -98,8 +98,8 @@ internal static class OrtEnvironment
     /// built not to keep pools of its own runs its operators on (<c>DisablePerSessionThreads</c>).
     /// Made so here, with the environment, where nothing has made the environment yet: an intra-op
     /// pool sized as a session's own would be (a thread per physical core, spinning while it waits
-    /// for work), and no inter-op pool, sessions running their nodes one at a time. An environment
-    /// something else made first may have none, and then answers false.
+    /// for work), and no inter-op pool, sessions running their nodes one at a time. Where something
+    /// else made the environment first, false, whatever pools it has: nothing here can tell.
     /// </summary>
     internal static bool SharedThreadPools
     {

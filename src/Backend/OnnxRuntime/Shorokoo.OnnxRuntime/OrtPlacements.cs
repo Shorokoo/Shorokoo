@@ -16,9 +16,10 @@ namespace Shorokoo.OnnxRuntime;
 /// hand ONNX Runtime the range each one goes to, and charging the session's own allocator accounts.</para>
 ///
 /// <para><b>Built from the graph that runs.</b> The plan is made over the graph ONNX Runtime runs
-/// for this session — written out once, with its initializers, by a probe build of the model, or by
-/// the session itself as it was built where it shares the weights it carries with its variants
-/// (<see cref="OrtBackend"/>, a model over <see cref="ModelBytesKept"/> on a card). Where
+/// for this session — written out once, with its initializers, by the session itself as it was built
+/// where it wrote that graph out anyway — to prove the outputs it writes into its inputs, or to share
+/// the weights it carries with its variants (<see cref="OrtBackend"/>, a model over
+/// <see cref="ModelBytesKept"/> on a card) — and otherwise by a probe build of the model. Where
 /// every value the plan places is a value of the model as handed over, the variant is first built
 /// over that model, optimized as the plain session is, which runs its nodes in the plain session's
 /// order; otherwise, or where that variant does not hold the plan, it is built from the graph that
@@ -28,7 +29,7 @@ namespace Shorokoo.OnnxRuntime;
 /// is built, and the variant's compute nodes must be the plain session's, operator for
 /// operator.</para>
 ///
-/// <para><b>The model is kept</b> to build the probe and the variants from: in memory up to
+/// <para><b>The model is kept</b> to build the variants, and the probe where there is one, from: in memory up to
 /// <see cref="ModelBytesKept"/>, and a larger one in a file of its own, written as the session is
 /// built and deleted with it, so that its weights are not held a second time — or not at all where
 /// the session wrote the graph it runs itself. A variant of a larger model is built from the graph
@@ -48,10 +49,10 @@ namespace Shorokoo.OnnxRuntime;
 ///
 /// <para><b>Decided before the first run.</b> Whether a plan pays is read off the proof's model of
 /// the memory a run holds (<see cref="PlacementProof.ModelledPeak"/>): with every placed value in its
-/// block against with none, less what the variant holds of its own. A signature's first run is
+/// block against with none, less what the variants hold of their own. A signature's first run is
 /// placed already where that pays, so a run that fits only placed runs on its first call. The first
-/// placed run is measured, and a plan whose run asked for more than the model said the plain one
-/// would is let go of for the runs after it.</para>
+/// placed run is measured, and a plan whose run, with what its variant holds, did not save the
+/// margin against the modelled plain run is let go of for the runs after it.</para>
 /// </summary>
 internal sealed class OrtPlacements : IDisposable
 {
@@ -96,7 +97,7 @@ internal sealed class OrtPlacements : IDisposable
     /// The placements of a session that wrote the graph it runs into <paramref name="runsDirectory"/>
     /// as it was built (<paramref name="runs"/>), its larger initializers in a file beside it, and
     /// reads the initializers <paramref name="sharedWeights"/> names from copies the variants are
-    /// handed too: the probe and the variants are built from that graph, and the folder is kept,
+    /// handed too: the variants are built from that graph, with no probe, and the folder is kept,
     /// and deleted with these.
     /// </summary>
     internal OrtPlacements(
@@ -398,8 +399,9 @@ internal sealed class OrtPlacements : IDisposable
     /// <summary>
     /// Plans <paramref name="entry"/> and, where the plan pays, builds its variant: the plan over the
     /// graph ONNX Runtime runs, weighed by the proof's model of the memory a run holds, the variant
-    /// built from that graph and the plan proved again over the graph the variant runs, until the
-    /// two agree. Refuses the entry, for good, where nothing can be placed, where placing saves too
+    /// built over the model as handed over where it can bind the plan, and from the graph that runs
+    /// where it cannot or did not hold it, and the plan proved again over the graph the variant runs,
+    /// until the two agree. Refuses the entry, for good, where nothing can be placed, where placing saves too
     /// little, where the variant's compute nodes differ from the plain session's, or where anything
     /// fails on the way. Under the lock.
     /// </summary>
@@ -577,7 +579,8 @@ internal sealed class OrtPlacements : IDisposable
     }
 
     /// <summary>The bytes of the initializers of <paramref name="model"/> a session built over it
-    /// reads in itself: every one but those the session is handed (<see cref="SuppliedInitializer"/>).</summary>
+    /// reads in itself: every one but those the session is handed (<see cref="SuppliedInitializer"/>),
+    /// and those it reads from copies the session shares with its variants.</summary>
     private long OwnInitializerBytes(ModelProto model)
     {
         var handed = model.Graph!.Inputs.Select(i => i.Name).ToHashSet(StringComparer.Ordinal);
@@ -668,13 +671,15 @@ internal sealed class OrtPlacements : IDisposable
         return host;
     }
 
-    /// <summary>The model as handed to the backend, for a measurement to read.</summary>
+    /// <summary>The model as handed to the backend — or, where the session kept none, the graph it
+    /// runs as it wrote it out — for a measurement to read.</summary>
     internal ModelProto OriginalModel
     {
         get { return Original(); }
     }
 
-    /// <summary>The model as handed to the backend, parsed once. One kept in a file is kept parsed
+    /// <summary>The model as handed to the backend, parsed once — or, where the session kept none,
+    /// the graph it runs as it wrote it out. One kept in a file is kept parsed
     /// without the contents of its larger tensors, which the proof does not read: it is a graph to
     /// plan over, and never one to build from.</summary>
     private ModelProto Original()

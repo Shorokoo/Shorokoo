@@ -39,8 +39,10 @@ namespace Shorokoo.Core.Backends;
 /// <item>on a card whose driver does not, every block is a <c>cudaMalloc</c> of its own.</item>
 /// </list>
 /// <para>An account's arena reserves address space with no memory behind it and commits a granule as
-/// a block is carved over it. A block let go of stays carved and is kept for the next request of its
-/// class, so a loop's runs find their blocks waiting with no work at all; a request of a class no
+/// a block is carved over it. A block let go of whole stays carved and is kept for the next request
+/// of its class, so a loop's runs find their blocks waiting with no work at all — one that handed
+/// parts of itself back while in use (<see cref="ReleaseRange"/>) goes back to its arena instead,
+/// and so does a large one of the host's own account (<see cref="Account.KeepsLargeBlocks"/>); a request of a class no
 /// kept block serves is carved from what the arena keeps committed, whatever block it was carved for
 /// before, so a session fed one shape after another reuses warm memory as an arena does, rather than
 /// taking every new size from the system. On a card no two blocks of an account's arena share a
@@ -708,9 +710,9 @@ internal sealed unsafe class CachingAllocator
     /// <paramref name="toTheEnd"/> — which nothing reads any more while the rest of the block is
     /// still in use: the memory of an input a run consumed that none of the outputs standing on it
     /// covers. The whole units of the block's arena lying inside it — 4 KiB pages on the host,
-    /// granules on a card, 512 bytes in the card's arena of small blocks — go back to the arena as a
-    /// block let go of does: still committed, for the
-    /// account's next request to be carved from, and shed as what the account keeps is. On a card,
+    /// granules on a card, 512 bytes in the card's arena of small blocks — go back to the arena:
+    /// still committed, for the account's next request to be carved from, and shed as what the
+    /// account keeps is. On a card,
     /// where this thread's call charges the block's account, the card is waited for first: work the
     /// call queued may still read the range. Answers the bytes handed back that lie in the part —
     /// up to what was asked for of the block, where it runs on to the end, not the rest of the last

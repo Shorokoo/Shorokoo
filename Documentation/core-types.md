@@ -326,13 +326,15 @@ var b = TensorFill((Vector<int64>)[Scalar(3L)], fill);   // fine: fill is untouc
 ## What a `TensorData` holds, and when its values go away
 
 A `TensorData` **is** its memory: one object per allocation, or per range of the
-memory of an input a run consumed and wrote several values into, never shared with
+memory of an input a run consumed and wrote values into, never shared with
 another tensor. `Delete()` (the same as `Dispose()`) releases it. The full lifetime
 model is in [A tensor's lifetime](inference.md#a-tensors-lifetime-locks-and-deletion).
 In short:
 
 - **Deleting is optional.** A dropped tensor is reclaimed like any object. Delete
-  to free memory at a known moment, e.g. in a long loop producing large tensors.
+  to free memory at a known moment, e.g. in a long loop producing large tensors — a
+  tensor standing on a block with others frees its own range, or on a backend that
+  frees a block whole, its share of the block with the last of them.
 - **`Delete()` never waits or interrupts.** It throws while a run is reading the
   tensor; `TryDelete()` declines instead, and `DeleteAsync(...)` asks the run to
   stop. Deleting a dead tensor does nothing.

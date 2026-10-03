@@ -25,7 +25,7 @@ Related: [core-types.md](core-types.md) · [defining-models.md](defining-models.
   alive — [Moving data between contexts](#moving-data-between-contexts).
 - **A run's outputs are in the memory of the backend that ran it** — on a GPU backend, the
   card's — and nothing moves them afterwards. Reading one's values copies them to the host and
-  leaves it there; fed to a run on another context, it is placed there by that run —
+  leaves it there; fed to a run on another context, that run moves it there —
   [Where a run's inputs and outputs are](#where-a-runs-inputs-and-outputs-are).
 - **A run may write its values into the memory of the inputs it consumes**, where the graph proves
   it safe and it saves memory; its outputs then stand on that memory, each holding its own range of
@@ -458,23 +458,24 @@ One backend per package, in a namespace equal to the package id. **The type name
 All four implement `IShorokooBackend` with a parameterless constructor; the GPU ones use the
 CUDA provider on device 0, the CPU ones ORT's default provider.
 
-Their sessions run their operators on ONNX Runtime's thread pools of the process, made with its
-environment when the first of these backends is built, rather than each on an intra-op pool of its
-own (`SessionsShareThreadPools`, true unless set otherwise: `new WinCpuBackend { SessionsShareThreadPools = false }`).
-A pool's threads spin for a while after a run, waiting for more work, so sessions with pools of
-their own run one after another contend: two compiled graphs run in turn, or a compiled graph whose
-runs consuming their inputs place values through a session of their own
-([A run that writes into what it consumed](#a-run-that-writes-into-what-it-consumed)). A session
-built with an intra-op thread count of its own (`CreateSession`'s `intraOpThreads`) keeps a pool of
-its own of that size; where
-something else made ONNX Runtime's environment first, without pools, every session keeps its own.
-
 | package | backend type | fully qualified |
 |---|---|---|
 | `Shorokoo.PyTorch.Cpu` | `TorchCpuBackend` | `Shorokoo.PyTorch.Cpu.TorchCpuBackend` |
 | `Shorokoo.PyTorch.Cuda` | `TorchCudaBackend` | `Shorokoo.PyTorch.Cuda.TorchCudaBackend` |
 | `Shorokoo.Jax.Cpu` | `JaxCpuBackend` | `Shorokoo.Jax.Cpu.JaxCpuBackend` |
 | `Shorokoo.Jax.Cuda` | `JaxCudaBackend` | `Shorokoo.Jax.Cuda.JaxCudaBackend` |
+
+The sessions of the four ONNX Runtime backends run their operators on ONNX Runtime's thread pools
+of the process, made with its environment when the first of these backends is built, rather than
+each on an intra-op pool of its own (`SessionsShareThreadPools`, true unless set otherwise:
+`new WinCpuBackend { SessionsShareThreadPools = false }`). A pool's threads spin for a while after a
+run, waiting for more work, so sessions with pools of their own run one after another contend: two
+compiled graphs run in turn, or a compiled graph whose runs consuming their inputs place values
+through a session of their own
+([A run that writes into what it consumed](#a-run-that-writes-into-what-it-consumed)). A session
+built with an intra-op thread count of its own (`CreateSession`'s `intraOpThreads`) keeps a pool of
+its own of that size; where something else made ONNX Runtime's environment first, every session
+keeps its own.
 
 ### Auto-discovery
 
@@ -642,7 +643,7 @@ a string tensor and a sequence are in the host memory of the backend's runtime. 
 it is host memory. That memory belongs to the backend: two backends on one card share it only
 where they share a runtime.
 
-- **Inputs.** Shorokoo places every input in the run memory before the run: a tensor there
+- **Inputs.** Shorokoo puts every input in the run memory before the run: a tensor there
   already is handed over as it is, and any other — a C# array, a tensor of another device or
   runtime, a card's output fed to a run on the host — through a copy made with the backend's own
   moves. A session is handed nothing else; one handed a value outside its run memory refuses it
@@ -651,8 +652,8 @@ where they share a runtime.
   context that ran it — on a GPU backend, on the card, `IsHostResident` false. Nothing moves it
   afterwards. Reading its values copies them to the host and leaves it on the card; `ToHost()`
   makes a copy of it in host memory, `To(context)` puts it on another context, and a run on
-  another context that is fed it places it there as one of its inputs.
-- **An output holds only its own bytes.** On ONNX Runtime a session allocates through an
+  another context that is fed it moves it there as one of its inputs.
+- **An output holds nothing of the session's.** On ONNX Runtime a session allocates through an
   allocator of Shorokoo's, and an output is the block its run wrote it into — or a range of the
   memory of an input the run consumed, where the run wrote it there
   ([below](#a-run-that-writes-into-what-it-consumed)). Keeping it keeps that memory and nothing else
@@ -687,9 +688,9 @@ training rig's step, which pairs each updated state field with the one it replac
 ([A step writes its state over the state it consumed](training.md#a-step-writes-its-state-over-the-state-it-consumed));
 a graph you compile yourself marks no output.
 
-**Placement.** For any graph, a run's values of a mebibyte or more — outputs and intermediates
-alike — are written into ranges of the consumed inputs' memory where the graph the backend runs
-proves a range free for the value:
+**Placement.** For a compiled graph, a run's values of a mebibyte or more — outputs and
+intermediates alike — are written into ranges of the consumed inputs' memory where the graph the
+backend runs proves a range free for the value:
 
 - everything that reads what the range held runs before the value is written: by the graph's own
   edges, or on ONNX Runtime in the order the session runs its nodes — one at a time, in the order
@@ -707,30 +708,36 @@ shape of every input, the outputs asked for — runs, and kept for it.
 | | ONNX Runtime | PyTorch |
 |---|---|---|
 | **How** | a second session, its placed values bound to their ranges: over the model, where that keeps the first session's order and can bind every placed value, and otherwise over the graph ONNX Runtime runs, its fusions made | a translation writing each placed value with torch's own operator: an `out=` form, a fill, a concatenation part by part, or a copy of what a view reads |
-| **When it applies** | from the signature's first run, where placing saves — by a model of what the run holds at each node, in the order the second session runs them, less what that session holds of its own — more than the larger of a mebibyte and a sixty-fourth of the plain run. The first placed run is measured, and the runs after it run as always where it asked for more than the model said a plain run would | from the first run: nothing placed allocates |
-| **Not used** | where the second session would run other operators than the first; on an execution provider other than ONNX Runtime's CPU and CUDA ones; past 8 signatures | in a training step whose gradient torch takes; for a model over 16 MiB; past 8 signatures |
+| **When it applies** | from the signature's first run, where placing saves — by a model of what the run holds at each node, in the order the second session runs them, less what that session holds of its own — more than the larger of a mebibyte and a sixty-fourth of the plain run. The first placed run is measured, and the runs after it run unplaced where it did not save that much, counting what the second session holds | from the first run: nothing placed allocates |
+| **Not used** | where the second session would run other operators than the first; on an execution provider other than ONNX Runtime's CPU and CUDA ones; past 8 signatures; in a run of a graph not compiled (`Execute` or `Run` on the context); for a graph of over 20 000 nodes | in a training step whose gradient torch takes; for a model over 16 MiB; past 8 signatures; in a run of a graph not compiled; for a graph of over 20 000 nodes |
 
-On ONNX Runtime a session keeps the model it was built from to build the second session with: in
-memory up to 16 MiB, and a larger one in a temporary file of its own, deleted with the session. The
-second session shares the weights loaded into the context's memory; on a card, a session over a
-model over 16 MiB reads the weights the model carries from copies in the card's memory, which the
-second session reads too, and writes out the graph it runs, which the second session is built from,
-into a temporary folder kept for its life. Otherwise the second session holds its own copy of the
-weights the model carries — on the host, only the packed copies ONNX Runtime makes of a product's
-weights; the rest it maps from the files the graph was written into.
+On ONNX Runtime a session keeps what it builds the second session from. A model of 16 MiB or less
+it keeps in memory; a larger one on the host, in a temporary file of its own, deleted with the
+session. On a card, a session over a model over 16 MiB reads the weights the model carries from
+copies in the card's memory, which the second session reads too, and keeps no model: it writes out
+the graph it runs, which the second session is built from, into a temporary folder kept for its
+life. A session whose outputs are written into its inputs, such as a training step's, also keeps
+the graph it runs, which it writes out to prove those outputs, in a temporary folder for its life,
+on the host and on a card. The second session reads the weights fed to the session from the context's
+memory as they are. Of the weights the model carries it holds a copy of its own for a model of
+16 MiB or less, on the host as on a card; for a larger one, on the host, only the packed copies
+ONNX Runtime makes of a product's weights, the rest mapped from the files the graph was written
+into, and on a card none.
 
 **Outputs on consumed memory.** An output written into an input stands on that input's memory —
 its **block** — as a `TensorData` of its own over its range, never overlapping another's. Several
 outputs of one run may stand on one block. How the block is freed depends on whose memory it is:
 
-- **On ONNX Runtime**, where every tensor of 64 KiB or more is memory of Shorokoo's allocator —
-  on the host and on a card, made from your data or by a run: each output frees its own range as
-  it ends, and what of the block no output stands on is freed as the run ends. The whole pages
-  inside a range go back — 4 KiB on the host, 2 MiB on a card (512 bytes for a card block of a
-  mebibyte or less) — to the allocator, as a tensor's own memory does
-  ([Device memory](#device-memory-gpu-backends)).
-- **On PyTorch** the block is freed when the last output on it ends, not before: torch frees a
-  tensor's storage whole. A run places outputs in such a block only where they leave at most a
+- **On ONNX Runtime**, where the block is one Shorokoo's allocator carved from its reserved memory
+  — on the host a tensor of 64 KiB or more, made from your data or by a run; on a card any tensor,
+  where the driver offers CUDA's virtual memory management
+  ([Device memory](#device-memory-gpu-backends)): each output frees its own range as it ends, and
+  what of the block no output stands on is freed as the run ends. The whole pages inside a range go
+  back — 4 KiB on the host, 2 MiB on a card (512 bytes for a card block of a mebibyte or less) — to
+  the allocator, as a tensor's own memory does.
+- **On PyTorch**, and on a card whose driver does not offer virtual memory management, the block is
+  freed when the last output on it ends, not before: torch frees a tensor's storage whole, and so
+  does `cudaFree` a block. A run places outputs in such a block only where they leave at most a
   mebibyte of it unused.
 
 A device-memory budget counts a block once, for what of it is still held, for as long as any
@@ -1314,7 +1321,7 @@ What the session allocates is its weights, everything the run computes, and the 
 until it returns. From then on every output on the card is counted with the attached tensors, in
 the discount of every later run until it goes, so delete each output once you are done with it.
 Outputs [written into consumed memory](#a-run-that-writes-into-what-it-consumed) count that
-memory once, whole, while any of them is attached.
+memory once, for what of it is still held, while any of them is attached.
 
 A run whose discount leaves its session nothing is refused before taking anything; one whose
 session needs more than it was left fails with an allocation failure naming the limit:

@@ -328,8 +328,7 @@ public abstract class OrtBackend : IShorokooBackend
     /// that way against 113–118 on shared pools, and a session run alone took as long either way.
     /// A session built with an intra-op thread count of its own — one run side by side with others
     /// on a thread each — keeps a pool of its own of that size whatever this says. Where something
-    /// else made the process's ONNX Runtime environment first, without pools of its own, every
-    /// session keeps its own.
+    /// else made the process's ONNX Runtime environment first, every session keeps its own.
     /// </summary>
     public bool SessionsShareThreadPools { get; init; } = true;
 
@@ -368,11 +367,11 @@ public abstract class OrtBackend : IShorokooBackend
         var session = BuildSession(model, New, outputAliases, placing, out var written);
         // A session of a stock provider can place the values of a run that consumes inputs in the
         // memory of what it consumes (see OrtPlacements), through sessions of its own built over the
-        // same model the same way. They charge the session's own
-        // allocator accounts, so that what a run of the session takes is read, budgeted and limited
-        // as one session's, whichever of them ran it. Not where its sessions allocate through ONNX
-        // Runtime's own arena, a comparison's alone: what a placed run saves is measured on
-        // Shorokoo's allocator.
+        // same model the same way, or over the graph the session runs as ONNX Runtime wrote it out.
+        // They charge the session's own allocator accounts, so that what a run of the session takes
+        // is read, budgeted and limited as one session's, whichever of them ran it. Not where its
+        // sessions allocate through ONNX Runtime's own arena, a comparison's alone: what a placed run
+        // saves is measured on Shorokoo's allocator.
         if (placing)
             session.Placements = new OrtPlacements(
                 model,
@@ -394,8 +393,8 @@ public abstract class OrtBackend : IShorokooBackend
     /// <see cref="OrtPlacements.ModelBytesKept"/> — whose second session would otherwise hold a
     /// second copy of the weights it carries — built with no output written into an input. Its
     /// initializers and constants of a mebibyte or more of fixed-width elements that it carries
-    /// itself; null for
-    /// any other model, or where it carries none. On the host such a copy saves nothing: ONNX Runtime
+    /// itself; null for any other model, or where it carries none. On the host such a copy saves
+    /// nothing: ONNX Runtime
     /// packs a product's constant weight into memory of the session's own, and keeps a weight it was
     /// handed beside its packed copy.
     /// </summary>
@@ -977,10 +976,10 @@ public abstract class OrtBackend : IShorokooBackend
     /// <para><b>Sequential execution</b> (<c>ExecutionMode.ORT_SEQUENTIAL</c>, ONNX Runtime's
     /// default, set so that nothing else can be): a session runs its nodes one at a time, on each of
     /// its streams in the order of the graph it writes out (<c>OptimizedModelFilePath</c>) — measured
-    /// against the profiled kernel order of the memory-pass benchmark's families, on the host and on
-    /// a card, built from a model and from a graph ONNX Runtime wrote out alike. A run that places
-    /// its values in the memory it consumes is proved in that order (see <c>OrtPlacements</c>), which
-    /// parallel execution would not keep.</para>
+    /// against the order its kernels ran in, profiled, over the training and inference graphs of
+    /// several model families, on the host and on a card, built from a model and from a graph ONNX
+    /// Runtime wrote out alike. A run that writes its values into the memory of the inputs it
+    /// consumes is proved in that order, which parallel execution would not keep.</para>
     ///
     /// <para>For <see cref="ShorokooGraphOptimization.TrainingStep"/>:
     /// <c>optimization.disable_specified_optimizers</c> = CommonSubexpressionElimination;
@@ -1081,7 +1080,7 @@ public abstract class OrtBackend : IShorokooBackend
     /// <paramref name="shape"/> by reinterpreting a fixed-stride byte buffer.
     ///
     /// <para>In host memory, whatever device this backend computes on: Shorokoo's host allocator's,
-    /// as every host tensor of this backend is. <see cref="CreateTensorInBackendMemory"/> is the one
+    /// as every fixed-width host tensor of this backend is. <see cref="CreateTensorInBackendMemory"/> is the one
     /// that builds it where this backend's tensors are meant to live.</para>
     /// </summary>
     /// <exception cref="NotSupportedException">
@@ -1104,8 +1103,8 @@ public abstract class OrtBackend : IShorokooBackend
     ///
     /// <para>On a host backend that is where <see cref="CreateTensorFromRawBytes"/> already builds
     /// it, so this defers to it. On a CUDA backend it is the card's own memory, where this backend's
-    /// sessions read every tensor they are fed: the buffer comes from that device's ORT allocator
-    /// and the bytes cross the bus once, here.</para>
+    /// sessions read every tensor they are fed: the buffer comes from Shorokoo's allocator for that
+    /// device and the bytes cross the bus once, here.</para>
     ///
     /// <para>The card's memory comes out of one allocator per device, shared by every compute
     /// context on it (<see cref="CachingAllocator"/>), so nothing here bounds it: a context's
@@ -1165,8 +1164,8 @@ public abstract class OrtBackend : IShorokooBackend
 
     /// <summary>
     /// A tensor of <paramref name="elementType"/> and <paramref name="shape"/> in the memory this
-    /// backend's tensors live in, with nothing written into it: the buffer holds whatever ORT's
-    /// allocator last left there, and the caller fills it.
+    /// backend's tensors live in, with nothing written into it: the buffer holds whatever its memory
+    /// last held, and the caller fills it.
     ///
     /// <para>The same allocation <see cref="CreateTensorInBackendMemory"/> makes, and no copy —
     /// which is the point. That one starts from a managed array, so the tensor exists twice for as
@@ -1390,9 +1389,11 @@ public abstract class OrtBackend : IShorokooBackend
     /// <summary>
     /// A block over <paramref name="owner"/>'s memory, of its <paramref name="bytes"/>, for values to
     /// stand on, which <paramref name="letGo"/> lets go of with the last of them. Where that memory is
-    /// a block of Shorokoo's allocator — anything a session's run allocated, and every tensor placed on
-    /// a card — a part of it no value stands on any more goes back to that allocator
-    /// (<see cref="CachingAllocator.ReleaseRange"/>) while the rest is still in use.
+    /// a block Shorokoo's allocator carved from one of its arenas (<see cref="RangesGoBack(OrtTensorValue)"/>)
+    /// — on the host one of 64 KiB or more, a run's or a tensor's made from host data; on a card any
+    /// block, where the driver offers virtual memory management — a part of it no value stands on any
+    /// more goes back to that allocator (<see cref="CachingAllocator.ReleaseRange"/>) while the rest is
+    /// still in use.
     /// </summary>
     internal static SharedBlock BlockOver(OrtTensorValue owner, long bytes, Action letGo)
     {
@@ -1645,10 +1646,10 @@ public abstract class OrtBackend : IShorokooBackend
     /// <para>The obvious alternative — <c>OrtValue.CreateTensorValueFromMemory</c> over a managed
     /// array — is why this is a copy. That API pins the array for the value's lifetime and releases
     /// the pin only from <c>Dispose</c>: the release sits behind the <c>disposing</c> guard, so an
-    /// <c>OrtValue</c> reclaimed by its finalizer never runs it. Nothing in Shorokoo disposes a
-    /// tensor value, so every tensor built that way pinned its bytes for the life of the process —
-    /// a training loop that fed a fresh batch each step leaked one batch per step, permanently, and
-    /// no collection could ever get it back. An ORT-allocated buffer is released by the value's
+    /// <c>OrtValue</c> reclaimed by its finalizer never runs it. A tensor value is as often collected
+    /// as disposed, so a tensor built that way would pin its bytes for the life of the process — a
+    /// training loop feeding a fresh batch each step would leak one batch per step, permanently, and
+    /// no collection could get it back. An ORT-allocated buffer is released by the value's
     /// finalizer along with the value, so it behaves like every other tensor the runtime hands
     /// back — which is why <see cref="CreateTensorInBackendMemory"/> allocates device memory the
     /// same way rather than calling <c>cudaMalloc</c> and owning the result itself.</para>
@@ -1665,8 +1666,7 @@ public abstract class OrtBackend : IShorokooBackend
                     $"Supplied data of {bytes.Length} bytes is less than shape size {destination.Length} bytes.",
                     nameof(bytes));
             // A caller may hand over a buffer longer than the shape covers — the node-definition
-            // tables do — in which case the surplus was never part of the tensor and the
-            // wrapped-memory path this replaced never read it either.
+            // tables do — in which case the surplus is not part of the tensor and is not read.
             bytes.Slice(0, destination.Length).CopyTo(destination);
             // The destination span is a bare pointer into the value's buffer: reading the value
             // for it is the value's last read, after which the JIT may retire the local and a

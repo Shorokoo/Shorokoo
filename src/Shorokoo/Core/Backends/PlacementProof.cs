@@ -103,7 +103,7 @@ internal sealed record PlacementMemory(
 /// — read by every node reading the input or a view of it, each over the range it reads (the range
 /// the view covers, where it is one contiguous run, or the whole block) — and the values placed in
 /// it. Of any two occupants whose ranges overlap, one comes first: every node reading its overlapped
-/// bytes, other than the second's writer, is an ancestor of the second's writer, its own writer is
+/// bytes, other than the second's writer, runs before the second's writer, its own writer does
 /// too, and it is not read after the run — a graph output, or anything a graph output is a view of,
 /// never is overwritten.</item>
 /// <item><b>A writer reads what it overwrites only where it writes it.</b> Where V's writer reads an
@@ -112,11 +112,14 @@ internal sealed record PlacementMemory(
 /// offset; a <c>Slice</c> written at the offset it reads; a <c>Concat</c> part written where the
 /// concatenation puts it.</item>
 /// </list>
-/// <para>Ancestry follows the edges that order execution whatever a runtime folds, as
-/// <see cref="OutputAliasProof"/> does: explicit inputs, except those of a node that reads only a
-/// shape, and the outer values a node's subgraphs read. Nothing depends on the order a runtime
-/// picks among independent nodes, so a proof holds under a sequential order, a parallel executor,
-/// and a card's single stream alike.</para>
+/// <para>What runs before a node depends on the backend. One that runs the graph's nodes one at a
+/// time in the order they are listed — ONNX Runtime's sequential executor, over the graph the session
+/// wrote out — runs before a node every node listed before it (<c>runsInOrder</c>), so a proof holds
+/// for that order alone. Otherwise a node's ancestors run before it, ancestry following the edges
+/// that order execution whatever a runtime folds, as <see cref="OutputAliasProof"/> does: explicit
+/// inputs, except those of a node that reads only a shape, and the outer values a node's subgraphs
+/// read. Such a proof depends on no order a runtime picks among independent nodes, and holds under
+/// a sequential order, a parallel executor, and a card's single stream alike.</para>
 /// </summary>
 internal sealed class PlacementProof
 {
@@ -824,7 +827,8 @@ internal sealed class PlacementProof
         }
         foreach (var value in outputs) Try(value, cut);
 
-        // An output that would keep more of its block idle than it uses goes back to the backend.
+        // An output whose block would keep more than idleOutputBytes idle beside the outputs placed
+        // in it goes back to the backend.
         var idle = placed.Where(p => _readAfterRun.Contains(p.Value)).GroupBy(p => p.Block)
             .Where(g => givingBack?.Contains(g.Key) != true && _blocks[g.Key] - g.Sum(p => p.Bytes) > idleOutputBytes)
             .Select(g => g.Key).ToHashSet();

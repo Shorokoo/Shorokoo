@@ -238,15 +238,19 @@ internal sealed class OrtSession : IShorokooSession
     /// Runs the session with <paramref name="consumed"/> handed over, writing each output this
     /// session was built to alias into the memory of the consumed value its input was fed,
     /// wherever that can be done (see <see cref="OutputsIntoConsumed"/>), and saying which it did in
-    /// <paramref name="aliasedInputs"/>.
+    /// <paramref name="aliasedInputs"/>; and, where its placements adopted a plan for the run's
+    /// signature, writing values into ranges of the other consumed values (see
+    /// <see cref="OrtPlacements"/>).
     ///
     /// <para>Each consumed value is this backend's from here, on every path, and is released
     /// through it in the <c>finally</c> below — after the native run, which ONNX Runtime does not
-    /// let go of its inputs before, and before this returns the outputs or rethrows a failure.
-    /// Nothing the caller holds points into one of them any more: the run's outputs are values of
-    /// their own. ONNX Runtime keeps every input until the run ends — its memory planner gives each
-    /// feed an extra use so a caller can read it after <c>Run</c> returns — so there is no earlier
-    /// point at which a consumed input could go.</para>
+    /// let go of its inputs before, and before this returns the outputs or rethrows a failure —
+    /// except one an output was placed in: that one became a block (<see cref="SharedBlock"/>)
+    /// the outputs placed in it stand on, each over its own range, and the block releases it with
+    /// the last of them. Nothing else the caller holds points into a consumed value: an aliased
+    /// output is a value of its own over the same memory. ONNX Runtime keeps every input until the
+    /// run ends — its memory planner gives each feed an extra use so a caller can read it after
+    /// <c>Run</c> returns — so there is no earlier point at which a consumed input could go.</para>
     ///
     /// <para>An aliased output is bound to the consumed value itself, so the node that produces it
     /// writes straight into that memory rather than into a block of the arena — which is the whole

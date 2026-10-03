@@ -261,10 +261,11 @@ What that still leaves:
   host, and its output is host memory: it is not written into an input on the card.
 - **The weights of a second session.** On ONNX Runtime the values are written by a
   second session, which holds its own copy of the weights the model carries where
-  it cannot share them: on a card a model's of 16 MiB or less, on the host the
-  packed copies ONNX Runtime makes of a product's weights (it keeps a weight it is
-  handed beside its packed copy, so handing it one saves nothing). Placing pays
-  only where it saves more than that copy.
+  it cannot share them: a model's of 16 MiB or less, on the host as on a card, and
+  of a larger model on the host the packed copies ONNX Runtime makes of a
+  product's weights (it keeps a weight it is handed beside its packed copy, so
+  handing it one saves nothing). Placing pays only where it saves more than that
+  copy.
 - **A training step.** The state it consumes it already writes over
   ([A step writes its state over the state it consumed](training.md#a-step-writes-its-state-over-the-state-it-consumed)),
   and a batch it consumes is read by the backward pass as well as the forward one —
@@ -274,12 +275,17 @@ What that still leaves:
 ### Some outputs written into one consumed input are freed together
 
 Outputs a run wrote into the memory of one input it consumed stand on that memory
-together. On ONNX Runtime each frees its own pages as it ends; otherwise it is
-freed only when the last of them ends
+together. On ONNX Runtime, where the input was carved from Shorokoo's reserved
+memory, each frees its own pages as it ends; otherwise the memory is freed only
+when the last of them ends
 ([Outputs on consumed memory](inference.md#a-run-that-writes-into-what-it-consumed)):
 
 - **On PyTorch** torch frees a tensor's storage whole, with the last tensor
   reading it, and has no call that frees part of one.
+- **On a card without CUDA's virtual memory management** every block is a
+  `cudaMalloc` of its own, which `cudaFree` frees whole.
+- **On the host, an input under 64 KiB** is an allocation of the C runtime's
+  heap, freed whole; no value that small is written into anything.
 - **Pages are whole.** A page two outputs' ranges share — a 2 MiB page on a card,
   a 4 KiB one on the host — is held until both have ended. CUDA maps a card's
   memory 2 MiB at a time at the finest (the driver's minimum granularity for the

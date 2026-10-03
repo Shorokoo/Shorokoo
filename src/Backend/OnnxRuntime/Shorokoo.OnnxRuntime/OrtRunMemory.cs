@@ -8,8 +8,9 @@ namespace Shorokoo.OnnxRuntime;
 /// the graph a session writes out (<c>OptimizedModelFilePath</c>), its fusions and rewrites made,
 /// in that graph's order, which is the order a session runs its nodes in (see
 /// <see cref="OrtBackend.Configure"/>), each loop's body run once per iteration in its own order and
-/// each sequence the tensors it holds (<see cref="UnrolledRun"/>), laid out as its allocation plan
-/// lays a run out:
+/// each sequence the tensors it holds (<see cref="UnrolledRun"/>) — on a card, a loop's carried
+/// sequences copied out where it ends, which holds them twice there, as measured at three sizes of the
+/// LSTM benchmark's step — laid out as its allocation plan lays a run out:
 ///
 /// <list type="bullet">
 /// <item>a node takes a buffer for each output it makes; an output a kernel hands back over its input
@@ -20,8 +21,9 @@ namespace Shorokoo.OnnxRuntime;
 /// death; one that no later output takes is given back as its value dies, and so is one whose value's
 /// shape the graph does not fix (<see cref="ShapesNotFixed(GraphProto)"/>), which takes a buffer of its own, and
 /// one made in a loop's body, which the body's own frame gives back as its iteration ends;</item>
-/// <item>an output the run writes into the input it is paired with takes nothing, and every other
-/// output is held to the run's end;</item>
+/// <item>an output the run writes into the input it is paired with takes nothing, a constant — which
+/// a session holds as it holds an initializer — takes nothing, and every other output is held to the
+/// run's end;</item>
 /// <item>a kernel's own scratch for the node's length: on the host as <see cref="HostScratch"/> says,
 /// on a card as <see cref="CardScratch"/> does.</item>
 /// </list>
@@ -48,7 +50,7 @@ internal static class OrtRunMemory
         UnrolledRun.Run? run;
         try
         {
-            run = UnrolledRun.Of(graph, inputs, written => written);
+            run = UnrolledRun.Of(graph, inputs, written => written, copiesListsAtLoopEnd: !onHost);
         }
         catch (ArgumentException)
         {
@@ -88,7 +90,7 @@ internal static class OrtRunMemory
             scratch[k] = onHost ? HostScratch(node, shapes) : CardScratch(node, shapes);
             foreach (var o in node.Outputs.Where(o => o.Length > 0))
             {
-                if (RootOf(o) != o || intoInputs.Contains(o) || shapes[o].Bytes <= 0) continue;
+                if (RootOf(o) != o || intoInputs.Contains(o) || shapes[o].Bytes <= 0 || node.OpType == "Constant") continue;
                 var value = shapes[o];
                 var shape = $"{value.ElementType}[{string.Join(",", value.Shape)}]";
                 if (InPlaceActivations.Contains(node.OpType) && OutputAliasProof.IsStandard(node)

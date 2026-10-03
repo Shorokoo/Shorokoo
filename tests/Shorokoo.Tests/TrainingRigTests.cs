@@ -743,6 +743,11 @@ public class TrainingRigFromScratchCoverageTests
             ComputeContextLifetimeCoverageTests.Loop("three s", "S", ComputeContextLifetimeCoverageTests.GraphOf("i c t", "k u",
                 Op("Neg", "x", "n"), Op("SequenceInsert", "t n", "u"), Op("Identity", "c", "k"))),
             ComputeContextLifetimeCoverageTests.Op("ConcatFromSequence", "S", "O", attribute: ("axis", 0))));
+        NodeProto[] listed = [Op("SequenceEmpty", "", "s"), ComputeContextLifetimeCoverageTests.Loop("three s", "S",
+            ComputeContextLifetimeCoverageTests.GraphOf("i c t", "k u", Op("Neg", "x", "n"), Op("SequenceInsert", "t n", "u"), Op("Identity", "c", "k"))),
+            Op("SequenceAt", "S zero", "O")];
+        Assert.Equal(384, OrtPeak("x:float[4,8]", "O", true, [], listed));
+        Assert.Equal(768, OrtPeak("x:float[4,8]", "O", false, [], listed));
     }
 
     private static NodeProto Op(string op, string inputs, string outputs) => ComputeContextLifetimeCoverageTests.Op(op, inputs, outputs);

@@ -20,7 +20,10 @@ namespace Shorokoo.Core.Backends;
 /// of its elements too — a <see cref="HoldOpType"/> node of the <see cref="HoldDomain"/> domain,
 /// with no outputs, where the node reading it stands — and the outer values a loop's body reads are
 /// read once more where the loop ends, as the frame around the loop holds them until it is
-/// done.</para>
+/// done. Where a backend hands a loop's carried sequences out as copies (<c>copiesListsAtLoopEnd</c>,
+/// ONNX Runtime's CUDA provider), each of their tensors is copied there — a
+/// <see cref="CopyOpType"/> node of the <see cref="HoldDomain"/> domain — and the copies are what
+/// the loop's outputs hold.</para>
 ///
 /// <para>Null where a loop's trip count or condition cannot be told, or a sequence reaches a node
 /// other than the sequence operators and <c>Identity</c>.</para>
@@ -33,16 +36,20 @@ internal static class UnrolledRun
     /// <summary>The operator of the nodes that read what a list holds.</summary>
     internal const string HoldOpType = "Hold";
 
+    /// <summary>The operator of the nodes that copy a tensor a loop hands out in a sequence.</summary>
+    internal const string CopyOpType = "Copy";
+
     /// <summary>The nodes a run runs, in order, the shapes of the values they make, and those of the
     /// values made for a loop — in its body, or of its outputs where it ends.</summary>
     internal sealed record Run(IReadOnlyList<NodeProto> Order, Dictionary<string, PlacementShapes.Value> Shapes,
         IReadOnlySet<string> Iterated);
 
     /// <summary>The run of <paramref name="graph"/> fed <paramref name="inputs"/>, a graph's nodes
-    /// run in the order <paramref name="runOrder"/> puts them in, or null where it cannot be
+    /// run in the order <paramref name="runOrder"/> puts them in, a loop's carried sequences handed
+    /// out as copies where <paramref name="copiesListsAtLoopEnd"/>; null where it cannot be
     /// told.</summary>
     internal static Run? Of(GraphProto graph, IReadOnlyDictionary<string, (long[] Shape, int ElementType)> inputs,
-        Func<IReadOnlyList<NodeProto>, IReadOnlyList<NodeProto>> runOrder)
+        Func<IReadOnlyList<NodeProto>, IReadOnlyList<NodeProto>> runOrder, bool copiesListsAtLoopEnd = false)
     {
         var order = runOrder(graph.Nodes);
         if (!graph.Nodes.Any(Unrolls))
@@ -50,7 +57,7 @@ internal static class UnrolledRun
         var (values, symbols) = PlacementShapes.Start(graph, inputs);
         var stated = new Dictionary<string, ValueInfoProto>(StringComparer.Ordinal);
         foreach (var info in graph.ValueInfoes.Concat(graph.Outputs)) stated.TryAdd(info.Name, info);
-        var unrolling = new Unrolling(values, symbols, stated, runOrder);
+        var unrolling = new Unrolling(values, symbols, stated, runOrder, copiesListsAtLoopEnd);
         if (!unrolling.Expand(order, new Dictionary<string, string>(StringComparer.Ordinal), renameOutputs: false)) return null;
         foreach (var output in graph.Outputs)
             if (unrolling.Lists.TryGetValue(output.Name, out var held)) unrolling.Hold(held);
@@ -63,7 +70,8 @@ internal static class UnrolledRun
             || node.OpType is "ConcatFromSequence" or "SplitToSequence");
 
     private sealed class Unrolling(Dictionary<string, PlacementShapes.Value> values, Dictionary<string, long> symbols,
-        IReadOnlyDictionary<string, ValueInfoProto> stated, Func<IReadOnlyList<NodeProto>, IReadOnlyList<NodeProto>> runOrder)
+        IReadOnlyDictionary<string, ValueInfoProto> stated, Func<IReadOnlyList<NodeProto>, IReadOnlyList<NodeProto>> runOrder,
+        bool copiesListsAtLoopEnd)
     {
         private int _renamed;
         private int _looping;
@@ -72,6 +80,19 @@ internal static class UnrolledRun
 
         /// <summary>The values made for a loop: in its body, or of its outputs where it ends.</summary>
         internal HashSet<string> Iterated { get; } = new(StringComparer.Ordinal);
+
+        /// <summary>A copy of <paramref name="tensor"/>, made where the run stands.</summary>
+        private string Copy(string tensor)
+        {
+            var copy = Fresh(tensor);
+            var node = new NodeProto { OpType = CopyOpType, Domain = HoldDomain };
+            node.Inputs.Add(tensor);
+            node.Outputs.Add(copy);
+            if (values.TryGetValue(tensor, out var value)) values[copy] = value;
+            Order.Add(node);
+            if (_looping > 0) Iterated.Add(copy);
+            return copy;
+        }
 
         /// <summary>Every sequence made so far, by name: the tensors it holds, in order.</summary>
         internal Dictionary<string, List<string>> Lists { get; } = new(StringComparer.Ordinal);
@@ -286,7 +307,12 @@ internal static class UnrolledRun
             for (int i = 0; i < carried && i < outputs.Count; i++)
             {
                 if (outputs[i].Length == 0) continue;
-                if (Lists.TryGetValue(current[i], out var list)) Lists[outputs[i]] = list;
+                if (Lists.TryGetValue(current[i], out var list))
+                {
+                    List<string> handed = copiesListsAtLoopEnd ? [.. list.Select(Copy)] : list;
+                    if (copiesListsAtLoopEnd) Hold(list);
+                    Lists[outputs[i]] = handed;
+                }
                 else Emit(Node("Identity", [current[i]], outputs[i]));
             }
             for (int s = 0; s < scans.Count && carried + s < outputs.Count; s++)

@@ -1278,6 +1278,9 @@ public class PyTorchBackendCoverageTests
             Loop("m", "O", GraphOn("i c", "k e", Op("Exp", "x", "e"), Op("Identity", "c", "k")))), "m", 2)));
         Assert.Equal(256, RunPeak(GraphOn("x:float[4,2,3] w:float[1,16,3] r:float[1,16,4]", "Y",
             ComputeContextLifetimeCoverageTests.Op("LSTM", "x w r", "Y", attribute: ("hidden_size", 4)))));
+        var branch = ComputeContextLifetimeCoverageTests.Op("If", "c", "O", body: GraphOn("", "t", Op("Neg", "x", "t")));
+        branch.Attributes.Add(new AttributeProto { Name = "else_branch", Type = AttributeProto.AttributeType.Graph, G = GraphOn("", "t", Op("Exp", "x", "t")) });
+        Assert.Null(RunPeak(GraphOn("x:float[4,8] c:bool[1]", "O", branch)));
     }
 
     [Fact]

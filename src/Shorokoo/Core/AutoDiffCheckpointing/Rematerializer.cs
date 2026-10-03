@@ -46,7 +46,15 @@ namespace Shorokoo.Core.AutoDiffCheckpointing;
 ///
 /// <para>Two invariants hold for every commit: the candidate graph scores strictly better
 /// under the objective and its evaluated peak does not exceed the peak before the commit; and
-/// the shape info returned covers every clone, so nothing is ever priced at zero.</para>
+/// the shape info returned covers every clone, so nothing is ever priced at zero. Where the
+/// backend the graph runs on models a run of it (a <see cref="BackendJudge"/>), "better" may also be
+/// the backend's verdict: when a walk of single candidates commits nothing — a plateau of the
+/// rematerializer's own figures — the <see cref="PlateauWidth"/> trials of that walk scoring best by
+/// them are weighed by the backend's model, and the one scoring best there, at no higher peak there,
+/// is committed where it scores better than the graph it was tried on, and the search goes on from
+/// it. The two models disagree most where the backend holds what the evaluator does not see — a
+/// copy a kernel makes of an operand, say — and a trial that frees a value held there costs a
+/// little compute and changes nothing by the evaluator's figures.</para>
 ///
 /// <para>A user's <c>[Module(Checkpoint = true)]</c> is a different contract, applied by
 /// <see cref="ApplyCheckpointSegments"/>: recompute every interior tensor of the segment that
@@ -58,6 +66,10 @@ internal class Rematerializer
     private readonly ComputeMemoryObjective _objective;
     private readonly int _maxEvaluationsPerCall;
     private readonly bool _pruneBatches;
+    private readonly BackendJudge? _judge;
+
+    /// <summary>The trials of a plateau weighed by the backend's model, where there is one.</summary>
+    internal const int PlateauWidth = 4;
 
     /// <param name="objective">What a commit must score better by.</param>
     /// <param name="evaluator">The evaluator every trial is scored with; the default when null.</param>
@@ -66,16 +78,20 @@ internal class Rematerializer
     /// <param name="pruneBatches">Whether a batch that improves is pruned to the members that pay
     /// for themselves before it is committed; committed whole, it costs the compute of every member
     /// that rode along, and can set the search on a path that ends lower.</param>
+    /// <param name="judge">The backend's model of a run, which weighs the trials a plateau leaves;
+    /// none where null.</param>
     public Rematerializer(
         ComputeMemoryObjective objective,
         GraphEvaluator? evaluator = null,
         int maxEvaluationsPerCall = MaxEvaluationsPerCall,
-        bool pruneBatches = true)
+        bool pruneBatches = true,
+        BackendJudge? judge = null)
     {
         _evaluator = evaluator ?? new GraphEvaluator();
         _objective = objective;
         _maxEvaluationsPerCall = maxEvaluationsPerCall;
         _pruneBatches = pruneBatches;
+        _judge = judge;
     }
 
     /// <summary>
@@ -265,15 +281,39 @@ internal class Rematerializer
             // candidate a graph such as the one-layer encoder has, turning the pass off on it
             // entirely. The budget is the only stop.
             var accepted = false;
+            var plateau = new List<(State Trial, RematCandidate Candidate)>();
             foreach (var candidate in candidates)
             {
                 if (evaluations >= _maxEvaluationsPerCall) break;
                 if (!tried.Add(candidate.Identity)) continue;
                 var trial = Trial([candidate], Placement.AfterProducer);
-                if (!Better(trial)) continue;
+                if (!Better(trial))
+                {
+                    if (trial is not null && _judge is not null)
+                    {
+                        plateau.Add((trial, candidate));
+                        plateau.Sort((a, b) => Score(a.Trial).CompareTo(Score(b.Trial)));
+                        if (plateau.Count > PlateauWidth) plateau.RemoveAt(PlateauWidth);
+                    }
+                    continue;
+                }
                 Commit(trial!, [candidate], Placement.AfterProducer, 1);
                 accepted = true;
                 break;
+            }
+
+            // A plateau of the evaluator's figures: its best trials weighed by the backend's model.
+            if (!accepted && _judge?.Judge(current.Graph, current.Eval) is { } now)
+            {
+                (State Trial, RematCandidate Candidate, double Score)? escape = null;
+                foreach (var (trial, candidate) in plateau)
+                    if (_judge.Judge(trial.Graph, trial.Eval) is { } judged && judged.Score < (escape?.Score ?? now.Score) && judged.Peak <= now.Peak)
+                        escape = (trial, candidate, judged.Score);
+                if (escape is { } taken)
+                {
+                    Commit(taken.Trial, [taken.Candidate], Placement.AfterProducer, 1);
+                    accepted = true;
+                }
             }
 
             if (!accepted)

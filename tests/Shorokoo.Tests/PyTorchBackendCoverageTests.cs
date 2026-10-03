@@ -1303,14 +1303,10 @@ public class PyTorchBackendCoverageTests
         var state = rig.UpdatedParamFieldCount + rig.UpdatedStateFieldCount + rig.UpdatedOptimizerStateFieldCount;
         long Holds(ComputationGraph step)
         {
-            var graph = Benchmarks.MemoryPassBenchmarkTests.RigModel(step, rig.OptimizationInputShapes).Graph!;
-            var index = new Dictionary<NodeProto, int>(ReferenceEqualityComparer.Instance);
-            for (int i = 0; i < graph.Nodes.Count; i++) index[graph.Nodes[i]] = i;
-            var over = TorchInPlace.Plan(graph);
-            return new Benchmarks.StepAnatomy(graph, rig.UpdatedParamFieldCount, state, rig.UpdatedOptimizerStateFieldCount)
-                .Peak([.. Shorokoo.PythonTranslation.OnnxToPythonTranslator.RunOrder(graph.Nodes).Select(n => index[n])],
-                    PlacementMemory.PyTorch.SharesUnlessPlaced,
-                    (node, slot) => node.Outputs.Count > 0 && over.TryGetValue(node.Outputs[0], out var s) && s == slot).Bytes;
+            var model = Benchmarks.MemoryPassBenchmarkTests.RigModel(step, rig.OptimizationInputShapes);
+            var graph = model.Graph!;
+            List<OutputAlias> written = [.. Enumerable.Range(0, state).Select(i => new OutputAlias(graph.Outputs[i].Name, graph.Inputs[i].Name))];
+            return TorchRunMemory.Peak(model, OutputAliasProof.Prove(graph, written))!.Value;
         }
         return Holds(rig.TrainingStepPureGraph) <= Holds(rig.PreOptimizationGraph);
     }

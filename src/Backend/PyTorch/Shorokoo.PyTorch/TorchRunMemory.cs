@@ -61,7 +61,7 @@ internal static class TorchRunMemory
         string RootOf(string value) => root.TryGetValue(value, out var r) && r != value ? root[value] = RootOf(r) : value;
         var strides = new Dictionary<string, long[]>(StringComparer.Ordinal);
         long[]? StridesOf(string value) => strides.TryGetValue(value, out var known) ? known
-            : shapes.TryGetValue(value, out var v) ? Contiguous(v.Shape) : null;
+            : shapes.TryGetValue(value, out var v) ? TorchStrides.Contiguous(v.Shape) : null;
         foreach (var node in order)
             for (int o = 0; o < node.Outputs.Count; o++)
             {
@@ -72,7 +72,9 @@ internal static class TorchRunMemory
                         && !(node.OpType.StartsWith("Reduce", StringComparison.Ordinal)
                              && shapes.TryGetValue(node.Inputs[i], out var reduced) && reduced.Bytes != shapes[output].Bytes))
                     {
-                        var viewed = ViewStrides(node, StridesOf(node.Inputs[i]), shapes.GetValueOrDefault(node.Inputs[i]), shapes.GetValueOrDefault(output));
+                        var viewed = StridesOf(node.Inputs[i]) is { } inputStrides && shapes.TryGetValue(node.Inputs[i], out var viewedShape) && shapes.TryGetValue(output, out var viewShape)
+                            ? TorchStrides.OfView(node.OpType, node.Attributes.FirstOrDefault(a => a.Name == "perm")?.Ints, viewedShape.Shape, inputStrides, viewShape.Shape)
+                            : null;
                         if (viewed is null && node.OpType is "Reshape" or "Flatten" or "Squeeze" or "Unsqueeze") break;
                         if (viewed is not null) strides[output] = viewed;
                         root[output] = RootOf(node.Inputs[i]);
@@ -141,86 +143,6 @@ internal static class TorchRunMemory
             }
         }
         return peak;
-    }
-
-    /// <summary>The strides of a value of <paramref name="shape"/> laid out row by row.</summary>
-    private static long[] Contiguous(long[] shape)
-    {
-        var strides = new long[shape.Length];
-        long step = 1;
-        for (int d = shape.Length - 1; d >= 0; d--)
-        {
-            strides[d] = step;
-            step *= Math.Max(shape[d], 1);
-        }
-        return strides;
-    }
-
-    /// <summary>
-    /// The strides of <paramref name="node"/>'s output as a view of its input of
-    /// <paramref name="input"/>'s shape and <paramref name="inputStrides"/>: permuted by a transpose,
-    /// none along an axis an expansion broadcasts, the input's own for every other view — and for a
-    /// reshape the strides torch gives the view, or null where torch's reshape cannot view the input
-    /// and copies it.
-    /// </summary>
-    private static long[]? ViewStrides(NodeProto node, long[]? inputStrides, PlacementShapes.Value? input, PlacementShapes.Value? output)
-    {
-        if (inputStrides is null || input is null || output is null) return null;
-        switch (node.OpType)
-        {
-            case "Transpose":
-            {
-                var perm = node.Attributes.FirstOrDefault(a => a.Name == "perm")?.Ints is { Length: > 0 } given
-                    ? given : [.. Enumerable.Range(0, inputStrides.Length).Reverse().Select(d => (long)d)];
-                return perm.Length == inputStrides.Length ? [.. perm.Select(d => inputStrides[d])] : null;
-            }
-            case "Expand":
-            {
-                var strides = new long[output.Shape.Length];
-                var lead = output.Shape.Length - input.Shape.Length;
-                for (int d = 0; d < strides.Length; d++)
-                    strides[d] = d < lead || (input.Shape[d - lead] == 1 && output.Shape[d] != 1) ? 0 : inputStrides[d - lead];
-                return strides;
-            }
-            case "Reshape" or "Flatten" or "Squeeze" or "Unsqueeze":
-                return ComputeStride(input.Shape, inputStrides, output.Shape);
-            default:
-                return input.Shape.SequenceEqual(output.Shape) ? inputStrides : Contiguous(output.Shape);
-        }
-    }
-
-    /// <summary>The strides torch gives a view of a tensor of <paramref name="shape"/> and
-    /// <paramref name="strides"/> reshaped to <paramref name="target"/>, or null where it cannot
-    /// view it (ATen's <c>computeStride</c>).</summary>
-    private static long[]? ComputeStride(long[] shape, long[] strides, long[] target)
-    {
-        if (shape.Length == 0) return [.. target.Select(_ => 1L)];
-        if (shape.Aggregate(1L, (a, d) => a * d) == 0) return shape.SequenceEqual(target) ? strides : Contiguous(target);
-        var result = new long[target.Length];
-        var viewD = target.Length - 1;
-        var chunkBaseStride = strides[^1];
-        long tensorNumel = 1, viewNumel = 1;
-        for (int tensorD = shape.Length - 1; tensorD >= 0; tensorD--)
-        {
-            tensorNumel *= shape[tensorD];
-            if (tensorD == 0 || (shape[tensorD - 1] != 1 && strides[tensorD - 1] != tensorNumel * chunkBaseStride))
-            {
-                while (viewD >= 0 && (viewNumel < tensorNumel || target[viewD] == 1))
-                {
-                    result[viewD] = viewNumel * chunkBaseStride;
-                    viewNumel *= target[viewD];
-                    viewD--;
-                }
-                if (viewNumel != tensorNumel) return null;
-                if (tensorD > 0)
-                {
-                    chunkBaseStride = strides[tensorD - 1];
-                    tensorNumel = 1;
-                    viewNumel = 1;
-                }
-            }
-        }
-        return viewD == -1 ? result : null;
     }
 
     /// <summary>

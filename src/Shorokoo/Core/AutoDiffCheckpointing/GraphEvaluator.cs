@@ -194,8 +194,10 @@ internal class GraphEvaluator
                     if (output is not null) graphInputs.Add(output.Value);
 
         var plan = new AllocationPlan(graphOutputs, graphInputs, _modelOrtBufferReuse);
-        // Under a translation's layout: the values that are another's memory, never written over.
+        // Under a translation's layout: the values that are another's memory, never written over, and
+        // the strides of each, which decide whether a reshape of it is a view or a copy.
         var views = new HashSet<FastTensorKey>();
+        var strides = new Dictionary<FastTensorKey, long[]>();
 
         // The state: each input held from the first position, and each output its step writes in
         // place bound to the buffer of the input it replaces, to be placed there by its writer.
@@ -277,7 +279,7 @@ internal class GraphEvaluator
                 {
                     var writtenOver = false;
                     if (!readsMetadataOnly
-                        && TranslationReuse(node, outIdx, shapeInfo, plan, views, tensorLastUse, graphOutputs, pos) is var (over, isView))
+                        && TranslationReuse(node, outIdx, shapeInfo, plan, views, strides, tensorLastUse, graphOutputs, pos) is var (over, isView))
                     {
                         plan.Alias(over, output.Value, isView ? 0 : outputInfo.MemoryBytes);
                         if (isView) views.Add(output.Value);
@@ -376,11 +378,13 @@ internal class GraphEvaluator
     /// <paramref name="node"/>'s output <paramref name="outIdx"/> takes, and whether as a view of it;
     /// null where it takes memory of its own. A view's input may stay live; an operand written over
     /// dies at this node, is of the output's bytes and type, is memory of its own — not a view, not
-    /// a fed input, not a graph output — and no other value shares it.
+    /// a fed input, not a graph output — and no other value shares it. A reshape is a view only where
+    /// torch can view what it reshapes by its strides (<paramref name="strides"/>, followed here),
+    /// and memory of its own otherwise, as torch copies it.
     /// </summary>
     private static (FastTensorKey Over, bool IsView)? TranslationReuse(
         FastNode node, int outIdx, ShapeInferenceResult shapeInfo, AllocationPlan plan, HashSet<FastTensorKey> views,
-        Dictionary<FastTensorKey, int> tensorLastUse, HashSet<FastTensorKey> graphOutputs, int pos)
+        Dictionary<FastTensorKey, long[]> strides, Dictionary<FastTensorKey, int> tensorLastUse, HashSet<FastTensorKey> graphOutputs, int pos)
     {
         var inputs = node.Inputs;
         var used = inputs.Count(i => i is not null);
@@ -395,7 +399,18 @@ internal class GraphEvaluator
             _ => false,
         };
         if (viewOfFirst)
-            return first is { } source && plan.Contains(source) ? (source, true) : null;
+        {
+            if (first is not { } source || !plan.Contains(source)) return null;
+            if (node.Outputs[outIdx] is { } view && shapeInfo.GetTensorInfo(source) is { } viewedInfo && shapeInfo.GetTensorInfo(view) is { } viewInfo
+                && viewedInfo.Shape.Dims.All(d => d >= 0) && viewInfo.Shape.Dims.All(d => d >= 0))
+            {
+                var viewedStrides = strides.TryGetValue(source, out var known) ? known : Shorokoo.Core.Backends.TorchStrides.Contiguous(viewedInfo.Shape.Dims);
+                var viewStrides = Shorokoo.Core.Backends.TorchStrides.OfView(op, node.Attributes.IsAttributeDefined("perm") ? node.Attributes.GetLongsVal("perm") : null, viewedInfo.Shape.Dims, viewedStrides, viewInfo.Shape.Dims);
+                if (viewStrides is null && op is "Reshape" or "Flatten" or "Squeeze" or "Unsqueeze") return null;
+                if (viewStrides is not null) strides[view] = viewStrides;
+            }
+            return (source, true);
+        }
 
         if (outIdx != 0 || node.Outputs.Count(o => o is not null) != 1 || node.Outputs[0] is not { } output) return null;
         IReadOnlyList<int> slots = op switch

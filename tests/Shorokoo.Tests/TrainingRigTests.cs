@@ -683,6 +683,30 @@ internal static class TrainingRigHelpers
 [Trait("Purpose", "Coverage")]
 public class TrainingRigFromScratchCoverageTests
 {
+    [Fact]
+    public void TestTheMemoryAwarePassHandsAnOnnxRuntimeHostContextNoStepHoldingMoreThanTheStepItWasHanded()
+        => Assert.True(HostStepPeak(Benchmarks.MemoryPassConv.ComputationGraph, [8L, 3L, 64L, 64L], handed: false)
+                       <= HostStepPeak(Benchmarks.MemoryPassConv.ComputationGraph, [8L, 3L, 64L, 64L], handed: true));
+
+    /// <summary>The most the arenas of an ONNX Runtime host context held while a rig on it ran two
+    /// resident steps: the step the memory-aware pass chose, or the step it was handed.</summary>
+    private static long HostStepPeak(ComputationGraph model, long[] shape, bool handed)
+    {
+        using var context = new ComputeContext { Diagnostics = new DiagnosticSettings { CollectRunStatistics = true } };
+        var sample = TensorData(shape, new float[shape.Aggregate(1L, (a, d) => a * d)]);
+        var rig = TrainingRig.FromScratch(model, Shorokoo.Modules.Losses.L2Loss.ComputationGraph,
+            Shorokoo.Modules.Optimizers.AdamWOptimizer.ComputationGraph, [sample],
+            new Shorokoo.Modules.Optimizers.AdamWOptimizerHyperparameters { LearningRate = 0.001f }, runtimeContext: context);
+        if (handed)
+            typeof(TrainingRig).GetProperty(nameof(TrainingRig.TrainingStepPureGraph))!.SetValue(rig, rig.PreOptimizationGraph);
+        var input = rig.InputDef.FromOrderedData(sample);
+        var target = rig.TargetDef.FromOrderedData(TensorData([8L, 32L], new float[256]));
+        using var run = rig.BeginResidentRun(rig.CreateInitialCheckpoint());
+        run.Step(input.Shared(), target.Shared());
+        run.Step(input.Shared(), target.Shared());
+        return context.RunStats.PeakBytes;
+    }
+
     private static void CoverCheckpointRebind(
         ComputationGraph modelGraph,
         ComputationGraph lossGraph,

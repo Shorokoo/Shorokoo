@@ -1219,20 +1219,9 @@ public class PyTorchBackendCoverageTests
     public void TestTheMemoryAwarePassTakesARecurrentStepTorchModelsBelowItsPeakComputingWhatItWasHanded()
     {
         using var context = new ComputeContext(Torch);
-        long[] shape = [32L, 32L, 64L];
-        var sample = TensorData(shape, [.. Enumerable.Range(0, 32 * 32 * 64).Select(i => (i % 13) / 13f - 0.5f)]);
-        var rig = TrainingRig.FromScratch(Benchmarks.MemoryPassLstm.ComputationGraph, Shorokoo.Modules.Losses.L2Loss.ComputationGraph,
-            Shorokoo.Modules.Optimizers.AdamWOptimizer.ComputationGraph, [sample],
-            new Shorokoo.Modules.Optimizers.AdamWOptimizerHyperparameters { LearningRate = 0.001f }, runtimeContext: context);
-        var result = rig.OptimizationResult;
-        var chosen = result.AllStrategies.Select(s => s.Graph).ToList().FindIndex(g => ReferenceEquals(g, result.OptimizedGraph));
-        Assert.True(result.BackendPeakBytes![chosen] < result.BackendPeakBytes[0]);
-        TensorData[] feeds = [.. rig.OptimizationInputShapes.Select(s => s.DType == DType.Float32
-            ? (TensorData)TensorData([.. s.Shape.Dims.Select(d => (long)d)], [.. Enumerable.Range(0, (int)s.Shape.Count).Select(i => (i % 7) / 7f)])
-            : TensorData([.. s.Shape.Dims.Select(d => (long)d)], new long[s.Shape.Count]))];
-        float[][] Outputs(ComputationGraph step) => [.. context.Execute(step, [.. feeds.Select(f => f.Shared())]).Select(o => o.ToTensorData())
-            .Where(t => t.DType == DType.Float32).Select(t => t.As<float32>().CopyMemory<float>())];
-        Assert.Equal(Outputs(rig.PreOptimizationGraph), Outputs(rig.TrainingStepPureGraph));
+        var step = TrainingRigFromScratchCoverageTests.RecurrentStep(context);
+        Assert.True(step.Chosen < step.Handed);
+        Assert.Equal(step.HandedComputes, step.ChosenComputes);
     }
 
     /// <summary>Torch on the CPU, its steps judged by torch's model of a run on a card.</summary>
@@ -1299,15 +1288,7 @@ public class PyTorchBackendCoverageTests
         Assert.Equal(256, RunPeak(GraphOn("x:float[4,8]", "O", Op("Exp", "x", "e"), ComputeContextLifetimeCoverageTests.Op("Cast", "e", "c", attribute: ("to", 1)), Op("Neg", "c", "O"))));
     }
 
-    /// <summary>A <c>Loop</c> of <paramref name="inputs"/> — its trip count and its carried values,
-    /// with no condition — making <paramref name="outputs"/> by <paramref name="body"/>.</summary>
-    private static NodeProto Loop(string inputs, string outputs, GraphProto body)
-    {
-        var loop = Op("Loop", inputs, outputs);
-        loop.Inputs.Insert(1, "");
-        loop.Attributes.Add(new AttributeProto { Name = "body", Type = AttributeProto.AttributeType.Graph, G = body });
-        return loop;
-    }
+    private static NodeProto Loop(string inputs, string outputs, GraphProto body) => ComputeContextLifetimeCoverageTests.Loop(inputs, outputs, body);
 
     [Fact]
     public void TestATorchRunIsModelledCopyingAReshapeOfAViewItsStridesCannotReshape()

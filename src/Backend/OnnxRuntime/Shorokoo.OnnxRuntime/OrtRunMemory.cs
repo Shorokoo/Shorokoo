@@ -7,7 +7,9 @@ namespace Shorokoo.OnnxRuntime;
 /// The most a run holds at once beyond its inputs and initializers, as ONNX Runtime runs it: over
 /// the graph a session writes out (<c>OptimizedModelFilePath</c>), its fusions and rewrites made,
 /// in that graph's order, which is the order a session runs its nodes in (see
-/// <see cref="OrtBackend.Configure"/>), laid out as its allocation plan lays a run out:
+/// <see cref="OrtBackend.Configure"/>), each loop's body run once per iteration in its own order and
+/// each sequence the tensors it holds (<see cref="UnrolledRun"/>), laid out as its allocation plan
+/// lays a run out:
 ///
 /// <list type="bullet">
 /// <item>a node takes a buffer for each output it makes; an output a kernel hands back over its input
@@ -16,7 +18,8 @@ namespace Shorokoo.OnnxRuntime;
 /// <item>a buffer whose every value has died is kept for the next output of its exact shape and type,
 /// the most recently let go of first, and is occupied from its first value's birth to its last one's
 /// death; one that no later output takes is given back as its value dies, and so is one whose value's
-/// shape the graph does not fix (<see cref="ShapesNotFixed"/>), which takes a buffer of its own;</item>
+/// shape the graph does not fix (<see cref="ShapesNotFixed(GraphProto)"/>), which takes a buffer of its own, and
+/// one made in a loop's body, which the body's own frame gives back as its iteration ends;</item>
 /// <item>an output the run writes into the input it is paired with takes nothing, and every other
 /// output is held to the run's end;</item>
 /// <item>a kernel's own scratch for the node's length: on the host as <see cref="HostScratch"/> says,
@@ -42,18 +45,19 @@ internal static class OrtRunMemory
     internal static long? Peak(GraphProto graph, IReadOnlyDictionary<string, (long[] Shape, int ElementType)> inputs,
         IReadOnlyList<OutputAlias> aliases, bool onHost)
     {
-        Dictionary<string, PlacementShapes.Value> shapes;
+        UnrolledRun.Run? run;
         try
         {
-            shapes = PlacementShapes.Evaluate(graph, inputs);
+            run = UnrolledRun.Of(graph, inputs, written => written);
         }
         catch (ArgumentException)
         {
             return null;
         }
-        if (graph.Nodes.Any(n => n.Outputs.Any(o => o.Length > 0 && !shapes.ContainsKey(o)))) return null;
+        if (run is null) return null;
+        var (nodes, shapes) = (run.Order, run.Shapes);
+        if (nodes.Any(n => n.Outputs.Any(o => o.Length > 0 && !shapes.ContainsKey(o)))) return null;
 
-        var nodes = graph.Nodes;
         var root = new Dictionary<string, string>(StringComparer.Ordinal);
         string RootOf(string v) => root.TryGetValue(v, out var r) && r != v ? root[v] = RootOf(r) : v;
         foreach (var node in nodes)
@@ -76,7 +80,8 @@ internal static class OrtRunMemory
         var users = new List<int>();
         var free = new List<int>();
         var scratch = new long[nodes.Count];
-        var unfixed = ShapesNotFixed(graph);
+        var unfixed = ShapesNotFixed(nodes, graph.Initializers.Select(i => i.Name));
+        unfixed.UnionWith(run.Iterated);
         for (int k = 0; k < nodes.Count; k++)
         {
             var node = nodes[k];
@@ -143,10 +148,15 @@ internal static class OrtRunMemory
     /// such a value: these take a buffer of their own, and give it back as they die.
     /// </summary>
     internal static HashSet<string> ShapesNotFixed(GraphProto graph)
+        => ShapesNotFixed(graph.Nodes, graph.Initializers.Select(i => i.Name));
+
+    /// <summary><see cref="ShapesNotFixed(GraphProto)"/> over <paramref name="nodes"/>, whose
+    /// initializers are <paramref name="initializers"/>.</summary>
+    private static HashSet<string> ShapesNotFixed(IEnumerable<NodeProto> nodes, IEnumerable<string> initializers)
     {
-        var constant = graph.Initializers.Select(i => i.Name).ToHashSet(StringComparer.Ordinal);
+        var constant = initializers.ToHashSet(StringComparer.Ordinal);
         var unfixed = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var node in graph.Nodes)
+        foreach (var node in nodes)
         {
             int[] read = node.OpType switch
             {

@@ -38,10 +38,10 @@ internal static class TorchRunMemory
             if (shape.Dims.Any(d => d.DimValue <= 0 && d.DimParam is { Length: > 0 })) return null;
             given[input.Name] = ([.. shape.Dims.Select(d => d.DimValue)], tensor.ElemType);
         }
-        TorchUnrolledRun.Run? run;
+        UnrolledRun.Run? run;
         try
         {
-            run = TorchUnrolledRun.Of(graph, given);
+            run = UnrolledRun.Of(graph, given, OnnxToPythonTranslator.RunOrder);
         }
         catch (ArgumentException)
         {

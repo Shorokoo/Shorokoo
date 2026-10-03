@@ -1,32 +1,31 @@
-using Shorokoo.Core.Backends;
 using Shorokoo.Core.Factory.IR;
-using Shorokoo.PythonTranslation;
 
-namespace Shorokoo.PyTorch;
+namespace Shorokoo.Core.Backends;
 
 /// <summary>
-/// A run of a model's translation as the nodes it runs, one after the other, with the shape of
-/// every value they make: the top-level graph's nodes in the order the translation runs them
-/// (<see cref="OnnxToPythonTranslator.RunOrder"/>), each <c>Loop</c> unrolled where it stands —
-/// its body once per iteration, in its own run order, its values renamed per iteration — and each
-/// sequence resolved into the tensors it holds, which the translation keeps in a Python list.
+/// A run of a graph as the nodes a backend runs, one after the other, with the shape of every
+/// value they make: the top-level graph's nodes in the backend's order, each <c>Loop</c> unrolled
+/// where it stands — its body once per iteration, in the backend's order, its values renamed per
+/// iteration (<see cref="Run.Iterated"/>) — and each sequence resolved into the tensors it holds,
+/// as a backend keeps a sequence: a Python list of tensors in a translation, a list of tensors in
+/// ONNX Runtime.
 ///
 /// <para>A loop unrolls where its trip count is known from the shapes the run is fed and its
-/// condition from what its body computes: the translation runs <c>trip_count</c> iterations, or fewer
-/// where the condition turns false. Each iteration's carried values are the last one's; a scan
-/// output is the iteration's values stacked, a <c>Concat</c> of each unsqueezed, read once the loop
-/// ends, as <c>torch.stack</c> reads the list it built. A sequence is a list of tensors and holds no
-/// memory of its own: inserting into one, erasing from one or reading one element of it makes no
-/// tensor, and an element read from one is that tensor (an <c>Identity</c>). What a list holds lives
-/// as long as the list does, so every node reading a list reads each of its elements too — a
-/// <see cref="HoldOpType"/> node of the <see cref="HoldDomain"/> domain, with no outputs, where the
-/// node reading it stands — and the outer values a loop's body reads are read once more where the
-/// loop ends, as the translation's enclosing function holds them until its statement is done.</para>
+/// condition from what its body computes: a run takes <c>trip_count</c> iterations, or fewer where
+/// the condition turns false. Each iteration's carried values are the last one's; a scan output is
+/// the iteration's values stacked, a <c>Concat</c> of each unsqueezed, read once the loop ends. A
+/// sequence holds no memory of its own: inserting into one, erasing from one or reading one element
+/// of it makes no tensor, and an element read from one is that tensor (an <c>Identity</c>). What a
+/// sequence holds lives as long as the sequence does, so every node reading a sequence reads each
+/// of its elements too — a <see cref="HoldOpType"/> node of the <see cref="HoldDomain"/> domain,
+/// with no outputs, where the node reading it stands — and the outer values a loop's body reads are
+/// read once more where the loop ends, as the frame around the loop holds them until it is
+/// done.</para>
 ///
 /// <para>Null where a loop's trip count or condition cannot be told, or a sequence reaches a node
 /// other than the sequence operators and <c>Identity</c>.</para>
 /// </summary>
-internal static class TorchUnrolledRun
+internal static class UnrolledRun
 {
     /// <summary>The domain of the nodes that read what a list holds.</summary>
     internal const string HoldDomain = "shorokoo.run";
@@ -34,24 +33,28 @@ internal static class TorchUnrolledRun
     /// <summary>The operator of the nodes that read what a list holds.</summary>
     internal const string HoldOpType = "Hold";
 
-    /// <summary>The nodes a run runs, in order, and the shapes of the values they make.</summary>
-    internal sealed record Run(IReadOnlyList<NodeProto> Order, Dictionary<string, PlacementShapes.Value> Shapes);
+    /// <summary>The nodes a run runs, in order, the shapes of the values they make, and those of the
+    /// values made for a loop — in its body, or of its outputs where it ends.</summary>
+    internal sealed record Run(IReadOnlyList<NodeProto> Order, Dictionary<string, PlacementShapes.Value> Shapes,
+        IReadOnlySet<string> Iterated);
 
-    /// <summary>The run of <paramref name="graph"/> fed <paramref name="inputs"/>, or null where it
-    /// cannot be told.</summary>
-    internal static Run? Of(GraphProto graph, IReadOnlyDictionary<string, (long[] Shape, int ElementType)> inputs)
+    /// <summary>The run of <paramref name="graph"/> fed <paramref name="inputs"/>, a graph's nodes
+    /// run in the order <paramref name="runOrder"/> puts them in, or null where it cannot be
+    /// told.</summary>
+    internal static Run? Of(GraphProto graph, IReadOnlyDictionary<string, (long[] Shape, int ElementType)> inputs,
+        Func<IReadOnlyList<NodeProto>, IReadOnlyList<NodeProto>> runOrder)
     {
-        var order = OnnxToPythonTranslator.RunOrder(graph.Nodes);
+        var order = runOrder(graph.Nodes);
         if (!graph.Nodes.Any(Unrolls))
-            return new Run(order, PlacementShapes.Evaluate(graph, inputs));
+            return new Run(order, PlacementShapes.Evaluate(graph, inputs), new HashSet<string>(StringComparer.Ordinal));
         var (values, symbols) = PlacementShapes.Start(graph, inputs);
         var stated = new Dictionary<string, ValueInfoProto>(StringComparer.Ordinal);
         foreach (var info in graph.ValueInfoes.Concat(graph.Outputs)) stated.TryAdd(info.Name, info);
-        var unrolling = new Unrolling(values, symbols, stated);
+        var unrolling = new Unrolling(values, symbols, stated, runOrder);
         if (!unrolling.Expand(order, new Dictionary<string, string>(StringComparer.Ordinal), renameOutputs: false)) return null;
         foreach (var output in graph.Outputs)
             if (unrolling.Lists.TryGetValue(output.Name, out var held)) unrolling.Hold(held);
-        return new Run(unrolling.Order, values);
+        return new Run(unrolling.Order, values, unrolling.Iterated);
     }
 
     /// <summary>Whether <paramref name="node"/> is one a run of the graph is unrolled for.</summary>
@@ -60,13 +63,17 @@ internal static class TorchUnrolledRun
             || node.OpType is "ConcatFromSequence" or "SplitToSequence");
 
     private sealed class Unrolling(Dictionary<string, PlacementShapes.Value> values, Dictionary<string, long> symbols,
-        IReadOnlyDictionary<string, ValueInfoProto> stated)
+        IReadOnlyDictionary<string, ValueInfoProto> stated, Func<IReadOnlyList<NodeProto>, IReadOnlyList<NodeProto>> runOrder)
     {
         private int _renamed;
+        private int _looping;
 
         internal List<NodeProto> Order { get; } = [];
 
-        /// <summary>Every sequence made so far, by name: the tensors its list holds, in order.</summary>
+        /// <summary>The values made for a loop: in its body, or of its outputs where it ends.</summary>
+        internal HashSet<string> Iterated { get; } = new(StringComparer.Ordinal);
+
+        /// <summary>Every sequence made so far, by name: the tensors it holds, in order.</summary>
         internal Dictionary<string, List<string>> Lists { get; } = new(StringComparer.Ordinal);
 
         internal void Hold(IEnumerable<string> held)
@@ -80,6 +87,7 @@ internal static class TorchUnrolledRun
         {
             PlacementShapes.Step(node, values, symbols, stated);
             Order.Add(node);
+            if (_looping > 0) Iterated.UnionWith(node.Outputs.Where(o => o.Length > 0));
         }
 
         private string Fresh(string name) => $"{name}§{_renamed++}";
@@ -224,6 +232,19 @@ internal static class TorchUnrolledRun
         /// <paramref name="outputs"/>; false where its trip count or condition cannot be told.</summary>
         private bool Loop(NodeProto loop, List<string> inputs, List<string> outputs)
         {
+            _looping++;
+            try
+            {
+                return Unroll(loop, inputs, outputs);
+            }
+            finally
+            {
+                _looping--;
+            }
+        }
+
+        private bool Unroll(NodeProto loop, List<string> inputs, List<string> outputs)
+        {
             if (loop.Attributes.FirstOrDefault(a => a.Name == "body")?.G is not { } body) return false;
             if (inputs.Count == 0 || inputs[0].Length == 0 || Scalar(inputs[0]) is not { } trips) return false;
             var carried = inputs.Count - 2;
@@ -233,7 +254,7 @@ internal static class TorchUnrolledRun
             var defined = body.Inputs.Select(i => i.Name).Concat(body.Initializers.Select(i => i.Name))
                 .Concat(body.Nodes.SelectMany(n => n.Outputs)).ToHashSet(StringComparer.Ordinal);
             var captured = body.Nodes.SelectMany(n => n.Inputs).Where(i => i.Length > 0 && !defined.Contains(i)).Distinct().ToList();
-            var bodyOrder = OnnxToPythonTranslator.RunOrder(body.Nodes);
+            var bodyOrder = runOrder(body.Nodes);
             var current = inputs.Skip(2).ToList();
             var scans = Enumerable.Range(0, body.Outputs.Count - 1 - carried).Select(_ => new List<string>()).ToList();
             var condition = inputs.Count > 1 && inputs[1].Length > 0 ? inputs[1] : "";

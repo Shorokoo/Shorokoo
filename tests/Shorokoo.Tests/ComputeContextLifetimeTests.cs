@@ -961,6 +961,16 @@ public class ComputeContextLifetimeCoverageTests
             : "unknown"));
     }
 
+    /// <summary>A <c>Loop</c> of <paramref name="inputs"/> — its trip count and its carried values,
+    /// with no condition — making <paramref name="outputs"/> by <paramref name="body"/>.</summary>
+    internal static NodeProto Loop(string inputs, string outputs, GraphProto body)
+    {
+        var loop = Op("Loop", inputs, outputs);
+        loop.Inputs.Insert(1, "");
+        loop.Attributes.Add(new AttributeProto { Name = "body", Type = AttributeProto.AttributeType.Graph, G = body });
+        return loop;
+    }
+
     internal static NodeProto With(NodeProto node, string name, params long[] ints)
     {
         node.Attributes.Add(new AttributeProto { Name = name, Type = AttributeProto.AttributeType.Ints, Ints = ints });

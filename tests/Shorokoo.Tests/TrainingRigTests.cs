@@ -684,6 +684,34 @@ internal static class TrainingRigHelpers
 public class TrainingRigFromScratchCoverageTests
 {
     [Fact]
+    public void TestTheMemoryAwarePassTakesARecurrentStepOnnxRuntimeModelsBelowItsPeakComputingWhatItWasHanded()
+    {
+        using var context = new ComputeContext();
+        var step = RecurrentStep(context);
+        Assert.True(step.Chosen < step.Handed);
+        Assert.Equal(step.HandedComputes, step.ChosenComputes);
+    }
+
+    /// <summary>The LSTM benchmark's step at four times its batch, built on <paramref name="context"/>:
+    /// the backend's peak of the step handed to the memory-aware pass and of the one it chose, and what
+    /// each computes from the same inputs.</summary>
+    internal static (long Handed, long Chosen, float[][] HandedComputes, float[][] ChosenComputes) RecurrentStep(ComputeContext context)
+    {
+        long[] shape = [32L, 32L, 64L];
+        var sample = TensorData(shape, [.. Enumerable.Range(0, 32 * 32 * 64).Select(i => (i % 13) / 13f - 0.5f)]);
+        var rig = TrainingRig.FromScratch(Benchmarks.MemoryPassLstm.ComputationGraph, L2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph,
+            [sample], new AdamWOptimizerHyperparameters { LearningRate = 0.001f }, runtimeContext: context);
+        var result = rig.OptimizationResult;
+        var chosen = result.AllStrategies.Select(s => s.Graph).ToList().FindIndex(g => ReferenceEquals(g, result.OptimizedGraph));
+        TensorData[] feeds = [.. rig.OptimizationInputShapes.Select(s => s.DType == DType.Float32
+            ? (TensorData)TensorData([.. s.Shape.Dims.Select(d => (long)d)], [.. Enumerable.Range(0, (int)s.Shape.Count).Select(i => (i % 7) / 7f)])
+            : TensorData([.. s.Shape.Dims.Select(d => (long)d)], new long[s.Shape.Count]))];
+        float[][] Computes(ComputationGraph step) => [.. context.Execute(step, [.. feeds.Select(f => f.Shared())]).Select(o => o.ToTensorData())
+            .Where(t => t.DType == DType.Float32).Select(t => t.As<float32>().CopyMemory<float>())];
+        return (result.BackendPeakBytes![0], result.BackendPeakBytes[chosen], Computes(rig.PreOptimizationGraph), Computes(rig.TrainingStepPureGraph));
+    }
+
+    [Fact]
     public void TestOnnxRuntimeOnTheHostIsModelledHoldingWhatItsRunOfATrainingStepHolds()
     {
         Assert.True(ModelledAgainstRun(Benchmarks.MemoryPassEncoder1.ComputationGraph, [8L, 128L, 128L]));
@@ -711,6 +739,10 @@ public class TrainingRigFromScratchCoverageTests
         Assert.Equal(16896, OrtPeak("x:float[4,8,16,4]", "O", false, [], Op("Exp", "x", "e"), Op("ReduceMean", "e two", "O")));
         Assert.Equal(10240, OrtPeak("x:float[4,8,16,4]", "O", false, [], Op("Exp", "x", "e"), Op("ReduceMean", "e three", "O")));
         Assert.Equal(8704, OrtPeak("x:float[4,8,16,4]", "O", true, [], Op("Exp", "x", "e"), Op("ReduceMean", "e two", "O")));
+        Assert.Equal(768, OrtPeak("x:float[4,8]", "O", true, [], Op("SequenceEmpty", "", "s"),
+            ComputeContextLifetimeCoverageTests.Loop("three s", "S", ComputeContextLifetimeCoverageTests.GraphOf("i c t", "k u",
+                Op("Neg", "x", "n"), Op("SequenceInsert", "t n", "u"), Op("Identity", "c", "k"))),
+            ComputeContextLifetimeCoverageTests.Op("ConcatFromSequence", "S", "O", attribute: ("axis", 0))));
     }
 
     private static NodeProto Op(string op, string inputs, string outputs) => ComputeContextLifetimeCoverageTests.Op(op, inputs, outputs);

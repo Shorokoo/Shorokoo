@@ -228,7 +228,7 @@ public class MemoryReuseScenarioTests
     /// <c>$SHOROKOO_MEMORY_REUSE_ROUNDS</c> times — for its peak (as
     /// <see cref="RecordWhatBoundsATrainingStepsPeak"/> reads it) and its median time; beside the
     /// pass's own figures for both (its evaluator's peak and compute) and, where the backend models a
-    /// run, the backend's peak. <c>$SHOROKOO_MEMORY_REUSE_SCALE</c> multiplies each family's batch;
+    /// run, the backend's peak; and how long the rig took to build. <c>$SHOROKOO_MEMORY_REUSE_SCALE</c> multiplies each family's batch;
     /// <c>$SHOROKOO_MEMORY_REUSE_MEMORY_WEIGHT</c> sets the pass's memory weight.
     /// </summary>
     [Fact]
@@ -247,8 +247,8 @@ public class MemoryReuseScenarioTests
         var lines = new List<string>
         {
             $"# What the memory-aware pass buys a training step, {where}, batch x{scale}, memory weight {weightName}{(Precision().AllowTensorFloat32 ? ", TensorFloat-32 allowed" : "")}", "",
-            "| family | chosen | real peak, handed -> chosen | step ms, handed -> chosen | pass's model, handed -> chosen | backend's model, handed -> chosen | modelled compute, chosen / handed |",
-            "|---|---|---|---|---|---|---|",
+            "| family | chosen | real peak, handed -> chosen | step ms, handed -> chosen | pass's model, handed -> chosen | backend's model, handed -> chosen | modelled compute, chosen / handed | rig built, s |",
+            "|---|---|---|---|---|---|---|---|",
         };
         const int Warm = 3, Timed = 9;
         // Beside the benchmark's families, its encoders and dense attention with each layer, or the
@@ -276,10 +276,12 @@ public class MemoryReuseScenarioTests
             var predicted = context.Execute(concrete, sample.Shared())[0].ToTensorData();
             long[] dims = [.. predicted.Shape.Dims.Select(d => (long)d)];
             predicted.Delete();
+            var building = Stopwatch.StartNew();
             var rig = TrainingRig.FromScratch(
                 model(), Shorokoo.Modules.Losses.L2Loss.ComputationGraph, Shorokoo.Modules.Optimizers.AdamWOptimizer.ComputationGraph,
                 [sample.CopyTo(ComputeContext.Host)], new Shorokoo.Modules.Optimizers.AdamWOptimizerHyperparameters { LearningRate = 0.001f },
                 runtimeContext: context);
+            var built = building.Elapsed.TotalSeconds;
             var result = rig.OptimizationResult;
             var chosenAt = result.AllStrategies.Select((x, i) => (x, i)).First(p => ReferenceEquals(p.x.Graph, result.OptimizedGraph)).i;
             var chosen = rig.TrainingStepPureGraph;
@@ -319,7 +321,7 @@ public class MemoryReuseScenarioTests
             lines.Add($"| {family} | {result.StrategyName} | {Pair(c => string.Join("/", peaks[c].Select(Mib)))} | {Pair(c => string.Join("/", times[c].Select(Ms)))} "
                       + $"| {Mib(result.AllStrategies[0].Evaluation.PeakMemoryBytes)} -> {Mib(result.Evaluation.PeakMemoryBytes)} "
                       + $"| {(backendPeaks is null ? "-" : $"{Mib(backendPeaks[0])} -> {Mib(backendPeaks[chosenAt])}")} "
-                      + $"| {result.Evaluation.TotalComputeTime / result.AllStrategies[0].Evaluation.TotalComputeTime:0.000} |");
+                      + $"| {result.Evaluation.TotalComputeTime / result.AllStrategies[0].Evaluation.TotalComputeTime:0.000} | {built:0.0} |");
             File.WriteAllText(Path.Combine(OutputDirectory(), $"what-the-pass-buys-{(backend == "ort" ? onCard ? "card" : "host" : backend)}-x{scale}-w{weightName}.md"), string.Join("\n", lines) + "\n");
         }
     }

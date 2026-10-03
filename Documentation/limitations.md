@@ -391,9 +391,14 @@ objective. It charges a step's memory as the backend of the rig's runtime contex
 lays a run out: ONNX Runtime's allocation plan, with the temporaries its CPU
 kernels hold beside their outputs on the host; on PyTorch, the translation's —
 each value freed after its last read, a view as its input's memory, a result
-written over a contiguous operand dying there. It then judges the steps it weighs
-by the backend's own model of a run, so that by that model the step it hands over
-holds no more there than the one it was handed. ONNX Runtime's model reads the
+written over a contiguous operand dying there. It judges its search by the
+backend's own model of a run: each strategy takes a step only where that model
+scores it better, and the strategies are chosen among by it, so that by that model
+the step it hands over holds no more there than the one it was handed. PyTorch's
+model is quick to ask, so the rematerializer also weighs by it the three candidates
+its own figures score best where they leave it nothing better to take; ONNX
+Runtime's builds a session each time it is asked, and is asked only about each
+strategy's steps. ONNX Runtime's model reads the
 graph ONNX Runtime optimizes and runs, in the order it runs it, with the buffers
 its allocation plan keeps for later values of the same shape and the scratch its
 kernels take: convolutions' and recurrent layers' working buffers on the host, and
@@ -401,17 +406,24 @@ on a card a reduction over inner axes. PyTorch's adds to the translation's layou
 the temporaries of a layer normalization and, on the CPU, of a convolution, and the
 copies torch makes of a value whose strides a reshape or a matrix product cannot
 use as they lie — an element-wise result lies as its operands do, so a product of
-transposed attention heads is transposed too. Where a model cannot tell a value's
-shape, as through a loop, the pass's own figures decide. It is conservative and has no
+transposed attention heads is transposed too — and a recurrent layer's stacked
+outputs. Both run a loop's body once per iteration where its trip count follows
+from the shapes fed, and hold what a sequence holds for as long as the sequence
+lives. Where a model cannot tell a value's shape, the pass's own figures decide.
+It is conservative and has no
 opt-out; use the attribute to force a trade it would not take. It picks the
 tensors it recomputes, but not whole-module segments: checkpointing each layer of
 a two-layer transformer encoder holds a further 5–6% less than the pass alone on
-ONNX Runtime, for a tenth more step time or more, and 4% less on PyTorch. The
+ONNX Runtime, for a tenth more step time or more, and up to 4% less on PyTorch. The
 pass cuts a step's peak memory by anywhere from nothing to about a third on ONNX
 Runtime, for at most a few percent more computation; on PyTorch it can trade more
 — a two-layer encoder's step holds over 40% less, for about a fifth more
-computation. A graph containing a scope (a recurrent op in its backward pass, or a
-forward `If`) gets only its checkpoint attributes applied. Separately, the
+computation. A step containing a scope — a recurrent op's backward pass is a loop
+— is searched only where the backend's model answers for it, which it does for a
+loop whose trip count follows from the shapes fed, and for no branch (`If`); a
+one-layer LSTM's step then holds about a tenth less on PyTorch and a fifth less on
+ONNX Runtime's host, by reordering alone. Any other step with a scope gets only
+its checkpoint attributes applied. Separately, the
 training-step session is compiled for the shapes it is fed, which removes most
 shape arithmetic from the executed graph.
 

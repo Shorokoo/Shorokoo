@@ -433,12 +433,19 @@ public class SideBySideBackendHardwareTests
         Assert.Equal(0, InAChildProcess(WithNoOtherCudaMajorOnThePathAndNoPythonEnvironment(), "onnxruntime-convolution"));
     }
 
+    [SideBySideCudaFact]
+    public void TestAConvolutionOnTheCardAfterTheProcessLoadedTheCudnnOnThePathEndsInAResultOrARefusalNamingTheCopyHeld()
+    {
+        Assert.Equal(0, InAChildProcess([], "onnxruntime-convolution-after-the-paths-cudnn"));
+    }
+
     /// <summary>What <c>dotnet Shorokoo.Tests.dll</c> runs: one case of a test that needs a process of
     /// its own, because what it covers is which native libraries a process loads, and from where.</summary>
     public static int Main(string[] args) => args switch
     {
         ["cuda-backends", var first] => BothCudaBackendsRun(pytorchFirst: first == "pytorch-first") ? 0 : 1,
         ["onnxruntime-convolution"] => AConvolutionEndsInAResultOrAnException(),
+        ["onnxruntime-convolution-after-the-paths-cudnn"] => AConvolutionAfterThePathsCudnnEndsInAResultOrARefusalNamingIt(),
         _ => 1,
     };
 
@@ -486,6 +493,14 @@ public class SideBySideBackendHardwareTests
     {
         try { return ConvolutionRuns(LoadCuda()) ? 0 : 1; }
         catch (Exception) { return 0; }
+    }
+
+    private static int AConvolutionAfterThePathsCudnnEndsInAResultOrARefusalNamingIt()
+    {
+        string[] held = Windows ? ["cudnn_graph64_9.dll", "cudnn_ops64_9.dll"] : ["libcudnn_graph.so.9", "libcudnn_ops.so.9"];
+        foreach (var name in held) NativeLibrary.TryLoad(name, out _);
+        try { return ConvolutionRuns(LoadCuda()) ? 0 : 1; }
+        catch (InvalidOperationException refusal) when (refusal.Message.Contains(held[0])) { return 0; }
     }
 
     private static bool OneCopyOfEachCudaLibrary()

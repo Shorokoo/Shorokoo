@@ -3,6 +3,7 @@ using System.Runtime.InteropServices;
 using Microsoft.ML.OnnxRuntime;
 using Shorokoo.Core.Backends;
 using Shorokoo.Core.Factory;
+using Shorokoo.Core.Factory.IR;
 using Shorokoo.Core.Nodes.Processors.Helpers;
 using Shorokoo.Modules.Layers;
 using Shorokoo.Modules.Losses;
@@ -289,26 +290,52 @@ public class GpuExecutionTests
         Assert.Equal(expected, output);
     }
 
-    [CudaFact]
-    public void CudaProvider_ARunWithANodeTheCardHasNoKernelForComputesWhatItComputesUnplaced()
+    /// <summary>
+    /// <paramref name="graph"/> over <paramref name="inputs"/>, each <c>float[N, N]</c>, run on the
+    /// card with the inputs shared and with them consumed: the output each time, and the provider
+    /// each operator ran on in the shared run.
+    /// </summary>
+    private static (byte[] Shared, byte[] Consumed, ILookup<string, string> Providers) SharedAndConsumed(GraphProto graph, params string[] inputs)
     {
         const int N = 1024;
         var backend = DefaultBackend.Instance;
-        var model = ComputeContextLifetimeCoverageTests.ModelOf(ComputeContextLifetimeCoverageTests.GraphOf($"x:float[{N},{N}]", $"z:float[{N},{N}]",
-            ComputeContextLifetimeCoverageTests.Op("Relu", "x", "r"), ComputeContextLifetimeCoverageTests.Op("Hardmax", "r", "y"),
-            ComputeContextLifetimeCoverageTests.Op("Neg", "y", "z")));
+        var model = ComputeContextLifetimeCoverageTests.ModelOf(graph);
         byte[] x = [.. MemoryMarshal.AsBytes(Enumerable.Range(0, N * N).Select(i => (i % 13) * 0.25f - 1.5f).ToArray().AsSpan())];
-        byte[] Run(bool consume)
+        (byte[], ILookup<string, string>?) Run(bool consume)
         {
-            using var session = backend.CreateSession(model, ShorokooGraphOptimization.EnableAll, ShorokooLogSeverity.Fatal, new DeviceMemorySettings(), DiagnosticSettings.Default);
-            var input = backend.CreateTensorInBackendMemory(ShorokooTensorElementType.Float, x, [N, N]);
-            var feeds = new Dictionary<string, IShorokooTensorValue> { ["x"] = input };
-            using var output = consume ? session.RunConsuming(feeds, [input], ["z"], RunSettings.Default, out _).Single() : session.Run(feeds, ["z"], RunSettings.Default).Single();
-            if (!consume) input.Dispose();
-            return backend.CopyTensorToHost(output);
+            using var session = backend.CreateSession(model, ShorokooGraphOptimization.EnableAll, ShorokooLogSeverity.Fatal, new DeviceMemorySettings(),
+                new DiagnosticSettings { TraceNodePlacement = !consume });
+            var fed = inputs.ToDictionary(name => name, _ => backend.CreateTensorInBackendMemory(ShorokooTensorElementType.Float, x, [N, N]));
+            var feeds = fed.ToDictionary(f => f.Key, f => f.Value);
+            using var output = consume
+                ? session.RunConsuming(feeds, [.. fed.Values], [graph.Outputs[0].Name], RunSettings.Default, out _).Single()
+                : session.Run(feeds, [graph.Outputs[0].Name], RunSettings.Default).Single();
+            if (!consume) foreach (var value in fed.Values) value.Dispose();
+            return (backend.CopyTensorToHost(output), consume ? null : session.ReadNodePlacement()!.Nodes.ToLookup(n => n.OpType, n => n.Provider));
         }
 
-        Assert.Equal(Run(consume: false), Run(consume: true));
+        var (shared, providers) = Run(consume: false);
+        return (shared, Run(consume: true).Item1, providers!);
+    }
+
+    [CudaFact]
+    public void CudaProvider_ARunWithANodeTheCardHasNoKernelForComputesWhatItComputesUnplaced()
+    {
+        var (shared, consumed, providers) = SharedAndConsumed(ComputeContextLifetimeCoverageTests.GraphOf("x:float[1024,1024]", "z:float[1024,1024]",
+            ComputeContextLifetimeCoverageTests.Op("Relu", "x", "r"), ComputeContextLifetimeCoverageTests.Op("Hardmax", "r", "y"),
+            ComputeContextLifetimeCoverageTests.Op("Neg", "y", "z")), "x");
+        Assert.Equal(["CPUExecutionProvider"], providers["Hardmax"]);
+        Assert.Equal(shared, consumed);
+    }
+
+    [CudaFact]
+    public void CudaProvider_ARunWhoseHostNodeReadsAConsumedInputComputesWhatItComputesUnplaced()
+    {
+        var (shared, consumed, providers) = SharedAndConsumed(ComputeContextLifetimeCoverageTests.GraphOf("x:float[1024,1024] w:float[1024,1024]", "z:float[1024,1024]",
+            ComputeContextLifetimeCoverageTests.Op("Relu", "w", "t"), ComputeContextLifetimeCoverageTests.Op("Hardmax", "x", "y"),
+            ComputeContextLifetimeCoverageTests.Op("Neg", "y", "n"), ComputeContextLifetimeCoverageTests.Op("Add", "n t", "z")), "x", "w");
+        Assert.Equal(["CPUExecutionProvider"], providers["Hardmax"]);
+        Assert.Equal(shared, consumed);
     }
 
     [CudaFact]

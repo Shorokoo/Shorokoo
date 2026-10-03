@@ -989,6 +989,20 @@ public class ComputeContextLifetimeCoverageTests
     }
 
     [Fact]
+    public void TestACardSessionsNodesWritingHostMemoryAreTheHostOnesWhateverTheyRead()
+    {
+        string[] Host(GraphProto graph) => [.. OrtPlacements.HostNodes(graph).Select(n => n.OpType).Order()];
+        Assert.Equal(["Hardmax"], Host(GraphOf("x w", "z", Op("Hardmax", "x", "y"), Op("MemcpyFromHost", "y", "y_card"),
+            Op("Neg", "y_card", "n"), Op("Relu", "w", "t"), Op("Add", "n t", "z"))));
+        Assert.Equal(["Hardmax", "Softmax"], Host(GraphOf("x", "z", Op("Hardmax", "x", "y"), Op("Softmax", "y", "s"),
+            Op("MemcpyFromHost", "s", "s_card"), Op("Neg", "s_card", "z"))));
+        Assert.Equal(["Hardmax"], Host(GraphOf("x w", "z", Op("Hardmax", "x", "y"), Op("MemcpyFromHost", "y", "y_card"),
+            Op("MemcpyFromHost", "x", "x_card"), Op("Relu", "x_card", "r"), Op("Add", "y_card r", "s"), Op("Mul", "s w", "z"))));
+        Assert.Equal(["MemcpyToHost", "Shape"], Host(GraphOf("x", "z", Op("Relu", "x", "r"), Op("Shape", "r", "s"),
+            Op("MemcpyToHost", "r", "r_host"), Op("Neg", "r", "z"))));
+    }
+
+    [Fact]
     public void TestABlockWhoseLastPagePassesItsTensorCountsWhatItStillHoldsOfTheTensor()
     {
         var backend = DefaultBackend.Instance;

@@ -588,7 +588,8 @@ public class MemoryReuseScenarioTests
             var workarounds = Shorokoo.Core.Lowering.KernelWorkarounds.KernelWorkaroundRegistry.For(context.ResolvedBackend.KernelWorkaroundSet);
             var graph = result.OptimizedGraph;
             var prepared = graph.Clone();
-            var keyOf = prepared.Nodes.ToDictionary(n => n, n => n.Key, ReferenceEqualityComparer.Instance);
+            var keyOf = new Dictionary<object, Shorokoo.Core.Graph.FastNodeKey>(ReferenceEqualityComparer.Instance);
+            foreach (var node in prepared.Nodes) keyOf[node] = node.Key;
             Shorokoo.Core.Nodes.Processors.Fast.FastIdentityWrapping.WrapAliasedOutputs(prepared);
             typeof(Shorokoo.Core.Factory.FastOnnxModelBuilder).GetMethod("RunPrePasses", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!
                 .Invoke(null, [prepared, true, true, workarounds, true, (Func<InternalComputationGraph, bool>)(_ => true), false]);

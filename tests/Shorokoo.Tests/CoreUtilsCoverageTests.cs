@@ -1055,6 +1055,24 @@ public class CoreUtilsCoverageTests
     }
 
     [Fact]
+    public void TestTheHostsOwnAccountHandsAMebibyteOrMoreBackAsItGoesAndKeepsLessForTheNextRequest()
+    {
+        var host = RuntimeAllocator.ForHost();
+        var account = host.Shared.Open("probe", keepsLargeBlocks: false);
+        IntPtr Made(long floats)
+        {
+            using var value = HostBlock(host, account, floats);
+            return OrtBackend.AddressOf(value);
+        }
+
+        bool[] held = [ProcessMemory.Holds(Made(1L << 18)), ProcessMemory.Holds(Made(1L << 16))];
+        host.Shared.Close(account);
+
+        Assert.Equal([false, true], held);
+        Assert.False(host.Shared.Placements.KeepsLargeBlocks);
+    }
+
+    [Fact]
     public void TestASmallerHostRequestIsCarvedFromThePagesALargerBlockLeftAndNothingStaysOnceTheAccountCloses()
     {
         var host = RuntimeAllocator.ForHost();

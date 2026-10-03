@@ -59,7 +59,9 @@ namespace Shorokoo.Core.Backends;
 /// only as much as it would, the request then committing fresh memory. What is still over the mark
 /// is shed — kept blocks of their own and small ones first, then the granules idle longest, then
 /// kept blocks of the arena — at once on the host, and on a card as the call that asked ends, since a
-/// granule must not go back while work the card has in hand may read it. What is kept also goes back
+/// granule must not go back while work the card has in hand may read it. The host's own account keeps
+/// no block of <see cref="LargeBlock"/> or more (<see cref="Account.KeepsLargeBlocks"/>): a large
+/// tensor made outside a run goes back to the system as it goes. What is kept also goes back
 /// when a run that hands back its memory ends (<see cref="ReleaseCached(Account)"/>), when a session
 /// closes, before an account would refuse an allocation for want of room, before the device would
 /// refuse one, and when the program asks (<see cref="ReleaseEverywhere"/>).</para>
@@ -72,8 +74,8 @@ namespace Shorokoo.Core.Backends;
 /// collected output, say — is credited to the account that took it. An account carries a session's
 /// statistics (<see cref="Statistics"/>) and, on a card, the limit a device-memory budget leaves its
 /// runs (<see cref="Account.Limit"/>), which it enforces as each block is asked for. Anything not
-/// charged to a session — what the framework places on a card — goes to the device's own
-/// account (<see cref="Placements"/>).</para>
+/// charged to a session — what the framework places on a card, and the tensors a backend makes in
+/// host memory outside a run — goes to the device's own account (<see cref="Placements"/>).</para>
 ///
 /// <para><b>The card's streams.</b> A session's kernels run on a stream of its own, so a block a run
 /// lets go of may still be read by work queued before it. Such a block is reused by that run alone
@@ -255,7 +257,7 @@ internal sealed unsafe class CachingAllocator
             _backing = card;
             _small = new Arena(card, unit: SmallUnit, chunkBytes: 256L << 20);
         }
-        Placements = new Account(this, "placements");
+        Placements = new Account(this, "placements", keepsLargeBlocks: device != Host);
         lock (_registryGate)
         {
             _states.Add(this);
@@ -292,7 +294,11 @@ internal sealed unsafe class CachingAllocator
     internal Account Placements { get; }
 
     /// <summary>A new account, for a session about to be built.</summary>
-    internal Account Open(string name) => new(this, name);
+    internal Account Open(string name, bool keepsLargeBlocks = true) => new(this, name, keepsLargeBlocks);
+
+    /// <summary>The least a host block is that an account keeping no large block
+    /// (<see cref="Account.KeepsLargeBlocks"/>) hands back as it is let go of.</summary>
+    internal const long LargeBlock = 1L << 20;
 
     // ---- the entry points the native allocator forwards to ----
 
@@ -622,6 +628,16 @@ internal sealed unsafe class CachingAllocator
             {
                 if (OnCard && scope is not null && scope.Charges(account))
                     scope.Hold(account, pointer, block.Size, block.Source, block.Call);
+                else if (!OnCard && !account.KeepsLargeBlocks && block.Source == Source.Arena && block.Size >= LargeBlock)
+                {
+                    // A large host tensor made outside a run -- a checkpoint's, a batch's -- goes back
+                    // to the system as it goes, as one from the C runtime's heap would: nothing says
+                    // another of its size follows, and carving one again costs what the heap's does.
+                    account.Blocks--;
+                    account.Arena!.Uncarve(pointer, block.Size);
+                    account.Arena.Decommit(block.Size, out var runs);
+                    account.Shrinkages += runs;
+                }
                 else
                     account.Keep(pointer, block.Size, block.Source, block.Call);
                 return;
@@ -986,14 +1002,22 @@ internal sealed unsafe class CachingAllocator
     /// </summary>
     internal sealed class Account
     {
-        internal Account(CachingAllocator allocator, string name)
+        internal Account(CachingAllocator allocator, string name, bool keepsLargeBlocks = true)
         {
             Allocator = allocator;
             Name = name;
+            KeepsLargeBlocks = keepsLargeBlocks;
             using (allocator._gate.Hold()) allocator._accounts.Add(this);
         }
 
         internal CachingAllocator Allocator { get; }
+
+        /// <summary>
+        /// Whether a block of <see cref="LargeBlock"/> or more carved from the account's arena on the
+        /// host is kept for the next request of its class as it is let go of; where not, its memory
+        /// goes back to the system at once.
+        /// </summary>
+        internal bool KeepsLargeBlocks { get; }
 
         internal string Name { get; }
 

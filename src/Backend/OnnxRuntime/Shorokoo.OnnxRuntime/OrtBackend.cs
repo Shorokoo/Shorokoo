@@ -1637,8 +1637,10 @@ public abstract class OrtBackend : IShorokooBackend
     /// Builds an ORT tensor on a buffer of Shorokoo's host allocator, the memory a session's own
     /// host tensors come from, and copies <paramref name="bytes"/> into it: a block whose part no
     /// tensor stands on any more goes back on its own (<see cref="CachingAllocator.ReleaseRange"/>).
-    /// Measured against ONNX Runtime's default allocator, making and deleting a tensor of 256 bytes
-    /// to 64 MiB took as long either way.
+    /// Measured against ONNX Runtime's default allocator on Windows, making and deleting a tensor
+    /// took as long either way up to 4 MiB, and up to a fifth longer at 16 and 64 MiB, where both take
+    /// fresh pages from the system each time; a tensor of a mebibyte or more goes back to the system
+    /// as it goes either way (<see cref="CachingAllocator.Account.KeepsLargeBlocks"/>).
     ///
     /// <para>The obvious alternative — <c>OrtValue.CreateTensorValueFromMemory</c> over a managed
     /// array — is why this is a copy. That API pins the array for the value's lifetime and releases

@@ -1113,8 +1113,8 @@ were within their run-to-run noise.
 
 On ONNX Runtime every session allocates through an allocator of Shorokoo's — one per device, the
 host or a card, for the whole process, whichever runtime or backend built the session — rather
-than through an arena of its own, and the tensors a context places on a card come from the same
-one. A session's blocks are carved from address space reserved for it with no memory behind it:
+than through an arena of its own, and the tensors a context places on a card, and every tensor
+made in host memory outside a run, come from the same one. A session's blocks are carved from address space reserved for it with no memory behind it:
 memory is committed under a block as it is carved, and handed back to the system as the session
 lets it go. Each request is rounded up and served by its size:
 
@@ -1144,8 +1144,11 @@ a smaller one shares a page with other small blocks; on the host a block shares 
   So a loop whose runs repeat finds every block it needs, and a session fed varied shapes holds
   what its busiest run used, not a block of every size it has seen. What the tensors placed on a
   card let go of is kept the same way, for the next tensor placed there, counting what is placed
-  between two runs on the card as one run; the small blocks every session on the card shares keep
-  no more memory committed than they had in use at their busiest.
+  between two runs on the card as one run; so is what a tensor made in host memory outside a run
+  lets go of under a mebibyte, while from a mebibyte its memory goes back to the system as it goes,
+  as the C runtime's heap hands back a block that large: nothing says another of its size follows.
+  The small blocks every session on the card shares keep no more memory committed than they had in
+  use at their busiest.
 - **What is kept goes back to the system**:
   - at the end of a run that asks for it (`RunSettings.ShrinkArenaAfterRun`, always on under a
     budget): what its session keeps, and what the placed tensors left on that device;
@@ -1156,7 +1159,7 @@ a smaller one shares a page with other small blocks; on the host a block shares 
     every session and every placed tensor, with no run to make. It returns the bytes it handed back.
 
   Nothing else returns it. A long-lived program doing varied work holds, besides what is in use,
-  up to the busiest run of each session it keeps alive and of the tensors it placed on each card,
+  up to the busiest run of each session it keeps alive and of the tensors it placed on each device,
   and nothing of a session it disposed. ONNX Runtime's own arena, where a session uses one,
   keeps a session's busiest run too, rounded up to the regions it grows by, until the session is
   disposed or a run asks it to shrink.

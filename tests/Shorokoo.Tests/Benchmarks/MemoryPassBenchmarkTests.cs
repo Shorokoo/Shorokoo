@@ -204,11 +204,12 @@ public class MemoryPassBenchmarkTests
             // switches the pass off on one family reads as a couple of percent and slips through:
             // a premature stop in the rematerializer's candidate walk can disable the pass on the
             // one-layer encoder, or quietly cost chunked attention part of its relief while
-            // leaving the strategy name intact.
+            // leaving the strategy name intact. A relief the pass's own figures put below nothing --
+            // a step the backend's model judged better -- may grow by the same share.
             if (was.Strategy != BaselineStrategy)
             {
                 Assert.NotEqual(BaselineStrategy, now.Strategy);
-                Assert.True(Relief(now) >= Relief(was) * ReliefRetentionFactor);
+                Assert.True(Relief(now) >= Relief(was) - Math.Abs(Relief(was)) * (1 - ReliefRetentionFactor));
             }
             if (was.RealPeakBytes is long wasReal && now.RealPeakBytes is long nowReal)
                 Assert.True(nowReal <= wasReal * RealPeakRegressionFactor + RealPeakNoiseFloorBytes);

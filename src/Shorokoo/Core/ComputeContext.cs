@@ -716,10 +716,9 @@ namespace Shorokoo.Runtime
         /// <para>This names <i>which</i> context is the fallback; it is not a way to reconfigure
         /// one. A context's <see cref="DeviceMemory"/>, <see cref="Precision"/> and
         /// <see cref="RunSettings"/> are initialize-only, so assigning here cannot alter a context
-        /// anything else already holds,
-        /// and cannot reach a session that has already been compiled — including those compiled by
-        /// the context being replaced. Code that wants a configuration of its own should hold its
-        /// own context rather than assign this one.</para>
+        /// anything else already holds, and cannot reach a session that has already been compiled —
+        /// including those compiled by the context being replaced. Code that wants a configuration of
+        /// its own should hold its own context rather than assign this one.</para>
         /// <para>Reading this resolves a backend, and refuses — naming the packages to
         /// deploy — when there is none. So it belongs at the point work actually runs: a
         /// <c>compute ??= ComputeContext.Default</c> at the top of a graph pass turns that whole

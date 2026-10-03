@@ -246,7 +246,7 @@ public class MemoryReuseScenarioTests
         var where = backend == "ort" ? $"ONNX Runtime on the {(onCard ? "card" : "host")}" : backend;
         var lines = new List<string>
         {
-            $"# What the memory-aware pass buys a training step, {where}, batch x{scale}, memory weight {weightName}", "",
+            $"# What the memory-aware pass buys a training step, {where}, batch x{scale}, memory weight {weightName}{(Precision().AllowTensorFloat32 ? ", TensorFloat-32 allowed" : "")}", "",
             "| family | chosen | real peak, handed -> chosen | step ms, handed -> chosen | pass's model, handed -> chosen | backend's model, handed -> chosen | modelled compute, chosen / handed |",
             "|---|---|---|---|---|---|---|",
         };
@@ -267,9 +267,9 @@ public class MemoryReuseScenarioTests
             float[] Values(int seed) => [.. Enumerable.Range(0, count).Select(i => ((i * 7 + seed) % 101) / 101f - 0.5f)];
             using var context = backend switch
             {
-                "torch-cpu" => new ComputeContext(new Shorokoo.PyTorch.Cpu.TorchCpuBackend()),
-                "torch-cuda" => new ComputeContext(new Shorokoo.PyTorch.Cuda.TorchCudaBackend()),
-                _ => new ComputeContext(),
+                "torch-cpu" => new ComputeContext(new Shorokoo.PyTorch.Cpu.TorchCpuBackend()) { Precision = Precision() },
+                "torch-cuda" => new ComputeContext(new Shorokoo.PyTorch.Cuda.TorchCudaBackend()) { Precision = Precision() },
+                _ => new ComputeContext { Precision = Precision() },
             };
             var sample = TensorData(shape, Values(0));
             var concrete = model().ToConcreteArchitecture([sample]).ToConcreteModel();
@@ -360,9 +360,9 @@ public class MemoryReuseScenarioTests
             float[] Values(int seed) => [.. Enumerable.Range(0, count).Select(i => ((i * 7 + seed) % 101) / 101f - 0.5f)];
             using var context = backend switch
             {
-                "torch-cpu" => new ComputeContext(new Shorokoo.PyTorch.Cpu.TorchCpuBackend()),
-                "torch-cuda" => new ComputeContext(new Shorokoo.PyTorch.Cuda.TorchCudaBackend()),
-                _ => new ComputeContext(),
+                "torch-cpu" => new ComputeContext(new Shorokoo.PyTorch.Cpu.TorchCpuBackend()) { Precision = Precision() },
+                "torch-cuda" => new ComputeContext(new Shorokoo.PyTorch.Cuda.TorchCudaBackend()) { Precision = Precision() },
+                _ => new ComputeContext { Precision = Precision() },
             };
             var sample = TensorData(shape, Values(0));
             var concrete = model().ToConcreteArchitecture([sample]).ToConcreteModel();
@@ -851,7 +851,7 @@ public class MemoryReuseScenarioTests
                 options.OptimizedModelFilePath = Path.Combine(directory, "optimized.onnx");
                 options.ProfileOutputPathPrefix = Path.Combine(directory, "profile");
                 options.EnableProfiling = true;
-                if (onCard) OrtBackend.AppendCuda(options, 0, DeviceMemorySettings.Default, PrecisionSettings.Default);
+                if (onCard) OrtBackend.AppendCuda(options, 0, DeviceMemorySettings.Default, Precision());
                 InferenceSession session;
                 var built = Stopwatch.StartNew();
                 using (CachingAllocator.Charge(host, card))
@@ -973,7 +973,7 @@ public class MemoryReuseScenarioTests
                 options.OptimizedModelFilePath = Path.Combine(directory, "optimized.onnx");
                 options.ProfileOutputPathPrefix = Path.Combine(directory, "profile");
                 options.EnableProfiling = true;
-                if (onCard) OrtBackend.AppendCuda(options, 0, DeviceMemorySettings.Default, PrecisionSettings.Default);
+                if (onCard) OrtBackend.AppendCuda(options, 0, DeviceMemorySettings.Default, Precision());
                 InferenceSession session;
                 using (CachingAllocator.Charge(host, card))
                     session = new InferenceSession(stream.ToArray(), options);
@@ -1322,7 +1322,11 @@ public class MemoryReuseScenarioTests
 
     /// <summary>What <paramref name="run"/> answers, and the most torch held at once beyond what it
     /// held as the run began: on CUDA off its allocator, on the CPU, where torch keeps no such figure,
-    /// off its profiler's memory timeline.</summary>
+    /// off its profiler's memory timeline. With <c>$SHOROKOO_MEMORY_REUSE_LOG</c> set, what is held at
+    /// that peak is appended to <c>torch-cuda-peak.txt</c> or <c>torch-cpu-peak.txt</c>: each block,
+    /// with the line of the translation that made it on CUDA, and on the CPU the operator, the
+    /// support package's function and the number of the translation's call (its calls, in order, in
+    /// <c>torch-cpu-calls.txt</c>).</summary>
     private static (T Result, long Peak) TorchObserved<T>(string backend, Func<T> run)
     {
         using (PythonRuntime.Gil())
@@ -1391,8 +1395,46 @@ public class MemoryReuseScenarioTests
                   if os.environ.get("SHOROKOO_MEMORY_REUSE_LOG"):
                       import tempfile
                       directory = os.environ.get("SHOROKOO_MEMORY_REUSE_DIR") or os.path.join(tempfile.gettempdir(), "shorokoo-memory-reuse")
-                      with open(os.path.join(directory, "torch-profile.txt"), "a") as f:
-                          f.write(f"{len(prof.events())} events, {sum(e.self_cpu_memory_usage for e in prof.events() if e.self_cpu_memory_usage > 0)} allocated, peak {peak}" + chr(10))
+                      # Every storage held at the run's peak, each put to the operator and the line of
+                      # the translation or the support package that made it.
+                      memory = prof._memory_profile()
+                      live, held, most, at_most = {}, 0, -1, {}
+                      for t, action, key, size in memory.timeline:
+                          if action.name == "CREATE":
+                              live[key[0]] = (t, size)
+                              held += size
+                              if held > most:
+                                  most, at_most = held, dict(live)
+                          elif action.name == "DESTROY":
+                              held -= size
+                              live.pop(key[0], None)
+                      made = {}
+                      for node in memory._op_tree.sorted_nodes:
+                          if node.tag == torch._C._profiler._EventType.Allocation:
+                              made.setdefault(node.start_time_ns, node)
+                      written = []
+                      def where(t):
+                          # The operator, the support package's function and the translation's call
+                          # that made the storage: its number among the run's own calls, in order.
+                          node = made.get(t)
+                          names, call = [], "?"
+                          child, parent = node, node.parent if node is not None else None
+                          while parent is not None:
+                              if parent.name.endswith(": main") and call == "?":
+                                  calls = [c for c in parent.children if ".py(" in c.name and "stop_point" not in c.name]
+                                  if not written:
+                                      written.append(1)
+                                      with open(os.path.join(directory, "torch-cpu-calls.txt"), "w") as f:
+                                          f.write(chr(10).join(c.name.split("/")[-1].split(chr(92))[-1] for c in calls) + chr(10))
+                                  call = next((str(i) for i, c in enumerate(calls) if c.start_time_ns == child.start_time_ns and c.name == child.name), "?")
+                              if (parent.name.startswith("aten::") and not any(n.startswith("aten::") for n in names)) or (".py(" in parent.name and "shorokoo" in parent.name):
+                                  names.append(parent.name.split("/")[-1].split(chr(92))[-1])
+                              child, parent = parent, parent.parent
+                          return f"#{call} " + (" < ".join(names[:3]) or "?")
+                      peak_at = max((t for t, _ in at_most.values()), default=0)
+                      blocks = sorted(((size, where(t)) for t, size in at_most.values() if size >= 2**20), reverse=True)
+                      with open(os.path.join(directory, "torch-cpu-peak.txt"), "a") as f:
+                          f.write(f"peak {most / 2**20:.2f} MiB at {where(peak_at)}: " + "; ".join(f"{s / 2**20:.2f} {w}" for s, w in blocks) + chr(10))
                   """);
             return (result, scope.Get<long>("peak"));
         }

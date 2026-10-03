@@ -493,6 +493,17 @@ public class AutoGradMatrixPoolingAndConvOpsCoverageTests
         -0.9f, 0.6f, 2.1f, -1.7f, 0.2f, 1.1f, -0.5f, 2.8f, -1.3f];
 
     [Fact]
+    public void TestAMeansGradientIsDividedAtTheMeansSizeBeforeItIsBroadcast()
+    {
+        var rig = TrainingRig.FromScratch(Benchmarks.MemoryPassConv.ComputationGraph, Shorokoo.Modules.Losses.L2Loss.ComputationGraph,
+            Shorokoo.Modules.Optimizers.SGDOptimizer.ComputationGraph, [TensorData([2L, 3L, 8L, 8L], new float[384])], 0.01f);
+        var graph = Benchmarks.MemoryPassBenchmarkTests.RigModel(rig.TrainingStepPureGraph, rig.OptimizationInputShapes).Graph!;
+        var shapes = Shorokoo.Core.Backends.PlacementShapes.Evaluate(graph, graph.Inputs.ToDictionary(i => i.Name,
+            i => (i.Type.TensorType.Shape.Dims.Select(d => d.DimValue).ToArray(), i.Type.TensorType.ElemType), StringComparer.Ordinal));
+        Assert.Equal(2 * 32 * 4, graph.Nodes.Where(n => n.OpType == "Div").Max(n => shapes[n.Outputs[0]].Bytes));
+    }
+
+    [Fact]
     public void TestAutoGradOneAxisAndWrittenPaddingPoolGradients()
     {
         RunTensorNoQee<AutoGradAvgPool1DStrideAboveKernel>([1L, 2L, 5L], [.. Wave18[..10]]);

@@ -4995,7 +4995,8 @@ namespace Shorokoo
                 Stage("OptimizeTrainingStepGraph");
                 var optimizer = new MemoryAwareGraphOptimizer(
                     memoryFactor: PassMemoryWeight.Value ?? MemoryAwareGraphOptimizer.DefaultMemoryWeight,
-                    evaluator: evaluator, shapeInference: shapeInferencer, backendPeak: BackendPeakOf(allInputs));
+                    evaluator: evaluator, shapeInference: shapeInferencer, backendPeak: BackendPeakOf(allInputs),
+                    weighPlateaus: _runtimeContext?.ResolvedBackend.ModelsARunQuickly ?? false);
                 optResult = optimizer.OptimizeWithShapeInfo(graph, shapeInfo);
             }
             else

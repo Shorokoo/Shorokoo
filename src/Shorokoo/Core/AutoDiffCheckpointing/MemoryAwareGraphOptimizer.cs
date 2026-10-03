@@ -141,6 +141,7 @@ internal class MemoryAwareGraphOptimizer
     private readonly double _computeFactor;
     private readonly double _memoryFactor;
     private readonly Func<InternalComputationGraph, long?>? _backendPeak;
+    private readonly bool _weighPlateaus;
 
     /// <summary>
     /// A pass scoring every graph it considers — the baseline, each checkpoint segment, each
@@ -153,16 +154,19 @@ internal class MemoryAwareGraphOptimizer
     /// (<see cref="BackendJudge"/>): each strategy takes a step only where it scores better so, the
     /// rematerializer weighs the trials its own figures leave on a plateau by it, and the strategies
     /// are chosen among by it, so that the graph handed back holds no more on that backend than the
-    /// one handed over, at the same objective.
+    /// one handed over, at the same objective. A plateau's trials are weighed by it only where
+    /// <paramref name="weighPlateaus"/> says it is quick to ask.
     /// </summary>
     public MemoryAwareGraphOptimizer(
         double computeFactor = DefaultComputeWeight,
         double memoryFactor = DefaultMemoryWeight,
         GraphEvaluator? evaluator = null,
         ShapeInferenceInterpreter? shapeInference = null,
-        Func<InternalComputationGraph, long?>? backendPeak = null)
+        Func<InternalComputationGraph, long?>? backendPeak = null,
+        bool weighPlateaus = true)
     {
         _backendPeak = backendPeak;
+        _weighPlateaus = weighPlateaus;
         _evaluator = evaluator ?? new GraphEvaluator();
         _shapeInference = shapeInference ?? new ShapeInferenceInterpreter();
         _computeFactor = computeFactor;
@@ -201,7 +205,7 @@ internal class MemoryAwareGraphOptimizer
         // The one objective every candidate is finally judged by, normalized to the graph we
         // started from so the weights behave identically at every model size.
         var selection = new ComputeMemoryObjective(_computeFactor, _memoryFactor, baselineEval);
-        var judge = _backendPeak is { } peakOf ? new BackendJudge(peakOf, _computeFactor, _memoryFactor, graph, baselineEval) : null;
+        var judge = _backendPeak is { } peakOf ? new BackendJudge(peakOf, _computeFactor, _memoryFactor, graph, baselineEval, _weighPlateaus) : null;
 
         // Doing nothing is always a candidate, so the pass can never return a graph that
         // scores worse than the one it was handed.

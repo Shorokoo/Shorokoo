@@ -912,6 +912,27 @@ public class AutoDiffCheckpointingCoverageTests
     }
 
     [Fact]
+    public void TestTheRematerializerTakesAPlateausTrialAQuickBackendModelScoresBetterAndAsksASlowOneNothingCoverage()
+    {
+        var (graph, shapeInfo) = SdpaMeanPoolStepD64.Value;
+        var evaluator = new GraphEvaluator();
+        var baseline = evaluator.Evaluate(graph, shapeInfo);
+        var asked = 0;
+        int Committed(bool? quick)
+        {
+            var judge = quick is { } weighs
+                ? new BackendJudge(g => { asked++; return (1L << 40) >> Math.Clamp(g.Nodes.Count - graph.Nodes.Count, 0, 40); }, 1.0, 2.0, graph, baseline, weighs)
+                : null;
+            var remat = new Rematerializer(new ComputeMemoryObjective(1.0, 2.0, baseline), evaluator, judge: judge);
+            remat.Apply(graph, shapeInfo);
+            return remat.CommitLog.Count;
+        }
+        Assert.Equal(Committed(null), Committed(quick: false));
+        Assert.Equal(0, asked);
+        Assert.True(Committed(quick: true) > Committed(null));
+    }
+
+    [Fact]
     public void TestRematerializerStopsAtAnyBudgetMidSearchWithoutRaisingThePeakCoverage()
     {
         var (graph, shapeInfo) = SdpaMeanPoolStepD64.Value;

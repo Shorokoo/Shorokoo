@@ -69,6 +69,9 @@ public abstract class TorchBackend : IShorokooBackend
         PrecisionSettings precision)
         => TorchRunMemory.Peak(model, outputAliases, onHost: !OnCuda);
 
+    /// <summary>Its model walks the model it is handed and builds nothing of torch's.</summary>
+    bool IShorokooBackend.ModelsARunQuickly => true;
+
     /// <summary>A translation's: each value freed at its last read, its views and its writes over
     /// dying operands.</summary>
     Shorokoo.Core.AutoDiffCheckpointing.RunLayout IShorokooBackend.RunLayout => Shorokoo.Core.AutoDiffCheckpointing.RunLayout.Translation;

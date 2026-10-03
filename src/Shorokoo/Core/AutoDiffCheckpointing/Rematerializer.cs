@@ -290,7 +290,7 @@ internal class Rematerializer
                 var trial = Trial([candidate], Placement.AfterProducer);
                 if (!Better(trial))
                 {
-                    if (trial is not null && _judge is not null)
+                    if (trial is not null && _judge is { WeighsPlateaus: true })
                     {
                         plateau.Add((trial, candidate));
                         plateau.Sort((a, b) => Score(a.Trial).CompareTo(Score(b.Trial)));
@@ -304,7 +304,7 @@ internal class Rematerializer
             }
 
             // A plateau of the evaluator's figures: its best trials weighed by the backend's model.
-            if (!accepted && _judge?.Judge(current.Graph, current.Eval) is { } now)
+            if (!accepted && plateau.Count > 0 && _judge?.Judge(current.Graph, current.Eval) is { } now)
             {
                 (State Trial, RematCandidate Candidate, double Score)? escape = null;
                 foreach (var (trial, candidate) in plateau)

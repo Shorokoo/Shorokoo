@@ -45,6 +45,11 @@ internal sealed class OrtTensorValue : IShorokooTensorValue
 
     BlockRange? IShorokooTensorValue.Range => Range;
 
+    /// <summary>Whether a part of this value's memory no value stands on any more goes back while the
+    /// rest is in use (<see cref="OrtBackend.RangesGoBack(OrtTensorValue)"/>), once asked: it holds
+    /// for the value's life.</summary>
+    internal bool? PartsGoBack { get; set; }
+
     private static ObjectDisposedException Released() => new(
         nameof(OrtTensorValue),
         "This runtime value has been released -- the tensor it belonged to was deleted, or consumed "

@@ -246,7 +246,7 @@ internal sealed class OrtPlacements : IDisposable
         {
             // A block whose parts go back once no output stands on them plans otherwise than one
             // held whole, so the two are signatures of their own.
-            key.Append(name).Append(blocks.TryGetValue(name, out var block) ? OrtBackend.RangesGoBack(block, out _, out _) ? "!!" : "!" : ":");
+            key.Append(name).Append(blocks.TryGetValue(name, out var block) ? OrtBackend.RangesGoBack(block) ? "!!" : "!" : ":");
             if (value is OrtTensorValue { ValueType: ShorokooOnnxValueType.Tensor } tensor)
                 key.Append((int)tensor.ElementType).Append('[').AppendJoin(',', tensor.ReadShape).Append(']');
             key.Append(';');
@@ -415,7 +415,7 @@ internal sealed class OrtPlacements : IDisposable
                 if (value is OrtTensorValue { ValueType: ShorokooOnnxValueType.Tensor } tensor)
                     given[name] = (tensor.ReadShape, (int)tensor.ElementType);
             var blockBytes = blocks.ToDictionary(b => b.Key, b => BytesOf(b.Value), StringComparer.Ordinal);
-            var givingBack = blocks.Where(b => OrtBackend.RangesGoBack(b.Value, out _, out _)).Select(b => b.Key).ToHashSet(StringComparer.Ordinal);
+            var givingBack = blocks.Where(b => OrtBackend.RangesGoBack(b.Value)).Select(b => b.Key).ToHashSet(StringComparer.Ordinal);
             entry.Given = given;
             entry.BlockBytes = blockBytes;
             // The model as handed over first, which costs no build: what it places nothing in, the

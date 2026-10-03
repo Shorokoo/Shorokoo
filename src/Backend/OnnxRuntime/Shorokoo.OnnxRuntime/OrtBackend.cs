@@ -1420,6 +1420,11 @@ public abstract class OrtBackend : IShorokooBackend
         return allocator.ReleasesRanges(address);
     }
 
+    /// <summary>Whether a part of <paramref name="value"/>'s memory no value stands on any more goes
+    /// back while the rest is in use (<see cref="RangesGoBack(OrtTensorValue, out CachingAllocator, out IntPtr)"/>),
+    /// asked once of each value.</summary>
+    internal static bool RangesGoBack(OrtTensorValue value) => value.PartsGoBack ??= RangesGoBack(value, out _, out _);
+
     /// <summary>
     /// <paramref name="value"/>'s contents as host bytes, including when it is in the execution
     /// provider's own memory and so cannot be read here at all.

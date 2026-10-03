@@ -567,23 +567,32 @@ internal sealed class OrtSession : IShorokooSession
                 + $"{bound.Count} bound names; they must agree one for one.");
         }
 
-        var byName = new Dictionary<string, OrtValue>(results.Count, StringComparer.Ordinal);
-        for (int b = 0; b < boundNames.Length; b++) byName[boundNames[b]] = results[b];
+        // Bound in the caller's order, the outputs come back in it, before any placed value the
+        // caller did not ask for; each is looked up by name where they do not.
+        Dictionary<string, OrtValue>? byName = null;
+        for (int i = 0; i < outputNames.Count && byName is null; i++)
+            if (!string.Equals(boundNames[i], outputNames[i], StringComparison.Ordinal))
+            {
+                byName = new Dictionary<string, OrtValue>(results.Count, StringComparer.Ordinal);
+                for (int b = 0; b < boundNames.Length; b++) byName[boundNames[b]] = results[b];
+            }
         // Same reason as the count check above, and the same handling: a name that does not come
         // back is a bad run, not an excuse to drop every allocation it made.
-        foreach (var name in outputNames)
-            if (!byName.ContainsKey(name))
-            {
-                foreach (var orphan in results) orphan.Dispose();
-                throw new InvalidOperationException(
-                    $"The run bound no output named '{name}'; it bound {string.Join(", ", boundNames)}.");
-            }
+        if (byName is not null)
+            foreach (var name in outputNames)
+                if (!byName.ContainsKey(name))
+                {
+                    foreach (var orphan in results) orphan.Dispose();
+                    throw new InvalidOperationException(
+                        $"The run bound no output named '{name}'; it bound {string.Join(", ", boundNames)}.");
+                }
 
         var wrapped = new IShorokooTensorValue[outputNames.Count];
-        var handed = new HashSet<OrtValue>(ReferenceEqualityComparer.Instance);
+        // Of a placed run, the values handed on, the others let go of below.
+        var handed = placed is null ? null : new HashSet<OrtValue>(ReferenceEqualityComparer.Instance);
         for (int i = 0; i < wrapped.Length; i++)
         {
-            var value = byName[outputNames[i]];
+            var value = byName is null ? results[i] : byName[outputNames[i]];
             if (placed is not null && placed.TryGetValue(outputNames[i], out var place) && place.Returned is { } view)
             {
                 // The view over the range, which holds the lease, is what is handed back; the value
@@ -591,7 +600,7 @@ internal sealed class OrtSession : IShorokooSession
                 wrapped[i] = view;
                 continue;
             }
-            handed.Add(value);
+            handed?.Add(value);
             // An output written into a consumed value that stands on a block stands on it too, over
             // the same range: it takes a lease of its own, since the consumed value's goes as the
             // consumed value is released.
@@ -599,8 +608,9 @@ internal sealed class OrtSession : IShorokooSession
                 ? Leased(value, range)
                 : new OrtTensorValue(value);
         }
-        foreach (var value in results)
-            if (!handed.Contains(value)) value.Dispose();
+        if (handed is not null)
+            foreach (var value in results)
+                if (!handed.Contains(value)) value.Dispose();
         return wrapped;
     }
 

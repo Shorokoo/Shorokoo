@@ -989,6 +989,20 @@ public class ComputeContextLifetimeCoverageTests
     }
 
     [Fact]
+    public void TestAnOutputWrittenIntoTheInputItIsMarkedForIsNotPlacedElsewhere()
+    {
+        var backend = DefaultBackend.Instance;
+        using var session = Aliasing(backend, GraphOf("a:float[512,512] b:float[512,512]", "O:float[512,512]", Op("Sub", "a b", "O")));
+        float[] values = [.. Enumerable.Range(0, 512 * 512).Select(i => (float)(i % 7))];
+        var a = backend.CreateTensorInBackendMemory(ShorokooTensorElementType.Float, MemoryMarshal.AsBytes(values.AsSpan()).ToArray(), [512, 512]);
+        var b = backend.CreateTensorInBackendMemory(ShorokooTensorElementType.Float, MemoryMarshal.AsBytes(values.AsSpan()).ToArray(), [512, 512]);
+        var address = OrtBackend.AddressOf(((OrtTensorValue)a).Inner);
+        using var output = session.RunConsuming(new Dictionary<string, IShorokooTensorValue> { ["a"] = a, ["b"] = b }, [a, b], ["O"], RunSettings.Default, out var aliased).Single();
+        Assert.Equal(["a"], aliased);
+        Assert.Equal(address, OrtBackend.AddressOf(((OrtTensorValue)output).Inner));
+    }
+
+    [Fact]
     public void TestASignatureWhosePlacedRunFailsRunsAsUsualFromThen()
     {
         const int Rows = 1024, Columns = 1024;

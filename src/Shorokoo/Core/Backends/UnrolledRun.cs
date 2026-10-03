@@ -22,8 +22,8 @@ namespace Shorokoo.Core.Backends;
 /// read once more where the loop ends, as the frame around the loop holds them until it is
 /// done. Where a backend hands a loop's carried sequences out as copies (<c>copiesListsAtLoopEnd</c>,
 /// ONNX Runtime's CUDA provider), each of their tensors is copied there — a
-/// <see cref="CopyOpType"/> node of the <see cref="HoldDomain"/> domain — and the copies are what
-/// the loop's outputs hold.</para>
+/// <see cref="CopyOpType"/> node of the <see cref="HoldDomain"/> domain — the tensors copied held
+/// until every sequence is, and the copies are what the loop's outputs hold.</para>
 ///
 /// <para>Null where a loop's trip count or condition cannot be told, a sequence reaches a node
 /// other than the sequence operators and <c>Identity</c>, or the graph holds a branch (<c>If</c>) or
@@ -312,17 +312,18 @@ internal static class UnrolledRun
                 for (int s = 0; s < scans.Count; s++) scans[s].Add(Out(1 + carried + s));
             }
             Hold([.. captured.SelectMany(c => Lists.TryGetValue(c, out var list) ? list : [c])]);
+            List<string> copied = [];
             for (int i = 0; i < carried && i < outputs.Count; i++)
             {
                 if (outputs[i].Length == 0) continue;
                 if (Lists.TryGetValue(current[i], out var list))
                 {
-                    List<string> handed = copiesListsAtLoopEnd ? [.. list.Select(Copy)] : list;
-                    if (copiesListsAtLoopEnd) Hold(list);
-                    Lists[outputs[i]] = handed;
+                    Lists[outputs[i]] = copiesListsAtLoopEnd ? [.. list.Select(Copy)] : list;
+                    if (copiesListsAtLoopEnd) copied.AddRange(list);
                 }
                 else Emit(Node("Identity", [current[i]], outputs[i]));
             }
+            Hold(copied);
             for (int s = 0; s < scans.Count && carried + s < outputs.Count; s++)
             {
                 if (outputs[carried + s].Length == 0) continue;

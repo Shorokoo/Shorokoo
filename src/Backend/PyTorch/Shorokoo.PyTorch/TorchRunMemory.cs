@@ -10,7 +10,8 @@ namespace Shorokoo.PyTorch;
 /// translation runs the nodes (<see cref="OnnxToPythonTranslator.RunOrder"/>), and gives them back
 /// after the last node reading it — torch's caching allocator has them again at once. A value
 /// handed back over an input (<see cref="PlacementMemory.PyTorch"/>: a slice, a reshape, a
-/// transpose, an expansion) is that input's memory; a node written over an operand dying there
+/// transpose, an expansion, a reduction of no axis) is that input's memory — a reduction only where
+/// it is of its input's size, since one reducing an axis computes a value of its own; a node written over an operand dying there
 /// (<see cref="TorchInPlace"/>) takes the operand's memory; an output written into the input it is
 /// paired with (<see cref="OutputAlias"/>) takes that input's. The inputs, the initializers and the
 /// constants are held before the run begins and are not counted.
@@ -60,7 +61,9 @@ internal static class TorchRunMemory
                 var output = node.Outputs[o];
                 if (output.Length == 0) continue;
                 for (int i = 0; i < node.Inputs.Count; i++)
-                    if (node.Inputs[i].Length > 0 && PlacementMemory.PyTorch.SharesUnlessPlaced(node, i, o))
+                    if (node.Inputs[i].Length > 0 && PlacementMemory.PyTorch.SharesUnlessPlaced(node, i, o)
+                        && !(node.OpType.StartsWith("Reduce", StringComparison.Ordinal)
+                             && shapes.TryGetValue(node.Inputs[i], out var reduced) && reduced.Bytes != shapes[output].Bytes))
                     {
                         root[output] = RootOf(node.Inputs[i]);
                         break;

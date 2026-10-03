@@ -13,17 +13,19 @@ namespace Shorokoo.PyTorch;
 /// transpose, an expansion, a reduction of no axis) is that input's memory — a reduction only where
 /// it is of its input's size, since one reducing an axis computes a value of its own; a node written over an operand dying there
 /// (<see cref="TorchInPlace"/>) takes the operand's memory; an output written into the input it is
-/// paired with (<see cref="OutputAlias"/>) takes that input's. The inputs, the initializers and the
-/// constants are held before the run begins and are not counted.
+/// paired with (<see cref="OutputAlias"/>) takes that input's. A kernel's own temporaries are held
+/// for the node's length (<see cref="Scratch"/>). The inputs, the initializers and the constants are
+/// held before the run begins and are not counted.
 /// </summary>
 internal static class TorchRunMemory
 {
     /// <summary>
     /// The peak of a run of <paramref name="model"/>, whose inputs state their shapes in full, with
-    /// the outputs of <paramref name="aliases"/> written into their inputs, which the run consumes;
-    /// null where a value's shape cannot be told, which leaves the model's bytes unknown.
+    /// the outputs of <paramref name="aliases"/> written into their inputs, which the run consumes,
+    /// on the host where <paramref name="onHost"/> and on a card otherwise; null where a value's
+    /// shape cannot be told, which leaves the model's bytes unknown.
     /// </summary>
-    internal static long? Peak(ModelProto model, IReadOnlyList<OutputAlias> aliases)
+    internal static long? Peak(ModelProto model, IReadOnlyList<OutputAlias> aliases, bool onHost = true)
     {
         if (model.Graph is not { } graph) return null;
         var given = new Dictionary<string, (long[] Shape, int ElementType)>(StringComparer.Ordinal);
@@ -78,11 +80,16 @@ internal static class TorchRunMemory
                 last[r] = Math.Max(last.GetValueOrDefault(r, -1), position[node]);
             }
 
+        var producer = new Dictionary<string, NodeProto>(StringComparer.Ordinal);
+        foreach (var node in order)
+            foreach (var output in node.Outputs.Where(o => o.Length > 0))
+                producer[output] = node;
         var alive = new Dictionary<string, long>(StringComparer.Ordinal);
         long live = 0, peak = 0;
         for (int k = 0; k < order.Count; k++)
         {
             var node = order[k];
+            var writtenOver = false;
             foreach (var output in node.Outputs.Where(o => o.Length > 0))
             {
                 if (RootOf(output) != output || node.OpType == "Constant") continue;
@@ -101,18 +108,20 @@ internal static class TorchRunMemory
                         alive.Remove(operand);
                         alive[output] = bytes;
                         root[operand] = output;
+                        writtenOver = true;
                         continue;
                     }
                     if (dies && consumed.Contains(operand) && shapes.TryGetValue(operand, out var fed) && fed.Bytes == bytes)
                     {
                         root[output] = operand;
+                        writtenOver = true;
                         continue;
                     }
                 }
                 alive[output] = bytes;
                 live += bytes;
             }
-            peak = Math.Max(peak, live);
+            peak = Math.Max(peak, live + Scratch(node, shapes, producer, writtenOver, onHost));
             foreach (var value in node.Inputs.Concat(node.Outputs).Where(v => v.Length > 0).Distinct())
             {
                 var r = RootOf(value);
@@ -124,6 +133,41 @@ internal static class TorchRunMemory
             }
         }
         return peak;
+    }
+
+    /// <summary>
+    /// What the translation's kernel for <paramref name="node"/> holds of its own while it runs,
+    /// measured operator by operator through torch's profiler: a <c>LayerNormalization</c> its
+    /// centered values' squares where it is written over its operand
+    /// (<paramref name="writtenOver"/>), and otherwise its centered values and one value more, each of
+    /// its input's size; on the host, where oneDNN computes in a layout of its own, a convolution a
+    /// copy of its output, a convolution of two transposed views — the gradient of another's weights,
+    /// which the translation computes as torch does — a copy of each of the values they view, and a
+    /// transposed convolution a copy of its input.
+    /// </summary>
+    internal static long Scratch(NodeProto node, IReadOnlyDictionary<string, PlacementShapes.Value> shapes,
+        IReadOnlyDictionary<string, NodeProto> producer, bool writtenOver, bool onHost)
+    {
+        long BytesOf(string name) => name.Length > 0 && shapes.TryGetValue(name, out var value) ? Math.Max(value.Bytes, 0) : 0;
+        if (!OutputAliasProof.IsStandard(node) || node.Inputs.Count == 0) return 0;
+        var input = BytesOf(node.Inputs[0]);
+        switch (node.OpType)
+        {
+            case "LayerNormalization":
+                return writtenOver ? input : 2 * input;
+            case "Conv" when onHost:
+            {
+                string? Transposed(int slot) => slot < node.Inputs.Count && producer.TryGetValue(node.Inputs[slot], out var made)
+                    && made.OpType == "Transpose" && made.Attributes.FirstOrDefault(a => a.Name == "perm")?.Ints is [1, 0, ..] ? made.Inputs[0] : null;
+                return Transposed(0) is { } activation && Transposed(1) is { } gradient
+                    ? BytesOf(activation) + BytesOf(gradient)
+                    : node.Outputs.Count > 0 ? BytesOf(node.Outputs[0]) : 0;
+            }
+            case "ConvTranspose" when onHost:
+                return input;
+            default:
+                return 0;
+        }
     }
 
     /// <summary>Whether the translation writes <paramref name="node"/>'s output into the input it

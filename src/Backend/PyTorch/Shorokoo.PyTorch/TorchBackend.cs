@@ -65,7 +65,7 @@ public abstract class TorchBackend : IShorokooBackend
     /// <summary>What a run of the model's translation holds at once beyond its inputs
     /// (<see cref="TorchRunMemory"/>).</summary>
     long? IShorokooBackend.ModelledRunPeak(Shorokoo.Core.Factory.IR.ModelProto model, IReadOnlyList<OutputAlias> outputAliases)
-        => TorchRunMemory.Peak(model, outputAliases);
+        => TorchRunMemory.Peak(model, outputAliases, onHost: !OnCuda);
 
     /// <summary>A translation's: each value freed at its last read, its views and its writes over
     /// dying operands.</summary>

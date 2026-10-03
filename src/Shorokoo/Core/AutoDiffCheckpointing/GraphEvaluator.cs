@@ -55,7 +55,9 @@ internal enum RunLayout
     /// the type it has and a one-input sum, mean, maximum or minimum is its input's memory; and an
     /// element-wise operator, a <c>Where</c>, a softmax, a normalization, a <c>Clip</c> or a
     /// <c>Gelu</c> writes its result over an operand of its own memory that dies there — what the
-    /// translation does, in ONNX Runtime's order, which is the order it runs a graph in.
+    /// translation does, in ONNX Runtime's order, which is the order it runs a graph in; a layer
+    /// normalization holds one value of its input's size beside it where it writes over its operand,
+    /// and two where it does not.
     /// </summary>
     Translation,
 }
@@ -273,14 +275,22 @@ internal class GraphEvaluator
 
                 if (_layout == RunLayout.Translation)
                 {
+                    var writtenOver = false;
                     if (!readsMetadataOnly
                         && TranslationReuse(node, outIdx, shapeInfo, plan, views, tensorLastUse, graphOutputs, pos) is var (over, isView))
                     {
                         plan.Alias(over, output.Value, isView ? 0 : outputInfo.MemoryBytes);
                         if (isView) views.Add(output.Value);
+                        writtenOver = !isView;
                     }
                     else
                         plan.Allocate(output.Value, outputInfo, pos);
+                    // The translation's layer normalization holds the squares of its centered values
+                    // where it writes over its operand, and otherwise the centered values and one
+                    // value more, each of its input's size, as it runs.
+                    if (outIdx == 0 && node.OpCode == "LayerNormalization" && nodeInputs.Count > 0 && nodeInputs[0] is { } normalized
+                        && shapeInfo.GetTensorInfo(normalized) is { } normalizedInfo)
+                        extraAtPos[pos] += (writtenOver ? 1 : 2) * normalizedInfo.MemoryBytes;
                     continue;
                 }
 

@@ -285,6 +285,8 @@ internal sealed class OrtSession : IShorokooSession
                     this, entry, inputs, blocks, outputNames,
                     () => RunBound(inputs, outputNames, into, runSettings),
                     (variant, placed) => variant.RunBound(inputs, outputNames, into, runSettings, placed),
+                    // An output written into its own input is not placed in another.
+                    (IReadOnlyCollection<string>?)into?.Keys ?? [],
                     out kept);
             else
                 results = RunBound(inputs, outputNames, into, runSettings);

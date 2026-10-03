@@ -250,7 +250,9 @@ internal sealed class OrtPlacements : IDisposable
     /// first where nothing has: placed on its variant once adopted, plain once refused. Planning a
     /// signature holds back only its own runs. The first placed run is measured; a placed run that
     /// fails refuses the signature, so the runs after it run plain, and a refused signature's variant
-    /// goes once no run is on it. <paramref name="kept"/> answers the consumed values a placed output
+    /// goes once no run is on it. <paramref name="aliasedOutputs"/> names the outputs the run writes
+    /// into the inputs they are marked for, which no plan places. <paramref name="kept"/> answers the
+    /// consumed values a placed output
     /// stands on, which the run does not release: the block each became releases it with its last
     /// output.
     /// </summary>
@@ -259,14 +261,14 @@ internal sealed class OrtPlacements : IDisposable
         Dictionary<string, OrtTensorValue> blocks, IReadOnlyList<string> outputNames,
         Func<IReadOnlyList<IShorokooTensorValue>> plain,
         Func<OrtSession, IReadOnlyDictionary<string, OrtSession.PlacedBinding>, IReadOnlyList<IShorokooTensorValue>> placed,
-        out HashSet<IShorokooTensorValue>? kept)
+        IReadOnlyCollection<string> aliasedOutputs, out HashSet<IShorokooTensorValue>? kept)
     {
         kept = null;
         lock (entry.Planning)
         {
             if (entry.Stage == Stage.Unplanned)
             {
-                Prepare(entry, inputs, blocks, outputNames);
+                Prepare(entry, inputs, blocks, outputNames, aliasedOutputs);
                 Settled?.Invoke(entry);
             }
         }
@@ -387,7 +389,7 @@ internal sealed class OrtPlacements : IDisposable
     /// </summary>
     private void Prepare(
         Entry entry, IReadOnlyDictionary<string, IShorokooTensorValue> inputs, Dictionary<string, OrtTensorValue> blocks,
-        IReadOnlyList<string> outputNames)
+        IReadOnlyList<string> outputNames, IReadOnlyCollection<string> aliasedOutputs)
     {
         try
         {
@@ -423,7 +425,7 @@ internal sealed class OrtPlacements : IDisposable
             var runsOutputs = runs.Outputs.Select(o => o.Name).ToHashSet(StringComparer.Ordinal);
             var proof = new PlacementProof(runs, blockBytes, shapes, memory: MemoryOf(runs), runsInOrder: true);
             var plan = proof.Prove(proof.Plan(PlacementProof.Smallest, PlacementProof.IdleOutputBytes, givingBack)
-                .Where(p => !runsOutputs.Contains(p.Value) || outputNames.Contains(p.Value)));
+                .Where(p => (!runsOutputs.Contains(p.Value) || outputNames.Contains(p.Value)) && !aliasedOutputs.Contains(p.Value)));
             if (plan.Count == 0)
             {
                 Refuse(entry, "nothing to place in the graph ONNX Runtime runs");

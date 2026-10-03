@@ -271,9 +271,9 @@ public interface IShorokooBackend
     // `outputAliases` written into the inputs they are paired with -- as this backend lays a run's
     // values out, or null where this backend has no such model. `model`'s inputs state their shapes
     // in full. The training rig's memory-aware pass judges the steps it weighs by this where it is
-    // not null and the backend lays a run out other than as ONNX Runtime does (RunLayout), so that a
-    // step it hands a backend holds least on that backend, rather than in the pass's own model of a
-    // run, which is ONNX Runtime's.
+    // not null, so that a step it hands a backend holds least on that backend, rather than in the
+    // pass's own model of a run, which charges the graph it hands over in the order it predicts the
+    // backend takes, where the backend may rewrite that graph and run it in another.
     //
     // A decorator forwards this, as it forwards every member with a default body.
     internal long? ModelledRunPeak(Shorokoo.Core.Factory.IR.ModelProto model, IReadOnlyList<OutputAlias> outputAliases) => null;

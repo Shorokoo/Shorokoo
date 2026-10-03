@@ -691,6 +691,37 @@ public class TrainingRigFromScratchCoverageTests
         Assert.True(ModelledAgainstRun(Benchmarks.MemoryPassConv.ComputationGraph, [8L, 3L, 64L, 64L]));
     }
 
+    [Fact]
+    public void TestOnnxRuntimesRunIsModelledWithItsViewsInPlaceActivationsKeptBuffersAndKernelScratch()
+    {
+        Assert.Equal(12288, OrtPeak("a:float[1024]", "O", true, [], Op("Exp", "a", "e"), Op("Neg", "e", "f"), Op("Add", "e f", "O")));
+        Assert.Equal(4096, OrtPeak("a:float[1024]", "O", true, [], Op("Exp", "a", "e"), Op("Relu", "e", "O")));
+        Assert.Equal(4096, OrtPeak("a:float[1024]", "O", true, [], Op("Exp", "a", "e"), Op("Unsqueeze", "e zero", "O")));
+        Assert.Equal(20484, OrtPeak("a:float[1024] b:float[2048]", "y z", true, [],
+            Op("Exp", "a", "e"), Op("ReduceSum", "e zero", "s"), Op("Exp", "b", "x"), Op("Neg", "x", "y"), Op("Add", "a s", "z")));
+        Assert.Equal(16388, OrtPeak("a:float[1024] b:float[2048]", "y z", true, [],
+            Op("Exp", "a", "e"), Op("ReduceSum", "e zero", "s"), Op("Exp", "b", "x"), Op("Neg", "x", "y"), Op("Shape", "a", "h"), Op("Expand", "s h", "z")));
+        Assert.Equal(0, OrtPeak("a:float[1024] b:float[1024]", "O", true, [new OutputAlias("O", "a")], Op("Add", "a b", "O")));
+        Assert.Equal(13312, OrtPeak("a:float[1024] c:float[1024]", "O", true, [], Op("Greater", "a c", "m"), Op("Where", "m a c", "O")));
+        Assert.Equal(5120, OrtPeak("a:float[1024] c:float[1024]", "O", false, [], Op("Greater", "a c", "m"), Op("Where", "m a c", "O")));
+        Assert.Equal(133120, OrtPeak("x:float[2,3,8,8] w:float[4,3,3,3]", "O", true, [], ComputeContextLifetimeCoverageTests.With(Op("Conv", "x w", "O"), "pads", 1, 1, 1, 1)));
+        Assert.Equal(2160, OrtPeak("x:float[1,4,4,4] w:float[4,3,3,3]", "O", true, [], Op("ConvTranspose", "x w", "O")));
+        Assert.Equal(1000, OrtPeak("x:float[4,2,3] w:float[1,20,3] r:float[1,20,5]", "O", true, [],
+            ComputeContextLifetimeCoverageTests.Op("LSTM", "x w r", "O", attribute: ("hidden_size", 5))));
+    }
+
+    private static NodeProto Op(string op, string inputs, string outputs) => ComputeContextLifetimeCoverageTests.Op(op, inputs, outputs);
+
+    /// <summary>What <see cref="Shorokoo.OnnxRuntime.OrtRunMemory"/> models a run of a graph of
+    /// <paramref name="nodes"/> holding at once, on the host or a card, with a zero as an initializer
+    /// it may read.</summary>
+    private static long? OrtPeak(string inputs, string outputs, bool onHost, OutputAlias[] aliases, params NodeProto[] nodes)
+    {
+        var graph = ComputeContextLifetimeCoverageTests.WithInts(ComputeContextLifetimeCoverageTests.GraphOf(inputs, outputs, nodes), "zero", 0);
+        var fed = graph.Inputs.ToDictionary(i => i.Name, i => ((long[])[.. i.Type.TensorType.Shape.Dims.Select(d => d.DimValue)], i.Type.TensorType.ElemType), StringComparer.Ordinal);
+        return Shorokoo.OnnxRuntime.OrtRunMemory.Peak(graph, fed, aliases, onHost);
+    }
+
     /// <summary>Whether the host backend's model of a run of the training step a rig builds for
     /// <paramref name="model"/> comes within a thirty-second of the most a session's run of that step
     /// asks of its own account, every output held.</summary>

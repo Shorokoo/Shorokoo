@@ -551,8 +551,8 @@ public class MemoryReuseScenarioTests
         var summary = new List<string>
         {
             $"# Where ONNX Runtime holds other than the pass models, on the {where}, batch x{scale}", "",
-            "| family | real peak (resident run) | run peak (one run, outputs into inputs left out) | its graph at that kernel, freed at last read | its graph planned as the pass plans, in the run's order | the same, in the order the pass predicts | the pass's modelled peak | the pass's model at that kernel's node | scratch over 1 MiB, by operator |",
-            "|---|---|---|---|---|---|---|---|---|",
+            "| family | real peak (resident run) | run peak (one run, outputs into inputs left out) | its graph at that kernel, freed at last read | its graph planned as the pass plans, in the run's order | the same, in the order the pass predicts | the pass's modelled peak | the pass's model at that kernel's node | the backend's model of the chosen step | scratch over 1 MiB, by operator |",
+            "|---|---|---|---|---|---|---|---|---|---|",
         };
         var detail = new StringBuilder();
         foreach (var (family, model, benchmarkShape) in MemoryPassBenchmarkTests.Suite)
@@ -653,7 +653,8 @@ public class MemoryReuseScenarioTests
             var notCounted = ran.Inputs.Select(i => i.Name).Concat(ran.Initializers.Select(i => i.Name)).Concat(stateOutputs).ToHashSet(StringComparer.Ordinal);
             var alive = new Dictionary<string, long>(StringComparer.Ordinal);
             long liveBytes = 0;
-            var planned = PlannedOccupancy(ran, order, valueShapes, notCounted);
+            var planTrace = new Dictionary<int, string>();
+            var planned = PlannedOccupancy(ran, order, valueShapes, notCounted, planTrace);
             var plannedInItsOrder = PlannedOccupancy(ran, new StepAnatomy(ran, 0, 0, 0).OrtOrder(), valueShapes, notCounted);
 
             long stateSoFar = 0, previousDelta = 0, runPeak = 0, modelAtRunPeak = 0, graphAtRunPeak = 0;
@@ -715,7 +716,7 @@ public class MemoryReuseScenarioTests
                 var delta = most - planned[k];
                 if (Math.Abs(delta - previousDelta) >= Big / 2 || transient >= Big)
                     detail.Append($"| {k} | {op} | {Mib(outputBytes)} | {Mib(before)} / {Mib(most)} / {Mib(after)} | {Mib(liveDuring)} | {Mib(planned[k])} | {Mib(delta)} | {Mib(modelled)} "
-                                  + $"| {string.Join(" ", kernel.Taken.Where(b => b >= Big / 4).Select(Mib))} |\n");
+                                  + $"| {string.Join(" ", kernel.Taken.Where(b => b >= Big / 4).Select(Mib))} | {string.Join(" ", node.Inputs.Where(v => v.Length > 0).Select(v => $"{v}:{Mib(BytesOf(v))}"))} -> {string.Join(" ", outputs)} | {planTrace.GetValueOrDefault(k, "")} |\n");
                 previousDelta = delta;
             }
             string ProducerOf(string v) => ran.Nodes.FirstOrDefault(n => n.Outputs.Contains(v)) is { } p ? $"{p.OpType}#{kernelAt.GetValueOrDefault(ran.Nodes.IndexOf(p), -1)}" : "input";
@@ -725,7 +726,7 @@ public class MemoryReuseScenarioTests
                 + string.Join(", ", timeline.Blocks.Where(b => b.Size >= Big && b.Taken <= runPeakAt && (b.Freed < 0 || b.Freed > runPeakAt))
                     .Select(b => $"{Mib(b.Size)} taken in {OpAt(b.Taken)}, freed in {(b.Freed < 0 ? "-" : OpAt(b.Freed))}")) + "\n");
             string OpAt(int k) => k < 0 ? "-" : $"{ran.Nodes[order[k]].OpType}#{k}";
-            summary.Add($"| {family} | {Mib(real)} | {Mib(runPeak)} | {Mib(graphAtRunPeak)} | {Mib(planned.Max())} | {Mib(plannedInItsOrder.Max())} | {Mib(ModelAt(modelPeakAt))} | {Mib(modelAtRunPeak)} "
+            summary.Add($"| {family} | {Mib(real)} | {Mib(runPeak)} | {Mib(graphAtRunPeak)} | {Mib(planned.Max())} | {Mib(plannedInItsOrder.Max())} | {Mib(ModelAt(modelPeakAt))} | {Mib(modelAtRunPeak)} | {(result.BackendPeakBytes is { } judged ? Mib(judged[result.AllStrategies.Select((x, i) => (x, i)).First(p => ReferenceEquals(p.x.Graph, result.OptimizedGraph)).i]) : "-")} "
                         + $"| {string.Join(", ", scratch.OrderByDescending(x => x.Value.Bytes).Select(x => $"{x.Key} x{x.Value.Count} up to {Mib(x.Value.Bytes)}"))} |");
             File.WriteAllText(Path.Combine(OutputDirectory(), $"ort-against-model-{where}-x{scale}.md"), string.Join("\n", summary) + "\n");
             File.WriteAllText(Path.Combine(OutputDirectory(), $"ort-against-model-{where}-x{scale}-detail.md"), detail.ToString());
@@ -734,13 +735,14 @@ public class MemoryReuseScenarioTests
 
     /// <summary>
     /// What a run of <paramref name="graph"/> in <paramref name="order"/> (node indices) holds after
-    /// each node, laid out as the memory-aware pass models ONNX Runtime's allocation plan: a view as
-    /// its input's memory, an activation over its input where that dies there, and a dead value's
-    /// buffer kept for the next value of its exact shape and type — occupied from its first value's
-    /// birth to its last one's death — or given back where none takes it. The values named in
+    /// each node, laid out as ONNX Runtime's allocation plan lays it out (<see cref="OrtRunMemory"/>,
+    /// without its kernels' scratch): a view as its input's memory, an activation over its input
+    /// where that dies there, and a dead value's buffer kept for the next value of its exact shape
+    /// and type — occupied from its first value's birth to its last one's death — or given back
+    /// where none takes it, or where the graph does not fix the shape of either. The values named in
     /// <paramref name="notCounted"/> take nothing; every other graph output is held to the end.
     /// </summary>
-    private static long[] PlannedOccupancy(GraphProto graph, IReadOnlyList<int> order, Dictionary<string, PlacementShapes.Value> shapes, HashSet<string> notCounted)
+    private static long[] PlannedOccupancy(GraphProto graph, IReadOnlyList<int> order, Dictionary<string, PlacementShapes.Value> shapes, HashSet<string> notCounted, Dictionary<int, string>? trace = null)
     {
         var root = new Dictionary<string, string>(StringComparer.Ordinal);
         string RootOf(string v) => root.TryGetValue(v, out var r) && r != v ? root[v] = RootOf(r) : v;
@@ -764,6 +766,9 @@ public class MemoryReuseScenarioTests
         var bufferOf = new Dictionary<string, int>(StringComparer.Ordinal);
         var users = new Dictionary<int, int>();
         var free = new List<int>();
+        // ONNX Runtime reuses no buffer for, and hands none on from, a value whose shape the graph
+        // does not fix.
+        var unfixed = OrtRunMemory.ShapesNotFixed(graph);
         for (int k = 0; k < order.Count; k++)
         {
             var node = graph.Nodes[order[k]];
@@ -779,11 +784,12 @@ public class MemoryReuseScenarioTests
                     users[over]++;
                     continue;
                 }
-                var taken = free.FindLastIndex(b => buffers[b].Shape == shape);
+                var taken = unfixed.Contains(o) ? -1 : free.FindLastIndex(b => buffers[b].Shape == shape);
                 if (taken >= 0)
                 {
                     var id = free[taken];
                     free.RemoveAt(taken);
+                    if (trace is not null) trace[k] = trace.GetValueOrDefault(k, "") + $" {o} into the buffer freed at {buffers[id].End};";
                     buffers[id] = buffers[id] with { End = int.MaxValue };
                     bufferOf[o] = id;
                     users[id] = 1;
@@ -792,6 +798,7 @@ public class MemoryReuseScenarioTests
                 buffers.Add((value.Bytes, shape, k, int.MaxValue));
                 bufferOf[o] = buffers.Count - 1;
                 users[buffers.Count - 1] = 1;
+                if (trace is not null && value.Bytes >= (1 << 20)) trace[k] = trace.GetValueOrDefault(k, "") + $" {o} new;";
             }
             foreach (var v in node.Inputs.Concat(node.Outputs).Where(v => v.Length > 0).Select(RootOf).Distinct())
             {
@@ -799,7 +806,8 @@ public class MemoryReuseScenarioTests
                 bufferOf.Remove(v);
                 if (--users[id] > 0) continue;
                 buffers[id] = buffers[id] with { End = k };
-                free.Add(id);
+                if (!unfixed.Contains(v)) free.Add(id);
+                if (trace is not null && buffers[id].Bytes >= (1 << 20)) trace[k] = trace.GetValueOrDefault(k, "") + $" frees {v};";
             }
         }
         var occupancy = new long[order.Count];

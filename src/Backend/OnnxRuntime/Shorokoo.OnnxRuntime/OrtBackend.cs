@@ -154,6 +154,48 @@ public abstract class OrtBackend : IShorokooBackend
         ? KernelWorkaroundSets.OnnxRuntime
         : KernelWorkaroundSets.OnnxRuntimeCuda;
 
+    /// <summary>
+    /// What a run of <paramref name="model"/> — a training step's — holds at once beyond its inputs
+    /// on this backend: the graph a session built from it as a training step's session is writes
+    /// out, laid out as ONNX Runtime runs it (<see cref="OrtRunMemory"/>), with the pairs of
+    /// <paramref name="outputAliases"/> that graph proves written in place. Null where the session
+    /// cannot be built or its graph written, or a value's shape cannot be told.
+    /// </summary>
+    long? IShorokooBackend.ModelledRunPeak(ModelProto model, IReadOnlyList<OutputAlias> outputAliases)
+    {
+        if (model.Graph is not { } handed) return null;
+        var inputs = new Dictionary<string, (long[] Shape, int ElementType)>(StringComparer.Ordinal);
+        foreach (var input in handed.Inputs)
+        {
+            if (input.Type?.TensorType is not { Shape: { } shape } tensor || shape.Dims.Any(d => d.DimValue <= 0 && d.DimParam is { Length: > 0 }))
+                return null;
+            inputs[input.Name] = ([.. shape.Dims.Select(d => d.DimValue)], tensor.ElemType);
+        }
+        var directory = TempDirectory("shorokoo-modelled-");
+        try
+        {
+            Directory.CreateDirectory(directory);
+            using var stream = new MemoryStream();
+            ProtoBuf.Serializer.Serialize(stream, model);
+            Discard(NewSession(stream.ToArray(), ShorokooGraphOptimization.TrainingStep, ShorokooLogSeverity.Fatal,
+                DeviceMemorySettings.Default, DiagnosticSettings.Default, directory, 0, []));
+            ModelProto run;
+            using (var written = File.OpenRead(Path.Combine(directory, OptimizedModelFile)))
+                run = ProtoBuf.Serializer.Deserialize<ModelProto>(written);
+            return run.Graph is { } graph
+                ? OrtRunMemory.Peak(graph, inputs, OutputAliasProof.Prove(graph, outputAliases), onHost: _cudaDeviceId is null)
+                : null;
+        }
+        catch (Exception failure) when (failure is OnnxRuntimeException or IOException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            return null;
+        }
+        finally
+        {
+            DeleteDirectory(directory);
+        }
+    }
+
     /// <summary>ONNX Runtime's allocation plan, with what its CPU kernels hold beside their outputs
     /// where this backend runs on the host.</summary>
     Shorokoo.Core.AutoDiffCheckpointing.RunLayout IShorokooBackend.RunLayout => _cudaDeviceId is null

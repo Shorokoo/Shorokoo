@@ -64,6 +64,11 @@ public class MemoryReuseScenarioTests
     private static readonly string[] Outputs = ["L", "A_half", "B_half"];
     private static readonly string[] Intermediates = ["C0", "C1", "C2", "C3", "L0", "L1", "L2"];
 
+    /// <summary>The precision the harness's contexts compute in: TensorFloat-32 allowed where
+    /// <c>$SHOROKOO_MEMORY_REUSE_TF32</c> is <c>1</c>, full precision otherwise.</summary>
+    private static PrecisionSettings Precision()
+        => new() { AllowTensorFloat32 = Environment.GetEnvironmentVariable("SHOROKOO_MEMORY_REUSE_TF32") is "1" };
+
     private static string OutputDirectory()
     {
         var dir = Environment.GetEnvironmentVariable("SHOROKOO_MEMORY_REUSE_DIR")
@@ -107,9 +112,9 @@ public class MemoryReuseScenarioTests
         }
         using var context = backend switch
         {
-            "torch-cpu" => new ComputeContext(new Shorokoo.PyTorch.Cpu.TorchCpuBackend()),
-            "torch-cuda" => new ComputeContext(new Shorokoo.PyTorch.Cuda.TorchCudaBackend()),
-            _ => new ComputeContext(),
+            "torch-cpu" => new ComputeContext(new Shorokoo.PyTorch.Cpu.TorchCpuBackend()) { Precision = Precision() },
+            "torch-cuda" => new ComputeContext(new Shorokoo.PyTorch.Cuda.TorchCudaBackend()) { Precision = Precision() },
+            _ => new ComputeContext { Precision = Precision() },
         };
         var compiled = context.Compile(ComputeContextLifetimeCoverageTests.TwoHalves());
         var lines = new List<string> { $"# The scenario through the compute context: {backend}, A and B [{rows}, {columns}] float", "",
@@ -278,7 +283,7 @@ public class MemoryReuseScenarioTests
         {
             foreach (var aliasing in (bool[])[true, false])
             {
-                using var context = new ComputeContext { OutputAliasing = aliasing, ValuePlacement = true };
+                using var context = new ComputeContext { OutputAliasing = aliasing, ValuePlacement = true, Precision = Precision() };
                 var sample = TensorData([2L, 4096L], [.. Enumerable.Range(0, 8192).Select(i => (i % 13) / 13f)]);
                 var rig = TrainingRig.FromScratch(
                     WideLinearModel.ComputationGraph, Shorokoo.Modules.Losses.L2Loss.ComputationGraph,
@@ -383,10 +388,10 @@ public class MemoryReuseScenarioTests
         float[] Values(int seed) => [.. Enumerable.Range(0, count).Select(i => ((i * 7 + seed) % 101) / 101f - 0.5f)];
         using var context = backend switch
         {
-            "torch-cpu" => new ComputeContext(new Shorokoo.PyTorch.Cpu.TorchCpuBackend()) { ValuePlacement = placing },
-            "torch-cuda" => new ComputeContext(new Shorokoo.PyTorch.Cuda.TorchCudaBackend()) { ValuePlacement = placing },
-            _ when Environment.GetEnvironmentVariable("SHOROKOO_MEMORY_REUSE_SESSION_POOLS") is "1" => new ComputeContext(SessionPools()) { ValuePlacement = placing },
-            _ => new ComputeContext { ValuePlacement = placing },
+            "torch-cpu" => new ComputeContext(new Shorokoo.PyTorch.Cpu.TorchCpuBackend()) { ValuePlacement = placing, Precision = Precision() },
+            "torch-cuda" => new ComputeContext(new Shorokoo.PyTorch.Cuda.TorchCudaBackend()) { ValuePlacement = placing, Precision = Precision() },
+            _ when Environment.GetEnvironmentVariable("SHOROKOO_MEMORY_REUSE_SESSION_POOLS") is "1" => new ComputeContext(SessionPools()) { ValuePlacement = placing, Precision = Precision() },
+            _ => new ComputeContext { ValuePlacement = placing, Precision = Precision() },
         };
         (T, long) Observe<T>(Func<T> run) => backend == "ort" ? Observed(onCard, run) : TorchObserved(backend, run);
         var settled = new List<OrtPlacements.Entry>();

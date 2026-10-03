@@ -57,15 +57,25 @@ internal class Rematerializer
     private readonly GraphEvaluator _evaluator;
     private readonly ComputeMemoryObjective _objective;
     private readonly int _maxEvaluationsPerCall;
+    private readonly bool _pruneBatches;
 
+    /// <param name="objective">What a commit must score better by.</param>
+    /// <param name="evaluator">The evaluator every trial is scored with; the default when null.</param>
+    /// <param name="maxEvaluationsPerCall">The full-graph evaluations one <see cref="Apply"/> may
+    /// spend.</param>
+    /// <param name="pruneBatches">Whether a batch that improves is pruned to the members that pay
+    /// for themselves before it is committed; committed whole, it costs the compute of every member
+    /// that rode along, and can set the search on a path that ends lower.</param>
     public Rematerializer(
         ComputeMemoryObjective objective,
         GraphEvaluator? evaluator = null,
-        int maxEvaluationsPerCall = MaxEvaluationsPerCall)
+        int maxEvaluationsPerCall = MaxEvaluationsPerCall,
+        bool pruneBatches = true)
     {
         _evaluator = evaluator ?? new GraphEvaluator();
         _objective = objective;
         _maxEvaluationsPerCall = maxEvaluationsPerCall;
+        _pruneBatches = pruneBatches;
     }
 
     /// <summary>
@@ -224,7 +234,7 @@ internal class Rematerializer
                     // still costs one evaluation per member. Every member of the original prefix
                     // is marked tried: a dropped one was just measured to buy nothing here.
                     var members = new List<RematCandidate>(prefix);
-                    for (var pruning = true; pruning && members.Count > 1;)
+                    for (var pruning = _pruneBatches; pruning && members.Count > 1;)
                     {
                         pruning = false;
                         for (int i = members.Count - 1; i >= 0 && members.Count > 1; i--)

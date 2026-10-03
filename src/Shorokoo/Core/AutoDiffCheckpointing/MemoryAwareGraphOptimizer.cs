@@ -57,7 +57,8 @@ public class GraphOptimizationResult
 /// Optimizes a <see cref="InternalComputationGraph"/> for the compute–memory tradeoff by
 /// combining memory-aware scheduling (<see cref="MemoryAwareScheduler"/>) with
 /// rematerialization (<see cref="Rematerializer"/>). The optimizer evaluates two
-/// alternating strategies — <c>RematReorder</c> and <c>ReorderRemat</c> — and selects
+/// alternating strategies — <c>RematReorder</c> and <c>ReorderRemat</c> — and a third
+/// committing the rematerializer's batches whole (<see cref="UnprunedRematReorder"/>), and selects
 /// the one with the best combined metric
 /// (see <see cref="ComputeMemoryObjective"/>: both terms as ratios to the baseline graph).
 /// Where its evaluator carries a step's state written in place, both start from the graph with
@@ -119,6 +120,21 @@ internal class MemoryAwareGraphOptimizer
     /// reordering strategies start from it where it is kept.
     /// </summary>
     public const string OrderedStateReads = "OrderedStateReads";
+
+    /// <summary>
+    /// The strategy alternating rematerialization and reordering as <c>RematReorder</c> does, with
+    /// a rematerializer that commits each batch that improves whole, rather than pruned to the
+    /// members that pay for themselves where the peak stands.
+    ///
+    /// <para>Pruning saves the compute of the members that ride along, but the graph it commits
+    /// can set the search on a path that ends higher: on a two-layer transformer encoder's step
+    /// charged as PyTorch's translation lays it out, the pruned search stops at 78% of the step's
+    /// peak for 4% more compute, and the whole batches reach 58% for 20% more, which scores better
+    /// by the objective both are judged by. Neither a larger evaluation budget nor retrying the
+    /// pruned members later reaches it. Where pruning does as well, it scores better, at less
+    /// compute, and is chosen.</para>
+    /// </summary>
+    public const string UnprunedRematReorder = "RematReorderUnpruned";
 
     private readonly GraphEvaluator _evaluator;
     private readonly ShapeInferenceInterpreter _shapeInference;
@@ -238,6 +254,14 @@ internal class MemoryAwareGraphOptimizer
 
         strategies.Add(RunAlternatingStrategy("RematReorder", selection, start, startEval, Remat, Reorder));
         strategies.Add(RunAlternatingStrategy("ReorderRemat", selection, start, startEval, Reorder, Remat));
+
+        var unpruned = new Rematerializer(selection, _evaluator, pruneBatches: false);
+        Candidate RematWhole(Candidate c)
+        {
+            var (g, si) = unpruned.Apply(c.Graph, c.ShapeInfo);
+            return new Candidate(g, si);
+        }
+        strategies.Add(RunAlternatingStrategy(UnprunedRematReorder, selection, start, startEval, RematWhole, Reorder));
 
         var best = Enumerable.Range(0, strategies.Count).MinBy(i => selection.Score(strategies[i].Evaluation));
         return Chosen(strategies, best, selection);

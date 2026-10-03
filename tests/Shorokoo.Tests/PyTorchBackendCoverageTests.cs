@@ -1271,6 +1271,14 @@ public class PyTorchBackendCoverageTests
             ComputeContextLifetimeCoverageTests.Op("LSTM", "x w r", "Y", attribute: ("hidden_size", 4)))));
     }
 
+    [Fact]
+    public void TestATorchRunIsModelledHoldingTheResultOfEveryOperatorThatComputesOneOfItsOwn()
+    {
+        Assert.Equal(192, RunPeak(GraphOn("x:float[4,8] i:int64[2]", "O", Op("Exp", "x", "e"), Op("Gather", "e i", "O"))));
+        Assert.Equal(384, RunPeak(GraphOn("x:float[4,8]", "O", Op("Exp", "x", "e"), ComputeContextLifetimeCoverageTests.Op("Cast", "e", "O", attribute: ("to", 7)))));
+        Assert.Equal(256, RunPeak(GraphOn("x:float[4,8]", "O", Op("Exp", "x", "e"), ComputeContextLifetimeCoverageTests.Op("Cast", "e", "c", attribute: ("to", 1)), Op("Neg", "c", "O"))));
+    }
+
     /// <summary>A <c>Loop</c> of <paramref name="inputs"/> — its trip count and its carried values,
     /// with no condition — making <paramref name="outputs"/> by <paramref name="body"/>.</summary>
     private static NodeProto Loop(string inputs, string outputs, GraphProto body)

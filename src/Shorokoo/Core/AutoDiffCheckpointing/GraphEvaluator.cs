@@ -286,7 +286,10 @@ internal class GraphEvaluator
                         writtenOver = !isView;
                     }
                     else
+                    {
                         plan.Allocate(output.Value, outputInfo, pos);
+                        LayOutAsOperands(node, nodeInputs, output.Value, outputInfo, shapeInfo, strides);
+                    }
                     // The translation's layer normalization holds the squares of its centered values
                     // where it writes over its operand, and otherwise the centered values and one
                     // value more, each of its input's size, as it runs.
@@ -378,7 +381,8 @@ internal class GraphEvaluator
     /// <paramref name="node"/>'s output <paramref name="outIdx"/> takes, and whether as a view of it;
     /// null where it takes memory of its own. A view's input may stay live; an operand written over
     /// dies at this node, is of the output's bytes and type, is memory of its own — not a view, not
-    /// a fed input, not a graph output — and no other value shares it. A reshape is a view only where
+    /// a fed input, not a graph output — lies row by row, as torch writes over no other, and no other
+    /// value shares it. A reshape is a view only where
     /// torch can view what it reshapes by its strides (<paramref name="strides"/>, followed here),
     /// and memory of its own otherwise, as torch copies it.
     /// </summary>
@@ -429,9 +433,29 @@ internal class GraphEvaluator
             if (plan.AliasCount(operand) != 1 || plan.IsGraphInput(operand) || plan.IsGraphOutput(operand)) continue;
             if (shapeInfo.GetTensorInfo(operand) is not { } operandInfo || operandInfo.MemoryBytes != outputInfo.MemoryBytes
                 || operandInfo.DType != outputInfo.DType) continue;
+            if (strides.TryGetValue(operand, out var laid) && !Shorokoo.Core.Backends.TorchStrides.IsContiguous(operandInfo.Shape.Dims, laid)) continue;
             return (operand, false);
         }
         return null;
+    }
+
+    /// <summary>
+    /// Under a translation's layout, the strides torch gives an element-wise result of memory of its
+    /// own (<see cref="Shorokoo.Core.Backends.TorchStrides.OfElementwise"/>), kept in
+    /// <paramref name="strides"/> where they are not row by row.
+    /// </summary>
+    private static void LayOutAsOperands(FastNode node, IReadOnlyList<FastTensorKey?> inputs, FastTensorKey output, TensorShapeInfo outputInfo,
+        ShapeInferenceResult shapeInfo, Dictionary<FastTensorKey, long[]> strides)
+    {
+        if (!Shorokoo.Core.Backends.TorchStrides.LaidOutAsOperands.Contains(node.OpCode) || outputInfo.Shape.Dims.Any(d => d < 0)) return;
+        var operands = new List<(IReadOnlyList<long>, IReadOnlyList<long>)>();
+        foreach (var input in inputs)
+        {
+            if (input is not { } key || shapeInfo.GetTensorInfo(key) is not { } info || info.Shape.Dims.Any(d => d < 0)) continue;
+            operands.Add((info.Shape.Dims, strides.TryGetValue(key, out var known) ? known : Shorokoo.Core.Backends.TorchStrides.Contiguous(info.Shape.Dims)));
+        }
+        var laid = Shorokoo.Core.Backends.TorchStrides.OfElementwise(operands, outputInfo.Shape.Dims);
+        if (!Shorokoo.Core.Backends.TorchStrides.IsContiguous(outputInfo.Shape.Dims, laid)) strides[output] = laid;
     }
 
     /// <summary>Reads only its input's metadata; ORT folds it away under static shapes.</summary>

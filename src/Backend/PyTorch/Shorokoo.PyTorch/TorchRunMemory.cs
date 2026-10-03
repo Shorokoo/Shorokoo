@@ -12,9 +12,11 @@ namespace Shorokoo.PyTorch;
 /// handed back over an input (<see cref="PlacementMemory.PyTorch"/>: a slice, a reshape, a
 /// transpose, an expansion, a reduction of no axis) is that input's memory — a reduction only where
 /// it is of its input's size, since one reducing an axis computes a value of its own, and a reshape
-/// only where torch can view what it reshapes, by its strides, since it copies it otherwise; a node written over an operand dying there
-/// (<see cref="TorchInPlace"/>) takes the operand's memory; an output written into the input it is
-/// paired with (<see cref="OutputAlias"/>) takes that input's. A kernel's own temporaries are held
+/// only where torch can view what it reshapes, by its strides, since it copies it otherwise — an
+/// element-wise result lying as its operands do (<see cref="TorchStrides.OfElementwise"/>). A node
+/// written over an operand dying there (<see cref="TorchInPlace"/>) takes the operand's memory,
+/// where the operand is contiguous, as torch writes over no other; an output written into the input
+/// it is paired with (<see cref="OutputAlias"/>) takes that input's. A kernel's own temporaries are held
 /// for the node's length (<see cref="Scratch"/>). The inputs, the initializers and the constants are
 /// held before the run begins and are not counted.
 /// </summary>
@@ -62,6 +64,7 @@ internal static class TorchRunMemory
         var strides = new Dictionary<string, long[]>(StringComparer.Ordinal);
         long[]? StridesOf(string value) => strides.TryGetValue(value, out var known) ? known
             : shapes.TryGetValue(value, out var v) ? TorchStrides.Contiguous(v.Shape) : null;
+        bool Contiguous(string value) => value.Length > 0 && shapes.TryGetValue(value, out var v) && StridesOf(value) is { } s && TorchStrides.IsContiguous(v.Shape, s);
         foreach (var node in order)
             for (int o = 0; o < node.Outputs.Count; o++)
             {
@@ -80,6 +83,16 @@ internal static class TorchRunMemory
                         root[output] = RootOf(node.Inputs[i]);
                         break;
                     }
+                // An element-wise result of memory of its own lies as its operands do, or as the
+                // operand it is written over, which torch writes over only where it is contiguous.
+                if (root.ContainsKey(output) || intoInput.ContainsKey(output) || !TorchStrides.LaidOutAsOperands.Contains(node.OpType)
+                    || !OutputAliasProof.IsStandard(node) || !shapes.TryGetValue(output, out var made)) continue;
+                if (over.TryGetValue(output, out var target) && Contiguous(node.Inputs[target])
+                    && shapes[node.Inputs[target]] is var written && written.ElementType == made.ElementType && written.Shape.SequenceEqual(made.Shape)) continue;
+                var operands = node.Inputs.Where(i => i.Length > 0 && shapes.ContainsKey(i) && StridesOf(i) is not null)
+                    .Select(i => ((IReadOnlyList<long>)shapes[i].Shape, (IReadOnlyList<long>)StridesOf(i)!)).ToList();
+                var laid = TorchStrides.OfElementwise(operands, made.Shape);
+                if (!TorchStrides.IsContiguous(made.Shape, laid)) strides[output] = laid;
             }
         var last = new Dictionary<string, int>(StringComparer.Ordinal);
         foreach (var output in graph.Outputs) last[RootOf(output.Name)] = int.MaxValue;
@@ -109,7 +122,7 @@ internal static class TorchRunMemory
                     continue;
                 }
                 var bytes = Math.Max(shapes[output].Bytes, 0);
-                if (over.TryGetValue(output, out var slot) && node.Inputs[slot].Length > 0)
+                if (over.TryGetValue(output, out var slot) && node.Inputs[slot].Length > 0 && Contiguous(node.Inputs[slot]))
                 {
                     var operand = RootOf(node.Inputs[slot]);
                     var dies = last.GetValueOrDefault(operand, -1) == k;

@@ -3,7 +3,7 @@ namespace Shorokoo.Core.Backends;
 /// <summary>
 /// The strides torch gives a view, as far as a model of a translation's memory asks: whether a
 /// reshape of a view is a view, or a copy torch makes because the view's strides cannot be reshaped,
-/// and which operands a matrix product copies.
+/// how torch lays out an element-wise result, and which operands a matrix product copies.
 /// </summary>
 internal static class TorchStrides
 {
@@ -18,6 +18,85 @@ internal static class TorchStrides
             step *= Math.Max(shape[d], 1);
         }
         return strides;
+    }
+
+    /// <summary>The operators torch computes element by element, laying out a result of their own as
+    /// their operands are laid out (<see cref="OfElementwise"/>).</summary>
+    internal static readonly HashSet<string> LaidOutAsOperands = new(StringComparer.Ordinal)
+    {
+        "Neg", "Abs", "Sigmoid", "Relu", "Exp", "Log", "Sqrt", "Tanh", "Sin", "Cos", "Tan", "Asin", "Acos", "Atan",
+        "Sinh", "Cosh", "Asinh", "Acosh", "Atanh", "Reciprocal", "Floor", "Ceil", "Round", "Sign", "Erf", "Softplus",
+        "Softsign", "Elu", "Selu", "LeakyRelu", "ThresholdedRelu", "HardSigmoid", "HardSwish", "Celu", "Gelu", "Not",
+        "Add", "Sub", "Mul", "Div", "Pow", "Max", "Min", "Sum", "Where", "Clip", "Cast",
+        "Equal", "Less", "Greater", "LessOrEqual", "GreaterOrEqual", "And", "Or", "Xor",
+    };
+
+    /// <summary>Whether a value of <paramref name="shape"/> and <paramref name="strides"/> lies row
+    /// by row, as torch's <c>is_contiguous</c> tells it, an axis of one element stepping anyhow.</summary>
+    internal static bool IsContiguous(IReadOnlyList<long> shape, IReadOnlyList<long> strides)
+    {
+        long step = 1;
+        for (int d = shape.Count - 1; d >= 0; d--)
+        {
+            if (shape[d] == 1) continue;
+            if (strides[d] != step) return false;
+            step *= shape[d];
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// The strides torch gives the result of an element-wise operator over operands of the shapes
+    /// and strides of <paramref name="operands"/>, broadcast to <paramref name="target"/>, where it
+    /// lays the result out itself, as ATen's <c>TensorIterator</c> does: its axes ordered from the
+    /// fastest by the operands' strides — two axes by the first operand whose strides tell them apart,
+    /// an axis an operand broadcasts telling nothing — and the result laid densely in that order.
+    /// </summary>
+    internal static long[] OfElementwise(IReadOnlyList<(IReadOnlyList<long> Shape, IReadOnlyList<long> Strides)> operands, IReadOnlyList<long> target)
+    {
+        int rank = target.Count;
+        if (rank <= 1) return Contiguous(target);
+        var broadcast = operands.Select(o =>
+        {
+            var lead = rank - o.Shape.Count;
+            var steps = new long[rank];
+            for (int d = 0; d < rank; d++)
+                steps[d] = d < lead || (o.Shape[d - lead] == 1 && target[d] != 1) ? 0 : o.Strides[d - lead];
+            return steps;
+        }).ToList();
+        int Order(int first, int second)
+        {
+            foreach (var steps in broadcast)
+            {
+                if (steps[first] == 0 || steps[second] == 0) continue;
+                if (steps[first] != steps[second]) return steps[first] < steps[second] ? -1 : 1;
+                if (target[first] > target[second]) return 1;
+            }
+            return 0;
+        }
+        var fastest = Enumerable.Range(0, rank).Reverse().ToArray();
+        for (int i = 1; i < rank; i++)
+        {
+            var later = i;
+            for (int earlier = i - 1; earlier >= 0; earlier--)
+            {
+                var order = Order(fastest[earlier], fastest[later]);
+                if (order > 0)
+                {
+                    (fastest[earlier], fastest[later]) = (fastest[later], fastest[earlier]);
+                    later = earlier;
+                }
+                else if (order < 0) break;
+            }
+        }
+        var result = new long[rank];
+        long step = 1;
+        foreach (var d in fastest)
+        {
+            result[d] = step;
+            step *= Math.Max(target[d], 1);
+        }
+        return result;
     }
 
     /// <summary>

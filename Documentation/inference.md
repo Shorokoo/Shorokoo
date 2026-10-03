@@ -972,16 +972,18 @@ lets an ONNX Runtime CUDA backend and a PyTorch one share a process in either or
 holding two releases of cuDNN cannot run both, since cuDNN's libraries import one another's
 internal entry points by name and bind to whichever copy of a name was loaded first.
 
-So whatever else in the process loads cuDNN or cuBLAS has to come after them: a CUDA session of
-your own built on ONNX Runtime directly, say, calls `CudaLibraries.Prepare()` before appending its
-provider. A process that already holds another release when the ONNX Runtime CUDA backend
+So whatever else in the process loads cuDNN or cuBLAS has to do so once the pinned copies are
+loaded: a CUDA session of your own built on ONNX Runtime directly, say, calls
+`CudaLibraries.Prepare()` before appending its provider. A process that already holds another release when the ONNX Runtime CUDA backend
 prepares the pinned one cannot load it beside that release, and the backend's first session
 fails with an `InvalidOperationException` naming the copies held.
 
 The other NVIDIA libraries both stacks load — the CUDA runtime, cuFFT, nvrtc, nvJitLink — are
-each backend's own: the ONNX Runtime backend's come from the machine's CUDA 13 runtime, PyTorch's
-from its environment. Two copies of these run side by side: they call one another only through
-public, versioned entry points.
+each backend's own: the ONNX Runtime backend and Shorokoo's allocator on the card load them by
+name, from the machine's CUDA 13 runtime or the copy the process already holds under that name,
+and PyTorch loads its environment's. Two copies of these run side by side: they call one another
+only through public, versioned entry points, and both work in the card's one context per process,
+so memory either one allocates is good to the other.
 
 ### Device memory (GPU backends)
 

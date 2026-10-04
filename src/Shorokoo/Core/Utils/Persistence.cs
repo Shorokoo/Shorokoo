@@ -791,11 +791,20 @@ namespace Shorokoo
             {
                 return decoder.Read(buffer);
             }
-            catch (Exception e) when (e is not OperationCanceledException)
+            catch (Exception e) when (e is not OperationCanceledException && !FromTheStreamUnderIt(e))
             {
                 throw failed(e);
             }
         }
+
+        /// <summary>
+        /// Whether <paramref name="e"/> is the stream under the decoder failing to read rather than
+        /// the decoder failing on what it read. The decoder reports a frame that ends early as an
+        /// <see cref="EndOfStreamException"/> and one it cannot decode as an exception of its own
+        /// that is no <see cref="IOException"/>, so any other <see cref="IOException"/> came up
+        /// from beneath it — a disk failing to read, say — and says nothing of the bytes stored.
+        /// </summary>
+        private static bool FromTheStreamUnderIt(Exception e) => e is IOException and not EndOfStreamException;
 
         public override int Read(byte[] buffer, int offset, int count) => Read(buffer.AsSpan(offset, count));
         public override bool CanRead => true;

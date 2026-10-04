@@ -887,25 +887,35 @@ namespace Shorokoo
                     + "not host memory, so its elements cannot be read here. ToHost() takes a copy "
                     + "in host memory.");
 
-        /// <inheritdoc/>
+        /// <summary>
+        /// Laid out from the element type and shape, wherever the value is, rather than read off a
+        /// span over its storage: a span's length is an <see cref="int"/>, so no span measures a
+        /// tensor past 2 GiB.
+        /// </summary>
         internal override long ContentByteLength
-            => this.Value.IsHostAccessible
-                ? this.Value.GetTensorDataAsSpan<byte>().Length
-                : TensorElementLayout.ByteLength(backing.ElementType, backing.Shape);
+        {
+            get
+            {
+                var value = this.Value;
+                return TensorElementLayout.ByteLength(value.ElementType, value.Shape);
+            }
+        }
 
         /// <summary>
-        /// The storage's own bytes where the host can read them, and otherwise the value streamed
-        /// out of the provider's memory through one bounded buffer by the backend that made it.
+        /// The storage's own bytes where the host can read them all through one span, and otherwise
+        /// the value streamed through one bounded buffer by the backend that made it — out of the
+        /// provider's memory, or out of host memory longer than one span reaches.
         /// </summary>
         private protected override void WriteContentBytes(Stream destination)
         {
-            if (backing.IsHostAccessible)
+            var length = ContentByteLength;
+            if (backing.IsHostAccessible && length <= int.MaxValue)
             {
                 destination.Write(backing.GetTensorDataAsSpan<byte>());
                 GC.KeepAlive(backing);
                 return;
             }
-            StagedReadBack.Write(AllocatingBackend, backing, ContentByteLength, destination);
+            StagedReadBack.Write(AllocatingBackend, backing, length, destination);
             GC.KeepAlive(backing);
         }
 

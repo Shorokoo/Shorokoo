@@ -575,7 +575,8 @@ internal sealed unsafe class CachingAllocator
         {
             arena.Uncarve(larger, largerSize);
             block = arena.Carve(size, mayCommit: false);
-            counted = call;
+            // Counted where the block is carved from memory the account had: fresh memory counts.
+            if (block != IntPtr.Zero) counted = call;
         }
         var giveWay = excess * 8 >= size ? long.MaxValue : excess;
         for (long givenWay = 0; block == IntPtr.Zero && givenWay < giveWay && account.GiveWayOldest(fromArena: true, out var kept, out var keptSize, out _); givenWay += keptSize)

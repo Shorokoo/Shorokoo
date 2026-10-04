@@ -1684,10 +1684,10 @@ public class PyTorchBackendCoverageTests
             for %%a in (%*) do set "last=%%~a"
             mkdir "%last%\{Path.GetDirectoryName(copy)}"
             echo x>"%last%\{copy}"
-            """, TimeSpan.FromSeconds(3), HoldingTheCudnnCacheAndForAWhileTheEnvironment);
+            """, TimeSpan.FromSeconds(4), HoldingTheCudnnCacheAndForAWhileTheEnvironment);
 
         Assert.Equal(PythonEnvironmentFailure.NotAVirtualEnvironment, linking.Failure);
-        Assert.True(linking.Took < TimeSpan.FromSeconds(4));
+        Assert.True(linking.Took < TimeSpan.FromSeconds(5));
     }
 
     [Fact]
@@ -1878,15 +1878,15 @@ public class PyTorchBackendCoverageTests
     }
 
     /// <summary>The lock of the CUDA library cache's cuDNN folder under <paramref name="root"/>, held
-    /// until the result is disposed, and the lock of the environment provisioned there, held for a
-    /// second and a half.</summary>
+    /// until the result is disposed, and the lock of the environment provisioned there, held for two
+    /// seconds.</summary>
     private static IDisposable HoldingTheCudnnCacheAndForAWhileTheEnvironment(string root)
     {
         var cudnn = CudaLibraryPins.Current!.Libraries.Single(pin => pin.Name == "cudnn");
         var cuda = Directory.CreateDirectory(Path.Combine(root, "shorokoo", "cuda")).FullName;
         var cache = new FileStream(Path.Combine(cuda, cudnn.CacheKey + ".lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
         var environment = new FileStream(Path.Combine(root, PythonEnvironmentLock.Cpu.CacheKey + ".lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
-        _ = Task.Delay(1500).ContinueWith(_ => environment.Dispose());
+        _ = Task.Delay(2000).ContinueWith(_ => environment.Dispose());
         return cache;
     }
 

@@ -331,7 +331,14 @@ internal sealed class SessionCountingBackend(IShorokooBackend inner) : IShorokoo
     internal int Sessions;
     internal int SingleThreaded;
     internal int Disposed;
+    internal int ModelledPeaks;
     internal int Live => Sessions - Disposed;
+
+    long? IShorokooBackend.ModelledRunPeak(Shorokoo.Core.Factory.IR.ModelProto model, IReadOnlyList<OutputAlias> outputAliases, PrecisionSettings precision)
+    {
+        System.Threading.Interlocked.Increment(ref ModelledPeaks);
+        return null;
+    }
 
     public BackendDescription Description => inner.Description;
     public MemorySpace MemorySpace => inner.MemorySpace;

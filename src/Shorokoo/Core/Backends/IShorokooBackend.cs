@@ -279,6 +279,13 @@ public interface IShorokooBackend
     internal long? ModelledRunPeak(Shorokoo.Core.Factory.IR.ModelProto model, IReadOnlyList<OutputAlias> outputAliases,
         PrecisionSettings precision) => null;
 
+    // Whether this backend has the model of a run ModelledRunPeak answers from -- which may still
+    // answer null for a graph it cannot tell. The training rig asks ModelledRunPeak nothing of a
+    // backend without one: each question is a model built for that backend, only to hear null.
+    //
+    // A decorator forwards this, as it forwards every member with a default body.
+    internal bool ModelsARun => false;
+
     // Whether ModelledRunPeak answers in about the time the memory-aware pass takes to evaluate a
     // graph itself -- building nothing of this backend's own, a session say -- so that the pass may
     // weigh the many candidates its search leaves on a plateau by it, rather than only the steps
@@ -413,9 +420,9 @@ public interface IShorokooBackend
     // (Shorokoo/Shorokoo#359).
     //
     // The default fills it after all, from a zeroed buffer through the member above, and so buys
-    // nothing: it is here because this interface is an ABI, and a member without a body is a
-    // backend outside this repository that no longer compiles. A backend that does not override
-    // this keeps paying the copy it always paid; overriding it is what stops paying.
+    // nothing: it is here because this interface is an ABI, and a member without a body would not
+    // compile in a backend outside this repository. A backend that does not override this pays for
+    // the copy; overriding it is what stops paying.
     //
     // Sizing that buffer is TensorElementLayout's table -- the same one a backend's own byte-wise
     // constructor reads -- so the element types CreateTensorFromRawBytes turns away are turned

@@ -22,7 +22,8 @@ public sealed record PythonEnvironmentOptions
 
     /// <summary>How long provisioning may take: waiting for another process that is provisioning
     /// the same environment, then building it, a <c>uv</c> step still running when it runs out being
-    /// stopped. Provisioning downloads the framework, which is more than a gigabyte, so the default
-    /// is generous.</summary>
+    /// stopped, then linking its CUDA libraries to the shared cache, which is left for a later start
+    /// where none of it is left. Provisioning downloads the framework, which is more than a gigabyte,
+    /// so the default is generous.</summary>
     public TimeSpan ProvisioningTimeout { get; init; } = TimeSpan.FromMinutes(30);
 }

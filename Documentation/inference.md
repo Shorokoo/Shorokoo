@@ -1039,10 +1039,19 @@ every file is in place and checked; one left half-filled is filled again. It is 
    the system's library folders. The copy's files are hard-linked into the cache where the volume
    allows, so nothing is downloaded or stored twice, and copied otherwise. Any other copy — another
    release, a build for another CUDA major, a file that differs — is ignored, never mixed in.
-2. **Otherwise the release's wheel from PyPI**, checked against the SHA-256 the pin records.
+2. **Otherwise the release's wheel from PyPI**, checked against the SHA-256 the pin records. A
+   download through which no data arrives for a minute is given up, as is one not done within the
+   hour a fill may take; and a download ended with its process leaves no partial wheel behind.
+
+A filled folder is looked at again each time it is used, without reading its files: one whose
+size, or whose last write, has changed since the folder was filled — an installed copy it was
+linked to, written over in place, say — has the folder checked whole, file by file against the
+pin, and filled again where any file is no longer the pinned one. A folder copied from another
+machine, its files' times moved, passes that check and is kept.
 
 With neither available — offline, no copy that matches — the first CUDA session fails with an
-`InvalidOperationException` naming the library, where it looked and the size of the download. To
+`InvalidOperationException` naming the library, where it looked and the size of the download. A
+cache folder that cannot be written — a full disk — fails it with an `IOException` instead. To
 run offline, fill the cache once while online, copy the folders from a machine that has them, or
 install exactly the pinned release. `CudaLibraries.Prepare()` (in
 `Shorokoo.Core.Backends`) fills the cache and loads the libraries at a moment of your choosing,
@@ -1061,9 +1070,12 @@ internal entry points by name and bind to whichever copy of a name was loaded fi
 
 So whatever else in the process loads cuDNN or cuBLAS has to do so once the pinned copies are
 loaded: a CUDA session of your own built on ONNX Runtime directly, say, calls
-`CudaLibraries.Prepare()` before appending its provider. A process that already holds another release when the ONNX Runtime CUDA backend
-prepares the pinned one cannot load it beside that release, and the backend's first session
-fails with an `InvalidOperationException` naming the copies held.
+`CudaLibraries.Prepare()` before appending its provider. A process that already holds another
+release when the ONNX Runtime CUDA backend prepares the pinned one — any copy, under the name a
+pinned file is loaded by, that is not that file — is refused before anything is loaded: the
+backend's first session fails with an `InvalidOperationException` naming the copies held. Loading
+the pinned files beside them would not help, as what imports those names binds to the copies
+loaded first.
 
 The other NVIDIA libraries both stacks load — the CUDA runtime, cuFFT, nvrtc, nvJitLink — are
 each backend's own: the ONNX Runtime backend and Shorokoo's allocator on the card load them by

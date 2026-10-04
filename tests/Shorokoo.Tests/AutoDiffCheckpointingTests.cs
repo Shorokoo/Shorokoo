@@ -748,6 +748,30 @@ public class AutoDiffCheckpointingCoverageTests
         Assert.True(new GraphEvaluator().Evaluate(graph, shapeInfo).PeakMemoryBytes >= Mb);
     }
 
+    [Fact]
+    public void TestEveryStepTakenOnARecurrentStepIsJudgedByTheBackendsModelOrNotTakenCoverage()
+    {
+        var rig = TrainingRig.FromScratch(Benchmarks.MemoryPassLstm.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            [Pattern([32L, 8L, 64L], 1f)], (Hyperparameter[])[0.01f]);
+        var graph = rig.PreOptimizationGraph.ToInternal();
+        var shapeInfo = new ShapeInferenceInterpreter(CpuContext).Infer(graph, [.. rig.OptimizationInputShapes.Select(s => Synthesize(s.Shape, s.DType))]);
+
+        Assert.Contains(graph.Nodes, n => n.IsOpenNode());
+        Assert.Same(graph, new MemoryAwareGraphOptimizer(backendPeak: g => ReferenceEquals(g, graph) ? 64 * Mb : null).OptimizeWithShapeInfo(graph, shapeInfo).OptimizedGraph);
+    }
+
+    [Fact]
+    public void TestAStepBelowTheSizeThresholdIsNeverJudgedByTheBackendsModelCoverage()
+    {
+        var (graph, shapeInfo) = StepGraph(DoubleReader, ordered: false, side: 128);
+        var asked = 0;
+        var optimized = new MemoryAwareGraphOptimizer(evaluator: new GraphEvaluator(state: StateInPlace), backendPeak: _ => { asked++; return Mb; })
+            .OptimizeWithShapeInfo(graph, shapeInfo);
+
+        Assert.Equal(MemoryAwareGraphOptimizer.OrderedStateReads, optimized.StrategyName);
+        Assert.Equal(0, asked);
+    }
+
     // ----- [Module(Checkpoint = true)] and the rematerializer's invariants -----
 
     private static TensorData Pattern(long[] dims, float scale)
@@ -855,6 +879,18 @@ public class AutoDiffCheckpointingCoverageTests
         Assert.Contains(plain.OptimizationResult.StrategyName, ["Baseline", MemoryAwareGraphOptimizer.OrderedStateReads]);
         Assert.True(NodeCount(checkpointed) > NodeCount(plain));
         Assert.True(checkpointed.OptimizationResult.Evaluation.PeakMemoryBytes <= plain.OptimizationResult.Evaluation.PeakMemoryBytes);
+    }
+
+    [Fact]
+    public void TestARigOnABackendWithNoModelOfARunNeverAsksItForOneCoverage()
+    {
+        var backend = new SessionCountingBackend(Shorokoo.Core.Backends.DefaultBackend.Instance);
+        using var context = new ComputeContext(backend);
+        var rig = TrainingRig.FromScratch(ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            [Pattern([512L, 1024L], 1f)], (Hyperparameter[])[0.01f], runtimeContext: context);
+
+        Assert.True(rig.PreOptimizationEval.PeakMemoryBytes >= MemoryAwareGraphOptimizer.MinimumPeakBytesToOptimize);
+        Assert.Equal(0, backend.ModelledPeaks);
     }
 
     [Fact]

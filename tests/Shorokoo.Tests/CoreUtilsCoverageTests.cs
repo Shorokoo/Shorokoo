@@ -1088,7 +1088,7 @@ public class CoreUtilsCoverageTests
         again.Dispose();
         host.Shared.Close(account);
 
-        Assert.Equal([4 * MiB + 4096, Page, Page, 0, MiB, 0, 3 * MiB - 2 * Page + 4096], figures);
+        Assert.Equal([4 * MiB + 4096, Page, 0, 0, MiB, 0, 3 * MiB - Page + 4096], figures);
         Assert.True(reused);
         Assert.Equal(0L, host.Shared.Statistics(account).TotalAllocatedBytes);
     }
@@ -1149,6 +1149,209 @@ public class CoreUtilsCoverageTests
 
         Assert.Equal((large.Address, (4L << 20) + (64L << 10)), small);
         Assert.Equal((false, 0L), (held, account.Arena!.ReservedBytes));
+    }
+
+    [Fact]
+    public void TestABlockCarvedAfterAnotherHandedBackItsFirstPagesNeverTakesThatBlocksAddress()
+    {
+        const long MiB = 1L << 20;
+        var host = RuntimeAllocator.ForHost();
+        var account = host.Shared.Open("probe");
+        var first = HostBlock(host, account, MiB);
+        var address = OrtBackend.AddressOf(first);
+        host.Shared.ReleaseRange(address, 0, MiB, toTheEnd: false);
+        var second = HostBlock(host, account, MiB / 8);
+        var aliased = OrtBackend.AddressOf(second) == address;
+        first.Dispose();
+        second.Dispose();
+        var inUse = host.Shared.Statistics(account).InUseBytes;
+        host.Shared.Close(account);
+
+        Assert.Equal((false, 0L), (aliased, inUse));
+    }
+
+    [Fact]
+    public void TestABlockOnACardHandsBackItsFirstGranulesMemoryButKeepsItsAddressUntilItGoes()
+    {
+        const long G = FakeCard.GranuleBytes;
+        var card = new FakeCard();
+        var first = card.Allocator.Allocate(3 * G, out _);
+        card.Allocator.ReleaseRange(first, 0, 2 * G, toTheEnd: false);
+        var committed = card.Committed;
+        var second = card.Allocator.Allocate(G, out _);
+        card.Allocator.Free(first);
+        card.Allocator.Free(second);
+
+        Assert.Equal((2 * G, false, 0L), (committed, second == first, card.Allocator.Statistics(card.Allocator.Placements).InUseBytes));
+    }
+
+    [Fact]
+    public void TestACardThatIsFullTakesBackWhatTheAskingCallLetGoOfBeforeRefusing()
+    {
+        var card = new FakeCard(capacity: 20L << 20);
+        var account = card.Allocator.Open("probe");
+        using (CachingAllocator.Charge(null, account))
+        {
+            card.Allocator.Free(card.Allocator.Allocate(16L << 20, out _));
+            Assert.NotEqual(IntPtr.Zero, card.Allocator.Allocate(18L << 20, out _));
+        }
+    }
+
+    [Fact]
+    public void TestARuntimeThatRefusesTheAllocatorRefusesItAgainEachTimeItIsHandedIt()
+    {
+        var allocator = new FakeCard().Allocator;
+        var attempts = 0;
+        void Refuse()
+        {
+            attempts++;
+            throw new InvalidOperationException();
+        }
+
+        Assert.Throws<InvalidOperationException>(() => allocator.HandTo(1, Refuse));
+        Assert.Throws<InvalidOperationException>(() => allocator.HandTo(1, Refuse));
+        allocator.HandTo(1, () => attempts++);
+        allocator.HandTo(1, () => attempts++);
+        Assert.Equal(3, attempts);
+    }
+
+    [Fact]
+    public void TestCallsOverlappingWithoutEndKeepNoMoreThanTheSameCallsOneAfterAnother()
+    {
+        long Held(bool overlapping)
+        {
+            var card = new FakeCard();
+            var account = card.Allocator.Open("probe");
+            var outer = overlapping ? CachingAllocator.Charge(null, account) : (CachingAllocator.ChargeScope?)null;
+            for (var granules = 1; granules <= 6; granules++)
+                using (CachingAllocator.Charge(null, account))
+                    card.Allocator.Free(card.Allocator.Allocate(granules * FakeCard.GranuleBytes, out _));
+            outer?.Dispose();
+            return card.Allocator.Statistics(account).TotalAllocatedBytes;
+        }
+
+        Assert.Equal(Held(overlapping: false), Held(overlapping: true));
+    }
+
+    [Fact]
+    public void TestARequestNoDeviceCouldHoldIsRefusedHoweverCloseToTheLargestSizeItIs()
+    {
+        var card = new FakeCard();
+        long[] sizes = [long.MaxValue, long.MaxValue - (1L << 20), (1L << 62) + 1];
+        Assert.All(sizes, size => Assert.Equal(IntPtr.Zero, card.Allocator.Allocate(size, out _)));
+    }
+
+    [Fact]
+    public void TestAnAllocationThatFailsInsideTheAllocatorIsRefusedWhateverTheFailureSays()
+    {
+        var card = new FakeCard { Failure = new UnreadableException() };
+        var reason = new byte[256];
+        Assert.Equal(IntPtr.Zero, CachingAllocator.AllocateOrRefuse(card.Allocator.State, 4u << 20, reason));
+        Assert.StartsWith("Failed to allocate", System.Text.Encoding.UTF8.GetString(reason));
+    }
+
+    private sealed class UnreadableException : Exception
+    {
+        public override string Message => throw new InvalidOperationException();
+    }
+
+    [Fact]
+    public void TestAnArenaCarvesFromCommittedMemoryWhereverItLiesInAFreeStretch()
+    {
+        var arena = new Arena(new FakeCard(), unit: FakeCard.GranuleBytes, chunkBytes: 16 * FakeCard.GranuleBytes);
+        IntPtr[] blocks = [.. Enumerable.Range(0, 3).Select(_ => arena.Carve(FakeCard.GranuleBytes, mayCommit: true))];
+        arena.Uncarve(blocks[0], FakeCard.GranuleBytes);
+        arena.Decommit(FakeCard.GranuleBytes, out _);
+        arena.Uncarve(blocks[1], FakeCard.GranuleBytes);
+        var commits = arena.Commits;
+
+        Assert.Equal((blocks[1], commits), (arena.Carve(FakeCard.GranuleBytes, mayCommit: true), arena.Commits));
+    }
+
+    [Fact]
+    public void TestACardThatCannotBeWaitedForHandsBackNothingItsWorkMayStillRead()
+    {
+        var card = new FakeCard { CanWait = false };
+        var account = card.Allocator.Open("probe");
+        using (CachingAllocator.Charge(null, account))
+        {
+            var block = card.Allocator.Allocate(3 * FakeCard.GranuleBytes, out _);
+            Assert.Throws<InvalidOperationException>(() => card.Allocator.ReleaseRange(block, FakeCard.GranuleBytes, 0, toTheEnd: true));
+        }
+    }
+
+    [Fact]
+    public void TestTheCudaRuntimeIsBoundOnceItCanBeLoadedWhateverEarlierAttemptsFound()
+    {
+        var attempts = 0;
+        var binding = new CudaRuntime.Binding<string>(() => ++attempts < 3 ? (false, null) : (true, "bound"));
+        Assert.Equal<string?>([null, null, "bound", "bound"], Enumerable.Range(0, 4).Select(_ => binding.Value));
+        Assert.Equal(3, attempts);
+    }
+
+    [Fact]
+    public void TestTheCardIsWaitedForOutsideTheAllocatorsLockAndOnlyForWhatTheAskingCallLetGoOf()
+    {
+        const long G = FakeCard.GranuleBytes;
+        var card = new FakeCard();
+        var account = card.Allocator.Open("probe");
+        using (CachingAllocator.Charge(null, account))
+            foreach (var block in Enumerable.Range(0, 4).Select(i => card.Allocator.Allocate(2 * G, out _)).ToList())
+                card.Allocator.Free(block);
+        account.Limit = 10 * G;
+        long kept;
+        using (CachingAllocator.Charge(null, account))
+        {
+            card.Allocator.Free(card.Allocator.Allocate(4 * G, out _));
+            kept = account.Cached;
+            var large = card.Allocator.Allocate(8 * G, out _);
+            card.Allocator.ReleaseRange(large, 2 * G, 0, toTheEnd: true);
+            card.Allocator.Free(large);
+        }
+
+        Assert.Equal((2 * G, 3, 0), (kept, card.Waits, card.WaitsUnderTheLock));
+    }
+
+    [Fact]
+    public void TestReleasingWhatACardKeepsAnswersTheBytesItsMemoryShrankBy()
+    {
+        var card = new FakeCard();
+        var account = card.Allocator.Open("probe");
+        using (CachingAllocator.Charge(null, account))
+            foreach (var block in Enumerable.Range(0, 4).Select(i => card.Allocator.Allocate(512L << 10, out _)).ToList())
+                card.Allocator.Free(block);
+        var committed = card.Committed;
+        var released = card.Allocator.ReleaseEverythingCached();
+
+        Assert.Equal(committed - card.Committed, released);
+    }
+
+    [Fact]
+    public void TestMemoryTheSystemWouldNotTakeBackStaysCountedAsCommitted()
+    {
+        var card = new FakeCard();
+        var arena = new Arena(card, unit: FakeCard.GranuleBytes, chunkBytes: 16 * FakeCard.GranuleBytes);
+        arena.Uncarve(arena.Carve(4 * FakeCard.GranuleBytes, mayCommit: true), 4 * FakeCard.GranuleBytes);
+        card.CanDecommit = false;
+
+        Assert.Equal((0L, 4 * FakeCard.GranuleBytes, 4 * FakeCard.GranuleBytes), (arena.DecommitAll(out _), arena.CommittedBytes, card.Committed));
+    }
+
+    [Fact]
+    public void TestHostMemoryHandedBackLeavesItsReservationOneMappingOnLinux()
+    {
+        if (!OperatingSystem.IsLinux()) return;
+        const long Granule = 64L << 10;
+        var arena = new Arena(HostMemory.Instance, unit: Granule, chunkBytes: 64 * Granule);
+        var blocks = Enumerable.Range(0, 64).Select(_ => arena.Carve(Granule, mayCommit: true)).ToList();
+        foreach (var block in blocks.Where((_, i) => i % 2 == 0)) arena.Uncarve(block, Granule);
+        arena.DecommitAll(out _);
+        var mappings = File.ReadLines("/proc/self/maps").Select(line => line.Split(' ')[0].Split('-'))
+            .Count(range => Convert.ToInt64(range[0], 16) < blocks[0] + 64 * Granule && Convert.ToInt64(range[1], 16) > blocks[0]);
+        foreach (var block in blocks.Where((_, i) => i % 2 == 1)) arena.Uncarve(block, Granule);
+        arena.ReleaseEmptyChunks();
+
+        Assert.Equal(1, mappings);
     }
 
     /// <summary>A host block of <paramref name="floats"/> charged to <paramref name="account"/>, every
@@ -3268,6 +3471,68 @@ internal static class ArenaProbeModels
     /// <summary>What a run of <see cref="Filled"/> summed.</summary>
     internal static float Sum(NamedModelParam[] outputs)
         => outputs[0].ToTensorData().As<float32>().ValueAt<float>(0);
+}
+
+/// <summary>
+/// A card with nothing behind it, and an allocator over it: address space from a range no memory is
+/// at, granules committed up to a capacity, and a wait for its work that answers as told.
+/// </summary>
+internal sealed class FakeCard : ArenaBacking
+{
+    internal const long GranuleBytes = 2L << 20;
+    private long _next = 1L << 44;
+
+    internal FakeCard(long capacity = 1L << 30)
+    {
+        Capacity = capacity;
+        Allocator = new CachingAllocator(99, this);
+    }
+
+    internal CachingAllocator Allocator { get; }
+    internal long Capacity { get; }
+    internal long Committed { get; private set; }
+    internal bool CanWait { get; init; } = true;
+    internal bool CanDecommit { get; set; } = true;
+    internal Exception? Failure { get; init; }
+    internal int Waits { get; private set; }
+    internal int WaitsUnderTheLock { get; private set; }
+
+    internal override long Granule => GranuleBytes;
+
+    internal override IntPtr Reserve(long bytes, out object? state)
+    {
+        state = null;
+        if (bytes > 1L << 40) return IntPtr.Zero;
+        var at = _next;
+        _next += bytes;
+        return (IntPtr)at;
+    }
+
+    internal override void Release(IntPtr @base, long bytes, object? state)
+    {
+    }
+
+    internal override bool Commit(IntPtr @base, object? state, long first, long count)
+    {
+        if (Failure is { } failure) throw failure;
+        if (Committed + count * GranuleBytes > Capacity) return false;
+        Committed += count * GranuleBytes;
+        return true;
+    }
+
+    internal override bool Decommit(IntPtr @base, object? state, long first, long count)
+    {
+        if (!CanDecommit) return false;
+        Committed -= count * GranuleBytes;
+        return true;
+    }
+
+    internal override bool AwaitDevice()
+    {
+        Waits++;
+        if (Allocator.Locked) WaitsUnderTheLock++;
+        return CanWait;
+    }
 }
 
 /// <summary>

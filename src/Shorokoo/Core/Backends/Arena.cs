@@ -111,14 +111,16 @@ internal sealed class Arena
 
     /// <summary>
     /// A block of <paramref name="bytes"/> (a multiple of the unit), carved where its memory is
-    /// committed already if any free stretch allows; failing that, where <paramref name="mayCommit"/>
-    /// allows, over granules committed for it — in the free stretch that fits it best, or in a chunk
-    /// reserved for it. Zero where nothing fits without committing and that is not allowed, or where
-    /// the system has no address space or memory for it.
+    /// committed already if any free stretch allows — wherever in the stretch the committed memory
+    /// lies; failing that, where <paramref name="mayCommit"/> allows, over granules committed for it —
+    /// in the free stretch that fits it best, or in a chunk reserved for it. Zero where nothing fits
+    /// without committing and that is not allowed, or where the system has no address space or memory
+    /// for it.
     /// </summary>
     internal IntPtr Carve(long bytes, bool mayCommit)
     {
         var units = bytes / _unit;
+        if (units <= 0) return IntPtr.Zero;
         (long Units, int Chunk, long Start)? fallback = null;
         var first = _free.BinarySearch((units, int.MinValue, long.MinValue));
         if (first < 0) first = ~first;
@@ -126,15 +128,15 @@ internal sealed class Arena
         for (var i = first; i < _free.Count && i < first + 16; i++)
         {
             var span = _free[i];
-            if (Committed(_chunks[span.Chunk]!, span.Start, units)) return Take(span, units);
+            if (CommittedWithin(_chunks[span.Chunk]!, span.Start, span.Units, units) is { } at) return Take(span, at, units);
             fallback ??= span;
         }
         if (!mayCommit) return IntPtr.Zero;
         if (fallback is { } fit)
-            return Commit(_chunks[fit.Chunk]!, fit.Start, units) ? Take(fit, units) : IntPtr.Zero;
+            return Commit(_chunks[fit.Chunk]!, fit.Start, units) ? Take(fit, fit.Start, units) : IntPtr.Zero;
         if (Reserve(Math.Max(_chunkBytes, RoundUp(bytes, _granule))) is not { } chunk) return IntPtr.Zero;
         var whole = (chunk.Units, chunk.Index, 0L);
-        return Commit(chunk, 0, units) ? Take(whole, units) : IntPtr.Zero;
+        return Commit(chunk, 0, units) ? Take(whole, 0, units) : IntPtr.Zero;
     }
 
     /// <summary>Takes the block of <paramref name="bytes"/> at <paramref name="address"/> back into its
@@ -167,7 +169,9 @@ internal sealed class Arena
     /// <summary>
     /// Hands back to the system the committed granules no block is over, idle longest first, until
     /// they come to <paramref name="bytes"/> or none is left: a run of adjacent ones at a time.
-    /// Answers the bytes handed back, and in <paramref name="runs"/> how many runs that was.
+    /// Answers the bytes handed back, and in <paramref name="runs"/> how many runs that was. Where the
+    /// system will not take a run back, it stays committed and idle, and nothing more is handed back
+    /// this time.
     /// </summary>
     internal long Decommit(long bytes, out int runs)
     {
@@ -182,12 +186,12 @@ internal sealed class Arena
             while (first > 0 && IsIdle(chunk, first - 1)) first--;
             while (last + 1 < chunk.Committed.Length && IsIdle(chunk, last + 1)) last++;
             var count = last - first + 1;
+            if (!_backing.Decommit(chunk.Base, chunk.State, first, count)) break;
             for (var g = first; g <= last; g++)
             {
                 Unidle(chunk, g);
                 chunk.Committed[g] = false;
             }
-            _backing.Decommit(chunk.Base, chunk.State, first, count);
             CommittedBytes -= count * _granule;
             released += count * _granule;
             runs++;
@@ -198,19 +202,37 @@ internal sealed class Arena
     /// <summary>Hands back to the system every committed granule no block is over.</summary>
     internal long DecommitAll(out int runs) => Decommit(long.MaxValue, out runs);
 
+    /// <summary>
+    /// Hands back to the system the memory of the whole granules at <paramref name="address"/> for
+    /// <paramref name="bytes"/>, which stay carved: a part of a block nothing reads any more whose
+    /// address must not be carved again while the block is out. In an arena whose unit is its
+    /// granule. Answers the bytes handed back: none where the system would not take them.
+    /// </summary>
+    internal long DecommitCarved(IntPtr address, long bytes)
+    {
+        var chunk = ChunkOf(address);
+        var first = ((long)address - (long)chunk.Base) / _granule;
+        var count = bytes / _granule;
+        if (!_backing.Decommit(chunk.Base, chunk.State, first, count)) return 0;
+        for (var g = first; g < first + count; g++) chunk.Committed[g] = false;
+        CommittedBytes -= count * _granule;
+        return count * _granule;
+    }
+
     /// <summary>Whether no block is carved in the arena.</summary>
     internal bool IsEmpty => CarvedBytes == 0;
 
     /// <summary>
     /// Releases the address space of every chunk no block is carved in, after handing back what is
-    /// committed there: what an arena whose account has closed does once its last block goes.
+    /// committed there: what an arena whose account has closed does once its last block goes. A chunk
+    /// the system would not take all of its memory back from stays, for a later call to try again.
     /// </summary>
     internal void ReleaseEmptyChunks()
     {
         DecommitAll(out _);
         for (var i = 0; i < _chunks.Count; i++)
         {
-            if (_chunks[i] is not { CarvedUnits: 0 } chunk) continue;
+            if (_chunks[i] is not { CarvedUnits: 0 } chunk || chunk.Committed.AsSpan().Contains(true)) continue;
             RemoveFree((chunk.Units, chunk.Index, 0));
             _backing.Release(chunk.Base, chunk.Bytes, chunk.State);
             ReservedBytes -= chunk.Bytes;
@@ -228,13 +250,28 @@ internal sealed class Arena
         throw new InvalidOperationException("The block is not in this arena.");
     }
 
-    /// <summary>Whether every granule under <paramref name="units"/> units from
-    /// <paramref name="start"/> is committed.</summary>
-    private bool Committed(Chunk chunk, long start, long units)
+    /// <summary>The first unit of the free stretch of <paramref name="length"/> units from
+    /// <paramref name="start"/> from which <paramref name="units"/> units lie over committed granules
+    /// alone, or null where none does: the stretch's runs of committed granules, found a run at a
+    /// time.</summary>
+    private long? CommittedWithin(Chunk chunk, long start, long length, long units)
     {
-        for (var g = start / _unitsPerGranule; g <= (start + units - 1) / _unitsPerGranule; g++)
-            if (!chunk.Committed[g]) return false;
-        return true;
+        var end = start + length;
+        var committed = chunk.Committed.AsSpan();
+        var g = start / _unitsPerGranule;
+        var last = (end - 1) / _unitsPerGranule;
+        while (g <= last)
+        {
+            var found = committed.Slice((int)g, (int)(last - g + 1)).IndexOf(true);
+            if (found < 0) return null;
+            var runFirst = g + found;
+            var gap = committed.Slice((int)runFirst, (int)(last - runFirst + 1)).IndexOf(false);
+            var runEnd = gap < 0 ? last + 1 : runFirst + gap;
+            var from = Math.Max(start, runFirst * _unitsPerGranule);
+            if (Math.Min(end, runEnd * _unitsPerGranule) - from >= units) return from;
+            g = runEnd;
+        }
+        return null;
     }
 
     /// <summary>Commits every granule under <paramref name="units"/> units from <paramref name="start"/>
@@ -266,20 +303,21 @@ internal sealed class Arena
         return true;
     }
 
-    /// <summary>Takes <paramref name="units"/> units from the start of free stretch
-    /// <paramref name="span"/>, leaving the rest free.</summary>
-    private IntPtr Take((long Units, int Chunk, long Start) span, long units)
+    /// <summary>Takes <paramref name="units"/> units from unit <paramref name="at"/> of free stretch
+    /// <paramref name="span"/>, leaving what lies before and after them free.</summary>
+    private IntPtr Take((long Units, int Chunk, long Start) span, long at, long units)
     {
         var chunk = _chunks[span.Chunk]!;
         RemoveFree(span);
         chunk.FreeByStart.Remove(span.Start);
         chunk.FreeByEnd.Remove(span.Start + span.Units);
-        if (span.Units > units) Free(chunk, span.Start + units, span.Units - units);
-        Carved(chunk, span.Start, units, +1);
+        if (at > span.Start) Free(chunk, span.Start, at - span.Start);
+        if (span.Start + span.Units > at + units) Free(chunk, at + units, span.Start + span.Units - at - units);
+        Carved(chunk, at, units, +1);
         chunk.CarvedUnits += units;
         CarvedBytes += units * _unit;
         NoteBusy();
-        return chunk.Base + (nint)(span.Start * _unit);
+        return chunk.Base + (nint)(at * _unit);
     }
 
     private void Free(Chunk chunk, long start, long units)
@@ -410,8 +448,13 @@ internal abstract class ArenaBacking
     internal abstract bool Commit(IntPtr @base, object? state, long first, long count);
 
     /// <summary>Hands back the <paramref name="count"/> granules from granule <paramref name="first"/>,
-    /// which <see cref="Commit"/> committed.</summary>
-    internal abstract void Decommit(IntPtr @base, object? state, long first, long count);
+    /// which <see cref="Commit"/> committed; false where the system would not take them.</summary>
+    internal abstract bool Decommit(IntPtr @base, object? state, long first, long count);
+
+    /// <summary>Waits for the work the device has in hand, as handing back memory some of that work
+    /// may still read must; false where it cannot be waited for. Nothing to wait for by
+    /// default.</summary>
+    internal virtual bool AwaitDevice() => true;
 }
 
 /// <summary>
@@ -420,6 +463,13 @@ internal abstract class ArenaBacking
 /// mapping with no access, made readable and writable to commit and dropped with
 /// <c>madvise(MADV_DONTNEED)</c> to decommit. Committed pages are zeroed by the system as they are
 /// first touched, and are the process's from then until decommitted.
+///
+/// <para>On Linux a range committed once stays readable and writable as it is decommitted: Linux
+/// keeps a mapping for each stretch of address space of one protection, and a process may have only
+/// so many (<c>vm.max_map_count</c>), so a granule going back to no access between two committed
+/// ones would cost two more — enough, granule by granule, to run a process out of them. What
+/// <c>MADV_DONTNEED</c> drops is the process's no more either way, and is zeroed as it is next
+/// touched.</para>
 /// </summary>
 internal sealed partial class HostMemory : ArenaBacking
 {
@@ -452,17 +502,12 @@ internal sealed partial class HostMemory : ArenaBacking
         return mprotect(at, bytes, ProtRead | ProtWrite) == 0;
     }
 
-    internal override void Decommit(IntPtr @base, object? state, long first, long count)
+    internal override bool Decommit(IntPtr @base, object? state, long first, long count)
     {
         var at = @base + (nint)(first * Granule);
         var bytes = (nuint)(count * Granule);
-        if (OperatingSystem.IsWindows())
-        {
-            VirtualFree(at, bytes, MemDecommit);
-            return;
-        }
-        madvise(at, bytes, MadvDontNeed);
-        mprotect(at, bytes, ProtNone);
+        if (OperatingSystem.IsWindows()) return VirtualFree(at, bytes, MemDecommit);
+        return madvise(at, bytes, MadvDontNeed) == 0;
     }
 
     private const uint MemCommit = 0x1000;
@@ -585,13 +630,15 @@ internal sealed unsafe class CardMemory : ArenaBacking
         });
     }
 
-    internal override void Decommit(IntPtr @base, object? state, long first, long count)
+    internal override bool Decommit(IntPtr @base, object? state, long first, long count)
     {
         var handles = (ulong[])state!;
         var api = _api;
         var granule = _granule;
-        CudaRuntime.OnDevice(_device, () => Unmap(api, @base, handles, first, count, granule));
+        return CudaRuntime.OnDevice(_device, () => Unmap(api, @base, handles, first, count, granule));
     }
+
+    internal override bool AwaitDevice() => CudaRuntime.Synchronize(_device);
 
     private static bool Unmap(CudaVirtualMemory.Api api, IntPtr @base, ulong[] handles, long first, long count, long granule)
     {

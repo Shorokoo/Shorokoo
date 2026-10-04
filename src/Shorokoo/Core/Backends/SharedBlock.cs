@@ -13,7 +13,8 @@ namespace Shorokoo.Core.Backends;
 /// any more — as the run that placed its values ends (<see cref="Settle"/>), and as each lease is
 /// released — so a value that ends frees what of the block it alone stood on, as a value in memory
 /// of its own does. Only whole units of the memory's allocator go back: the 4 KiB pages of a block on
-/// the host, the 2 MiB granules of one on a card.</para>
+/// the host, the 2 MiB granules of one on a card — all but the block's first, by whose address the
+/// allocator knows the block until it is let go of.</para>
 ///
 /// <para>A block is counted by a device-memory budget once, for what of it is still held
 /// (<see cref="HeldBytes"/>), for as long as a tensor attached to the context stands on it.</para>

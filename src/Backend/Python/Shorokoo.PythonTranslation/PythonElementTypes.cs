@@ -25,13 +25,20 @@ internal static class PythonElementTypes
         _ => TensorElementLayout.ElementSizeInBytes(elementType),
     };
 
-    /// <summary>The bytes a tensor of this type and shape covers.</summary>
+    /// <summary>The bytes a tensor of this type and shape covers, for a path that holds them in one
+    /// buffer.</summary>
     public static int ByteCount(ShorokooTensorElementType elementType, long[] shape)
+        => checked((int)ByteLength(elementType, shape));
+
+    /// <summary><see cref="ByteCount"/> without its <see cref="int"/> ceiling, for a path that
+    /// never holds the bytes in one buffer: a tensor allocated where it lives, which a load fills a
+    /// piece at a time.</summary>
+    public static long ByteLength(ShorokooTensorElementType elementType, long[] shape)
     {
         ArgumentNullException.ThrowIfNull(shape);
         var size = ElementSize(elementType);
         // The shape checks are TensorElementLayout's, asked through a type it knows the stride of.
-        var elements = TensorElementLayout.ByteCount(ShorokooTensorElementType.UInt8, shape);
+        var elements = TensorElementLayout.ByteLength(ShorokooTensorElementType.UInt8, shape);
         return checked(elements * size);
     }
 

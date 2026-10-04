@@ -20,7 +20,7 @@ namespace Shorokoo.Jax;
 /// </summary>
 public sealed class JaxTensorValue : IShorokooTensorValue
 {
-    private readonly PyObject _value;
+    private PyObject _value;
     private readonly long[] _shape;
     private readonly IntPtr _address;
     private readonly long _byteCount;
@@ -70,6 +70,17 @@ public sealed class JaxTensorValue : IShorokooTensorValue
 
     /// <summary>The Python object this wraps, refused once released.</summary>
     internal PyObject Value => Volatile.Read(ref _released) == 0 ? _value : throw Released();
+
+    /// <summary>Makes this device value hold <paramref name="array"/> — of its type and shape, in its
+    /// device's memory — taking over the reference, and releases the array it held: a device array
+    /// written into is the array the write made, which the one written into was given up to. Called
+    /// holding the interpreter lock.</summary>
+    internal void Hold(PyObject array)
+    {
+        var held = Value;
+        _value = array;
+        held.Dispose();
+    }
 
     private static ObjectDisposedException Released() => new(
         nameof(JaxTensorValue),

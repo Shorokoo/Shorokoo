@@ -70,6 +70,18 @@ public class JaxCudaHardwareTests
     }
 
     [JaxCudaFact]
+    public void TestACardTensorPastTwoGibibytesIsSavedByThePiece()
+        => Assert.Equal((StagedReadBack.StagingBytes, true), PyTorchCudaHardwareTests.SavedPastTwoGibibytes(Cuda.Value));
+
+    [JaxCudaFact]
+    public void TestATensorPastTwoGibibytesIsLoadedOntoTheCardByThePiece()
+        => Assert.Equal((StagedReadBack.StagingBytes, StagedReadBack.StagingBytes, true), PyTorchCudaHardwareTests.LoadedPastTwoGibibytes(Cuda.Value));
+
+    [JaxCudaFact]
+    public void TestAPieceOfACardTensorIsWrittenAndReadAtAnyByteOffset()
+        => Assert.Equal(PyTorchCudaHardwareTests.PieceWrittenAtFive, PyTorchCudaHardwareTests.PieceWrittenIntoACardTensor(Cuda.Value));
+
+    [JaxCudaFact]
     public void TestTheCardsDriverIsEnoughToProbeAndStartTheBackend()
     {
         Assert.Equal(BackendRejection.None, BackendPackage.Probe(typeof(JaxCudaBackend).Assembly.Location).Reason);

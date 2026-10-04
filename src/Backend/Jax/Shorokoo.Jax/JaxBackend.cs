@@ -236,7 +236,7 @@ public abstract class JaxBackend : IShorokooBackend
     {
         ArgumentNullException.ThrowIfNull(shape);
         RefuseStrings(elementType);
-        PythonElementTypes.ByteCount(elementType, shape);
+        PythonElementTypes.ByteLength(elementType, shape);
         var runtime = Runtime;
         using (PythonRuntime.Gil())
         {
@@ -322,6 +322,60 @@ public abstract class JaxBackend : IShorokooBackend
             using var host = JaxTensorValue.Wrap(runtime, runtime.HostCopy.Invoke(jax.Value));
             return host.GetTensorDataAsSpan<byte>().ToArray();
         }
+    }
+
+    /// <summary>
+    /// Copies <paramref name="destination"/>'s length of bytes of <paramref name="value"/>,
+    /// <paramref name="byteOffset"/> bytes in, to <paramref name="destination"/>: out of the piece of
+    /// its buffer a host tensor addresses, and out of a device array by fetching the slice of it
+    /// covering those bytes, so a save streams a device array of any size through one bounded
+    /// buffer. False for a value of another runtime's that the host cannot read.
+    /// </summary>
+    public unsafe bool TryCopyTensorRangeToHost(IShorokooTensorValue value, long byteOffset, Span<byte> destination)
+    {
+        ArgumentNullException.ThrowIfNull(value);
+        if (value.IsHostAccessible)
+        {
+            value.HostPiece(byteOffset, destination.Length).CopyTo(destination);
+            // The piece is the value's last read (Shorokoo/Shorokoo#178).
+            GC.KeepAlive(value);
+            return true;
+        }
+        if (value is not JaxTensorValue jax) return false;
+        IShorokooTensorValue.PieceWithin(byteOffset, destination.Length, PythonElementTypes.ByteLength(jax.ElementType, jax.Shape));
+        var runtime = Runtime;
+        using (PythonRuntime.Gil())
+        fixed (byte* target = destination)
+            PyCall.Invoke(runtime.CopyRangeToHost, jax.Value, byteOffset, (long)target, destination.Length).Dispose();
+        GC.KeepAlive(jax);
+        return true;
+    }
+
+    /// <summary>
+    /// Copies <paramref name="source"/> into <paramref name="value"/>, <paramref name="byteOffset"/>
+    /// bytes in: into the piece of its buffer a host tensor addresses, and into a device array by
+    /// sending the slice of it covering those bytes to the device and writing it over the array in
+    /// place, so a load streams a device array of any size through one bounded buffer. The value then
+    /// holds the array the write made, the one it held given up to it. False where
+    /// <see cref="TryCopyTensorRangeToHost"/> is.
+    /// </summary>
+    public unsafe bool TryCopyHostToTensorRange(IShorokooTensorValue value, long byteOffset, ReadOnlySpan<byte> source)
+    {
+        ArgumentNullException.ThrowIfNull(value);
+        if (value.IsHostAccessible)
+        {
+            source.CopyTo(value.HostPiece(byteOffset, source.Length));
+            // The piece is the value's last read (Shorokoo/Shorokoo#178).
+            GC.KeepAlive(value);
+            return true;
+        }
+        if (value is not JaxTensorValue jax) return false;
+        IShorokooTensorValue.PieceWithin(byteOffset, source.Length, PythonElementTypes.ByteLength(jax.ElementType, jax.Shape));
+        var runtime = Runtime;
+        using (PythonRuntime.Gil())
+        fixed (byte* bytes = source)
+            jax.Hold(PyCall.Invoke(runtime.CopyHostToRange, jax.Value, byteOffset, (long)bytes, source.Length));
+        return true;
     }
 
     internal static PyList Shape(long[] shape)

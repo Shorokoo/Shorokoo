@@ -104,6 +104,31 @@ def host_copy(tensor):
     return tensor.detach().to("cpu").contiguous()
 
 
+def _bytes_of(tensor):
+    """`tensor`'s bytes, as a flat view of its memory: a contiguous tensor's, as every tensor the
+    .NET side holds is."""
+    return tensor.detach().reshape(-1).view(torch.uint8)
+
+
+def _host_bytes(address, count):
+    """The `count` bytes of host memory at `address`, as a tensor over them."""
+    return torch.frombuffer((ctypes.c_uint8 * count).from_address(address), dtype=torch.uint8)
+
+
+def copy_range_to_host(tensor, byte_offset, address, count):
+    """Copies `count` bytes of `tensor`, `byte_offset` bytes in, to host `address`: one piece of a
+    tensor in a card's memory, copied home without the rest of it."""
+    if count:
+        _host_bytes(address, count).copy_(_bytes_of(tensor)[byte_offset:byte_offset + count])
+
+
+def copy_host_to_range(tensor, byte_offset, address, count):
+    """Copies `count` bytes at host `address` into `tensor`, `byte_offset` bytes in: one piece of a
+    tensor in a card's memory, written without the rest of it."""
+    if count:
+        _bytes_of(tensor)[byte_offset:byte_offset + count].copy_(_host_bytes(address, count))
+
+
 def sequence_element(sequence, index):
     """An element of a sequence as a value of its own: a copy, so that writing to it cannot reach
     into the sequence."""

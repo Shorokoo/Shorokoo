@@ -111,6 +111,10 @@ internal sealed unsafe class CachingAllocator
     /// <summary>What the card's arena of small blocks carves in.</summary>
     private const long SmallUnit = 512;
 
+    /// <summary>The most a request may ask for: more than any device holds, and far enough below the
+    /// largest size there is that rounding a request up to its class cannot run past it.</summary>
+    private const long Largest = 1L << 62;
+
     private static readonly object _registryGate = new();
     private static readonly Dictionary<int, CachingAllocator> _byDevice = [];
 
@@ -438,6 +442,14 @@ internal sealed unsafe class CachingAllocator
         if (bytes <= 0) return IntPtr.Zero;
         var scope = t_scope;
         var account = scope?.AccountOn(this) ?? Placements;
+        if (bytes > Largest)
+        {
+            using (_gate.Hold()) account.Refusals++;
+            refusal = OnCard
+                ? $"Failed to allocate {bytes} bytes {Where}: {Allocator} serves nothing that large, more than any card holds."
+                : $"Failed to allocate {bytes} bytes {Where}: more than any process could commit (a bad allocation).";
+            return IntPtr.Zero;
+        }
         var size = ClassOf(bytes);
         var source = SourceOf(size);
         List<(IntPtr, long)>? release = null;

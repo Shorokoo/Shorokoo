@@ -119,6 +119,7 @@ internal sealed class Arena
     internal IntPtr Carve(long bytes, bool mayCommit)
     {
         var units = bytes / _unit;
+        if (units <= 0) return IntPtr.Zero;
         (long Units, int Chunk, long Start)? fallback = null;
         var first = _free.BinarySearch((units, int.MinValue, long.MinValue));
         if (first < 0) first = ~first;

@@ -16,7 +16,7 @@ namespace Shorokoo.Core.Backends;
 /// program's own and one loaded in isolation over the same file — and a runtime keeps one allocator
 /// per device for every session it builds, whichever backend asked. So the allocator, its accounts
 /// and the charging that picks an account are this assembly's, which every copy of a backend
-/// shares, and a runtime is handed it once (<see cref="ClaimRuntime"/>): the sessions of either
+/// shares, and a runtime is handed it once (<see cref="HandTo"/>): the sessions of either
 /// backend then charge their own accounts, and are held to their own limits.</para>
 ///
 /// <para><b>Why the session's allocator is Shorokoo's.</b> ONNX Runtime writes a run's every output
@@ -291,22 +291,21 @@ internal sealed unsafe class CachingAllocator
     internal static IntPtr FreeEntry => (IntPtr)(delegate* unmanaged<IntPtr, IntPtr, void>)&FreeCallback;
 
     /// <summary>
-    /// Whether the runtime whose environment is <paramref name="environment"/> still has to be handed
-    /// this allocator: true the first time a runtime is named, for the caller to register it there,
-    /// and false after, however many backends bind that runtime. A runtime keeps one allocator per
-    /// device, so a second registration would take the device over from the first.
+    /// Hands this allocator to the runtime whose environment is <paramref name="environment"/>
+    /// through <paramref name="register"/>, once: the first time that runtime is named, and not again
+    /// however many backends bind it. A runtime keeps one allocator per device, so a second
+    /// registration would take the device over from the first. A registration the runtime refuses —
+    /// <paramref name="register"/> throwing — leaves the runtime without it, so the next backend to
+    /// name that runtime registers it again and is refused again, as loudly.
     /// </summary>
-    internal bool ClaimRuntime(IntPtr environment)
-    {
-        using (_gate.Hold()) return _runtimes.Add(environment);
-    }
-
-    /// <summary>Hands this allocator to the runtime whose environment is
-    /// <paramref name="environment"/> through <paramref name="register"/>, the first time that runtime
-    /// is named (<see cref="ClaimRuntime"/>).</summary>
     internal void HandTo(IntPtr environment, Action register)
     {
-        if (ClaimRuntime(environment)) register();
+        lock (_runtimes)
+        {
+            if (_runtimes.Contains(environment)) return;
+            register();
+            _runtimes.Add(environment);
+        }
     }
 
     /// <summary>Whether this is a card's allocator.</summary>

@@ -44,4 +44,25 @@ public interface IShorokooTensorValue : IDisposable
     // own, holding a lease on it (see SharedBlock): a run's output placed in the memory of an input
     // the run consumed. Null for a value that owns its memory whole, which is every value but those.
     internal BlockRange? Range => null;
+
+    // The `count` bytes at `byteOffset` into the buffer of a tensor the host reads, addressed from
+    // where the buffer starts: how a tensor is copied in and out piece by piece, which is the only
+    // way one longer than any span is copied at all -- a span's length is an int. Read and written
+    // through alike. The default slices the span over the whole buffer, which serves a tensor of up
+    // to 2 GiB; a value whose buffer can be longer answers from its address. The caller keeps the
+    // value alive for as long as it uses the piece.
+    internal Span<byte> HostPiece(long byteOffset, int count)
+    {
+        var buffer = GetTensorMutableDataAsSpan<byte>();
+        PieceWithin(byteOffset, count, buffer.Length);
+        return buffer.Slice((int)byteOffset, count);
+    }
+
+    // Refuses a piece of `count` bytes at `byteOffset` that does not lie within a buffer of `length`.
+    internal static void PieceWithin(long byteOffset, int count, long length)
+    {
+        if (count < 0 || byteOffset < 0 || byteOffset > length - count)
+            throw new ArgumentOutOfRangeException(nameof(byteOffset),
+                $"{count} bytes from offset {byteOffset} run past the value's {length}.");
+    }
 }

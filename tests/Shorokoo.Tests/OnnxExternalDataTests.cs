@@ -352,7 +352,7 @@ public class OnnxExternalDataTests
     /// <summary>A model whose messages nest <paramref name="depth"/> deep, each the one field of
     /// the message around it: keyed by <paramref name="outer"/>, then by <paramref name="cycle"/>
     /// over and over.</summary>
-    private static byte[] Nested(byte[] outer, byte[] cycle, int depth)
+    internal static byte[] Nested(byte[] outer, byte[] cycle, int depth)
     {
         static int VarintLength(long value) { int n = 1; for (; value >= 0x80; value >>= 7) n++; return n; }
         var lengths = new long[depth + 1];
@@ -379,13 +379,13 @@ public class OnnxExternalDataTests
             ModelProto Scan(string path) { using var file = OnnxStreamingScan.Open(path); return OnnxStreamingScan.ReadModel(file); }
 
             Assert.NotNull(Scan(Written("deepest.onnx", Nested(graph, subgraphs, 99))).Graph);
-            Assert.Throws<InvalidOperationException>(() => Scan(Written("deeper.onnx", Nested(graph, subgraphs, 100))));
+            Assert.Throws<ProtoBuf.ProtoException>(() => Scan(Written("deeper.onnx", Nested(graph, subgraphs, 100))));
             foreach (var (name, bytes) in (ValueTuple<string, byte[]>[])[("subgraphs.onnx", Nested(graph, subgraphs, 100_000)), ("types.onnx", Nested(input, sequences, 100_000))])
             {
                 var path = Written(name, bytes);
                 Assert.Contains(path, Assert.Throws<InvalidDataException>(() => Persistence.ImportOnnx(path)).Message);
-                Assert.Throws<InvalidOperationException>(() => OnnxModelImporter.FromOnnxModel(path));
-                Assert.Throws<InvalidOperationException>(() => OnnxModelImporter.FromOnnxModel(bytes));
+                Assert.Throws<ProtoBuf.ProtoException>(() => OnnxModelImporter.FromOnnxModel(path));
+                Assert.Throws<ProtoBuf.ProtoException>(() => OnnxModelImporter.FromOnnxModel(bytes));
             }
         });
     }

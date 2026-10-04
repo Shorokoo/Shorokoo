@@ -196,16 +196,62 @@ def from_host(address, nbytes, code, shape, device_name):
 
 
 def empty(code, shape, device_name):
-    """A tensor whose contents are unspecified: zeros, since a jax array is never uninitialized."""
+    """A tensor whose contents are unspecified: zeros, since a jax array is never uninitialized --
+    made on its device, never through host memory."""
     if device_name == "cpu":
         return np.zeros(tuple(shape), dtype=jax_dtype(code))
-    return jax.device_put(np.zeros(tuple(shape), dtype=jax_dtype(code)), device_of(device_name))
+    return jnp.zeros(tuple(shape), dtype=jax_dtype(code), device=device_of(device_name))
 
 
 def host_copy(value):
     """A host value of its own with `value`'s contents: C-contiguous and writable."""
     array = np.array(value, copy=True, order="C")
     return array if array.flags.writeable else array.copy()
+
+
+# A device array's elements `first` to `first + size` as an array of their own, and the array with
+# those elements replaced, written over the array handed in (donated): XLA reshapes an array to a
+# flat one in place, so neither copies the rest of it.
+_piece = jax.jit(lambda array, first, size: jax.lax.dynamic_slice(array.reshape(-1), (first,), (size,)),
+                 static_argnums=2)
+_with_piece = jax.jit(
+    lambda array, piece, first: jax.lax.dynamic_update_slice(array.reshape(-1), piece, (first,)).reshape(array.shape),
+    donate_argnums=0)
+
+
+def _elements_of(array, byte_offset, count):
+    """The elements covering `count` bytes `byte_offset` bytes into `array`: the first, how many, and
+    where the bytes start in them."""
+    itemsize = np.dtype(array.dtype).itemsize
+    first = byte_offset // itemsize
+    return first, -(-(byte_offset + count) // itemsize) - first, byte_offset - first * itemsize
+
+
+def copy_range_to_host(array, byte_offset, address, count):
+    """Copies `count` bytes of a device array, `byte_offset` bytes in, to host `address`: the
+    elements covering them fetched home as an array of their own, without the rest of it."""
+    if count:
+        first, size, skip = _elements_of(array, byte_offset, count)
+        piece = np.asarray(_piece(array, np.int64(first), size))
+        ctypes.memmove(address, piece.ctypes.data + skip, count)
+
+
+def copy_host_to_range(array, byte_offset, address, count):
+    """A device array holding `array`'s contents with `count` bytes at host `address` written
+    `byte_offset` bytes in -- `array` itself, written over in place, which leaves the array handed
+    in deleted. Only the elements covering those bytes cross to the device, and those of them the
+    bytes cover only in part are fetched first."""
+    if not count:
+        return array
+    first, size, skip = _elements_of(array, byte_offset, count)
+    itemsize = np.dtype(array.dtype).itemsize
+    if skip or (skip + count) % itemsize:
+        piece = np.array(_piece(array, np.int64(first), size), copy=True)
+    else:
+        piece = np.empty(size, dtype=array.dtype)
+    ctypes.memmove(piece.ctypes.data + skip, address, count)
+    device = next(iter(array.devices()))
+    return _with_piece(array, jax.device_put(piece, device), np.int64(first))
 
 
 def describe(value):

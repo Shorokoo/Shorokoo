@@ -391,6 +391,38 @@ public class OnnxExternalDataTests
     }
 
     [Fact]
+    public void TestTheScanKeepsTheWireOrderOfAPayloadWrittenBothPackedAndUnpacked()
+    {
+        WithTempDir(dir =>
+        {
+            static byte[] Varint(long value) { var bytes = new List<byte>(); for (; value >= 0x80; value >>= 7) bytes.Add((byte)(value | 0x80)); bytes.Add((byte)value); return [.. bytes]; }
+            static byte[] Delimited(int field, byte[] body) => [.. Varint(field << 3 | 2), .. Varint(body.Length), .. body];
+            static byte[] Floats(int from, int count) => FloatBytes([.. Enumerable.Range(from, count).Select(i => (float)i)]);
+            static byte[] Doubles(int from, int count) => [.. Enumerable.Range(from, count).SelectMany(i => BitConverter.GetBytes((double)i))];
+            static byte[] Unpacked(int field, int wire, byte[] values) => [.. values.Chunk(wire == 5 ? 4 : 8).SelectMany(v => (byte[])[(byte)(field << 3 | wire), .. v])];
+            void Same(string name, long dims, int dataType, params byte[][] payloads)
+            {
+                byte[] tensor = [0x08, .. Varint(dims), 0x10, (byte)dataType, .. payloads.SelectMany(p => p)];
+                var path = Path.Combine(dir, name);
+                File.WriteAllBytes(path, Delimited(7, Delimited(5, tensor)));
+                TensorProto whole;
+                using (var stream = File.OpenRead(path)) whole = OnnxProtobuf.ReadModel(stream).Graph.Initializers[0];
+                TensorProto scanned;
+                using (var file = OnnxStreamingScan.Open(path)) scanned = OnnxStreamingScan.ReadModel(file).Graph.Initializers[0];
+                Assert.Equal(whole.data_location, scanned.data_location);
+                Assert.Equal(whole.FloatDatas, scanned.FloatDatas);
+                Assert.Equal(whole.DoubleDatas, scanned.DoubleDatas);
+            }
+
+            byte[] name = Delimited(8, "w"u8.ToArray());
+            Same("packed-then-unpacked.onnx", 257, FloatElem, Delimited(4, Floats(0, 256)), Unpacked(4, 5, Floats(256, 1)), name);
+            Same("packed-to-shape-then-unpacked.onnx", 256, FloatElem, Delimited(4, Floats(0, 256)), Unpacked(4, 5, Floats(256, 1)));
+            Same("interleaved.onnx", 259, FloatElem, Unpacked(4, 5, Floats(0, 1)), name, Delimited(4, Floats(1, 256)), Unpacked(4, 5, Floats(257, 2)));
+            Same("doubles-packed-then-unpacked.onnx", 129, DoubleElem, Delimited(10, Doubles(0, 128)), Unpacked(10, 1, Doubles(128, 1)), name);
+        });
+    }
+
+    [Fact]
     public void TestSaveWithExternalDataRoundTripsBitExactAlignedDeterministicAndOnnxRuntimeReadable()
     {
         var numOut = TensorData(DType.Int64, [], 4L);

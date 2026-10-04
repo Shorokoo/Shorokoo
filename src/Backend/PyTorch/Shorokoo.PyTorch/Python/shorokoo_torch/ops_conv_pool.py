@@ -4,8 +4,9 @@ and Lp pools with their global forms, MaxUnpool and MaxRoiPool.
 torch's own kernels pad symmetrically and round a ceil-mode output differently, so every helper
 here pads explicitly (ONNX's pads may be asymmetric, and an auto_pad of SAME_UPPER or SAME_LOWER
 puts the odd element at a chosen end), then runs the kernel unpadded over exactly the windows ONNX
-defines. Every helper is functional and autograd-safe: no input is written to, and float data never
-leaves torch.
+defines. Every helper is autograd-safe: no input is written to, and float data never leaves torch.
+conv writes its result into the `_out` it takes, which a run hands it only while it computes no
+gradient: a range of memory the run consumed (the runtime's place_into).
 """
 
 import math

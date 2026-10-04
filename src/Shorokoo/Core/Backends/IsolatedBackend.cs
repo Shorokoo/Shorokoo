@@ -455,6 +455,8 @@ public static class IsolatedBackend
 
         Shorokoo.Core.AutoDiffCheckpointing.RunLayout IShorokooBackend.RunLayout => _inner.RunLayout;
 
+        bool IShorokooBackend.ModelsARun => _inner.ModelsARun;
+
         bool IShorokooBackend.ModelsARunQuickly => _inner.ModelsARunQuickly;
 
         public IShorokooTensorValue CreateTensor<T>(T[] data, long[] shape) where T : unmanaged

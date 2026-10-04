@@ -237,14 +237,19 @@ internal class MemoryAwareGraphOptimizer
                 strategies.Add((OrderedStateReads, startEval, start.Graph, start.ShapeInfo));
         }
 
+        // Below the threshold there is nothing worth buying, nor worth asking the backend about.
+        if (baselineEval.PeakMemoryBytes < MinimumPeakBytesToOptimize)
+            return Chosen(strategies, strategies.Count - 1, judge: null);
+
         // The evaluator walks a Loop/If body once, but a backend runs a Loop body per iteration and
         // allocates per iteration; the pass would be optimizing a number that is not what runs.
         // Measured on the LSTM training step with no judge, letting it act raised ONNX Runtime's
         // real peak by a quarter while the evaluator claimed a small saving. So a graph with a scope
         // is handed back as it came, unless the backend's own model of a run answers for it -- one
         // that runs each loop's body per iteration, as torch's does -- and then every step the
-        // search takes is judged by that model.
-        if (baselineEval.PeakMemoryBytes < MinimumPeakBytesToOptimize || (graph.Nodes.Any(n => n.IsOpenNode()) && judge?.Peak(graph) is null))
+        // search takes is judged by that model, and a step it cannot judge is not taken.
+        var scoped = graph.Nodes.Any(n => n.IsOpenNode());
+        if (scoped && judge?.Peak(graph) is null)
             return Chosen(strategies, strategies.Count - 1, judge);
 
         var scheduler = new MemoryAwareScheduler();
@@ -261,8 +266,8 @@ internal class MemoryAwareGraphOptimizer
 
         Candidate Reorder(Candidate c) => new(scheduler.Reorder(c.Graph, c.ShapeInfo), c.ShapeInfo);
 
-        strategies.Add(RunAlternatingStrategy("RematReorder", selection, judge, start, startEval, Remat, Reorder));
-        strategies.Add(RunAlternatingStrategy("ReorderRemat", selection, judge, start, startEval, Reorder, Remat));
+        strategies.Add(RunAlternatingStrategy("RematReorder", selection, judge, scoped, start, startEval, Remat, Reorder));
+        strategies.Add(RunAlternatingStrategy("ReorderRemat", selection, judge, scoped, start, startEval, Reorder, Remat));
 
         var unpruned = new Rematerializer(selection, _evaluator, pruneBatches: false, judge: judge);
         Candidate RematWhole(Candidate c)
@@ -270,7 +275,7 @@ internal class MemoryAwareGraphOptimizer
             var (g, si) = unpruned.Apply(c.Graph, c.ShapeInfo);
             return new Candidate(g, si);
         }
-        strategies.Add(RunAlternatingStrategy(UnprunedRematReorder, selection, judge, start, startEval, RematWhole, Reorder));
+        strategies.Add(RunAlternatingStrategy(UnprunedRematReorder, selection, judge, scoped, start, startEval, RematWhole, Reorder));
 
         var best = Enumerable.Range(0, strategies.Count).MinBy(i => selection.Score(strategies[i].Evaluation));
         return Chosen(strategies, best, judge);
@@ -333,12 +338,14 @@ internal class MemoryAwareGraphOptimizer
     /// A strategy: <paramref name="firstPass"/> and <paramref name="secondPass"/> applied in turn
     /// from <paramref name="initial"/>, each result taken where it scores better than the graph it
     /// was made from — by <paramref name="judge"/> where the backend's model answers for both, else
-    /// by <paramref name="objective"/> — until a pass's result is not taken.
+    /// by <paramref name="objective"/>, unless the graph holds a scope (<paramref name="judgedOnly"/>),
+    /// whose steps only the backend's model may take — until a pass's result is not taken.
     /// </summary>
     private (string Name, GraphEvaluationResult Evaluation, InternalComputationGraph Graph, ShapeInferenceResult ShapeInfo) RunAlternatingStrategy(
         string name,
         ComputeMemoryObjective objective,
         BackendJudge? judge,
+        bool judgedOnly,
         Candidate initial,
         GraphEvaluationResult initialEval,
         Func<Candidate, Candidate> firstPass,
@@ -348,14 +355,14 @@ internal class MemoryAwareGraphOptimizer
         var currentEval = initialEval;
         var currentMetric = objective.Score(currentEval);
 
-        TryApply(objective, judge, firstPass, ref current, ref currentEval, ref currentMetric);
-        TryApply(objective, judge, secondPass, ref current, ref currentEval, ref currentMetric);
+        TryApply(objective, judge, judgedOnly, firstPass, ref current, ref currentEval, ref currentMetric);
+        TryApply(objective, judge, judgedOnly, secondPass, ref current, ref currentEval, ref currentMetric);
 
         while (true)
         {
-            if (!TryApply(objective, judge, firstPass, ref current, ref currentEval, ref currentMetric))
+            if (!TryApply(objective, judge, judgedOnly, firstPass, ref current, ref currentEval, ref currentMetric))
                 break;
-            if (!TryApply(objective, judge, secondPass, ref current, ref currentEval, ref currentMetric))
+            if (!TryApply(objective, judge, judgedOnly, secondPass, ref current, ref currentEval, ref currentMetric))
                 break;
         }
 
@@ -365,6 +372,7 @@ internal class MemoryAwareGraphOptimizer
     private bool TryApply(
         ComputeMemoryObjective objective,
         BackendJudge? judge,
+        bool judgedOnly,
         Func<Candidate, Candidate> pass,
         ref Candidate current,
         ref GraphEvaluationResult currentEval,
@@ -381,7 +389,7 @@ internal class MemoryAwareGraphOptimizer
             if (judged.Score >= now.Score)
                 return false;
         }
-        else if (candidateMetric >= currentMetric)
+        else if (judgedOnly || candidateMetric >= currentMetric)
             return false;
 
         current = candidate;

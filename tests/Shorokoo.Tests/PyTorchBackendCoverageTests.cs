@@ -1384,6 +1384,8 @@ public class PyTorchBackendCoverageTests
             ComputeContextLifetimeCoverageTests.Op("ConcatFromSequence", "S", "O", attribute: ("axis", 0))), "m", 3)));
         Assert.Equal(512, RunPeak(ComputeContextLifetimeCoverageTests.WithInts(GraphOn("x:float[4,8]", "O",
             Loop("m", "O", GraphOn("i c", "k e", Op("Exp", "x", "e"), Op("Identity", "c", "k")))), "m", 2)));
+        Assert.Null(RunPeak(ComputeContextLifetimeCoverageTests.WithInts(GraphOn("x:float[4,8]", "O",
+            Loop("m x", "O", GraphOn("i c t", "k u", Op("Identity", "c", "k"), Op("Neg", "t", "u")))), "m", 50_000)));
         Assert.Equal(256, RunPeak(GraphOn("x:float[4,2,3] w:float[1,16,3] r:float[1,16,4]", "Y",
             ComputeContextLifetimeCoverageTests.Op("LSTM", "x w r", "Y", attribute: ("hidden_size", 4)))));
         var branch = ComputeContextLifetimeCoverageTests.Op("If", "c", "O", body: GraphOn("", "t", Op("Neg", "x", "t")));
@@ -1670,6 +1672,25 @@ public class PyTorchBackendCoverageTests
     }
 
     [Fact]
+    public void TestProvisioningLinksTheCudaLibrariesWithinWhatIsLeftOfItsTimeout()
+    {
+        var cudnn = CudaLibraryPins.Current!.Libraries.Single(pin => pin.Name == "cudnn");
+        var copy = Path.Combine(PythonEnvironment.SitePackagesOf("", System.Version.Parse(PythonEnvironmentLock.Cpu.PythonVersion), OperatingSystem.IsWindows()),
+            "torch", "lib", cudnn.Files[^1].FileName);
+        var linking = FakeUv($"""
+            if [ "$1" = venv ]; then for last; do :; done; mkdir -p "$(dirname "$last/{copy}")"; echo x > "$last/{copy}"; fi
+            """, $"""
+            if not "%~1"=="venv" exit /b 0
+            for %%a in (%*) do set "last=%%~a"
+            mkdir "%last%\{Path.GetDirectoryName(copy)}"
+            echo x>"%last%\{copy}"
+            """, TimeSpan.FromSeconds(4), HoldingTheCudnnCacheAndForAWhileTheEnvironment);
+
+        Assert.Equal(PythonEnvironmentFailure.NotAVirtualEnvironment, linking.Failure);
+        Assert.True(linking.Took < TimeSpan.FromSeconds(5));
+    }
+
+    [Fact]
     public void TestAProcessWithoutUvWaitsForAnotherThatIsProvisioningAndUsesWhatItProvisioned()
     {
         var root = Directory.CreateDirectory(Path.Combine(Path.GetTempPath(), "shorokoo-wait-" + Guid.NewGuid().ToString("N"))).FullName;
@@ -1904,7 +1925,8 @@ public class PyTorchBackendCoverageTests
         return Serialize(graph);
     }
 
-    private static (PythonEnvironmentFailure Failure, string[] Log, string Directory, TimeSpan Took) FakeUv(string sh, string cmd, TimeSpan? timeout = null)
+    private static (PythonEnvironmentFailure Failure, string[] Log, string Directory, TimeSpan Took) FakeUv(
+        string sh, string cmd, TimeSpan? timeout = null, Func<string, IDisposable?>? holding = null)
     {
         var root = Directory.CreateDirectory(Path.Combine(Path.GetTempPath(), "shorokoo-uv-" + Guid.NewGuid().ToString("N"))).FullName;
         var (uv, log) = (Path.Combine(root, OperatingSystem.IsWindows() ? "uv.cmd" : "uv"), Path.Combine(root, "log"));
@@ -1912,17 +1934,33 @@ public class PyTorchBackendCoverageTests
             ? "@echo off\r\n" + cmd.Replace("LOG", log).ReplaceLineEndings("\r\n") + "\r\n"
             : "#!/bin/sh\n" + sh.Replace("LOG", log) + "\n");
         if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(uv, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        var held = holding?.Invoke(root);
         var clock = System.Diagnostics.Stopwatch.StartNew();
         try
         {
             var failure = Assert.Throws<PythonEnvironmentException>(() => PythonEnvironmentResolver.Resolve(PythonEnvironmentLock.Cpu,
-                new() { CacheDirectory = root, UvPath = uv, ProvisioningTimeout = timeout ?? TimeSpan.FromMinutes(1) }, _ => null)).Failure;
+                new() { CacheDirectory = root, UvPath = uv, ProvisioningTimeout = timeout ?? TimeSpan.FromMinutes(1) },
+                name => name is "LOCALAPPDATA" or "XDG_CACHE_HOME" ? root : null)).Failure;
             return (failure, File.Exists(log) ? File.ReadAllLines(log) : [], Path.Combine(root, PythonEnvironmentLock.Cpu.CacheKey), clock.Elapsed);
         }
         finally
         {
+            held?.Dispose();
             Directory.Delete(root, recursive: true);
         }
+    }
+
+    /// <summary>The lock of the CUDA library cache's cuDNN folder under <paramref name="root"/>, held
+    /// until the result is disposed, and the lock of the environment provisioned there, held for two
+    /// seconds.</summary>
+    private static IDisposable HoldingTheCudnnCacheAndForAWhileTheEnvironment(string root)
+    {
+        var cudnn = CudaLibraryPins.Current!.Libraries.Single(pin => pin.Name == "cudnn");
+        var cuda = Directory.CreateDirectory(Path.Combine(root, "shorokoo", "cuda")).FullName;
+        var cache = new FileStream(Path.Combine(cuda, cudnn.CacheKey + ".lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+        var environment = new FileStream(Path.Combine(root, PythonEnvironmentLock.Cpu.CacheKey + ".lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+        _ = Task.Delay(2000).ContinueWith(_ => environment.Dispose());
+        return cache;
     }
 
     private static FunctionProto Function(string name, string[] inputs, string[] outputs, string overload, params NodeProto[] nodes)

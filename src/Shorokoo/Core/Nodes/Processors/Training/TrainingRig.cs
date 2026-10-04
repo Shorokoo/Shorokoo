@@ -192,12 +192,14 @@ namespace Shorokoo
         /// What the backend of the context this rig's steps run on holds at the peak of a run of a
         /// step graph, at the shapes of <paramref name="exemplars"/> — the model it would be handed,
         /// built as a compile builds it, with the state pairs that model proves written in place where
-        /// the context writes in place — or null where the context is the unread default.
+        /// the context writes in place — or null where the context is the unread default, or its
+        /// backend has no model of a run.
         /// </summary>
         private Func<InternalComputationGraph, long?>? BackendPeakOf(IReadOnlyList<IRuntimeTensor> exemplars)
         {
             if (_runtimeContext is not { } context) return null;
             var backend = context.ResolvedBackend;
+            if (!backend.ModelsARun) return null;
             var dims = new long[]?[exemplars.Count];
             for (int i = 0; i < dims.Length; i++)
             {
@@ -1335,7 +1337,7 @@ namespace Shorokoo
         ///
         /// <para>The threshold decides only how faithful the description is, never whether it is legal:
         /// a values-elided attribute is readable as "shape and dtype, no values" at any threshold, so
-        /// this one and the engines' read thresholds no longer have to agree.</para>
+        /// this one and the engines' read thresholds need not agree.</para>
         ///
         /// <para>A string tensor has no zero bytes to be made of, so its payload is empty strings; any
         /// other dtype without a fixed whole-byte width (a packed 4-bit or a complex type) is described

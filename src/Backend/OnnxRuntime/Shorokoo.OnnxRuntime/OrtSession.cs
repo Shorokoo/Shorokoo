@@ -276,11 +276,11 @@ internal sealed class OrtSession : IShorokooSession
         out IReadOnlyList<string?> aliasedInputs)
     {
         ArgumentNullException.ThrowIfNull(consumed);
-        ArgumentNullException.ThrowIfNull(runSettings);
         aliasedInputs = [];
         HashSet<IShorokooTensorValue>? kept = null;
         try
         {
+            ArgumentNullException.ThrowIfNull(runSettings);
             var into = OutputsIntoConsumed(inputs, consumed, outputNames);
             IReadOnlyList<IShorokooTensorValue> results;
             var intoInputs = into?.Values.Select(t => t.Input).ToHashSet(StringComparer.Ordinal) ?? [];
@@ -388,9 +388,9 @@ internal sealed class OrtSession : IShorokooSession
     /// sessions carrying out its placements, which charge its accounts — where
     /// <paramref name="runSettings"/> asks a run to hand back its memory: as the run is over, once
     /// everything it let go of has gone back to them.</summary>
-    private void HandBackIfAsked(RunSettings runSettings)
+    private void HandBackIfAsked(RunSettings? runSettings)
     {
-        if (!runSettings.ShrinkArenaAfterRun) return;
+        if (runSettings?.ShrinkArenaAfterRun != true) return;
         if (_cardAccount is { } card) card.Allocator.ReleaseCached(card);
         _hostAccount.Allocator.ReleaseCached(_hostAccount);
     }

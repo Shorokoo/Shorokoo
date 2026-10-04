@@ -716,8 +716,9 @@ internal sealed class OrtPlacements : IDisposable
                 if (output.Length > 0) producer[output] = node;
         static bool Copies(NodeProto node) => node.OpType is "MemcpyFromHost" or "MemcpyToHost" or "Shape" or "Size";
         var host = new HashSet<NodeProto>(ReferenceEqualityComparer.Instance);
-        var pending = new Stack<NodeProto>(graph.Nodes.Where(n => !Copies(n)
-            && n.Outputs.Any(o => copiedOn.Contains(o) || hostOutputs?.Contains(o) == true)));
+        var pending = new Stack<NodeProto>(graph.Nodes.Where(n =>
+            (n.OpType != "MemcpyToHost" && n.Outputs.Any(copiedOn.Contains))
+            || (!Copies(n) && hostOutputs is not null && n.Outputs.Any(hostOutputs.Contains))));
         while (pending.TryPop(out var node))
         {
             if (!host.Add(node)) continue;

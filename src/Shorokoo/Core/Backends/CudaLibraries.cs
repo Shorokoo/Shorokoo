@@ -181,14 +181,19 @@ public static partial class CudaLibraries
     private static unsafe partial uint GetModuleFileName(IntPtr module, char* path, uint size);
 
     /// <summary>
-    /// The pinned libraries <paramref name="directory"/> ships that this process already holds another
-    /// release of, each named with that copy's folder and version, or null when it holds none: what
-    /// makes a framework that loads that folder's libraries by path fail to load them.
+    /// The pinned libraries the folder <paramref name="directory"/> holds the environment's copies of —
+    /// in it, or each in a folder of its own under it, as NVIDIA's wheels install them — that this
+    /// process already holds another release of, each named with that copy's folder and version, or
+    /// null when it holds none: what makes a framework that loads that folder's libraries fail to load
+    /// them. What the process holds is every module it has loaded on Windows, and on Linux the file
+    /// each pinned name binds to, as its loader has it; the list of mapped files names the file a
+    /// library's name links to, under a name of its own.
     /// </summary>
     internal static string? Conflict(string directory)
     {
-        if (!OperatingSystem.IsWindows() || CudaLibraryPins.Current is not { } pins) return null;
-        return Conflict(directory, PinnedFileNames(pins), LoadedModules());
+        if (CudaLibraryPins.Current is not { } pins) return null;
+        var pinned = PinnedFileNames(pins).ToList();
+        return Conflict(directory, pinned, OperatingSystem.IsWindows() ? LoadedModules() : [.. pinned.Select(HeldUnder).OfType<string>()]);
     }
 
     private static IEnumerable<string> PinnedFileNames(CudaLibraryPins pins)
@@ -211,12 +216,15 @@ public static partial class CudaLibraries
     {
         if (!Directory.Exists(directory)) return null;
         var names = pinned.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        string? Own(string name) => File.Exists(Path.Combine(directory, name))
+            ? Path.Combine(directory, name)
+            : Directory.EnumerateFiles(directory, name, SearchOption.AllDirectories).FirstOrDefault();
         var held = loaded
             .Where(path => names.Contains(Path.GetFileName(path)))
-            .Where(path => File.Exists(Path.Combine(directory, Path.GetFileName(path))))
+            .Select(path => (Held: path, Own: Own(Path.GetFileName(path))))
             // A copy of the very same file, under another path, binds as well as the folder's own.
-            .Where(path => !SameContents(path, Path.Combine(directory, Path.GetFileName(path))))
-            .Select(Describe)
+            .Where(copy => copy.Own is not null && !SameContents(copy.Held, copy.Own))
+            .Select(copy => Describe(copy.Held))
             .ToList();
         return held.Count == 0 ? null : string.Join("; ", held);
     }

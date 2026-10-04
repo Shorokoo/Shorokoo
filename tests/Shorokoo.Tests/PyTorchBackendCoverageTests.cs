@@ -1241,17 +1241,26 @@ public class PyTorchBackendCoverageTests
                      + $"rt.place_into(0, False, {call}).data_ptr() == t.data_ptr(), t.tolist())[1:]))(__import__('shorokoo_torch.runtime', fromlist=['_']), torch.zeros(4))");
 
     [Fact]
-    public void TestASessionStoppedFromPlacingWritesNothingOverTheInputsItsRunsConsume()
+    public void TestASessionStoppedFromPlacingWritesNothingOverTheInputsItsRunsConsumeAndOneBuiltForASingleRunStillDoes()
     {
-        Assert.Equal([-1f, -2f, -3f, -4f], ConsumedAfterARun(stopPlacing: false));
-        Assert.Equal([1f, 2f, 3f, 4f], ConsumedAfterARun(stopPlacing: true));
+        Assert.Equal([-1f, -2f, -3f, -4f], ConsumedAfterARun(null));
+        Assert.Equal([1f, 2f, 3f, 4f], ConsumedAfterARun(null, stopPlacing: true));
+        Assert.Equal([-1f, -2f, -3f, -4f], ConsumedAfterARun(new ComputeContext(Torch)));
+        Assert.Equal([-1f, -2f, -3f, -4f], ConsumedAfterARun(new ComputeContext(Torch), placing: false));
+        Assert.Equal([1f, 2f, 3f, 4f], ConsumedAfterARun(new ComputeContext(Torch) { ValuePlacement = false }));
+        Assert.Equal([1f, 2f, 3f, 4f], ConsumedAfterARun(new ComputeContext(Torch) { OutputAliasing = false }));
     }
 
-    /// <summary>What the memory of the input a run of <c>Neg</c> consumed holds once the run is
-    /// over.</summary>
-    private static float[] ConsumedAfterARun(bool stopPlacing)
+    /// <summary>What the memory of the input a run of <c>Neg</c> consumed holds once the run is over:
+    /// a run of a session of the backend's own, stopped from placing where
+    /// <paramref name="stopPlacing"/>, or of one <paramref name="context"/> builds, built for a single
+    /// run where not <paramref name="placing"/>.</summary>
+    private static float[] ConsumedAfterARun(ComputeContext? context, bool placing = true, bool stopPlacing = false)
     {
-        using var session = Torch.CreateSession(Serialize(GraphOn("x:float[4]", "O", Op("Neg", "x", "O"))), default, default, DeviceMemorySettings.Default);
+        var model = Serialize(GraphOn("x:float[4]", "O", Op("Neg", "x", "O")));
+        using var owner = context;
+        using var session = context?.BuildSession(Torch, model, ShorokooGraphOptimization.EnableAll, DeviceMemorySettings.Default, placing: placing)
+            ?? Torch.CreateSession(model, default, default, DeviceMemorySettings.Default);
         if (stopPlacing) session.StopPlacing();
         var x = (TorchTensorValue)Torch.CreateTensor([1f, 2f, 3f, 4f], [4]);
         TorchTensorValue seen;

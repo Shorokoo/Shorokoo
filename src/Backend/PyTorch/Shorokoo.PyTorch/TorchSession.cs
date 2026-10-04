@@ -223,6 +223,14 @@ internal sealed class TorchSession : IShorokooSession
     void IShorokooSession.StopPlacing()
     {
         Volatile.Write(ref _stoppedPlacing, 1);
+        ((IShorokooSession)this).StopPlanningPlacements();
+    }
+
+    /// <summary>Stops placing values in consumed memory, which plans and translates the model again
+    /// per run signature; nodes are still written over consumed inputs, which costs nothing to
+    /// arrange.</summary>
+    void IShorokooSession.StopPlanningPlacements()
+    {
         _placements?.Dispose();
         _placements = null;
     }

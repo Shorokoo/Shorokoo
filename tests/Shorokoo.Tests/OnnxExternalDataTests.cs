@@ -352,7 +352,7 @@ public class OnnxExternalDataTests
     /// <summary>A model whose messages nest <paramref name="depth"/> deep, each the one field of
     /// the message around it: keyed by <paramref name="outer"/>, then by <paramref name="cycle"/>
     /// over and over.</summary>
-    private static byte[] Nested(byte[] outer, byte[] cycle, int depth)
+    internal static byte[] Nested(byte[] outer, byte[] cycle, int depth)
     {
         static int VarintLength(long value) { int n = 1; for (; value >= 0x80; value >>= 7) n++; return n; }
         var lengths = new long[depth + 1];

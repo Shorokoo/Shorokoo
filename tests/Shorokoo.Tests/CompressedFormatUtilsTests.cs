@@ -367,6 +367,10 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
         FromBinary([], "empty");
         FromBinary(bareZstd, "not a Shorokoo .srk container");
         FromBinary(BuildRawSrkContainer("{not json", payload), "header");
+        byte[] nested = OnnxExternalDataTests.Nested([0x3A], [0x0A, 0x2A, 0x32], 100);
+        FromFile("nested.srk", BuildRawSrkContainer(
+            $"{{\"srkVersion\":1,\"stage\":\"concrete-architecture\",\"compression\":\"none\",\"payloadSha256\":\"{Sha256Hex(nested)}\"}}",
+            nested), "not a readable Shorokoo graph file");
         FromBinary(BuildRawSrkContainer(
             $"{{\"srkVersion\":3,\"stage\":\"concrete-architecture\",\"compression\":\"zstd\",\"payloadSha256\":\"{Sha256Hex(payload)}\"}}",
             payload), "version 3");

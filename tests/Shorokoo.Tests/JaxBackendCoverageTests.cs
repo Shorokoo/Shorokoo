@@ -39,6 +39,22 @@ public class JaxBackendCoverageTests
     }
 
     [Fact]
+    public void TestAHostTensorPastTwoGibibytesIsCopiedInAndOutByThePieceAndSavedFromItsAddress()
+    {
+        const long Elements = (1L << 30) + 2;
+        using var head = (JaxTensorValue)Jax.CreateTensor(new float[StagedReadBack.StagingBytes / 4], [StagedReadBack.StagingBytes / 4]);
+        JaxTensorValue large;
+        using (PythonRuntime.Gil())
+        {
+            using var ctypes = head.Value.GetAttr("ctypes");
+            using var address = ctypes.GetAttr("data");
+            using var description = HostFloats(address.As<long>(), Elements);
+            large = JaxTensorValue.Wrap(head.Value.InvokeMethod("view"), description);
+        }
+        AssertAHostValuePastTwoGibibytesIsCopiedByThePiece(Jax, large, 4 * Elements);
+    }
+
+    [Fact]
     public void TestTypedTensorsSpansAndUninitializedTensorsAreTheTensorsTheySayTheyAre()
     {
         using var floats = Jax.CreateTensor([1f, 2f, 3f, 4f], [2, 2]);

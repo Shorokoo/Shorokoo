@@ -189,8 +189,11 @@ internal sealed class PlacementProof
     private readonly IReadOnlyDictionary<string, long> _blocks;
     private readonly IReadOnlyDictionary<string, PlacementShapes.Value> _shapes;
     private readonly PlacementMemory _memory;
-    private readonly ulong[][] _ancestors;
+    // Per node, its ancestors as a bit set; none where the nodes run in their order, which is all
+    // that then orders them.
+    private readonly ulong[][]? _ancestors;
     private readonly bool _runsInOrder;
+    private readonly Func<NodeProto, long>? _scratch;
 
     /// <summary>
     /// The proof over <paramref name="graph"/> for one run: <paramref name="blocks"/> names each
@@ -205,15 +208,19 @@ internal sealed class PlacementProof
     /// order they are listed — on each of its streams, where every node that reads or writes a
     /// block is on one — so that a node listed earlier has run before a later one starts; where
     /// it does not, a node runs before another only where the graph's edges make it.
+    /// <paramref name="scratch"/> says what the backend's kernel for a node takes for its own use
+    /// while the node runs, which <see cref="ModelledPeak"/> counts; none where null.
     /// </summary>
     /// <exception cref="ArgumentException">The graph has more than <see cref="MostNodes"/> nodes,
     /// or is not in topological order.</exception>
     internal PlacementProof(
         GraphProto graph, IReadOnlyDictionary<string, long> blocks, IReadOnlyDictionary<string, PlacementShapes.Value> shapes,
-        IReadOnlySet<string>? readAfterRun = null, PlacementMemory? memory = null, bool runsInOrder = false)
+        IReadOnlySet<string>? readAfterRun = null, PlacementMemory? memory = null, bool runsInOrder = false,
+        Func<NodeProto, long>? scratch = null)
     {
         _nodes = graph.Nodes;
         _runsInOrder = runsInOrder;
+        _scratch = scratch;
         if (_nodes.Count > MostNodes) throw new ArgumentException($"The graph has more than {MostNodes} nodes.", nameof(graph));
         _blocks = blocks;
         _shapes = shapes;
@@ -254,10 +261,26 @@ internal sealed class PlacementProof
                 }
             }
         }
-        _ancestors = Ancestry(captured);
+        if (runsInOrder) InOrder(captured);
+        else _ancestors = Ancestry(captured);
     }
 
     // ---- ancestry ----
+
+    /// <summary>Checks the graph is in the topological order <see cref="Ancestry"/> requires: what a
+    /// node reads, or its subgraphs read, written by a node listed before it.</summary>
+    private void InOrder(Dictionary<int, HashSet<string>> captured)
+    {
+        for (int n = 0; n < _nodes.Count; n++)
+        {
+            if (OutputAliasProof.ReadsOnlyAShape(_nodes[n])) continue;
+            IEnumerable<string> reads = _nodes[n].Inputs;
+            if (captured.TryGetValue(n, out var names)) reads = reads.Concat(names);
+            foreach (var input in reads)
+                if (input.Length > 0 && _producer.TryGetValue(input, out var p) && p >= n)
+                    throw new ArgumentException("The graph is not in topological order.");
+        }
+    }
 
     /// <summary>Per node, the nodes that run before it whatever a runtime folds, as a bit set:
     /// computed in node order, which must be topological.</summary>
@@ -291,7 +314,7 @@ internal sealed class PlacementProof
     /// starts: listed first, where the backend runs the nodes in their order, and otherwise an
     /// ancestor of it, which runs first whatever order a runtime picks.</summary>
     private bool Precedes(int before, int node)
-        => _runsInOrder ? before < node : (_ancestors[node][before >> 6] & (1UL << (before & 63))) != 0;
+        => _runsInOrder ? before < node : (_ancestors![node][before >> 6] & (1UL << (before & 63))) != 0;
 
     // ---- memory chains ----
 
@@ -745,7 +768,8 @@ internal sealed class PlacementProof
     /// memory for every output it makes that is neither placed nor what the backend hands back
     /// over an input, and lets go of each once the last node reading it — or anything handed back
     /// over it — has run; what is read after the run is held to its end. A value of unknown shape
-    /// counts nothing.
+    /// counts nothing. While a node runs, what its kernel takes for its own use (the proof's
+    /// <c>scratch</c>) is held besides.
     /// </summary>
     internal long ModelledPeak(IEnumerable<Placement> placements)
     {
@@ -795,7 +819,7 @@ internal sealed class PlacementProof
                 var until = last.GetValueOrDefault(output, n);
                 if (until != AfterTheRun) freed[until] = freed.GetValueOrDefault(until) + bytes[output];
             }
-            peak = Math.Max(peak, live);
+            peak = Math.Max(peak, live + (_scratch?.Invoke(_nodes[n]) ?? 0));
             live -= freed.GetValueOrDefault(n);
         }
         return peak;

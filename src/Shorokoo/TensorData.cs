@@ -948,6 +948,8 @@ namespace Shorokoo
         // There is deliberately no finalizer -- one here could only release the backing value,
         // and a finalizer must not touch another managed object that may already have been
         // finalized itself. The backing value has its own finalizer, which is what reclaims a
-        // tensor nobody deletes (Shorokoo/Shorokoo#180).
+        // tensor nobody deletes (Shorokoo/Shorokoo#180); a value standing on a shared block holds
+        // its lease on its range in an object of its own that releases it as it is collected
+        // (see HeldLease).
     }
 }

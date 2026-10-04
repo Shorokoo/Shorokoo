@@ -48,7 +48,8 @@ namespace Shorokoo.OnnxRuntime;
 /// anything could be placed at all.</para>
 ///
 /// <para><b>Decided before the first run.</b> Whether a plan pays is read off the proof's model of
-/// the memory a run holds (<see cref="PlacementProof.ModelledPeak"/>): with every placed value in its
+/// the memory a run holds (<see cref="PlacementProof.ModelledPeak"/>), its kernels' own scratch
+/// counted as the allocator counts it (<see cref="OrtRunMemory"/>): with every placed value in its
 /// block against with none, less what the variants hold of their own. A signature's first run is
 /// placed already where that pays, so a run that fits only placed runs on its first call. The first
 /// placed run is measured, and a plan whose run, with what its variant holds, did not save the
@@ -60,17 +61,23 @@ internal sealed class OrtPlacements : IDisposable
     /// keeps in a file.</summary>
     internal const int ModelBytesKept = 16 << 20;
 
+    /// <summary>The file in a folder of a session's placements that marks it as theirs.</summary>
+    internal const string KeptLockFile = "kept.lock";
+
     /// <summary>How many signatures a session plans for; a run of any other runs unplaced.</summary>
     private const int MostSignatures = 8;
 
     /// <summary>
-    /// Builds a session over a model, writing the graph it will run into the folder
-    /// <paramref name="optimizedDirectory"/> names where one is. A model read with its initializers
-    /// from files in <paramref name="externalDataDirectory"/> — a graph ONNX Runtime wrote out — is
-    /// built with ONNX Runtime's optimizations off. A <paramref name="variant"/> charges the
-    /// session's own allocator accounts; a probe, built and let go of, accounts of its own.
+    /// Builds a session over a model — <paramref name="model"/>, or where that is null the one in
+    /// <paramref name="modelFile"/>, which ONNX Runtime reads itself — writing the graph it will run
+    /// into the folder <paramref name="optimizedDirectory"/> names where one is. A model read with
+    /// its initializers from files in <paramref name="externalDataDirectory"/> — a graph ONNX Runtime
+    /// wrote out — is built with ONNX Runtime's optimizations off. A <paramref name="variant"/>
+    /// charges the session's own allocator accounts; a probe, built and let go of, accounts of its
+    /// own.
     /// </summary>
-    internal delegate OrtSession VariantBuilder(byte[] model, string? optimizedDirectory, string? externalDataDirectory, bool variant);
+    internal delegate OrtSession VariantBuilder(
+        byte[]? model, string? modelFile, string? optimizedDirectory, string? externalDataDirectory, bool variant);
 
     // The model as handed over: in memory where it is small, and otherwise in a file of its own.
     private readonly byte[]? _model;
@@ -104,7 +111,7 @@ internal sealed class OrtPlacements : IDisposable
         string runsDirectory, ModelProto runs, IReadOnlySet<string> sharedWeights, VariantBuilder build, OrtBackend backend,
         Func<long> held)
     {
-        _files.Runs = runsDirectory;
+        _files.KeepRuns(runsDirectory);
         _runs = runs;
         _sharedWeights = sharedWeights;
         _build = build;
@@ -131,7 +138,7 @@ internal sealed class OrtPlacements : IDisposable
         _build = build;
         if (written is not null)
         {
-            _files.Runs = written.Directory;
+            _files.KeepRuns(written.Directory);
             _runs = written.Runs;
         }
         if (model.Length <= ModelBytesKept)
@@ -139,8 +146,7 @@ internal sealed class OrtPlacements : IDisposable
         else
             try
             {
-                _files.Model = Path.Combine(Path.GetTempPath(), "shorokoo-model-" + Guid.NewGuid().ToString("N") + ".onnx");
-                File.WriteAllBytes(_files.Model, model);
+                _files.KeepModel(model);
             }
             catch (Exception unwritable) when (unwritable is IOException or UnauthorizedAccessException)
             {
@@ -199,6 +205,12 @@ internal sealed class OrtPlacements : IDisposable
     [ThreadStatic]
     internal static Func<Exception?>? PlacedRunFault;
 
+    /// <summary>For a test: asked as a signature of this thread's run starts to be planned, and what
+    /// it answers is thrown there, as a failure of the planning would be; null on every thread but
+    /// one a test sets it on.</summary>
+    [ThreadStatic]
+    internal static Func<Exception?>? PlanningFault;
+
     /// <summary>Every signature planned so far, for a test to read.</summary>
     internal IReadOnlyList<Entry> Entries
     {
@@ -208,7 +220,8 @@ internal sealed class OrtPlacements : IDisposable
     /// <summary>
     /// The memory a run may place values in, by input name: each value the run consumed that it was
     /// fed under that one name, a tensor of this runtime of fixed-width elements, into which no
-    /// marked output is written.
+    /// marked output is written, of at least <see cref="PlacementProof.Smallest"/> bytes — the least
+    /// a placed value is, so a smaller one holds none. A run consuming none of those plans nothing.
     /// </summary>
     internal static Dictionary<string, OrtTensorValue> Blocks(
         IReadOnlyDictionary<string, IShorokooTensorValue> inputs, IReadOnlyCollection<IShorokooTensorValue> consumed,
@@ -223,7 +236,7 @@ internal sealed class OrtPlacements : IDisposable
         {
             if (!handed.Contains(value) || fedAs[value] != 1 || aliasedInputs.Contains(name)) continue;
             if (value is not OrtTensorValue { ValueType: ShorokooOnnxValueType.Tensor } own) continue;
-            if (PlacementShapes.ElementBytes((int)own.ElementType) == 0 || BytesOf(own) <= 0) continue;
+            if (PlacementShapes.ElementBytes((int)own.ElementType) == 0 || BytesOf(own) < PlacementProof.Smallest) continue;
             blocks[name] = own;
         }
         return blocks;
@@ -235,19 +248,23 @@ internal sealed class OrtPlacements : IDisposable
     /// <summary>
     /// The entry for a run that may place values in <paramref name="blocks"/>, made the first time
     /// its signature is seen; null where this session has stopped planning or plans for as many
-    /// signatures as it will.
+    /// signatures as it will. <paramref name="aliasedInputs"/> names the inputs the run writes an
+    /// output into, which no plan places.
     /// </summary>
     internal Entry? EntryFor(
         IReadOnlyDictionary<string, IShorokooTensorValue> inputs, Dictionary<string, OrtTensorValue> blocks,
-        IReadOnlyList<string> outputNames)
+        IReadOnlyList<string> outputNames, IReadOnlySet<string> aliasedInputs)
     {
         if (blocks.Count == 0) return null;
         var key = new System.Text.StringBuilder();
         foreach (var (name, value) in inputs.OrderBy(i => i.Key, StringComparer.Ordinal))
         {
             // A block whose parts go back once no output stands on them plans otherwise than one
-            // held whole, so the two are signatures of their own.
-            key.Append(name).Append(blocks.TryGetValue(name, out var block) ? OrtBackend.RangesGoBack(block) ? "!!" : "!" : ":");
+            // held whole, so the two are signatures of their own; and an input an output is written
+            // into plans otherwise than one only read, whose output a plan may place.
+            key.Append(name).Append(
+                blocks.TryGetValue(name, out var block) ? OrtBackend.RangesGoBack(block) ? "!!" : "!"
+                : aliasedInputs.Contains(name) ? "=" : ":");
             if (value is OrtTensorValue { ValueType: ShorokooOnnxValueType.Tensor } tensor)
                 key.Append((int)tensor.ElementType).Append('[').AppendJoin(',', tensor.ReadShape).Append(']');
             key.Append(';');
@@ -265,27 +282,28 @@ internal sealed class OrtPlacements : IDisposable
     /// <summary>
     /// Runs <paramref name="owner"/> on a signature <paramref name="entry"/> stands for, planning it
     /// first where nothing has: placed on its variant once adopted, plain once refused. Planning a
-    /// signature holds back only its own runs. The first placed run is measured; a placed run that
-    /// fails refuses the signature, so the runs after it run plain, and a refused signature's variant
-    /// goes once no run is on it. <paramref name="aliasedOutputs"/> names the outputs the run writes
-    /// into the inputs they are marked for, which no plan places. <paramref name="kept"/> answers the
-    /// consumed values a placed output
-    /// stands on, which the run does not release: the block each became releases it with its last
-    /// output.
+    /// signature holds back only its own runs, and stops where <paramref name="cancellation"/> is
+    /// cancelled, leaving the signature to be planned by a run after it. The first placed run to end
+    /// is measured; a placed run that fails refuses the signature, so the runs after it run plain,
+    /// and a refused signature's variant goes once no run is on it. <paramref name="aliasedOutputs"/>
+    /// names the outputs the run writes into the inputs they are marked for, which no plan places.
+    /// <paramref name="kept"/> answers the consumed values a placed output stands on, which the run
+    /// does not release: the block each became releases it with its last output.
     /// </summary>
     internal IReadOnlyList<IShorokooTensorValue> Run(
         OrtSession owner, Entry entry, IReadOnlyDictionary<string, IShorokooTensorValue> inputs,
         Dictionary<string, OrtTensorValue> blocks, IReadOnlyList<string> outputNames,
         Func<IReadOnlyList<IShorokooTensorValue>> plain,
         Func<OrtSession, IReadOnlyDictionary<string, OrtSession.PlacedBinding>, IReadOnlyList<IShorokooTensorValue>> placed,
-        IReadOnlyCollection<string> aliasedOutputs, out HashSet<IShorokooTensorValue>? kept)
+        IReadOnlyCollection<string> aliasedOutputs, CancellationToken cancellation, out HashSet<IShorokooTensorValue>? kept)
     {
         kept = null;
         lock (entry.Planning)
         {
             if (entry.Stage == Stage.Unplanned)
             {
-                Prepare(entry, inputs, blocks, outputNames, aliasedOutputs);
+                cancellation.ThrowIfCancellationRequested();
+                Prepare(owner, entry, inputs, blocks, outputNames, aliasedOutputs, cancellation);
                 Settled?.Invoke(entry);
             }
         }
@@ -297,6 +315,7 @@ internal sealed class OrtPlacements : IDisposable
             {
                 variant = adopted;
                 entry.Running++;
+                // Taken by the one run measuring, as its allocator account reads one run at a time.
                 first = !entry.Measured;
                 entry.Measured = true;
             }
@@ -310,11 +329,18 @@ internal sealed class OrtPlacements : IDisposable
                 {
                     entry.PlacedPeak = Math.Max(peak, 1);
                     // The model was wrong where the placed run asked for more than it said the plain
-                    // one would: the runs after this one run plain.
+                    // one would — both with what the kernels take for their own use besides the
+                    // values: the runs after this one run plain.
                     if (entry.Stage == Stage.Adopted && peak + entry.VariantHeld + Margin(entry.PredictedPlainPeak) > entry.PredictedPlainPeak)
                         Refuse(entry, $"placed, the run asked {peak} bytes against {entry.PredictedPlainPeak} modelled plain");
                 }
             return results;
+        }
+        catch (OperationCanceledException) when (first)
+        {
+            // A run stopped before it ended measured nothing: the next one is measured instead.
+            lock (_gate) entry.Measured = false;
+            throw;
         }
         catch (Exception failure) when (failure is not OperationCanceledException)
         {
@@ -332,6 +358,11 @@ internal sealed class OrtPlacements : IDisposable
             }
         }
     }
+
+    /// <summary>Releases <paramref name="value"/> through <paramref name="backend"/>: what a block
+    /// over the value's memory does with its last lease. Made apart from any run so that it holds
+    /// those two alone — a placed output keeps its block, and so this, for as long as it lives.</summary>
+    private static Action ReleaseThrough(IShorokooBackend backend, OrtTensorValue value) => () => backend.Release(value);
 
     /// <summary>The least a plan must save to be kept: a mebibyte, or a sixty-fourth of the plain
     /// run where that is more.</summary>
@@ -363,7 +394,7 @@ internal sealed class OrtPlacements : IDisposable
                     {
                         block = owner.Range is { } range
                             ? (range.Block, range.Offset)
-                            : (OrtBackend.BlockOver(owner, BytesOf(owner), () => ((IShorokooBackend)_backend).Release(owner)), 0L);
+                            : (OrtBackend.BlockOver(owner, BytesOf(owner), ReleaseThrough(_backend, owner)), 0L);
                         shared[placement.Block] = block;
                     }
                     var view = OrtBackend.View(owner, placement.Offset, type, shape, placement.Bytes, block.Block, block.Base + placement.Offset);
@@ -401,17 +432,21 @@ internal sealed class OrtPlacements : IDisposable
     /// graph ONNX Runtime runs, weighed by the proof's model of the memory a run holds, the variant
     /// built over the model as handed over where it can bind the plan, and from the graph that runs
     /// where it cannot or did not hold it, and the plan proved again over the graph the variant runs,
-    /// until the two agree. Refuses the entry, for good, where nothing can be placed, where placing saves too
-    /// little, where the variant's compute nodes differ from the plain session's, or where anything
-    /// fails on the way. Under the lock.
+    /// until the two agree. Refuses the entry, for good, where nothing can be placed, where placing
+    /// saves too little, where the variant's compute nodes differ from the plain session's, or where
+    /// anything fails on the way — the run then runs as it would have with no placing — and stops
+    /// planning for the session where it ran out of memory, as planning another signature would.
+    /// Leaves the entry to be planned again where <paramref name="cancellation"/> stopped it. Under
+    /// the lock.
     /// </summary>
     private void Prepare(
-        Entry entry, IReadOnlyDictionary<string, IShorokooTensorValue> inputs, Dictionary<string, OrtTensorValue> blocks,
-        IReadOnlyList<string> outputNames, IReadOnlyCollection<string> aliasedOutputs)
+        OrtSession owner, Entry entry, IReadOnlyDictionary<string, IShorokooTensorValue> inputs,
+        Dictionary<string, OrtTensorValue> blocks, IReadOnlyList<string> outputNames, IReadOnlyCollection<string> aliasedOutputs,
+        CancellationToken cancellation)
     {
         try
         {
-            var original = Original();
+            if (PlanningFault?.Invoke() is { } fault) throw fault;
             var given = new Dictionary<string, (long[] Shape, int ElementType)>(StringComparer.Ordinal);
             foreach (var (name, value) in inputs)
                 if (value is OrtTensorValue { ValueType: ShorokooOnnxValueType.Tensor } tensor)
@@ -422,15 +457,19 @@ internal sealed class OrtPlacements : IDisposable
             entry.BlockBytes = blockBytes;
             // The model as handed over first, which costs no build: what it places nothing in, the
             // graph ONNX Runtime makes of it does not either, short of a rewrite freeing a range --
-            // and a session builds nothing for such a run.
-            if (original.Graph is not { } handed
-                || handed.Nodes.Count > PlacementProof.MostNodes
-                || new PlacementProof(handed, blockBytes, PlacementShapes.Evaluate(handed, given), memory: MemoryOf(handed), runsInOrder: true)
-                    .Plan(PlacementProof.Smallest, PlacementProof.IdleOutputBytes, givingBack).Count == 0)
+            // and a session builds nothing for such a run. Not where the graph that runs is at hand
+            // already and the model is kept in a file, which reading would copy for nothing.
+            var original = HandedOverToPlan();
+            if (original is not null
+                && (original.Graph is not { } handed
+                    || handed.Nodes.Count > PlacementProof.MostNodes
+                    || new PlacementProof(handed, blockBytes, PlacementShapes.Evaluate(handed, given), memory: LayoutOf(handed, owner).Memory, runsInOrder: true)
+                        .Plan(PlacementProof.Smallest, PlacementProof.IdleOutputBytes, givingBack).Count == 0))
             {
                 Refuse(entry, "nothing to place in the graph handed over");
                 return;
             }
+            cancellation.ThrowIfCancellationRequested();
             var runsModel = RunGraph();
             var runs = runsModel.Graph!;
             entry.Graph = runs;
@@ -441,7 +480,8 @@ internal sealed class OrtPlacements : IDisposable
             }
             var shapes = PlacementShapes.Evaluate(runs, given);
             var runsOutputs = runs.Outputs.Select(o => o.Name).ToHashSet(StringComparer.Ordinal);
-            var proof = new PlacementProof(runs, blockBytes, shapes, memory: MemoryOf(runs), runsInOrder: true);
+            var (memory, scratch) = LayoutOf(runs, owner);
+            var proof = new PlacementProof(runs, blockBytes, shapes, memory: memory, runsInOrder: true, scratch: node => scratch(node, shapes));
             var plan = proof.Prove(proof.Plan(PlacementProof.Smallest, PlacementProof.IdleOutputBytes, givingBack)
                 .Where(p => (!runsOutputs.Contains(p.Value) || outputNames.Contains(p.Value)) && !aliasedOutputs.Contains(p.Value)));
             if (plan.Count == 0)
@@ -466,14 +506,15 @@ internal sealed class OrtPlacements : IDisposable
             // variant over the graph ONNX Runtime wrote out binds any value of it, a fusion's too,
             // but ONNX Runtime orders that graph afresh as it loads it. So the first is tried where it
             // can be, and the second where it cannot or did not hold.
-            var originalValues = original.Graph.Nodes.SelectMany(n => n.Outputs).ToHashSet(StringComparer.Ordinal);
-            bool[] sources = _model is not null && plan.All(p => originalValues.Contains(p.Value)) ? [false, true] : [true];
+            var originalValues = original?.Graph?.Nodes.SelectMany(n => n.Outputs).ToHashSet(StringComparer.Ordinal);
+            bool[] sources = _model is not null && originalValues is not null && plan.All(p => originalValues.Contains(p.Value)) ? [false, true] : [true];
             foreach (var fromRuns in sources)
             {
                 var candidate = plan;
                 for (int attempt = 0; attempt < 3; attempt++)
                 {
-                    var outcome = TryVariant(entry, fromRuns ? runsModel : original, fromRuns, candidate, runs, runsOutputs, shapes, given, blockBytes);
+                    cancellation.ThrowIfCancellationRequested();
+                    var outcome = TryVariant(entry, fromRuns ? runsModel : original!, fromRuns, candidate, runs, runsOutputs, shapes, given, blockBytes);
                     if (outcome.Plan is null) break;
                     if (entry.Stage != Stage.Unplanned) return;
                     candidate = outcome.Plan;
@@ -482,7 +523,19 @@ internal sealed class OrtPlacements : IDisposable
             }
             Refuse(entry, entry.Refusal ?? "no variant held the plan");
         }
-        catch (Exception failure) when (failure is not OutOfMemoryException)
+        catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+        {
+            // Stopped rather than failed: a run after this one plans the signature.
+            throw;
+        }
+        catch (OutOfMemoryException exhausted)
+        {
+            // Placing is a saving and never a requirement: the run goes on as it would have with no
+            // placing, its memory what it was before planning began.
+            lock (_gate) _broken ??= $"planning ran out of memory: {exhausted.Message}";
+            Refuse(entry, $"planning failed: {exhausted.GetType().Name}: {exhausted.Message}");
+        }
+        catch (Exception failure)
         {
             Refuse(entry, $"planning failed: {failure.GetType().Name}: {failure.Message}");
         }
@@ -509,7 +562,7 @@ internal sealed class OrtPlacements : IDisposable
         try
         {
             var heldBefore = _held();
-            variant = _build(WithOutputs(model, exposed, shapes), directory, fromRuns ? _files.Runs : null, true);
+            variant = _build(WithOutputs(model, exposed, shapes), null, directory, fromRuns ? _files.Runs : null, true);
             var variantHeld = _held() - heldBefore;
             var graph = ReadOptimized(directory).Graph!;
             entry.VariantGraph = graph;
@@ -519,7 +572,9 @@ internal sealed class OrtPlacements : IDisposable
                 return (null, false);
             }
             var variantShapes = PlacementShapes.Evaluate(graph, given);
-            var variantProof = new PlacementProof(graph, blockBytes, variantShapes, runsOutputs, MemoryOf(graph), runsInOrder: true);
+            var (memory, scratch) = LayoutOf(graph, variant);
+            var variantProof = new PlacementProof(graph, blockBytes, variantShapes, runsOutputs, memory, runsInOrder: true,
+                scratch: node => scratch(node, variantShapes));
             var proved = variantProof.Prove(plan
                 .Where(p => variantShapes.TryGetValue(p.Value, out var v) && v.Bytes == p.Bytes && StatedAgrees(graph, p.Value, v, given)));
             if (proved.Count == 0)
@@ -607,16 +662,24 @@ internal sealed class OrtPlacements : IDisposable
     }
 
     /// <summary>
-    /// How this session lays out the values of <paramref name="graph"/>, a graph it runs, as far as
-    /// placing them goes: ONNX Runtime's way, where on a card a node that runs on the host
-    /// (<see cref="HostNodes"/>) writes into no range — its output is host memory, which a binding
-    /// to a range on the card receives only as the run ends, over whatever the run wrote there since.
+    /// How <paramref name="session"/> — this session or a variant of it — lays out the values of
+    /// <paramref name="graph"/>, the graph it runs, as far as placing them goes, and what its kernels
+    /// take for their own use while each node runs, given the shapes of the run's values. Memory
+    /// ONNX Runtime's way, where on a card a node that runs on the host (<see cref="HostNodes"/>)
+    /// writes into no range — its output is host memory, which a binding to a range on the card
+    /// receives only as the run ends, over whatever the run wrote there since. Scratch as
+    /// <see cref="OrtRunMemory"/> measures it in the memory the session's runs are measured in: of a
+    /// card's nodes on a card, a host node taking none of the card's, and of every node on the host —
+    /// so the run the model weighs takes what a run measured on the session's allocator does.
     /// </summary>
-    private PlacementMemory MemoryOf(GraphProto graph)
+    private (PlacementMemory Memory, Func<NodeProto, IReadOnlyDictionary<string, PlacementShapes.Value>, long> Scratch) LayoutOf(
+        GraphProto graph, OrtSession session)
     {
-        if (!_backend.OnCard) return PlacementMemory.OnnxRuntime;
-        var host = HostNodes(graph);
-        return PlacementMemory.OnnxRuntime with { Writes = (node, _) => !host.Contains(node) };
+        if (!_backend.OnCard) return (PlacementMemory.OnnxRuntime, OrtRunMemory.HostScratch);
+        var names = session.HostMemoryNames;
+        var host = HostNodes(graph, names?.Inputs ?? graph.Inputs.Select(i => i.Name).ToHashSet(StringComparer.Ordinal), names?.Outputs);
+        return (PlacementMemory.OnnxRuntime with { Writes = (node, _) => !host.Contains(node) },
+            (node, shapes) => host.Contains(node) ? 0 : OrtRunMemory.CardScratch(node, shapes));
     }
 
     // The CUDA provider's operators reading nothing of the card's memory to write their output there:
@@ -631,31 +694,40 @@ internal sealed class OrtPlacements : IDisposable
     /// host memory: a copy to the host, a shape or a size, and every node of the CPU provider's. ONNX
     /// Runtime hands a node values in its provider's memory: across a copy node where one provider's
     /// node reads another's output, and for a graph input, by copying the feed as the run starts —
-    /// to the host where a CPU-provider node reads it, the card's readers then reading it through a
-    /// copy onto the card. So a node whose output a copy onto the card reads is the CPU provider's,
-    /// and so is every node writing what such a node reads; a node reading the output of a node of
-    /// the card's, an input no copy onto the card reads, or a copy onto the card is the CUDA
-    /// provider's; and of the nodes reading none of those, only its generators, where no copy onto
-    /// the card takes what they write.
+    /// to the host where only CPU-provider nodes read it, and where nodes of both read it, to the
+    /// host too, the card's readers then reading it through a copy onto the card.
+    /// <paramref name="hostInputs"/> names the inputs the session reads in host memory, as it says
+    /// where it reads each one; where it is not said, those a copy onto the card reads.
+    /// <paramref name="hostOutputs"/> names the outputs it leaves in host memory, as it says, where
+    /// the node writing one is a node of neither kind above.
+    ///
+    /// <para>So a node whose output a copy onto the card reads, or that writes an output left in
+    /// host memory, is the CPU provider's, and so is every node writing what such a node reads; a
+    /// node reading the output of a node of the card's, an input read on the card, or a copy onto the
+    /// card is the CUDA provider's; and of the nodes reading none of those, only its generators,
+    /// where no copy onto the card takes what they write.</para>
     /// </summary>
-    internal static HashSet<NodeProto> HostNodes(GraphProto graph)
+    internal static HashSet<NodeProto> HostNodes(GraphProto graph, IReadOnlySet<string>? hostInputs = null, IReadOnlySet<string>? hostOutputs = null)
     {
         var copiedOn = graph.Nodes.Where(n => n.OpType == "MemcpyFromHost").SelectMany(n => n.Inputs).ToHashSet(StringComparer.Ordinal);
         var producer = new Dictionary<string, NodeProto>(StringComparer.Ordinal);
         foreach (var node in graph.Nodes)
             foreach (var output in node.Outputs)
                 if (output.Length > 0) producer[output] = node;
+        static bool Copies(NodeProto node) => node.OpType is "MemcpyFromHost" or "MemcpyToHost" or "Shape" or "Size";
         var host = new HashSet<NodeProto>(ReferenceEqualityComparer.Instance);
-        var pending = new Stack<NodeProto>(graph.Nodes.Where(n => n.OpType != "MemcpyToHost" && n.Outputs.Any(copiedOn.Contains)));
+        var pending = new Stack<NodeProto>(graph.Nodes.Where(n =>
+            (n.OpType != "MemcpyToHost" && n.Outputs.Any(copiedOn.Contains))
+            || (!Copies(n) && hostOutputs is not null && n.Outputs.Any(hostOutputs.Contains))));
         while (pending.TryPop(out var node))
         {
             if (!host.Add(node)) continue;
             foreach (var input in node.Inputs)
-                if (input.Length > 0 && producer.TryGetValue(input, out var writer)
-                    && writer.OpType is not ("MemcpyFromHost" or "MemcpyToHost" or "Shape" or "Size"))
+                if (input.Length > 0 && producer.TryGetValue(input, out var writer) && !Copies(writer))
                     pending.Push(writer);
         }
-        var onCard = graph.Inputs.Select(i => i.Name).Where(i => !copiedOn.Contains(i)).ToHashSet(StringComparer.Ordinal);
+        var onCard = graph.Inputs.Select(i => i.Name)
+            .Where(i => !copiedOn.Contains(i) && hostInputs?.Contains(i) != true).ToHashSet(StringComparer.Ordinal);
         foreach (var node in graph.Nodes)
         {
             var card = !host.Contains(node) && node.OpType switch
@@ -675,18 +747,21 @@ internal sealed class OrtPlacements : IDisposable
     /// runs as it wrote it out — for a measurement to read.</summary>
     internal ModelProto OriginalModel
     {
-        get { return Original(); }
+        get { lock (_sources) return OriginalUnderLock(); }
+    }
+
+    /// <summary>The model as handed to the backend for a plan to look at before anything is built,
+    /// parsed once — or null where the graph that runs is at hand already and the model is kept in
+    /// no memory of the session's: reading it would cost a copy of the model for nothing.</summary>
+    private ModelProto? HandedOverToPlan()
+    {
+        lock (_sources) return _model is null && _runs is not null ? null : OriginalUnderLock();
     }
 
     /// <summary>The model as handed to the backend, parsed once — or, where the session kept none,
     /// the graph it runs as it wrote it out. One kept in a file is kept parsed
     /// without the contents of its larger tensors, which the proof does not read: it is a graph to
     /// plan over, and never one to build from.</summary>
-    private ModelProto Original()
-    {
-        lock (_sources) return OriginalUnderLock();
-    }
-
     private ModelProto OriginalUnderLock()
     {
         if (_original is not null) return _original;
@@ -696,40 +771,241 @@ internal sealed class OrtPlacements : IDisposable
             using var stream = new MemoryStream(_model, writable: false);
             return _original = ProtoBuf.Serializer.Deserialize<ModelProto>(stream);
         }
-        using (var file = File.OpenRead(_files.Model!))
-            _original = ProtoBuf.Serializer.Deserialize<ModelProto>(file);
-        foreach (var tensor in _original.Graph?.Initializers ?? [])
-            if (tensor.RawData is { Length: > 1024 }) tensor.RawData = [];
-        foreach (var node in _original.Graph?.Nodes ?? [])
-            foreach (var attribute in node.Attributes)
-                if (attribute.T?.RawData is { Length: > 1024 }) attribute.T.RawData = [];
-        return _original;
+        using var file = File.OpenRead(_files.Model!);
+        return _original = WithoutLargeTensorContents(file);
     }
 
-    /// <summary>The model's bytes, as handed to the backend.</summary>
-    private byte[] ModelBytes() => _model ?? File.ReadAllBytes(_files.Model!);
+    /// <summary>The most bytes of a tensor's contents a model read to plan over keeps.</summary>
+    private const int TensorContentsKept = 1024;
 
     /// <summary>
-    /// The files a session's placements keep on disk, deleted as the placements are let go of — or,
-    /// where the session is collected without being disposed, as this is finalized: a compiled graph
-    /// held weakly goes that way, and each would otherwise leave a model's worth of files behind. A
-    /// file still mapped by a variant ONNX Runtime has not released yet stays.
+    /// The model <paramref name="source"/> holds, read without the contents of any of its tensors
+    /// over <see cref="TensorContentsKept"/> bytes — its initializers', its constants', and those of
+    /// its subgraphs — which are skipped over in the stream, never read: what is read is the size of
+    /// the graph, not of the model's weights.
+    /// </summary>
+    internal static ModelProto WithoutLargeTensorContents(Stream source)
+    {
+        var lean = new MemoryStream();
+        CopyLean(source, source.Length, lean, Message.Model);
+        lean.Position = 0;
+        return ProtoBuf.Serializer.Deserialize<ModelProto>(lean);
+    }
+
+    /// <summary>The ONNX messages <see cref="CopyLean"/> looks into, on the way to tensors.</summary>
+    private enum Message { Model, Graph, Node, Attribute, Tensor }
+
+    /// <summary>The message field <paramref name="field"/> of a <paramref name="parent"/> holds, where
+    /// it is one on the way to a tensor: a model's graph; a graph's nodes and initializers; a node's
+    /// attributes; an attribute's tensors and graphs.</summary>
+    private static Message? Holds(Message parent, ulong field) => (parent, field) switch
+    {
+        (Message.Model, 7) => Message.Graph,
+        (Message.Graph, 1) => Message.Node,
+        (Message.Graph, 5) => Message.Tensor,
+        (Message.Node, 5) => Message.Attribute,
+        (Message.Attribute, 5 or 10) => Message.Tensor,
+        (Message.Attribute, 6 or 11) => Message.Graph,
+        _ => null,
+    };
+
+    /// <summary>Copies the fields of a <paramref name="message"/> from <paramref name="source"/> up to
+    /// <paramref name="end"/> into <paramref name="target"/>, but for a tensor's contents — raw, or
+    /// as packed numbers — over <see cref="TensorContentsKept"/> bytes.</summary>
+    private static void CopyLean(Stream source, long end, Stream target, Message message)
+    {
+        while (source.Position < end)
+        {
+            var tag = ReadVarint(source);
+            var (field, wire) = (tag >> 3, (int)(tag & 7));
+            switch (wire)
+            {
+                case 0:
+                    WriteVarint(target, tag);
+                    WriteVarint(target, ReadVarint(source));
+                    break;
+                case 1 or 5:
+                    WriteVarint(target, tag);
+                    CopyBytes(source, target, wire == 1 ? 8 : 4);
+                    break;
+                case 2:
+                    var length = (long)ReadVarint(source);
+                    if (message == Message.Tensor && field is 4 or 5 or 7 or 9 or 10 or 11 && length > TensorContentsKept)
+                    {
+                        source.Seek(length, SeekOrigin.Current);
+                        break;
+                    }
+                    WriteVarint(target, tag);
+                    if (Holds(message, field) is { } inner)
+                    {
+                        var nested = new MemoryStream();
+                        CopyLean(source, source.Position + length, nested, inner);
+                        WriteVarint(target, (ulong)nested.Length);
+                        nested.WriteTo(target);
+                    }
+                    else
+                    {
+                        WriteVarint(target, (ulong)length);
+                        CopyBytes(source, target, length);
+                    }
+                    break;
+                default:
+                    throw new InvalidDataException($"The model holds a field of wire type {wire}, which ONNX does not use.");
+            }
+        }
+    }
+
+    private static ulong ReadVarint(Stream source)
+    {
+        ulong value = 0;
+        for (int shift = 0; shift < 64; shift += 7)
+        {
+            var b = source.ReadByte();
+            if (b < 0) throw new EndOfStreamException("The model ends inside a field.");
+            value |= (ulong)(b & 0x7F) << shift;
+            if (b < 0x80) return value;
+        }
+        throw new InvalidDataException("The model holds a number longer than ten bytes.");
+    }
+
+    private static void WriteVarint(Stream target, ulong value)
+    {
+        for (; value >= 0x80; value >>= 7) target.WriteByte((byte)(value | 0x80));
+        target.WriteByte((byte)value);
+    }
+
+    private static void CopyBytes(Stream source, Stream target, long count)
+    {
+        Span<byte> buffer = stackalloc byte[4096];
+        while (count > 0)
+        {
+            var read = source.Read(buffer[..(int)Math.Min(count, buffer.Length)]);
+            if (read == 0) throw new EndOfStreamException("The model ends inside a field.");
+            target.Write(buffer[..read]);
+            count -= read;
+        }
+    }
+
+    /// <summary>
+    /// The files a session's placements keep on disk — a copy of a model too large to keep in
+    /// memory, and the folder of the graph ONNX Runtime runs — deleted as the placements are let go
+    /// of, or, where the session is collected without being disposed, as this is finalized: a
+    /// compiled graph held weakly goes that way, and each would otherwise leave a model's worth of
+    /// files behind. A file still mapped by a variant ONNX Runtime has not released yet stays.
+    ///
+    /// <para><b>Claimed while kept.</b> A process that ends without letting go of them — killed, or
+    /// crashed — leaves them behind, so each is held open while it is kept: the model's copy itself,
+    /// and in the folder a file of its own (<see cref="KeptLockFile"/>). What is left in the
+    /// temporary folder by a process that has ended is claimed by nothing, and is deleted by the next
+    /// process to keep files there (<see cref="SweepStale"/>).</para>
     /// </summary>
     private sealed class KeptFiles
     {
-        internal string? Model;
-        internal string? Runs;
+        private FileStream? _modelClaim;
+        private FileStream? _runsClaim;
+
+        internal string? Model { get; private set; }
+        internal string? Runs { get; private set; }
+
+        /// <summary>Keeps <paramref name="model"/> in a file of its own, claimed.</summary>
+        internal void KeepModel(byte[] model)
+        {
+            _ = Sweep.Value;
+            Model = Path.Combine(Path.GetTempPath(), ModelFilePrefix + Guid.NewGuid().ToString("N") + ".onnx");
+            File.WriteAllBytes(Model, model);
+            _modelClaim = new FileStream(Model, FileMode.Open, FileAccess.Read, FileShare.Read);
+        }
+
+        /// <summary>Keeps <paramref name="directory"/>, claimed — kept unclaimed where its claim
+        /// cannot be made, as a folder nothing else could take over a sweep is.</summary>
+        internal void KeepRuns(string directory)
+        {
+            _ = Sweep.Value;
+            Runs = directory;
+            try
+            {
+                _runsClaim = new FileStream(Path.Combine(directory, KeptLockFile), FileMode.CreateNew, FileAccess.ReadWrite, FileShare.Read);
+            }
+            catch (Exception unclaimed) when (unclaimed is IOException or UnauthorizedAccessException) { }
+        }
 
         ~KeptFiles() => Delete();
 
         internal void Delete()
         {
+            try { _modelClaim?.Dispose(); } catch (Exception) { }
+            try { _runsClaim?.Dispose(); } catch (Exception) { }
+            _modelClaim = _runsClaim = null;
             if (Model is { } model)
                 try { File.Delete(model); } catch (Exception) { }
             if (Runs is { } runs)
                 try { Directory.Delete(runs, recursive: true); } catch (Exception) { }
             Model = null;
             Runs = null;
+        }
+
+        // The sweep of what ended processes left, made once in the background as this process first
+        // keeps files.
+        private static readonly Lazy<Task> Sweep = new(() => Task.Run(SweepStale));
+    }
+
+    private const string ModelFilePrefix = "shorokoo-model-";
+
+    /// <summary>The prefixes of the folders the sessions and their placements make in the temporary
+    /// folder: the graph that runs, kept; and those made and deleted as a session or a variant is
+    /// built.</summary>
+    private static readonly string[] FolderPrefixes = ["shorokoo-runs-", "shorokoo-optimized-", "shorokoo-placed-"];
+
+    /// <summary>How long a file or folder has gone unwritten before a sweep may take it for one an
+    /// ended process left: none is in the making that long.</summary>
+    private static readonly TimeSpan StaleAfter = TimeSpan.FromDays(1);
+
+    /// <summary>
+    /// Deletes what processes that have ended left in the temporary folder: each model copy (as
+    /// <see cref="KeptFiles"/> keeps them) and each folder of a session's or its placements' that
+    /// has gone a day unwritten and that no live process claims — a model copy no process holds open,
+    /// a folder whose <see cref="KeptLockFile"/> no process holds open, or that has none. Anything it
+    /// cannot read or delete it leaves.
+    /// </summary>
+    internal static void SweepStale()
+    {
+        var stale = DateTime.UtcNow - StaleAfter;
+        string[] entries;
+        try
+        {
+            entries = Directory.GetFileSystemEntries(Path.GetTempPath(), "shorokoo-*");
+        }
+        catch (Exception unreadable) when (unreadable is IOException or UnauthorizedAccessException or ArgumentException) { return; }
+        foreach (var entry in entries)
+            try
+            {
+                var name = Path.GetFileName(entry);
+                if (name.StartsWith(ModelFilePrefix, StringComparison.Ordinal) && name.EndsWith(".onnx", StringComparison.Ordinal))
+                {
+                    if (File.GetLastWriteTimeUtc(entry) < stale) DeleteUnclaimed(entry);
+                }
+                else if (FolderPrefixes.Any(p => name.StartsWith(p, StringComparison.Ordinal)) && Directory.Exists(entry)
+                         && Directory.GetLastWriteTimeUtc(entry) < stale)
+                {
+                    var claim = Path.Combine(entry, KeptLockFile);
+                    if (!File.Exists(claim) || DeleteUnclaimed(claim)) Directory.Delete(entry, recursive: true);
+                }
+            }
+            catch (Exception locked) when (locked is IOException or UnauthorizedAccessException) { }
+    }
+
+    /// <summary>Deletes <paramref name="file"/> where no process holds it open, which opening it for
+    /// itself alone tells, and answers whether it did.</summary>
+    private static bool DeleteUnclaimed(string file)
+    {
+        try
+        {
+            using (new FileStream(file, FileMode.Open, FileAccess.ReadWrite, FileShare.None, 1, FileOptions.DeleteOnClose)) { }
+            return true;
+        }
+        catch (Exception claimed) when (claimed is IOException or UnauthorizedAccessException)
+        {
+            return false;
         }
     }
 
@@ -741,6 +1017,9 @@ internal sealed class OrtPlacements : IDisposable
         lock (_sources) return RunGraphUnderLock();
     }
 
+    /// <summary><see cref="RunGraph"/>, under the lock. A probe of a model kept in a file is built
+    /// from the file, which ONNX Runtime reads itself, so that no copy of the model is made here
+    /// besides the one it builds from.</summary>
     private ModelProto RunGraphUnderLock()
     {
         if (_runs is not null) return _runs;
@@ -748,9 +1027,9 @@ internal sealed class OrtPlacements : IDisposable
         Directory.CreateDirectory(directory);
         try
         {
-            _build(ModelBytes(), directory, null, false).Dispose();
+            _build(_model, _model is null ? _files.Model : null, directory, null, false).Dispose();
             _runs = ReadOptimized(directory);
-            _files.Runs = directory;
+            _files.KeepRuns(directory);
             return _runs;
         }
         catch (Exception failure)

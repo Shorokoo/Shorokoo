@@ -128,6 +128,7 @@ internal sealed class OrtSession : IShorokooSession
         // join the finalization queue to run an early return.
         if (profileDirectory is null) GC.SuppressFinalize(this);
         _placement = new Lazy<SessionOutputPlacement>(() => DiscoverPlacement(session));
+        _hostMemoryNames = new Lazy<(IReadOnlySet<string> Inputs, IReadOnlySet<string> Outputs)?>(ReadHostMemoryNames);
         // The info names the card's memory as a binding wants it: ONNX Runtime binds an output to
         // the device an info names, and allocates it there from the session's allocator for it.
         _cardMemory = cudaDeviceId is { } device ? CudaMemoryInfo(device) : null;
@@ -279,18 +280,19 @@ internal sealed class OrtSession : IShorokooSession
         HashSet<IShorokooTensorValue>? kept = null;
         try
         {
+            ArgumentNullException.ThrowIfNull(runSettings);
             var into = OutputsIntoConsumed(inputs, consumed, outputNames);
             IReadOnlyList<IShorokooTensorValue> results;
-            var blocks = Placements is null || consumed.Count == 0
-                ? null
-                : OrtPlacements.Blocks(inputs, consumed, into?.Values.Select(t => t.Input).ToHashSet(StringComparer.Ordinal) ?? []);
-            if (Placements is { } placements && blocks is not null && placements.EntryFor(inputs, blocks, outputNames) is { } entry)
+            var intoInputs = into?.Values.Select(t => t.Input).ToHashSet(StringComparer.Ordinal) ?? [];
+            var blocks = Placements is null || consumed.Count == 0 ? null : OrtPlacements.Blocks(inputs, consumed, intoInputs);
+            if (Placements is { } placements && blocks is not null && placements.EntryFor(inputs, blocks, outputNames, intoInputs) is { } entry)
                 results = placements.Run(
                     this, entry, inputs, blocks, outputNames,
                     () => RunBound(inputs, outputNames, into, runSettings),
                     (variant, placed) => variant.RunBound(inputs, outputNames, into, runSettings, placed),
                     // An output written into its own input is not placed in another.
                     (IReadOnlyCollection<string>?)into?.Keys ?? [],
+                    runSettings.CancellationToken,
                     out kept);
             else
                 results = RunBound(inputs, outputNames, into, runSettings);
@@ -310,6 +312,9 @@ internal sealed class OrtSession : IShorokooSession
             // output was placed in is the block's to release, with the last output standing on it.
             foreach (var value in consumed)
                 if (kept is null || !kept.Contains(value)) ((IShorokooBackend)_backend).Release(value);
+            // Last, so that what the run let go of is handed back with the rest: what it consumed, and
+            // what of a block no placed output stands on.
+            HandBackIfAsked(runSettings);
         }
     }
 
@@ -359,13 +364,39 @@ internal sealed class OrtSession : IShorokooSession
            && value.Shape.AsSpan().SequenceEqual(slot.Shape);
 
     /// <summary>
-    /// Runs the session, every output left in the run memory (<see cref="RunBound"/>).
+    /// Runs the session, every output left in the run memory (<see cref="RunBound"/>). A run asked
+    /// to hand back its memory has the allocators hand back what they keep cached for this session
+    /// once it ends (<see cref="CachingAllocator.ReleaseCached"/>).
     /// </summary>
     public IReadOnlyList<IShorokooTensorValue> Run(
         IReadOnlyDictionary<string, IShorokooTensorValue> inputs,
         IReadOnlyList<string> outputNames,
         RunSettings runSettings)
-        => RunBound(inputs, outputNames, into: null, runSettings);
+    {
+        ArgumentNullException.ThrowIfNull(runSettings);
+        try
+        {
+            return RunBound(inputs, outputNames, into: null, runSettings);
+        }
+        finally
+        {
+            HandBackIfAsked(runSettings);
+        }
+    }
+
+    /// <summary>Has the allocators hand back what they keep cached for this session — and for the
+    /// sessions carrying out its placements, which charge its accounts — where
+    /// <paramref name="runSettings"/> asks a run to hand back its memory: as the run is over, once
+    /// everything it let go of has gone back to them.</summary>
+    private void HandBackIfAsked(RunSettings? runSettings)
+    {
+        if (runSettings is null) return;
+        if (runSettings.ShrinkArenaAfterRun)
+        {
+            if (_cardAccount is { } card) card.Allocator.ReleaseCached(card);
+            _hostAccount.Allocator.ReleaseCached(_hostAccount);
+        }
+    }
 
     /// <summary>
     /// Runs the session, every output left in the run memory — on a CUDA session a tensor on this
@@ -382,8 +413,8 @@ internal sealed class OrtSession : IShorokooSession
     /// <para>Under a device-memory budget, each output on the card is handed over as the run
     /// returns (<see cref="CachingAllocator.HandOver"/>): the context counts it with the tensors
     /// attached to it from then on, so the limit the session's later runs get is no longer spent on
-    /// it. A run asked to hand back its memory has the allocators hand back what they keep cached
-    /// for this session once it ends (<see cref="CachingAllocator.ReleaseCached"/>).</para>
+    /// it. What the allocators keep cached is handed back by the caller, once the run has let go of
+    /// everything it will (<see cref="HandBackIfAsked"/>).</para>
     /// </summary>
     private IReadOnlyList<IShorokooTensorValue> RunBound(
         IReadOnlyDictionary<string, IShorokooTensorValue> inputs,
@@ -394,22 +425,11 @@ internal sealed class OrtSession : IShorokooSession
     {
         ArgumentNullException.ThrowIfNull(runSettings);
         runSettings.CancellationToken.ThrowIfCancellationRequested();
-        try
-        {
-            var outputs = into is null && _cardMemory is null && placed is null
-                ? RunPlain(inputs, outputNames, runSettings)
-                : RunThroughABinding(inputs, outputNames, into, runSettings, placed);
-            if (_cardAccount?.Limit is not null) HandOver(outputs);
-            return outputs;
-        }
-        finally
-        {
-            if (runSettings.ShrinkArenaAfterRun)
-            {
-                if (_cardAccount is { } card) card.Allocator.ReleaseCached(card);
-                _hostAccount.Allocator.ReleaseCached(_hostAccount);
-            }
-        }
+        var outputs = into is null && _cardMemory is null && placed is null
+            ? RunPlain(inputs, outputNames, runSettings)
+            : RunThroughABinding(inputs, outputNames, into, runSettings, placed);
+        if (_cardAccount?.Limit is not null) HandOver(outputs);
+        return outputs;
     }
 
     /// <summary>The allocator account this session charges its host memory to, which the sessions
@@ -686,6 +706,32 @@ internal sealed class OrtSession : IShorokooSession
 
     public SessionOutputPlacement OutputPlacement => _placement.Value;
 
+    /// <summary>
+    /// The inputs this session's runs read in host memory, and the outputs they leave there, as
+    /// ONNX Runtime says where it reads and leaves each one; null where it does not say. Asked once.
+    /// </summary>
+    internal (IReadOnlySet<string> Inputs, IReadOnlySet<string> Outputs)? HostMemoryNames => _hostMemoryNames.Value;
+
+    private readonly Lazy<(IReadOnlySet<string> Inputs, IReadOnlySet<string> Outputs)?> _hostMemoryNames;
+
+    private (IReadOnlySet<string>, IReadOnlySet<string>)? ReadHostMemoryNames()
+    {
+        try
+        {
+            static HashSet<string> InHost(IReadOnlyList<string> names, IReadOnlyCollection<OrtMemoryInfo> infos)
+                => [.. names.Zip(infos).Where(p => OrtTensorValue.IsHostAllocator(p.Second.Name)).Select(p => p.First)];
+            using var inputs = _session.GetMemoryInfosForInputs();
+            using var outputs = _session.GetMemoryInfosForOutputs();
+            (IReadOnlySet<string>, IReadOnlySet<string>) names = (InHost(_session.InputNames, inputs), InHost(_session.OutputNames, outputs));
+            // After the names are read, for the reason DiscoverPlacement gives: each info points into
+            // the session rather than owning anything.
+            GC.KeepAlive(_session);
+            return names;
+        }
+        // Not said is answered as such, and the caller takes nothing for read on the card.
+        catch (Exception) { return null; }
+    }
+
     /// <summary>ORT's memory info for a CUDA device's memory, as a binding names the device an
     /// output is left on. <c>CudaPinned</c> is the pinned host arena that host-to-device copies stage
     /// through and is a different allocator — <see cref="CudaPinnedArenaMemoryInfo"/>.</summary>
@@ -716,7 +762,8 @@ internal sealed class OrtSession : IShorokooSession
         {
             owned = CudaPinnedArenaMemoryInfo(device);
             var allocator = new OrtAllocator(_session, owned);
-            // The field assignment roots `owned` across the constructor, exactly as above.
+            // The constructor takes the info as a bare handle; reading `owned` again here, to keep
+            // it, keeps it reachable until the constructor has returned.
             _ownedPinnedMemoryInfo = owned;
             return allocator;
         }

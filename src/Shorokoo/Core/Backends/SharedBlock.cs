@@ -18,6 +18,12 @@ namespace Shorokoo.Core.Backends;
 ///
 /// <para>A block is counted by a device-memory budget once, for what of it is still held
 /// (<see cref="HeldBytes"/>), for as long as a tensor attached to the context stands on it.</para>
+///
+/// <para><b>A value nothing references releases its lease as it is collected</b>
+/// (<see cref="HeldLease"/>), as a tensor in memory of its own frees it then. While any lease is
+/// held the block is kept reachable from here, and with it whatever its letting go releases: the
+/// memory it stands for is let go of by the block alone, with its last lease, never by a finalizer of
+/// its own that could free it before the leases still handing parts of it back.</para>
 /// </summary>
 internal sealed class SharedBlock
 {
@@ -26,6 +32,8 @@ internal sealed class SharedBlock
     private readonly List<(long Offset, long Bytes)> _leases = [];
     private bool _released;
     private long _givenBack;
+    // Keeps the block reachable while a lease is held.
+    private System.Runtime.InteropServices.GCHandle _leased;
 
     /// <summary>
     /// A block of <paramref name="bytes"/> bytes with no lease yet, which <paramref name="letGo"/>
@@ -76,6 +84,7 @@ internal sealed class SharedBlock
         lock (_leases)
         {
             if (_released) throw new ObjectDisposedException(nameof(SharedBlock), "The block was let go of when its last lease was released.");
+            if (!_leased.IsAllocated) _leased = System.Runtime.InteropServices.GCHandle.Alloc(this);
             _leases.Add((offset, bytes));
         }
     }
@@ -96,6 +105,7 @@ internal sealed class SharedBlock
             }
             if (_released) return;
             _released = true;
+            if (_leased.IsAllocated) _leased.Free();
         }
         _letGo();
     }
@@ -132,4 +142,36 @@ internal readonly record struct BlockRange(SharedBlock Block, long Offset, long 
 
     /// <summary>Releases the lease <see cref="Lease"/> took.</summary>
     internal void Release() => Block.Release(Offset, Bytes);
+}
+
+/// <summary>
+/// The lease a value standing on a <see cref="SharedBlock"/> holds on its range, taken already,
+/// released once: by the value as it is released, or — where nothing references the value any more
+/// and it is collected without — as this is finalized, so the range goes back, and the block with
+/// its last lease, as a tensor in memory of its own is freed then.
+/// </summary>
+internal sealed class HeldLease(BlockRange range)
+{
+    private int _released;
+
+    /// <summary>Where the value stands.</summary>
+    internal BlockRange Range => range;
+
+    /// <summary>Releases the lease, the first time only.</summary>
+    internal void Release()
+    {
+        if (Interlocked.Exchange(ref _released, 1) != 0) return;
+        GC.SuppressFinalize(this);
+        range.Release();
+    }
+
+    ~HeldLease()
+    {
+        if (Interlocked.Exchange(ref _released, 1) != 0) return;
+        // The block is still reachable — it keeps itself so while leased — and so is what its
+        // letting go releases. Nothing may escape a finalizer: a failure to hand a range back leaves
+        // it held, as a value never collected would.
+        try { range.Release(); }
+        catch (Exception) { }
+    }
 }

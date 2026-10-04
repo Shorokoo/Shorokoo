@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Microsoft.ML.OnnxRuntime;
 using Shorokoo.Core.Backends;
@@ -31,17 +32,27 @@ internal sealed class OrtTensorValue : IShorokooTensorValue
     /// <summary>
     /// A value over a range of a shared block (<see cref="SharedBlock"/>): <paramref name="inner"/>
     /// is an ORT value over that memory, owning none of it, and <paramref name="range"/> where it
-    /// stands, with a lease the caller has taken for it, which this releases as it is released.
+    /// stands, with a lease the caller has taken for it, which this releases as it is released — or,
+    /// where it is collected without, as it is collected (<see cref="HeldLease"/>).
     /// </summary>
     public OrtTensorValue(OrtValue inner, BlockRange range)
     {
         _inner = inner;
-        Range = range;
+        _lease = new HeldLease(range);
+        LeasesOfInnerValues.Add(inner, _lease);
     }
+
+    // The lease on the range this value stands on, or null for one that owns its memory whole.
+    private readonly HeldLease? _lease;
+
+    // Each lease kept reachable from the ORT value over the range as well as from this wrapper: a
+    // native call is handed the ORT value alone, and keeps that alive across the call, not this --
+    // and the lease of a value collected undeleted goes as it is collected, the range with it.
+    private static readonly ConditionalWeakTable<OrtValue, HeldLease> LeasesOfInnerValues = new();
 
     /// <summary>Where this value stands on a block it shares, or null for one that owns its memory
     /// whole.</summary>
-    internal BlockRange? Range { get; }
+    internal BlockRange? Range => _lease?.Range;
 
     BlockRange? IShorokooTensorValue.Range => Range;
 
@@ -365,7 +376,7 @@ internal sealed class OrtTensorValue : IShorokooTensorValue
         _inner.Dispose();
         // After the value over the memory, which reads nothing once released: the lease may be the
         // block's last, and letting it go frees the memory.
-        Range?.Release();
+        _lease?.Release();
     }
 
     /// <summary>

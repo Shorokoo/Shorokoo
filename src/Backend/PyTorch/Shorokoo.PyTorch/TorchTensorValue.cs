@@ -31,7 +31,7 @@ public sealed class TorchTensorValue : IShorokooTensorValue
     private readonly ShorokooTensorElementType _elementType;
     private readonly bool _isHost;
     private readonly int _cudaDevice;
-    private BlockRange? _range;
+    private HeldLease? _lease;
     private int _released;
 
     private TorchTensorValue(
@@ -99,16 +99,17 @@ public sealed class TorchTensorValue : IShorokooTensorValue
 
     /// <summary>Where this value stands on a block of memory other values stand on too, holding a
     /// lease on it; null for a tensor of its own storage.</summary>
-    internal BlockRange? Range => _range;
+    internal BlockRange? Range => _lease?.Range;
 
-    BlockRange? IShorokooTensorValue.Range => _range;
+    BlockRange? IShorokooTensorValue.Range => Range;
 
     /// <summary>Makes this value one standing on <paramref name="range"/>, taking a lease on its
-    /// block, which disposing the value releases.</summary>
+    /// block, which disposing the value releases — or, where it is collected without, collecting it
+    /// (<see cref="HeldLease"/>).</summary>
     internal void StandOn(BlockRange range)
     {
         range.Lease();
-        _range = range;
+        _lease = new HeldLease(range);
     }
 
     /// <summary>The Python object this wraps, refused once released: a released value's reference
@@ -234,7 +235,7 @@ public sealed class TorchTensorValue : IShorokooTensorValue
     {
         if (Interlocked.Exchange(ref _released, 1) != 0) return;
         PythonRuntime.Release(_value);
-        _range?.Release();
+        _lease?.Release();
     }
 
     /// <summary>Marks this released and drops its reference, for a value handed into a sequence:

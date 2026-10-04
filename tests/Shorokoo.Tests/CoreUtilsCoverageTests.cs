@@ -1842,7 +1842,7 @@ public class CoreUtilsCoverageTests
         Assert.Matches(@"AppendExecutionProvider_CUDA\s*\(\s*cuda\s*\)", source);
         Assert.Matches(@"CudaProviderOptions\s*\(\s*deviceId\s*,\s*precision\s*\)", source);
         Assert.Matches(@"card\.Limit\s*=\s*deviceMemory\.LimitBytes", source);
-        Assert.Matches(@"using\s*\(\s*CachingAllocator\.Charge\s*\(\s*host\s*,\s*card\s*\)\s*\)\s*session\s*=\s*new\s+InferenceSession", source);
+        Assert.Matches(@"using\s*\(\s*CachingAllocator\.Charge\s*\(\s*host\s*,\s*card\s*\)\s*\)\s*session\s*=\s*(model\s+is\s+null\s*\?\s*new\s+InferenceSession\s*\([^;:]*:\s*)?new\s+InferenceSession", source);
         Assert.Contains("\"session.use_env_allocators\", \"1\"", File.ReadAllText(
             Path.Combine(backend, "Shorokoo.OnnxRuntime", "OrtBackend.cs")));
         Assert.Matches(@"_configureExecutionProvider\s*\(\s*options\s*,\s*deviceMemory\s*,\s*precision\s*\)", source);

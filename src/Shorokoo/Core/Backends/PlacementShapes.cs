@@ -211,7 +211,7 @@ internal static class PlacementShapes
         "LogSoftmax", "Hardmax", "Not", "BitwiseNot", "Shrink", "LpNormalization", "CumSum", "Trilu",
         "InstanceNormalization", "LayerNormalization", "SimplifiedLayerNormalization",
         "BatchNormalization", "Dropout",
-        "BiasDropout", "SoftmaxCrossEntropyLossGrad", "ReluGrad", "SigmoidGrad", "TanhGrad", "GeluGrad",
+        "BiasDropout", "ReluGrad", "SigmoidGrad", "TanhGrad", "GeluGrad",
         "FastGeluGrad", "SoftmaxGrad", "SoftmaxGrad_13", "LogSoftmaxGrad", "LogSoftmaxGrad_13",
     };
 
@@ -281,6 +281,13 @@ internal static class PlacementShapes
         }
         if (op is "IsNaN" or "IsInf")
             return x is null ? [] : [new Value(x.Shape, Bool, null)];
+        if (op == "SoftmaxCrossEntropyLossGrad")
+        {
+            // The gradient of the logits: shaped as the log-probabilities it reads beside the loss's
+            // gradient, typed as that gradient.
+            if (x is null || In(1) is not { } logProbabilities) return [];
+            return [new Value(logProbabilities.Shape, x.ElementType, null)];
+        }
         if (Broadcasting.Contains(op))
         {
             if (read.Length == 0 || read.Any(v => v is null)) return [];
@@ -408,8 +415,10 @@ internal static class PlacementShapes
             var b = y.Shape.Length == 1 ? [y.Shape[0], 1] : y.Shape;
             if (op == "FusedMatMul")
             {
-                if ((Attr(node, "transA") ?? 0) != 0) a = [.. a[..^2], a[^1], a[^2]];
-                if ((Attr(node, "transB") ?? 0) != 0) b = [.. b[..^2], b[^1], b[^2]];
+                // Each operand of two dimensions or more is first transposed on its first dimension
+                // and its batch ones — the first moved to the last but one — then on its last two.
+                if (x.Shape.Length > 1) a = Transposed(a, Attr(node, "transBatchA"), Attr(node, "transA"));
+                if (y.Shape.Length > 1) b = Transposed(b, Attr(node, "transBatchB"), Attr(node, "transB"));
             }
             var batch = Broadcast(a[..^2], b[..^2]);
             var dims = new List<long>(batch);
@@ -721,6 +730,16 @@ internal static class PlacementShapes
 
     private static long[]? Ints(NodeProto node, string name)
         => node.Attributes.FirstOrDefault(a => a.Name == name) is { } a ? a.Ints ?? [] : null;
+
+    /// <summary><paramref name="shape"/>, of two dimensions or more, transposed as a fused product
+    /// transposes an operand: where <paramref name="batch"/> is set, its first dimension moved to the
+    /// last but one; then, where <paramref name="last"/> is, its last two swapped.</summary>
+    private static long[] Transposed(long[] shape, long? batch, long? last)
+    {
+        if ((batch ?? 0) != 0) shape = [.. shape[1..^1], shape[0], shape[^1]];
+        if ((last ?? 0) != 0) shape = [.. shape[..^2], shape[^1], shape[^2]];
+        return shape;
+    }
 
     private static Value? ConstantOf(NodeProto node)
     {

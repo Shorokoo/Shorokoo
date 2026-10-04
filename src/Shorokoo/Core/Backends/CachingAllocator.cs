@@ -352,20 +352,28 @@ internal sealed unsafe class CachingAllocator
 
     /// <summary>What <see cref="AllocCallback"/> answers: a block of <paramref name="size"/> bytes from
     /// the allocator <paramref name="state"/> names, or null with the reason written into
-    /// <paramref name="reason"/>.</summary>
+    /// <paramref name="reason"/>. Nothing escapes it: wording a failure can fail too — the memory a
+    /// message takes may be the very memory there is none of, or the failure may not say what it
+    /// is — and then a reason fixed in advance is written, with nothing to allocate.</summary>
     internal static IntPtr AllocateOrRefuse(IntPtr state, nuint size, Span<byte> reason)
     {
-        string? refusal;
         try
         {
-            var block = Of(state).Allocate(size > long.MaxValue ? long.MaxValue : (long)size, out refusal);
-            if (block != IntPtr.Zero) return block;
+            try
+            {
+                var block = Of(state).Allocate(size > long.MaxValue ? long.MaxValue : (long)size, out var refusal);
+                if (block != IntPtr.Zero) return block;
+                Write(refusal ?? $"Failed to allocate {size} bytes.", reason);
+            }
+            catch (Exception failure)
+            {
+                Write($"Failed to allocate {size} bytes: Shorokoo's allocator failed ({failure.Message}).", reason);
+            }
         }
-        catch (Exception failure)
+        catch
         {
-            refusal = $"Failed to allocate {size} bytes: Shorokoo's allocator failed ({failure.Message}).";
+            Write("Failed to allocate: Shorokoo's allocator failed."u8, reason);
         }
-        Write(refusal ?? $"Failed to allocate {size} bytes.", reason);
         return IntPtr.Zero;
     }
 
@@ -375,6 +383,16 @@ internal sealed unsafe class CachingAllocator
     {
         if (buffer.IsEmpty) return;
         System.Text.Unicode.Utf8.FromUtf16(text, buffer[..^1], out _, out var written, replaceInvalidSequences: true, isFinalBlock: true);
+        buffer[written] = 0;
+    }
+
+    /// <summary><paramref name="text"/>, UTF-8 already, into <paramref name="buffer"/>, cut short where
+    /// it does not fit, and NUL-terminated: nothing allocated.</summary>
+    private static void Write(ReadOnlySpan<byte> text, Span<byte> buffer)
+    {
+        if (buffer.IsEmpty) return;
+        var written = Math.Min(text.Length, buffer.Length - 1);
+        text[..written].CopyTo(buffer);
         buffer[written] = 0;
     }
 

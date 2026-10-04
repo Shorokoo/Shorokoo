@@ -647,7 +647,11 @@ optimizer's temporaries take no memory of their own either
 
 Results are bit-identical with or without it, and there is nothing to configure. On a card a
 resident run thus holds its state once rather than twice; under a device-memory budget the state
-is counted once — see [inference.md](inference.md#a-contexts-device-memory-budget).
+is counted once — see [inference.md](inference.md#a-contexts-device-memory-budget). A step's peak
+falls by what of the new state a step writing it beside the old would hold at its busiest, which
+is not always all of it. The update's temporaries take memory of their own on ONNX Runtime either
+way, and under AdamW it frees one of them before it writes a weight's new value, so a step over
+one large weight peaks lower by the weight's two moments rather than by its whole state.
 
 ### What construction costs
 

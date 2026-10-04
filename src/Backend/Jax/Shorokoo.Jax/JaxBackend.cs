@@ -236,7 +236,7 @@ public abstract class JaxBackend : IShorokooBackend
     {
         ArgumentNullException.ThrowIfNull(shape);
         RefuseStrings(elementType);
-        PythonElementTypes.ByteCount(elementType, shape);
+        PythonElementTypes.ByteLength(elementType, shape);
         var runtime = Runtime;
         using (PythonRuntime.Gil())
         {

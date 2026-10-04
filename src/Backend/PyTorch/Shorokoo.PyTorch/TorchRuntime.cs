@@ -35,6 +35,8 @@ internal sealed class TorchRuntime
         Strings = runtime.GetAttr("strings");
         StringList = runtime.GetAttr("string_list");
         HostCopy = runtime.GetAttr("host_copy");
+        CopyRangeToHost = runtime.GetAttr("copy_range_to_host");
+        CopyHostToRange = runtime.GetAttr("copy_host_to_range");
         SequenceElement = runtime.GetAttr("sequence_element");
         Describe = runtime.GetAttr("describe");
         Run = runtime.GetAttr("run");
@@ -66,6 +68,8 @@ internal sealed class TorchRuntime
     public PyObject Strings { get; }
     public PyObject StringList { get; }
     public PyObject HostCopy { get; }
+    public PyObject CopyRangeToHost { get; }
+    public PyObject CopyHostToRange { get; }
     public PyObject SequenceElement { get; }
     public PyObject Describe { get; }
     public PyObject Run { get; }

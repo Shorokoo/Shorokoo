@@ -257,7 +257,7 @@ public abstract class TorchBackend : IShorokooBackend
         ShorokooTensorElementType elementType, long[] shape)
     {
         ArgumentNullException.ThrowIfNull(shape);
-        PythonElementTypes.ByteCount(elementType, shape);
+        PythonElementTypes.ByteLength(elementType, shape);
         var runtime = Runtime;
         using (PythonRuntime.Gil())
         {
@@ -411,6 +411,67 @@ public abstract class TorchBackend : IShorokooBackend
             return host.GetTensorDataAsSpan<byte>().ToArray();
         }
     }
+
+    /// <summary>
+    /// Copies <paramref name="destination"/>'s length of bytes of <paramref name="value"/>,
+    /// <paramref name="byteOffset"/> bytes in, to <paramref name="destination"/>: out of the piece of
+    /// its buffer a host tensor addresses, and out of a tensor on a card by torch copying that piece
+    /// of its memory home, so a save streams a card tensor of any size through one bounded buffer.
+    /// False for a value of another runtime's that the host cannot read, and for a string tensor or
+    /// a sequence on a card.
+    /// </summary>
+    public unsafe bool TryCopyTensorRangeToHost(IShorokooTensorValue value, long byteOffset, Span<byte> destination)
+    {
+        ArgumentNullException.ThrowIfNull(value);
+        if (value.IsHostAccessible)
+        {
+            value.HostPiece(byteOffset, destination.Length).CopyTo(destination);
+            // The piece is the value's last read (Shorokoo/Shorokoo#178).
+            GC.KeepAlive(value);
+            return true;
+        }
+        if (OnCard(value) is not { } torch) return false;
+        IShorokooTensorValue.PieceWithin(byteOffset, destination.Length, TorchPlacements.BytesOf(torch));
+        var runtime = Runtime;
+        using (PythonRuntime.Gil())
+        fixed (byte* target = destination)
+            PyCall.Invoke(runtime.CopyRangeToHost, torch.Value, byteOffset, (long)target, destination.Length).Dispose();
+        GC.KeepAlive(torch);
+        return true;
+    }
+
+    /// <summary>
+    /// Copies <paramref name="source"/> into <paramref name="value"/>, <paramref name="byteOffset"/>
+    /// bytes in: into the piece of its buffer a host tensor addresses, and into a tensor on a card by
+    /// torch copying the bytes into that piece of its memory, so a load streams a card tensor of any
+    /// size through one bounded buffer. False where <see cref="TryCopyTensorRangeToHost"/> is.
+    /// </summary>
+    public unsafe bool TryCopyHostToTensorRange(IShorokooTensorValue value, long byteOffset, ReadOnlySpan<byte> source)
+    {
+        ArgumentNullException.ThrowIfNull(value);
+        if (value.IsHostAccessible)
+        {
+            source.CopyTo(value.HostPiece(byteOffset, source.Length));
+            // The piece is the value's last read (Shorokoo/Shorokoo#178).
+            GC.KeepAlive(value);
+            return true;
+        }
+        if (OnCard(value) is not { } torch) return false;
+        IShorokooTensorValue.PieceWithin(byteOffset, source.Length, TorchPlacements.BytesOf(torch));
+        var runtime = Runtime;
+        using (PythonRuntime.Gil())
+        fixed (byte* bytes = source)
+            PyCall.Invoke(runtime.CopyHostToRange, torch.Value, byteOffset, (long)bytes, source.Length).Dispose();
+        GC.KeepAlive(torch);
+        return true;
+    }
+
+    /// <summary><paramref name="value"/> where it is a fixed-stride tensor of torch's on a card.</summary>
+    private static TorchTensorValue? OnCard(IShorokooTensorValue value)
+        => value is TorchTensorValue { ValueType: ShorokooOnnxValueType.Tensor } torch
+           && torch.ElementType != ShorokooTensorElementType.String && torch.CudaDevice >= 0
+            ? torch
+            : null;
 
     internal static PyList Shape(long[] shape)
     {

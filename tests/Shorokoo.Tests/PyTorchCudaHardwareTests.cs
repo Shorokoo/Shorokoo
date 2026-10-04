@@ -315,6 +315,101 @@ public class PyTorchCudaHardwareTests
     }
 
     [TorchCudaFact]
+    public void TestACardTensorPastTwoGibibytesIsSavedByThePiece()
+        => Assert.Equal((StagedReadBack.StagingBytes, true), SavedPastTwoGibibytes(Cuda.Value));
+
+    [TorchCudaFact]
+    public void TestATensorPastTwoGibibytesIsLoadedOntoTheCardByThePiece()
+        => Assert.Equal((StagedReadBack.StagingBytes, StagedReadBack.StagingBytes, true), LoadedPastTwoGibibytes(Cuda.Value));
+
+    /// <summary>The int32s a tensor past 2 GiB holds: 0, 1, 2 and on.</summary>
+    private const long CountedPastTwoGibibytes = 5L << 27;
+
+    /// <summary>The most bytes one write of a save of a card tensor of <paramref name="backend"/>
+    /// holding <see cref="CountedPastTwoGibibytes"/> int32s counting from 0 handed its stream, and
+    /// whether the stream was handed exactly those.</summary>
+    internal static (int Largest, bool Counted) SavedPastTwoGibibytes(IShorokooBackend backend)
+    {
+        const long Half = CountedPastTwoGibibytes / 2;
+        var graph = ComputeContextLifetimeCoverageTests.GraphOf($"x:int32[{Half}] h", "y",
+            ComputeContextLifetimeCoverageTests.Op("Add", "x h", "u"), ComputeContextLifetimeCoverageTests.Op("Concat", "x u", "y", attribute: ("axis", 0)));
+        using var session = backend.CreateSession(PyTorchBackendCoverageTests.Serialize(graph), default, default, DeviceMemorySettings.Default);
+        IShorokooTensorValue y;
+        using (var x = backend.CreateTensorInBackendMemory(ShorokooTensorElementType.Int32, Counting(Half), [Half]))
+        using (var h = backend.CreateTensorInBackendMemory(ShorokooTensorElementType.Int32, BitConverter.GetBytes((int)Half), []))
+            y = session.Run(new Dictionary<string, IShorokooTensorValue> { ["x"] = x, ["h"] = h }, ["y"], RunSettings.Default)[0];
+        var tensor = TensorData.Create(new Shape([CountedPastTwoGibibytes]), DType.Int32, y, backend);
+        var saved = new CountingStream(CountedPastTwoGibibytes);
+        try { tensor.WriteContentTo(saved); }
+        finally { tensor.Delete(); }
+        return (saved.Largest, saved.Counted);
+    }
+
+    /// <summary>The most bytes one read of a load onto <paramref name="backend"/>'s card of
+    /// <see cref="CountedPastTwoGibibytes"/> int32s counting from 0 asked its stream for, the most
+    /// one write of a save of what it loaded handed its own, and whether that save was handed exactly
+    /// those int32s.</summary>
+    internal static (int Read, int Written, bool Counted) LoadedPastTwoGibibytes(IShorokooBackend backend)
+    {
+        using var context = new ComputeContext(backend);
+        var source = new CountingStream(CountedPastTwoGibibytes);
+        var tensor = context.ReadTensor(new Shape([CountedPastTwoGibibytes]), DType.Int32, source);
+        var saved = new CountingStream(CountedPastTwoGibibytes);
+        try { tensor.WriteContentTo(saved); }
+        finally { tensor.Delete(); }
+        return (source.Largest, saved.Largest, saved.Counted);
+    }
+
+    private static byte[] Counting(long count)
+    {
+        var bytes = new byte[4 * count];
+        var ints = MemoryMarshal.Cast<byte, int>(bytes.AsSpan());
+        for (int i = 0; i < ints.Length; i++) ints[i] = i;
+        return bytes;
+    }
+
+    /// <summary>A stream of the int32s 0, 1, 2 and on, as many as it is made with: read, it hands
+    /// them out; written, it checks it is handed them, in order. It keeps the most bytes one call
+    /// asked for or handed it.</summary>
+    private sealed class CountingStream(long count) : Stream
+    {
+        private long _position;
+        private bool _wrong;
+        public int Largest { get; private set; }
+        public bool Counted => !_wrong && _position == 4 * count;
+
+        public override int Read(Span<byte> buffer)
+        {
+            Largest = Math.Max(Largest, buffer.Length);
+            var length = (int)Math.Min(buffer.Length, 4 * count - _position) & ~3;
+            var ints = MemoryMarshal.Cast<byte, int>(buffer[..length]);
+            for (int i = 0; i < ints.Length; i++) ints[i] = (int)(_position / 4 + i);
+            _position += length;
+            return length;
+        }
+
+        public override void Write(ReadOnlySpan<byte> buffer)
+        {
+            Largest = Math.Max(Largest, buffer.Length);
+            if (_position % 4 != 0 || buffer.Length % 4 != 0) _wrong = true;
+            var ints = MemoryMarshal.Cast<byte, int>(buffer[..(buffer.Length & ~3)]);
+            for (int i = 0; i < ints.Length && !_wrong; i++) _wrong = ints[i] != _position / 4 + i;
+            _position += buffer.Length;
+        }
+
+        public override int Read(byte[] buffer, int offset, int count) => Read(buffer.AsSpan(offset, count));
+        public override void Write(byte[] buffer, int offset, int count) => Write(buffer.AsSpan(offset, count));
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => true;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => _position; set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+    }
+
+    [TorchCudaFact]
     public void TestAConvolutionOfTwoTransposedViewsIsComputedAsTheWeightGradientItIsOnTheCard()
     {
         Assert.Equal("True True", PyTorchBackendCoverageTests.WeightGradient(batch: 4, sizes: 9, kernel: 3, stride: 1, dilation: 1, pad: 1, Cuda.Value));

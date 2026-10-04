@@ -349,6 +349,47 @@ public class OnnxExternalDataTests
         });
     }
 
+    /// <summary>A model whose messages nest <paramref name="depth"/> deep, each the one field of
+    /// the message around it: keyed by <paramref name="outer"/>, then by <paramref name="cycle"/>
+    /// over and over.</summary>
+    private static byte[] Nested(byte[] outer, byte[] cycle, int depth)
+    {
+        static int VarintLength(long value) { int n = 1; for (; value >= 0x80; value >>= 7) n++; return n; }
+        var lengths = new long[depth + 1];
+        for (int i = depth - 1; i >= 0; i--)
+            lengths[i] = 1 + VarintLength(lengths[i + 1]) + lengths[i + 1];
+        var bytes = new List<byte>();
+        for (int i = 0; i < depth; i++)
+        {
+            bytes.Add(i < outer.Length ? outer[i] : cycle[(i - outer.Length) % cycle.Length]);
+            var length = (ulong)lengths[i + 1];
+            for (; length >= 0x80; length >>= 7) bytes.Add((byte)(length | 0x80));
+            bytes.Add((byte)length);
+        }
+        return [.. bytes];
+    }
+
+    [Fact]
+    public void TestAModelNestedDeeperThanProtobufReadsIsRefusedWhereverItIsRead()
+    {
+        WithTempDir(dir =>
+        {
+            byte[] graph = [0x3A], input = [0x3A, 0x5A, 0x12], subgraphs = [0x0A, 0x2A, 0x32], sequences = [0x22, 0x0A];
+            string Written(string name, byte[] bytes) { var path = Path.Combine(dir, name); File.WriteAllBytes(path, bytes); return path; }
+            ModelProto Scan(string path) { using var file = OnnxStreamingScan.Open(path); return OnnxStreamingScan.ReadModel(file); }
+
+            Assert.NotNull(Scan(Written("deepest.onnx", Nested(graph, subgraphs, 99))).Graph);
+            Assert.Throws<InvalidOperationException>(() => Scan(Written("deeper.onnx", Nested(graph, subgraphs, 100))));
+            foreach (var (name, bytes) in (ValueTuple<string, byte[]>[])[("subgraphs.onnx", Nested(graph, subgraphs, 100_000)), ("types.onnx", Nested(input, sequences, 100_000))])
+            {
+                var path = Written(name, bytes);
+                Assert.Contains(path, Assert.Throws<InvalidDataException>(() => Persistence.ImportOnnx(path)).Message);
+                Assert.Throws<InvalidOperationException>(() => OnnxModelImporter.FromOnnxModel(path));
+                Assert.Throws<InvalidOperationException>(() => OnnxModelImporter.FromOnnxModel(bytes));
+            }
+        });
+    }
+
     [Fact]
     public void TestSaveWithExternalDataRoundTripsBitExactAlignedDeterministicAndOnnxRuntimeReadable()
     {

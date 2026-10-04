@@ -1063,17 +1063,22 @@ internal sealed unsafe class CachingAllocator
     /// <paramref name="release"/>.</summary>
     private long ReleaseEverythingCachedUnderLock(List<(IntPtr, long)> release, Scope? scope)
     {
-        long before = 0, after = 0;
-        foreach (var account in _accounts)
-        {
-            before += account.HeldBytes - account.InUse;
-            release.AddRange(ShedAll(account, scope));
-            after += account.HeldBytes - account.InUse;
-        }
-        var smallBefore = _small?.IdleBytes ?? 0;
+        // What goes back is what the device stops holding: the memory the arenas hand back, and the
+        // blocks of their own released -- not what the accounts stop keeping, since a small block
+        // kept goes back into the card's arena of small blocks and a host block into its
+        // account's, and leaves the device only with its granule.
+        var from = release.Count;
+        var before = CommittedBytes;
+        foreach (var account in _accounts) release.AddRange(ShedAll(account, scope));
         _small?.DecommitAll(out _);
-        return before - after + smallBefore;
+        var own = 0L;
+        for (var i = from; i < release.Count; i++) own += release[i].Item2;
+        return before - CommittedBytes + own;
     }
+
+    /// <summary>What the device's arenas hold committed: every open account's, and the card's arena
+    /// of small blocks. Under the lock.</summary>
+    private long CommittedBytes => _accounts.Sum(account => account.Arena?.CommittedBytes ?? 0) + (_small?.CommittedBytes ?? 0);
 
     /// <summary>
     /// Hands back to every device — the host and each card this process has allocated on —

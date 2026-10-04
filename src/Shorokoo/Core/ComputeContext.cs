@@ -2266,19 +2266,23 @@ namespace Shorokoo.Runtime
         /// in its precision, and with the outputs the lowering proved it may write into consumed
         /// inputs' memory — placing its runs' values in that memory where <paramref name="placing"/>
         /// and this context place (<see cref="ValuePlacement"/>), and otherwise built without what
-        /// placing asks of a build (<see cref="SessionPlacing"/>).</summary>
+        /// placing asks of a build (<see cref="SessionPlacing"/>). A session for a single run (not
+        /// <paramref name="placing"/>) of a context that places plans no placements but writes into
+        /// consumed memory whatever costs no planning; one of a context that does not place writes
+        /// nothing there but its pairs.</summary>
         internal IShorokooSession BuildSession(
             IShorokooBackend backend, byte[] modelData, ShorokooGraphOptimization optimization,
             DeviceMemorySettings deviceMemory, IReadOnlyList<OutputAlias>? outputAliases = null,
             int intraOpThreads = 0, IReadOnlyList<SuppliedInitializer>? supplied = null, bool placing = true)
         {
-            var off = !placing || !(ValuePlacement ?? OutputAliasing);
+            var off = !(ValuePlacement ?? OutputAliasing);
             IShorokooSession session;
-            using (SessionPlacing.Suppress(off))
+            using (SessionPlacing.Suppress(off || !placing))
                 session = backend.CreateSession(
                     modelData, optimization, ShorokooLogSeverity.Fatal, deviceMemory, Diagnostics,
                     outputAliases ?? [], intraOpThreads, supplied ?? [], Precision);
             if (off) session.StopPlacing();
+            else if (!placing) session.StopPlanningPlacements();
             return session;
         }
 

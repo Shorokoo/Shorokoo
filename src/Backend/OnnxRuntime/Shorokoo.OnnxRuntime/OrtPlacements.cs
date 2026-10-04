@@ -60,6 +60,9 @@ internal sealed class OrtPlacements : IDisposable
     /// keeps in a file.</summary>
     internal const int ModelBytesKept = 16 << 20;
 
+    /// <summary>The file in a folder of a session's placements that marks it as theirs.</summary>
+    internal const string KeptLockFile = "kept.lock";
+
     /// <summary>How many signatures a session plans for; a run of any other runs unplaced.</summary>
     private const int MostSignatures = 8;
 
@@ -198,6 +201,12 @@ internal sealed class OrtPlacements : IDisposable
     /// a test sets it on.</summary>
     [ThreadStatic]
     internal static Func<Exception?>? PlacedRunFault;
+
+    /// <summary>For a test: asked as a signature of this thread's run starts to be planned, and what
+    /// it answers is thrown there, as a failure of the planning would be; null on every thread but
+    /// one a test sets it on.</summary>
+    [ThreadStatic]
+    internal static Func<Exception?>? PlanningFault;
 
     /// <summary>Every signature planned so far, for a test to read.</summary>
     internal IReadOnlyList<Entry> Entries
@@ -411,8 +420,9 @@ internal sealed class OrtPlacements : IDisposable
     {
         try
         {
+            if (PlanningFault?.Invoke() is { } fault) throw fault;
             var original = Original();
-            var given = new Dictionary<string, (long[] Shape, int ElementType)>(StringComparer.Ordinal);
+            var given =new Dictionary<string, (long[] Shape, int ElementType)>(StringComparer.Ordinal);
             foreach (var (name, value) in inputs)
                 if (value is OrtTensorValue { ValueType: ShorokooOnnxValueType.Tensor } tensor)
                     given[name] = (tensor.ReadShape, (int)tensor.ElementType);
@@ -638,7 +648,7 @@ internal sealed class OrtPlacements : IDisposable
     /// provider's; and of the nodes reading none of those, only its generators, where no copy onto
     /// the card takes what they write.
     /// </summary>
-    internal static HashSet<NodeProto> HostNodes(GraphProto graph)
+    internal static HashSet<NodeProto> HostNodes(GraphProto graph, IReadOnlySet<string>? hostInputs = null, IReadOnlySet<string>? hostOutputs = null)
     {
         var copiedOn = graph.Nodes.Where(n => n.OpType == "MemcpyFromHost").SelectMany(n => n.Inputs).ToHashSet(StringComparer.Ordinal);
         var producer = new Dictionary<string, NodeProto>(StringComparer.Ordinal);

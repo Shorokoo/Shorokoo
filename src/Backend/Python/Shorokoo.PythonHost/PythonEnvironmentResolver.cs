@@ -110,7 +110,7 @@ public static class PythonEnvironmentResolver
             // environment built by the process it waited for needs none.
             if (!IsComplete(directory, lockFile))
                 Build(FindUv(options, variables), lockFile, directory, options.ProvisioningTimeout, deadline);
-            LinkCudaLibraries(directory, lockFile, options.ProvisioningTimeout);
+            LinkCudaLibraries(directory, lockFile, variables, options.ProvisioningTimeout);
         }
         finally
         {
@@ -141,17 +141,19 @@ public static class PythonEnvironmentResolver
     /// process that runs PyTorch beside another CUDA backend loads one copy of each, whichever starts
     /// first. The cache is filled from these very copies where it is empty, which downloads nothing.
     /// Called holding the environment's lock; a copy another process has loaded stays a copy of the
-    /// same release, and is linked by a later call.
+    /// same release, and is linked by a later call. The cache and the installed copies are where
+    /// <paramref name="variables"/> say.
     /// </summary>
-    private static void LinkCudaLibraries(string directory, PythonEnvironmentLock lockFile, TimeSpan timeout)
+    private static void LinkCudaLibraries(
+        string directory, PythonEnvironmentLock lockFile, Func<string, string?> variables, TimeSpan timeout)
     {
         if (CudaLibraryPins.Current is not { } pins) return;
         var windows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
         var sitePackages = PythonEnvironment.SitePackagesOf(directory, Version.Parse(lockFile.PythonVersion), windows);
         try
         {
-            CudaLibraryCache.LinkEnvironment(directory, sitePackages, pins, CudaLibraryCache.DefaultRoot,
-                pin => CudaLibraryCache.InstalledCandidates(pin, Environment.GetEnvironmentVariable, windows), timeout);
+            CudaLibraryCache.LinkEnvironment(directory, sitePackages, pins, CudaLibraryCache.Root(variables, windows),
+                pin => CudaLibraryCache.InstalledCandidates(pin, variables, windows), timeout);
         }
         // Linking only saves the second copy: the environment's own are the pinned release, byte for
         // byte, and serve as they are. So a cache that cannot be filled or written leaves them be,

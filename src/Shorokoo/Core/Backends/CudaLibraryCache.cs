@@ -239,29 +239,7 @@ internal static partial class CudaLibraryCache
         {
             using (var target = new FileStream(wheel, FileMode.Create, FileAccess.ReadWrite, FileShare.None))
             {
-                try
-                {
-                    if (pin.Wheel.IsFile)
-                    {
-                        using var source = File.OpenRead(pin.Wheel.LocalPath);
-                        source.CopyTo(target);
-                    }
-                    else
-                    {
-                        // The synchronous send: this runs inside a backend's own synchronous call, and
-                        // blocking on an asynchronous one there could wait on the caller's context.
-                        using var request = new HttpRequestMessage(HttpMethod.Get, pin.Wheel);
-                        using var response = Http.Value.Send(request, HttpCompletionOption.ResponseHeadersRead);
-                        response.EnsureSuccessStatusCode();
-                        using var source = response.Content.ReadAsStream();
-                        source.CopyTo(target);
-                    }
-                }
-                catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException
-                                               or IOException or UnauthorizedAccessException)
-                {
-                    throw Unavailable(pin, directory, ex);
-                }
+                Fetch(pin, directory, target);
                 target.Position = 0;
                 if (target.Length != pin.WheelSize || Convert.ToHexStringLower(SHA256.HashData(target)) != pin.WheelSha256)
                     throw new InvalidDataException($"The wheel fetched from {pin.Wheel} is not the one {pin} pins: its size or SHA-256 differs.");
@@ -275,6 +253,36 @@ internal static partial class CudaLibraryCache
         finally
         {
             File.Delete(wheel);
+        }
+    }
+
+    /// <summary>Writes the wheel of <paramref name="pin"/>, the cache folder <paramref name="directory"/>
+    /// is filled from, into <paramref name="target"/>: from the network, or from the file the pin
+    /// names.</summary>
+    internal static void Fetch(CudaLibraryPin pin, string directory, Stream target)
+    {
+        try
+        {
+            if (pin.Wheel.IsFile)
+            {
+                using var source = File.OpenRead(pin.Wheel.LocalPath);
+                source.CopyTo(target);
+            }
+            else
+            {
+                // The synchronous send: this runs inside a backend's own synchronous call, and
+                // blocking on an asynchronous one there could wait on the caller's context.
+                using var request = new HttpRequestMessage(HttpMethod.Get, pin.Wheel);
+                using var response = Http.Value.Send(request, HttpCompletionOption.ResponseHeadersRead);
+                response.EnsureSuccessStatusCode();
+                using var source = response.Content.ReadAsStream();
+                source.CopyTo(target);
+            }
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException
+                                       or IOException or UnauthorizedAccessException)
+        {
+            throw Unavailable(pin, directory, ex);
         }
     }
 

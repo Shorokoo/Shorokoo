@@ -50,7 +50,7 @@ internal sealed class RuntimeAllocator
         _info = InfoFor(device);
         var native = NativeAllocator.Create(
             Shared.State, CachingAllocator.AllocateEntry, CachingAllocator.FreeEntry, OrtEnvironment.PointerOf(_info));
-        if (Shared.ClaimRuntime(OrtEnvironment.EnvironmentHandle())) OrtEnvironment.Register(native);
+        Shared.HandTo(OrtEnvironment.EnvironmentHandle(), () => OrtEnvironment.Register(native));
         Managed = OrtEnvironment.Wrap(native);
     }
 

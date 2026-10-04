@@ -410,8 +410,13 @@ internal abstract class ArenaBacking
     internal abstract bool Commit(IntPtr @base, object? state, long first, long count);
 
     /// <summary>Hands back the <paramref name="count"/> granules from granule <paramref name="first"/>,
-    /// which <see cref="Commit"/> committed.</summary>
-    internal abstract void Decommit(IntPtr @base, object? state, long first, long count);
+    /// which <see cref="Commit"/> committed; false where the system would not take them.</summary>
+    internal abstract bool Decommit(IntPtr @base, object? state, long first, long count);
+
+    /// <summary>Waits for the work the device has in hand, as handing back memory some of that work
+    /// may still read must; false where it cannot be waited for. Nothing to wait for by
+    /// default.</summary>
+    internal virtual bool AwaitDevice() => true;
 }
 
 /// <summary>
@@ -452,17 +457,18 @@ internal sealed partial class HostMemory : ArenaBacking
         return mprotect(at, bytes, ProtRead | ProtWrite) == 0;
     }
 
-    internal override void Decommit(IntPtr @base, object? state, long first, long count)
+    internal override bool Decommit(IntPtr @base, object? state, long first, long count)
     {
         var at = @base + (nint)(first * Granule);
         var bytes = (nuint)(count * Granule);
         if (OperatingSystem.IsWindows())
         {
             VirtualFree(at, bytes, MemDecommit);
-            return;
+            return true;
         }
         madvise(at, bytes, MadvDontNeed);
         mprotect(at, bytes, ProtNone);
+        return true;
     }
 
     private const uint MemCommit = 0x1000;
@@ -585,13 +591,15 @@ internal sealed unsafe class CardMemory : ArenaBacking
         });
     }
 
-    internal override void Decommit(IntPtr @base, object? state, long first, long count)
+    internal override bool Decommit(IntPtr @base, object? state, long first, long count)
     {
         var handles = (ulong[])state!;
         var api = _api;
         var granule = _granule;
-        CudaRuntime.OnDevice(_device, () => Unmap(api, @base, handles, first, count, granule));
+        return CudaRuntime.OnDevice(_device, () => Unmap(api, @base, handles, first, count, granule));
     }
+
+    internal override bool AwaitDevice() => CudaRuntime.Synchronize(_device);
 
     private static bool Unmap(CudaVirtualMemory.Api api, IntPtr @base, ulong[] handles, long first, long count, long granule)
     {

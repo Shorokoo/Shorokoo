@@ -250,15 +250,18 @@ internal sealed unsafe class CachingAllocator
     }
 
     private CachingAllocator(int device)
+        : this(device, device == Host ? HostMemory.Supported ? HostMemory.Instance : null : CardMemory.For(device))
+    {
+    }
+
+    /// <summary>An allocator for <paramref name="device"/> — the host for -1, a card otherwise — whose
+    /// arenas are backed by <paramref name="backing"/>, or which takes every block of its own from the
+    /// device where that is null.</summary>
+    internal CachingAllocator(int device, ArenaBacking? backing)
     {
         _device = device;
-        if (device == Host)
-            _backing = HostMemory.Supported ? HostMemory.Instance : null;
-        else if (CardMemory.For(device) is { } card)
-        {
-            _backing = card;
-            _small = new Arena(card, unit: SmallUnit, chunkBytes: 256L << 20);
-        }
+        _backing = backing;
+        if (device != Host && backing is not null) _small = new Arena(backing, unit: SmallUnit, chunkBytes: 256L << 20);
         Placements = new Account(this, "placements", keepsLargeBlocks: device != Host);
         lock (_registryGate)
         {
@@ -287,6 +290,14 @@ internal sealed unsafe class CachingAllocator
     internal bool ClaimRuntime(IntPtr environment)
     {
         using (_gate.Hold()) return _runtimes.Add(environment);
+    }
+
+    /// <summary>Hands this allocator to the runtime whose environment is
+    /// <paramref name="environment"/> through <paramref name="register"/>, the first time that runtime
+    /// is named (<see cref="ClaimRuntime"/>).</summary>
+    internal void HandTo(IntPtr environment, Action register)
+    {
+        if (ClaimRuntime(environment)) register();
     }
 
     /// <summary>Whether this is a card's allocator.</summary>
@@ -325,6 +336,12 @@ internal sealed unsafe class CachingAllocator
     /// </summary>
     [UnmanagedCallersOnly]
     private static IntPtr AllocCallback(IntPtr state, nuint size, byte* reason, int capacity)
+        => AllocateOrRefuse(state, size, reason is null || capacity <= 0 ? default : new Span<byte>(reason, capacity));
+
+    /// <summary>What <see cref="AllocCallback"/> answers: a block of <paramref name="size"/> bytes from
+    /// the allocator <paramref name="state"/> names, or null with the reason written into
+    /// <paramref name="reason"/>.</summary>
+    internal static IntPtr AllocateOrRefuse(IntPtr state, nuint size, Span<byte> reason)
     {
         string? refusal;
         try
@@ -336,17 +353,16 @@ internal sealed unsafe class CachingAllocator
         {
             refusal = $"Failed to allocate {size} bytes: Shorokoo's allocator failed ({failure.Message}).";
         }
-        Write(refusal ?? $"Failed to allocate {size} bytes.", reason, capacity);
+        Write(refusal ?? $"Failed to allocate {size} bytes.", reason);
         return IntPtr.Zero;
     }
 
     /// <summary><paramref name="text"/> into <paramref name="buffer"/> as UTF-8, cut short where it
     /// does not fit, and NUL-terminated.</summary>
-    private static void Write(string text, byte* buffer, int capacity)
+    private static void Write(string text, Span<byte> buffer)
     {
-        if (buffer is null || capacity <= 0) return;
-        var span = new Span<byte>(buffer, capacity - 1);
-        System.Text.Unicode.Utf8.FromUtf16(text, span, out _, out var written, replaceInvalidSequences: true, isFinalBlock: true);
+        if (buffer.IsEmpty) return;
+        System.Text.Unicode.Utf8.FromUtf16(text, buffer[..^1], out _, out var written, replaceInvalidSequences: true, isFinalBlock: true);
         buffer[written] = 0;
     }
 
@@ -432,7 +448,7 @@ internal sealed unsafe class CachingAllocator
                 // Under a budget what it keeps goes back first -- kept, and on a card what this call
                 // let go of, which handing back waits for the card to be done with -- and then only
                 // what it has out counts.
-                if (OnCard) CudaRuntime.Synchronize(_device);
+                if (OnCard) AwaitCard();
                 release = ShedAll(account, scope);
                 if (account.Charged + size > limit)
                 {
@@ -449,7 +465,7 @@ internal sealed unsafe class CachingAllocator
                 {
                     // The device is full: what is kept anywhere on it goes back -- on a card once the
                     // card is done with it -- and the request is tried once more.
-                    if (OnCard) CudaRuntime.Synchronize(_device);
+                    if (OnCard) AwaitCard();
                     ReleaseEverythingCachedUnderLock(release ??= []);
                     carved = CarveFor(account, size, source, excess: 0, out counted);
                 }
@@ -619,7 +635,7 @@ internal sealed unsafe class CachingAllocator
                 // Parts of it went back while the rest was in use, so what is left is not a block to
                 // keep whole: it goes back to the arena as those parts did -- on a card once work
                 // this thread's call queued is done with it.
-                if (OnCard && scope is not null && scope.Charges(account)) CudaRuntime.Synchronize(_device);
+                if (OnCard && scope is not null && scope.Charges(account)) AwaitCard();
                 var arena = ArenaOf(block.Source, account);
                 foreach (var (from, to) in Outside(released, 0, block.Size)) arena.Uncarve(pointer + (nint)from, to - from);
                 account.Blocks--;
@@ -734,7 +750,7 @@ internal sealed unsafe class CachingAllocator
             if (end <= start) return 0;
             var pieces = Outside(block.Released, start, end);
             if (pieces.Count == 0) return 0;
-            if (OnCard && scope is not null && scope.Charges(account)) CudaRuntime.Synchronize(_device);
+            if (OnCard && scope is not null && scope.Charges(account)) AwaitCard();
             long released = 0, inside = 0;
             var partEnd = toTheEnd ? block.Requested : offset + length;
             foreach (var (from, to) in pieces)
@@ -817,6 +833,16 @@ internal sealed unsafe class CachingAllocator
             return IntPtr.Zero;
         }
     }
+
+    /// <summary>Waits for the work the card has in hand, as handing back memory some of that work may
+    /// still read must.</summary>
+    private void AwaitCard()
+    {
+        _ = _backing is { } backing ? backing.AwaitDevice() : CudaRuntime.Synchronize(_device);
+    }
+
+    /// <summary>Whether this allocator's lock is taken, by any thread.</summary>
+    internal bool Locked => _gate.Taken;
 
     /// <summary>Hands <paramref name="blocks"/> of their own, each with its size class, back to the
     /// device. Outside the lock: on a card each waits for the work the card has in hand.</summary>
@@ -919,7 +945,7 @@ internal sealed unsafe class CachingAllocator
 
     /// <summary>Hands back everything kept on the device, in every account still open, and answers
     /// how many bytes that was.</summary>
-    private long ReleaseEverythingCached()
+    internal long ReleaseEverythingCached()
     {
         List<(IntPtr Block, long Size)> release = [];
         long bytes;
@@ -1488,6 +1514,9 @@ internal sealed unsafe class CachingAllocator
             if (Interlocked.CompareExchange(ref _taken, 1, 0) != 0) Wait();
             return new Held(ref _taken);
         }
+
+        /// <summary>Whether the lock is taken now.</summary>
+        internal bool Taken => Volatile.Read(ref _taken) != 0;
 
         [MethodImpl(MethodImplOptions.NoInlining)]
         private void Wait()

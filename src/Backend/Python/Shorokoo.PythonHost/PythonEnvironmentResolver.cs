@@ -135,6 +135,12 @@ public static class PythonEnvironmentResolver
         }
     }
 
+    /// <summary>What is told, on this thread, the timeout each linking of an environment's CUDA
+    /// libraries is handed; null for nothing. A test's view of what provisioning leaves the
+    /// linking.</summary>
+    [ThreadStatic]
+    internal static Action<TimeSpan>? LinkingHanded;
+
     /// <summary>
     /// Makes the environment's copies of the pinned cuDNN and cuBLAS — PyTorch's <c>torch\lib</c> on
     /// Windows, the <c>nvidia</c> wheels' folders on Linux — hard links to the shared cache's, so a
@@ -147,6 +153,7 @@ public static class PythonEnvironmentResolver
     private static void LinkCudaLibraries(
         string directory, PythonEnvironmentLock lockFile, Func<string, string?> variables, TimeSpan timeout)
     {
+        LinkingHanded?.Invoke(timeout);
         if (CudaLibraryPins.Current is not { } pins) return;
         var windows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
         var sitePackages = PythonEnvironment.SitePackagesOf(directory, Version.Parse(lockFile.PythonVersion), windows);

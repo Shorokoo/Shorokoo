@@ -1749,6 +1749,79 @@ public class PyTorchBackendCoverageTests
         Assert.Throws<TorchUnsupportedModelException>(() => Torch.CreateSession(Typed(21, ["x"], ["y"], [Node("Constant", [], ["y"], attributes: new AttributeProto { Name = "value_string", Type = AttributeProto.AttributeType.String, S = [0xC3] })]), default, default, DeviceMemorySettings.Default));
     }
 
+    [Fact]
+    public void TestAHostTensorPastTwoGibibytesIsCopiedInAndOutByThePieceAndSavedFromItsAddress()
+    {
+        const long Elements = (1L << 30) + 2;
+        using var head = (TorchTensorValue)Torch.CreateTensor(new float[StagedReadBack.StagingBytes / 4], [StagedReadBack.StagingBytes / 4]);
+        TorchTensorValue large;
+        using (PythonRuntime.Gil())
+        {
+            using var description = HostFloats((long)head.Address, Elements);
+            large = TorchTensorValue.Wrap(head.Value.InvokeMethod("detach"), description, ShorokooTensorElementType.Float);
+        }
+        AssertAHostValuePastTwoGibibytesIsCopiedByThePiece(Torch, large, 4 * Elements);
+    }
+
+    /// <summary>The description of a host float tensor of <paramref name="elements"/> elements at
+    /// <paramref name="address"/>, as a backend's runtime describes one. Called holding the
+    /// interpreter lock.</summary>
+    internal static PyTuple HostFloats(long address, long elements)
+    {
+        PyObject[] dims = [elements.ToPython()];
+        PyObject[] fields =
+        [
+            0.ToPython(), ((int)ShorokooTensorElementType.Float).ToPython(), new PyList(dims), true.ToPython(),
+            address.ToPython(), (4 * elements).ToPython(), (-1).ToPython(),
+        ];
+        return new PyTuple(fields);
+    }
+
+    /// <summary>
+    /// <paramref name="large"/>, a host value of <paramref name="bytes"/> bytes of which only the first
+    /// <see cref="StagedReadBack.StagingBytes"/> are memory it holds: a piece copied in and out at an
+    /// offset within those, a piece past its end refused, and its save stopped once the first piece is
+    /// written. The value goes with the tensor saved.
+    /// </summary>
+    internal static void AssertAHostValuePastTwoGibibytesIsCopiedByThePiece(IShorokooBackend backend, IShorokooTensorValue large, long bytes)
+    {
+        byte[] piece = [1, 2, 3, 4];
+        var read = new byte[piece.Length];
+        Assert.True(backend.TryCopyHostToTensorRange(large, 5, piece));
+        Assert.True(backend.TryCopyTensorRangeToHost(large, 5, read));
+        Assert.Equal(piece, read);
+        Assert.Throws<ArgumentOutOfRangeException>(() => backend.TryCopyTensorRangeToHost(large, bytes - 2, read));
+
+        var tensor = TensorData.Create(new Shape([bytes / 4]), DType.Float32, large, backend);
+        var saved = new FirstWriteStream();
+        Assert.Same(FirstWriteStream.Stopped, Record.Exception(() => tensor.WriteContentTo(saved)));
+        tensor.Delete();
+        Assert.Equal(StagedReadBack.StagingBytes, saved.First.Length);
+        Assert.Equal(piece, saved.First[5..9]);
+    }
+
+    /// <summary>Keeps what the first write hands it, and stops the writer there.</summary>
+    private sealed class FirstWriteStream : Stream
+    {
+        internal static readonly IOException Stopped = new("Stopped after the first write.");
+        public byte[] First { get; private set; } = [];
+        public override void Write(ReadOnlySpan<byte> buffer)
+        {
+            First = buffer.ToArray();
+            throw Stopped;
+        }
+        public override void Write(byte[] buffer, int offset, int count) => Write(buffer.AsSpan(offset, count));
+        public override bool CanRead => false;
+        public override bool CanSeek => false;
+        public override bool CanWrite => true;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+    }
+
     private static PythonEnvironment Resolve(PythonEnvironmentOptions options, string variable)
         => PythonEnvironmentResolver.Resolve(PythonEnvironmentLock.Cpu, options,
             name => name == PythonEnvironmentResolver.EnvironmentVariable ? variable : null);

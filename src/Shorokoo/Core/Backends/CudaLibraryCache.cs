@@ -387,8 +387,17 @@ internal static partial class CudaLibraryCache
     /// <summary>Makes <paramref name="link"/> a second name of the file at <paramref name="existing"/>.</summary>
     internal static bool TryCreateHardLink(string link, string existing)
         => OperatingSystem.IsWindows()
-            ? CreateHardLinkW(link, existing, IntPtr.Zero)
+            ? CreateHardLinkW(ExtendedLength(link), ExtendedLength(existing), IntPtr.Zero)
             : LinkUnix(existing, link) == 0;
+
+    /// <summary>The full path in Windows' extended-length form, which its file functions take beyond
+    /// <c>MAX_PATH</c>: <c>\\?\C:\…</c>, or <c>\\?\UNC\server\share\…</c> for a share.</summary>
+    private static string ExtendedLength(string path)
+    {
+        var full = Path.GetFullPath(path);
+        if (full.StartsWith(@"\\?\", StringComparison.Ordinal) || full.StartsWith(@"\\.\", StringComparison.Ordinal)) return full;
+        return full.StartsWith(@"\\", StringComparison.Ordinal) ? @"\\?\UNC\" + full[2..] : @"\\?\" + full;
+    }
 
     [LibraryImport("kernel32.dll", StringMarshalling = StringMarshalling.Utf16, SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]

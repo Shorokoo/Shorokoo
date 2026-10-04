@@ -639,8 +639,9 @@ peak  ≈  A · (3 · score block  +  6.5 · q block)
 
 Example: 6 layers, batch 32, 6 heads, `L = 1024`, `d = 64` ≈ 6 × (2.25 + 0.30) GiB ≈
 **15 GiB of attention activations**, before parameters, gradients, optimizer state and
-other layers. On GPU, allocations below a few hundred MiB are hidden inside ONNX
-Runtime's up-front arena reservation.
+other layers. On a card nothing is reserved up front: a session commits memory as each
+tensor is allocated, so a step's peak shows in full in the device's figures (see
+[Device memory](inference.md#device-memory-gpu-backends)).
 
 **`queryChunks: c`** splits the query axis into `c` blocks, runs each against the whole
 key/value and concatenates. It is exact (outputs, gradients and causal masking match

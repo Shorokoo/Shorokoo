@@ -1354,8 +1354,6 @@ public class CoreUtilsCoverageTests
         Assert.Equal(1, mappings);
     }
 
-    /// <summary>A host block of <paramref name="floats"/> charged to <paramref name="account"/>, every
-    /// page of it written.</summary>
     private static OrtValue HostBlock(RuntimeAllocator host, CachingAllocator.Account account, long floats)
     {
         OrtValue value;
@@ -1365,12 +1363,6 @@ public class CoreUtilsCoverageTests
         return value;
     }
 
-    /// <summary>
-    /// A session's own arena, read back through the public surface: zeroed before it has run, and
-    /// carrying what the run took afterwards — the product the run negates, its output being memory
-    /// of its own. A backend answering the interface's default reports nothing rather than zeroes,
-    /// which is the difference between "no figures" and "no memory".
-    /// </summary>
     [Fact]
     public void TestAHostSessionReportsItsOwnArenaButNoPinnedOneAndABackendWithoutOneReportsNothing()
     {
@@ -1404,12 +1396,6 @@ public class CoreUtilsCoverageTests
         Assert.Throws<ObjectDisposedException>(() => compiled.ReadNodePlacement());
     }
 
-    /// <summary>
-    /// A session's weights come out of the same allocator these figures read — one block, taken
-    /// from the device — so a session is already holding them before it has run anything and the
-    /// first run's peak is weights plus whatever that run added. The record carries the mark the run
-    /// found, which is what separates the two.
-    /// </summary>
     [Fact]
     public void TestASessionHoldsItsWeightsInTheArenaBeforeItsFirstRunAndTheRecordSeparatesThem()
     {
@@ -1434,12 +1420,6 @@ public class CoreUtilsCoverageTests
         Assert.Equal(run.PeakBytes, context.RunStats.PeakBytes);
     }
 
-    /// <summary>
-    /// A kept output holds its own block of its session's memory and nothing else: with every output
-    /// kept, the session holds in use its weights and the outputs' own bytes once the run is over,
-    /// and its weights alone once they are let go of — an output whose shape the run learns, one the
-    /// run sizes from what it is fed, and one made after the run's 4 MiB intermediate is freed, alike.
-    /// </summary>
     [Fact]
     public void TestAKeptOutputHoldsOnlyItsOwnBlockOfItsSessionsMemory()
     {
@@ -1538,28 +1518,6 @@ public class CoreUtilsCoverageTests
     }
 
     [Fact]
-    public void TestReleasingWhatTheAllocatorsKeepLeavesASessionHoldingWhatItUsesAndRunningOn()
-    {
-        using var context = new ComputeContext();
-        var filled = ArenaProbeModels.Filled(context);
-        ArenaStatistics Held() => Assert.IsType<ArenaStatistics>(filled.ReadArenaStatistics());
-        ComputeContext.ReleaseOutputs(filled.Execute(ArenaProbeModels.FilledShape(1 << 20)));
-        var kept = Held().TotalAllocatedBytes - Held().InUseBytes;
-
-        var released = DeviceMemory.ReleaseCached();
-
-        Assert.True(kept >= 4 << 20);
-        Assert.True(released >= kept);
-        Assert.Equal(Held().InUseBytes, Held().TotalAllocatedBytes);
-        Assert.Equal(1048576f, ArenaProbeModels.Sum(filled.Execute(ArenaProbeModels.FilledShape(1 << 20))));
-    }
-
-    /// <summary>
-    /// An output whose shape only the run learns is the block its session's run wrote it into: its
-    /// session's allocator holds exactly the output's bytes more while the caller keeps it, and
-    /// nothing more once the caller lets it go.
-    /// </summary>
-    [Fact]
     public void TestAnOutputWhoseShapeTheRunLearnsIsTheBlockItsSessionWroteItInto()
     {
         using var context = new ComputeContext();
@@ -1581,20 +1539,6 @@ public class CoreUtilsCoverageTests
         var filled = ArenaProbeModels.Filled(context);
         Assert.Equal(1000f, ArenaProbeModels.Sum(filled.Execute(ArenaProbeModels.FilledShape(1000))));
         Assert.Equal(4096f, ArenaProbeModels.Sum(filled.Execute(ArenaProbeModels.FilledShape(4096))));
-    }
-
-    /// <summary>
-    /// A run asking for more than the host can give fails as a host allocation failure, the way ONNX
-    /// Runtime's own allocators fail one, and its session runs on.
-    /// </summary>
-    [Fact]
-    public void TestARunAskingMoreThanTheHostHasFailsAsAHostAllocationFailureAndItsSessionRunsOn()
-    {
-        using var context = new ComputeContext();
-        var filled = ArenaProbeModels.Filled(context);
-        var failure = Assert.ThrowsAny<Exception>(() => filled.Execute(ArenaProbeModels.FilledShape(1L << 50)));
-        Assert.Equal(AllocationPool.Host, AllocationFailureReport.Classify(failure, gpuBackend: true));
-        Assert.Equal(1000f, ArenaProbeModels.Sum(filled.Execute(ArenaProbeModels.FilledShape(1000))));
     }
 
     /// <summary>
@@ -3268,6 +3212,39 @@ public class CoreUtilsCoverageTests
         Assert.Contains("Sequence", Refusal(declaresSequence, tensorValue));
         Assert.Contains("Optional", Refusal(declaresOptional, innerValue));
         Assert.Contains("unsupported value type", Refusal(declaresTensor, null!));
+    }
+}
+
+[Trait("Domain", "Core")]
+[Trait("Purpose", "Coverage")]
+[Collection(ProcessWideMemory.Name)]
+public class ProcessAllocatorReleaseCoverageTests
+{
+    [Fact]
+    public void TestReleasingWhatTheAllocatorsKeepLeavesASessionHoldingWhatItUsesAndRunningOn()
+    {
+        using var context = new ComputeContext();
+        var filled = ArenaProbeModels.Filled(context);
+        ArenaStatistics Held() => Assert.IsType<ArenaStatistics>(filled.ReadArenaStatistics());
+        ComputeContext.ReleaseOutputs(filled.Execute(ArenaProbeModels.FilledShape(1 << 20)));
+        var kept = Held().TotalAllocatedBytes - Held().InUseBytes;
+
+        var released = DeviceMemory.ReleaseCached();
+
+        Assert.True(kept >= 4 << 20);
+        Assert.True(released >= kept);
+        Assert.Equal(Held().InUseBytes, Held().TotalAllocatedBytes);
+        Assert.Equal(1048576f, ArenaProbeModels.Sum(filled.Execute(ArenaProbeModels.FilledShape(1 << 20))));
+    }
+
+    [Fact]
+    public void TestARunAskingMoreThanTheHostHasFailsAsAHostAllocationFailureAndItsSessionRunsOn()
+    {
+        using var context = new ComputeContext();
+        var filled = ArenaProbeModels.Filled(context);
+        var failure = Assert.ThrowsAny<Exception>(() => filled.Execute(ArenaProbeModels.FilledShape(1L << 50)));
+        Assert.Equal(AllocationPool.Host, AllocationFailureReport.Classify(failure, gpuBackend: true));
+        Assert.Equal(1000f, ArenaProbeModels.Sum(filled.Execute(ArenaProbeModels.FilledShape(1000))));
     }
 }
 

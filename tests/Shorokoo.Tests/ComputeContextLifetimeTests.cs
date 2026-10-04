@@ -945,10 +945,7 @@ public class ComputeContextLifetimeCoverageTests
             PyTorchBackendCoverageTests.Branch("c", GraphOf("", "t", Op("Shape", "a", "t")), GraphOf("", "t", Op("Neg", "a", "t")))), "t"));
     }
 
-    /// <summary>The shapes <see cref="PlacementShapes"/> evaluates for <paramref name="values"/> of
-    /// <paramref name="graph"/>, with the small integers zero to five as initializers it may read,
-    /// as <c>4x2</c> for a float value, <c>4x2:7</c> for another type, <c>=4,2</c> after it for
-    /// known contents, and <c>unknown</c>.</summary>
+    // 4x2 for a float value, 4x2:7 for another type, =4,2 after it for known contents; initializers zero to five.
     private static string ShapeOf(GraphProto graph, params string[] values)
     {
         foreach (var (name, value) in (ReadOnlySpan<(string, long)>)[("zero", 0), ("one", 1), ("two", 2), ("four", 4), ("five", 5)])
@@ -961,8 +958,7 @@ public class ComputeContextLifetimeCoverageTests
             : "unknown"));
     }
 
-    /// <summary>A <c>Loop</c> of <paramref name="inputs"/> — its trip count and its carried values,
-    /// with no condition — making <paramref name="outputs"/> by <paramref name="body"/>.</summary>
+    // inputs: the trip count and the carried values; no condition.
     internal static NodeProto Loop(string inputs, string outputs, GraphProto body)
     {
         var loop = Op("Loop", inputs, outputs);
@@ -993,7 +989,6 @@ public class ComputeContextLifetimeCoverageTests
         Assert.Equal(plan.Select(p => p.ToString()).Order(), torchPlan.Select(p => p.ToString()).Order());
     }
 
-    /// <summary>Two tensors standing on one host block of eight floats, its halves, and the block.</summary>
     private static (TensorData First, TensorData Second, SharedBlock Block, OrtTensorValue Owner) Halved()
     {
         var backend = DefaultBackend.Instance;
@@ -1228,12 +1223,7 @@ public class ComputeContextLifetimeCoverageTests
         Assert.True(block.IsReleased);
     }
 
-    /// <summary>
-    /// Two consumed inputs A and B of one shape; A's first half and B's second half sliced out by
-    /// bounds the run computes; a fill of 2s shaped like a half, through Neg, Abs and Sigmoid;
-    /// concatenated with B's half, through Sigmoid, Neg and Abs. Outputs that, and the two halves —
-    /// or A's half alone where <paramref name="oneHalf"/>.
-    /// </summary>
+    // A[0:n], B[n:2n], and Concat(Fill(2) through Neg, Abs, Sigmoid; B's half) through Sigmoid, Neg, Abs.
     internal static InternalComputationGraph TwoHalves(bool oneHalf = false)
     {
         var a = InputTensor<float32>("A", rank: 2);
@@ -1287,14 +1277,8 @@ public class ComputeContextLifetimeCoverageTests
         Assert.Equal(b[(Rows / 2 * Columns)..], Floats(outputs[2].ToTensorData()));
     }
 
-    /// <summary>
-    /// <paramref name="graph"/> run consuming A and B, each a value a session made in its own memory,
-    /// and its outputs deleted one by one: after the run and after each deletion, what that session
-    /// has in use, the bytes of the outputs still standing on a block with <paramref name="firstPage"/>
-    /// for each block none of them stands at the start of — what the allocator keeps of such a block
-    /// until it goes — and what
-    /// <paramref name="context"/>'s books hold; and the most outputs that stood on one block.
-    /// </summary>
+    // After the run and after each output's deletion: the session's use, the bytes still on a block
+    // (with firstPage for a block no output stands at the start of, which the allocator keeps), the books.
     internal static ((long InUse, long OnBlocks, long Books)[] Stages, int MostOnABlock) OutputsOnBlocksEnding(
         ComputeContext context, InternalComputationGraph graph, int rows, int columns, long firstPage)
     {
@@ -1356,10 +1340,7 @@ public class ComputeContextLifetimeCoverageTests
         Assert.Equal([4L << 20, (2L << 20) + (4L << 10)], held);
     }
 
-    /// <summary>
-    /// A model carrying <paramref name="n"/> floats of its own, added across each row of its consumed
-    /// input past a Relu; its output, the session that ran it, and the output it should have.
-    /// </summary>
+    // n floats of its own, added across each row of its consumed input past a Relu.
     internal static (TensorData Output, OrtSession Session, float[] Expected) LargeModelRun(ComputeContext context, int n)
     {
         float[] b = [.. Enumerable.Range(0, n).Select(i => (i % 7) * 0.5f)];
@@ -1382,11 +1363,7 @@ public class ComputeContextLifetimeCoverageTests
         Assert.Equal(expected, Floats(output));
     }
 
-    /// <summary>
-    /// A run of <c>y = -Relu(x) * x·W</c> consuming x, through a session of
-    /// <paramref name="backend"/>: the matrix product reads x on a branch of its own, which the
-    /// session runs before the other. The plan it settled on, the output, and what it should be.
-    /// </summary>
+    // y = -Relu(x) * x·W consuming x: the product reads x on a branch of its own, run first.
     internal static (OrtPlacements.Entry Entry, float[] Output, float[] Expected) BranchesRun(IShorokooBackend backend)
     {
         const int N = 512;
@@ -1692,11 +1669,7 @@ public class ComputeContextLifetimeCoverageTests
         Assert.InRange(GC.GetAllocatedBytesForCurrentThread() - before, 0, 16 << 20);
     }
 
-    /// <summary>
-    /// For a session over <paramref name="family"/>'s model built as a plain session is, and one
-    /// built as a variant is from the graph the first wrote out, each provider's nodes in the order
-    /// they ran and in the order of the graph the session wrote out.
-    /// </summary>
+    // A plain session and a variant built from the graph it wrote out: each provider's nodes as run and as written.
     internal static List<(string[] Ran, string[] Written)> RunOrders(string family)
     {
         var backend = (OrtBackend)DefaultBackend.Instance;

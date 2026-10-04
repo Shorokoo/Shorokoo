@@ -1186,9 +1186,7 @@ a smaller one shares a page with other small blocks; on the host a block shares 
 
   Nothing else returns it. A long-lived program doing varied work holds, besides what is in use,
   up to the busiest run of each session it keeps alive and of the tensors it placed on each device,
-  and nothing of a session it disposed. ONNX Runtime's own arena, where a session uses one,
-  keeps a session's busiest run too, rounded up to the regions it grows by, until the session is
-  disposed or a run asks it to shrink.
+  and nothing of a session it disposed.
 - **Sessions run without ONNX Runtime's memory pattern.** With it, a session's runs from the second
   on take their planned tensors as one block laid out by the first run; that block came out larger
   than what the runs have in use at once with a block per tensor on every graph measured — 33–50%

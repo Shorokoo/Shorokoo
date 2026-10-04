@@ -264,16 +264,54 @@ public class PyTorchCudaHardwareTests
     [TorchCudaFact]
     public void TestASumOverTheLeadingAxesOnTheCardHoldsLittleBeyondItsResult()
     {
-        var graph = ComputeContextLifetimeCoverageTests.WithInts(ComputeContextLifetimeCoverageTests.GraphOf("x:float[128,128,512]", "y",
-            ComputeContextLifetimeCoverageTests.Op("ReduceSum", "x axes", "y")), "axes", 0, 1);
+        Assert.Equal((8192f, true), LeadingSum([128, 128, 512], 0, 1));
+        Assert.Equal((515.5f, true), LeadingSum([1031, 512], 0));
+    }
+
+    /// <summary>The first element of a sum over the leading axes <paramref name="axes"/> of a
+    /// <paramref name="shape"/> of 0.5s, and whether the run held under a mebibyte beyond what it
+    /// held as it started.</summary>
+    private static (float First, bool Little) LeadingSum(long[] shape, params long[] axes)
+    {
+        var dims = string.Join(",", shape);
+        var graph = ComputeContextLifetimeCoverageTests.WithInts(ComputeContextLifetimeCoverageTests.GraphOf($"x:float[{dims}]", "y",
+            ComputeContextLifetimeCoverageTests.Op("ReduceSum", "x axes", "y")), "axes", axes);
         using var session = Cuda.Value.CreateSession(PyTorchBackendCoverageTests.Serialize(graph), default, default, DeviceMemorySettings.Default);
         using var x = Cuda.Value.CreateTensorInBackendMemory(ShorokooTensorElementType.Float,
-            [.. MemoryMarshal.AsBytes<float>(Enumerable.Repeat(0.5f, 128 * 128 * 512).ToArray())], [128, 128, 512]);
+            [.. MemoryMarshal.AsBytes<float>(Enumerable.Repeat(0.5f, (int)shape.Aggregate(1L, (a, d) => a * d)).ToArray())], shape);
         var feeds = new Dictionary<string, IShorokooTensorValue> { ["x"] = x };
         session.Run(feeds, ["y"], RunSettings.Default)[0].Dispose();
         var (peak, y) = PyTorchBackendCoverageTests.CardPeak(() => session.Run(feeds, ["y"], RunSettings.Default)[0]);
-        using (y) Assert.Equal([.. MemoryMarshal.AsBytes<float>([8192f, 8192f])], Cuda.Value.CopyTensorToHost(y)[..8]);
-        Assert.True(peak < 1 << 20);
+        using (y) return (BitConverter.ToSingle(Cuda.Value.CopyTensorToHost(y), 0), peak < 1 << 20);
+    }
+
+    [TorchCudaFact]
+    public void TestASumOverTheLeadingAxesOfSixteenBitFloatsOnTheCardAddsUpInFloat32()
+    {
+        Assert.Equal(8f, SixteenBitSum(ShorokooTensorElementType.Float16));
+        Assert.Equal(8f, SixteenBitSum(ShorokooTensorElementType.BFloat16));
+    }
+
+    /// <summary>The sum over its rows of a column of 1024 sixteen-bit floats whose partial sums of
+    /// 32 rows each are no sixteen-bit float, and whose sum is 8.</summary>
+    private static float SixteenBitSum(ShorokooTensorElementType type)
+    {
+        float[] values = [.. Enumerable.Range(0, 1024).Select(r => (r / 32, r % 32) switch
+        {
+            (0, var q) => q % 2 == 0 ? 1024f : -1024f,
+            (var b, var q) => q % 2 == 0 ? 0.5f : b == 31 ? 0f : -0.5f,
+        })];
+        byte[] Bytes(float v) => type == ShorokooTensorElementType.Float16
+            ? BitConverter.GetBytes(BitConverter.HalfToUInt16Bits((Half)v))
+            : BitConverter.GetBytes((ushort)(BitConverter.SingleToUInt32Bits(v) >> 16));
+        var graph = ComputeContextLifetimeCoverageTests.WithInts(ComputeContextLifetimeCoverageTests.GraphOf(
+            $"x:{(type == ShorokooTensorElementType.Float16 ? "float16" : "bfloat16")}[1024,1]", "y",
+            ComputeContextLifetimeCoverageTests.Op("ReduceSum", "x axes", "y")), "axes", 0);
+        using var session = Cuda.Value.CreateSession(PyTorchBackendCoverageTests.Serialize(graph), default, default, DeviceMemorySettings.Default);
+        using var x = Cuda.Value.CreateTensorInBackendMemory(type, [.. values.SelectMany(Bytes)], [1024, 1]);
+        using var y = session.Run(new Dictionary<string, IShorokooTensorValue> { ["x"] = x }, ["y"], RunSettings.Default)[0];
+        var bits = BitConverter.ToUInt16(Cuda.Value.CopyTensorToHost(y), 0);
+        return type == ShorokooTensorElementType.Float16 ? (float)BitConverter.UInt16BitsToHalf(bits) : BitConverter.UInt32BitsToSingle((uint)bits << 16);
     }
 
     [TorchCudaFact]

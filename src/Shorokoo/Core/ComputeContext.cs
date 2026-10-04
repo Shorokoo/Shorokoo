@@ -51,8 +51,10 @@ namespace Shorokoo.Runtime
         // The session this graph runs on and what it was built with. Replaced only on a context whose
         // device memory is under a budget, at the start of a run -- which the budget serializes --
         // when the run finds the context holding more of its memory than the session's arena limit
-        // left room for (see Within). Everything else that reaches into the session does so under
-        // _sessionGate, which the replacement takes too, so nothing calls into one being disposed.
+        // left room for and the session cannot take a smaller one in place, or recorded with the
+        // limit it was just given where it can (see Within). Everything else that reaches into the
+        // session does so under _sessionGate, which the replacement takes too, so nothing calls into
+        // one being disposed.
         private volatile BuiltSession _built;
         private readonly object _sessionGate = new();
 
@@ -208,10 +210,16 @@ namespace Shorokoo.Runtime
                 built = _built;
             }
             built.Session.Dispose();
-            // After the session: it reads them for as long as it lives. Every lock goes before
-            // any weight is deleted, so a delete that throws leaves none of them held.
-            foreach (var tensor in SuppliedTensors) ReleaseWeight(tensor);
-            foreach (var tensor in SuppliedTensors) tensor.Delete();
+            // After the session: it reads them for as long as it lives. Each is dead before the
+            // graph lets go of its lock, so nothing can take it in between, and its memory goes as
+            // that lock drops -- or, where a run of another context is reading it through
+            // .Shared(), when that run is done with it. Neither waits nor throws for such a reader,
+            // so every weight is let go of, and a context disposing its graphs disposes them all.
+            foreach (var tensor in SuppliedTensors)
+            {
+                tensor.DeleteOnceUnread(TensorDeath.DeletedWithItsGraph);
+                ReleaseWeight(tensor);
+            }
             GC.SuppressFinalize(this);
         }
 
@@ -413,19 +421,23 @@ namespace Shorokoo.Runtime
 
         /// <summary>
         /// The session a run under a device-memory budget of <paramref name="limit"/> bytes can use,
-        /// with <paramref name="feeds"/> admitted against it: this graph's session while its arena
-        /// limit is still within what the budget allows, and otherwise a new one built with the
-        /// limit what the context now holds leaves.
+        /// with <paramref name="feeds"/> admitted against it.
         ///
-        /// <para>What the budget allows a session is the budget less the <i>discount</i>: the bytes
-        /// the context holds in its memory outside that session's arena for the length of the run —
-        /// every tensor attached to it there, what the run itself reads there or copies there to read
-        /// or consume, a copy of a tensor it consumes included, and the memory the run is handed for
-        /// its outputs there before it starts (see <see cref="RunFeeds.Plan"/>). No tensor is in the
-        /// arena: a run's outputs are memory of their own. ONNX Runtime fixes an arena's limit when
-        /// the session is built, and building one costs about as much as the graph is large, so a
-        /// session is kept for as long as its limit fits and built again only when the discount has
-        /// grown past the room it left — never merely because it has fallen. See
+        /// <para>What the budget leaves a session for the run is the budget less the
+        /// <i>discount</i>: the bytes the context holds in its memory outside that session's
+        /// allocations for the length of the run — every tensor on its books there, and what the
+        /// run itself reads there or copies there to read or consume, a copy of a tensor it consumes
+        /// included (<see cref="RunFeeds.Plan"/>). The run's outputs are not in it: they are the
+        /// session's allocations, held to its limit, until the run returns, and on the context's
+        /// books from then on.</para>
+        ///
+        /// <para>A session that enforces a limit itself
+        /// (<see cref="IShorokooSession.TryLimitDeviceMemory"/> — an ONNX Runtime session on a card,
+        /// whose allocator checks the limit as each block is asked for) is given exactly that room,
+        /// in place, before the run, and is never built again for it. Any other keeps the limit it
+        /// was built with while that is within the room, since building a session costs about as
+        /// much as the graph is large, and is built again with a new limit only when the discount
+        /// has grown past the room it left — never merely because it has fallen. See
         /// <see cref="ComputeContext.ArenaLimitWithin"/> for the limit a new one gets.</para>
         /// </summary>
         /// <exception cref="InvalidOperationException">What the context holds leaves no room for the
@@ -2254,19 +2266,23 @@ namespace Shorokoo.Runtime
         /// in its precision, and with the outputs the lowering proved it may write into consumed
         /// inputs' memory — placing its runs' values in that memory where <paramref name="placing"/>
         /// and this context place (<see cref="ValuePlacement"/>), and otherwise built without what
-        /// placing asks of a build (<see cref="SessionPlacing"/>).</summary>
+        /// placing asks of a build (<see cref="SessionPlacing"/>). A session for a single run (not
+        /// <paramref name="placing"/>) of a context that places plans no placements but writes into
+        /// consumed memory whatever costs no planning; one of a context that does not place writes
+        /// nothing there but its pairs.</summary>
         internal IShorokooSession BuildSession(
             IShorokooBackend backend, byte[] modelData, ShorokooGraphOptimization optimization,
             DeviceMemorySettings deviceMemory, IReadOnlyList<OutputAlias>? outputAliases = null,
             int intraOpThreads = 0, IReadOnlyList<SuppliedInitializer>? supplied = null, bool placing = true)
         {
-            var off = !placing || !(ValuePlacement ?? OutputAliasing);
+            var off = !(ValuePlacement ?? OutputAliasing);
             IShorokooSession session;
-            using (SessionPlacing.Suppress(off))
+            using (SessionPlacing.Suppress(off || !placing))
                 session = backend.CreateSession(
                     modelData, optimization, ShorokooLogSeverity.Fatal, deviceMemory, Diagnostics,
                     outputAliases ?? [], intraOpThreads, supplied ?? [], Precision);
             if (off) session.StopPlacing();
+            else if (!placing) session.StopPlanningPlacements();
             return session;
         }
 

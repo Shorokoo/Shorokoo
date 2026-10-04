@@ -2,9 +2,12 @@
 Layer-, Group-, RMS-, Lp- and MeanVarianceNormalization, LRN, NegativeLogLikelihoodLoss
 and SoftmaxCrossEntropyLoss.
 
-Every helper is functional -- no input is written to, the running statistics of a training-mode
-BatchNormalization included, which come back as new tensors -- so autograd can differentiate
-through all of them.
+No helper writes into a tensor it is handed but the `_out` two take -- the running statistics of a
+training-mode BatchNormalization included, which come back as new tensors -- so autograd can
+differentiate through all of them. batch_normalization and layer_normalization write their first
+output into `_out`, which a run hands them only while it computes no gradient -- a range of memory
+the run consumed, or their very input where nothing reads it after the node (the runtime's
+place_into and write_over) -- reading their statistics off the input before they write it.
 """
 
 import torch

@@ -460,10 +460,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     var zeroGrad = TensorData.CreateFromRawBytes(
                         paramData.Shape, paramData.DType,
                         new byte[paramData.Shape.Count * (paramData.DType.EncodingBitCount / 8)]);
-                    // Every value goes in as a copy the run consumes: they are the caller's — the
-                    // rig's own initial values and hyperparameters, which are never fed, so none of
-                    // them ever holds a copy of itself in a runtime's memory.
-                    IData[] feeds = [.. hyperSeeds.Select(CopyOf), CopyOf(paramData), zeroGrad];
+                    // The values are the caller's — the rig's own initial values and hyperparameters —
+                    // so none of them is consumed, and none is left holding a copy of itself in a
+                    // runtime's memory: one the run can read where it is is read there, and any
+                    // other goes in as a copy in the context's memory that the run consumes.
+                    IData[] feeds = [.. hyperSeeds.Select(FeedOf), FeedOf(paramData), zeroGrad];
                     results[i] = [.. compiled.Execute(feeds, compiled.DefaultRunSettings with { ShrinkArenaAfterRun = true })
                         .Select(r => r.ToTensorData())];
                 }
@@ -474,7 +475,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             }
             return results;
 
-            static IData CopyOf(TensorData t) => TensorData.CreateFromRawBytes(t.Shape, t.DType, t.CopyRawMemory());
+            IData FeedOf(TensorData t)
+                => t.FeedsInPlace(computeContext.ResolvedBackend) ? t.Shared() : t.CopyTo(computeContext);
         }
     }
 }

@@ -1257,9 +1257,10 @@ public class ComputeContextLifetimeCoverageTests
         Assert.Equal(b[(Rows / 2 * Columns)..], Floats(outputs[2].ToTensorData()));
     }
 
-    // After the run and after each output's deletion: the session's use, the bytes still on a block, the books.
+    // After the run and after each output's deletion: the session's use, the bytes still on a block
+    // (with firstPage for a block no output stands at the start of, which the allocator keeps), the books.
     internal static ((long InUse, long OnBlocks, long Books)[] Stages, int MostOnABlock) OutputsOnBlocksEnding(
-        ComputeContext context, InternalComputationGraph graph, int rows, int columns)
+        ComputeContext context, InternalComputationGraph graph, int rows, int columns, long firstPage)
     {
         var (a, b, _) = TwoHalvesValues(rows, columns);
         var x = InputTensor<float32>("x", rank: 2);
@@ -1274,8 +1275,12 @@ public class ComputeContextLifetimeCoverageTests
         var outputs = context.Compile(graph).Execute(Made(a), Made(b)).Select(o => o.ToTensorData()).ToList();
         var most = outputs.Where(o => o.Block is not null).GroupBy(o => o.Block).Max(g => (int?)g.Count()) ?? 0;
         List<(long, long, long)> stages = [];
-        void Stage() => stages.Add((made.ReadArenaStatistics()!.Value.InUseBytes,
-            outputs.Where(o => !o.IsDisposed && o.Block is not null).Sum(o => o.ByteCount), context.ReadDeviceMemoryUse().AttachedBytes));
+        void Stage()
+        {
+            var standing = outputs.Where(o => !o.IsDisposed && o.Block is not null).ToList();
+            var firstPages = standing.GroupBy(o => o.Block).Count(block => block.All(o => ((IOnnxData)o).Value.Range!.Value.Offset != 0)) * firstPage;
+            stages.Add((made.ReadArenaStatistics()!.Value.InUseBytes, standing.Sum(o => o.ByteCount) + firstPages, context.ReadDeviceMemoryUse().AttachedBytes));
+        }
         Stage();
         foreach (var output in outputs)
         {
@@ -1289,8 +1294,8 @@ public class ComputeContextLifetimeCoverageTests
     public void TestOutputsOnOneBlockOfASessionsMemoryEachFreeTheirOwnPagesAndWhatNoneStandsOnGoesWithTheRun()
     {
         using var context = new ComputeContext();
-        var (both, together) = OutputsOnBlocksEnding(context, TwoHalves(), 1024, 1024);
-        var (one, _) = OutputsOnBlocksEnding(context, TwoHalves(oneHalf: true), 1024, 1024);
+        var (both, together) = OutputsOnBlocksEnding(context, TwoHalves(), 1024, 1024, firstPage: 4L << 10);
+        var (one, _) = OutputsOnBlocksEnding(context, TwoHalves(oneHalf: true), 1024, 1024, firstPage: 4L << 10);
         Assert.Equal(2, together);
         Assert.True(one[0].OnBlocks > 0);
         Assert.All(both, stage => Assert.Equal(stage.OnBlocks, stage.InUse - both[^1].InUse));
@@ -1312,7 +1317,7 @@ public class ComputeContextLifetimeCoverageTests
             output.Delete();
             if (!block.IsReleased) held.Add(block.HeldBytes);
         }
-        Assert.Equal([4L << 20, 2L << 20], held);
+        Assert.Equal([4L << 20, (2L << 20) + (4L << 10)], held);
     }
 
     // n floats of its own, added across each row of its consumed input past a Relu.
@@ -1870,7 +1875,7 @@ public class ComputeContextLifetimeCoverageTests
     /// <c>RunFeeds.Prepare</c>'s refusal is for.</summary>
     private sealed class UnlockableParam : NamedModelParam
     {
-        public override IShorokooTensorValue ToTensorValue() => throw new NotSupportedException();
+        internal override IShorokooTensorValue ToTensorValue() => throw new NotSupportedException();
         public override TensorData ToTensorData() => throw new NotSupportedException();
         public override TensorData<T> ToTensorData<T>() => throw new NotSupportedException();
         public override TensorDataSequence ToTensorDataSequence() => throw new NotSupportedException();

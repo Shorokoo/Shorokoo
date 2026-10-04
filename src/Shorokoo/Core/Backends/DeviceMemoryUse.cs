@@ -5,16 +5,18 @@ namespace Shorokoo.Core.Backends;
 /// <see cref="Shorokoo.Runtime.ComputeContext.ReadDeviceMemoryUse"/>.
 ///
 /// <para>The budget counts tensors, not arenas. <see cref="AttachedBytes"/> is the bytes of the
-/// live tensors on the context's books that are in its memory: what <c>To</c> and <c>CopyTo</c>
+/// tensors on the context's books whose memory is in its memory: what <c>To</c> and <c>CopyTo</c>
 /// placed for it, what its runs read there or copied there to read, and the outputs its runs left
-/// there. A tensor attached to two contexts counts on both books; one
-/// that dies, is collected, or is detached with <c>Detach</c> leaves them. What the arenas holding
+/// there. A tensor attached to two contexts counts on both books; one that is collected or is
+/// detached with <c>Detach</c> leaves them, and so does one that dies once its memory is released —
+/// for one deleted while a run or a compiled graph's session still reads it, when the last of them
+/// stands down. What the arenas holding
 /// those tensors have taken from the device besides — the blocks they keep spare — is not in it:
 /// read <see cref="Shorokoo.Runtime.CompiledGraph.ReadArenaStatistics"/> for a session's, and
 /// <see cref="DeviceMemory"/> for the card.</para>
 /// </summary>
-/// <param name="AttachedBytes">The bytes of the live tensors attached to the context that are in its
-/// memory — the card's, on a GPU backend.</param>
+/// <param name="AttachedBytes">The bytes of the tensors attached to the context whose memory is in
+/// its memory — the card's, on a GPU backend.</param>
 /// <param name="AttachedTensors">How many tensors those are.</param>
 /// <param name="LimitBytes">The context's budget: its
 /// <see cref="DeviceMemorySettings.LimitBytes"/> where its memory is a device's, and <c>null</c>

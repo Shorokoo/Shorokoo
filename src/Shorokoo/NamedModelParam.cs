@@ -33,7 +33,7 @@ namespace Shorokoo
             base.ParamType = paramType;
         }
 
-        public override IShorokooTensorValue ToTensorValue()
+        internal override IShorokooTensorValue ToTensorValue()
         {
             return data.ToTensorValue();
         }
@@ -80,7 +80,7 @@ namespace Shorokoo
             base.Structure = DataStructure.Sequence;
         }
 
-        public override IShorokooTensorValue ToTensorValue() => data.ToTensorValue();
+        internal override IShorokooTensorValue ToTensorValue() => data.ToTensorValue();
 
         /// <inheritdoc/>
         internal override IShorokooTensorValue ToTensorValue(IShorokooBackend backend)
@@ -123,7 +123,7 @@ namespace Shorokoo
             base.Structure = DataStructure.Optional;
         }
 
-        public override IShorokooTensorValue ToTensorValue() => ToTensorValue(DefaultBackend.Instance);
+        internal override IShorokooTensorValue ToTensorValue() => ToTensorValue(DefaultBackend.Instance);
 
         /// <inheritdoc/>
         internal override IShorokooTensorValue ToTensorValue(IShorokooBackend backend)
@@ -177,7 +177,7 @@ namespace Shorokoo
             base.Structure = DataStructure.TensorStruct;
         }
 
-        public override IShorokooTensorValue ToTensorValue()
+        internal override IShorokooTensorValue ToTensorValue()
         {
             throw new InvalidTensorOperationException(ErrorCodes.FW007, "ToTensorValue", "TensorStructModelParam",
                 "TensorStructModelParam cannot be directly converted to a tensor value. Use individual field data via StructData.GetField()");
@@ -299,7 +299,15 @@ namespace Shorokoo
 
         public DataStructure Structure { get; protected set; } = DataStructure.Tensor;
 
-        public abstract IShorokooTensorValue ToTensorValue();
+        /// <summary>
+        /// This parameter as a value of the process-wide backend's runtime — the value a run is fed,
+        /// and the parameter's own: read it, do not dispose it.
+        ///
+        /// <para>Framework-only. A runtime value hands out writable spans over its memory, and a
+        /// tensor's contents are fixed when it is built, so no caller outside the framework is ever
+        /// handed one.</para>
+        /// </summary>
+        internal abstract IShorokooTensorValue ToTensorValue();
 
         /// <summary>
         /// This parameter as a value of <paramref name="backend"/>'s runtime — the form the feed

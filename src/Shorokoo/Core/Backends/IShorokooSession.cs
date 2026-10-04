@@ -117,6 +117,15 @@ public interface IShorokooSession : IDisposable
     // The default does nothing: a session that places nothing has nothing to stop.
     internal void StopPlacing() { }
 
+    // Stops this session from planning where its runs place values (PlacementProof), for a session
+    // built for a single run, which would not run long enough to repay what the planning builds. It
+    // stops only that: whatever else its runs write into the memory they consume at no such cost --
+    // a node written over a consumed input it reads last, on PyTorch -- they still write, unlike
+    // after StopPlacing. Called on a new session, before its first run.
+    //
+    // The default is StopPlacing: a session whose placing all costs planning stops it all.
+    internal void StopPlanningPlacements() => StopPlacing();
+
     // Sets the most this session's runs may hold in its device memory -- what a device-memory
     // budget leaves them -- without the session being built again, where its backend can enforce
     // that itself, and answers whether it can. The framework sets it before each run under a budget,

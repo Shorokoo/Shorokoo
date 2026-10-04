@@ -336,6 +336,10 @@ var y = compiled.Execute(x);
 
 - The weights belong to the compiled graph and are freed when it is disposed. There is no graph
   with the weights to edit or save; load one with `Persistence.Load` for that.
+- A weight another context's run is reading through `.Shared()` when its graph is disposed is
+  deleted all the same, and its memory is freed when that run is done with it. While the graph
+  lives, `Delete` refuses its weights, `TryDelete` declines, and `DeleteAsync` deletes one and
+  counts it on the context's budget until the graph is disposed.
 - Weights of at most about a thousand elements stay in the graph on the host, where the compiler
   reads such values.
 - The runtime does not fold or fuse over the weights it is handed, so results can round differently
@@ -734,7 +738,10 @@ outputs of one run may stand on one block. How the block is freed depends on who
   ([Device memory](#device-memory-gpu-backends)): each output frees its own range as it ends, and
   what of the block no output stands on is freed as the run ends. The whole pages inside a range go
   back — 4 KiB on the host, 2 MiB on a card (512 bytes for a card block of a mebibyte or less) — to
-  the allocator, as a tensor's own memory does.
+  the allocator, as a tensor's own memory does. All but the block's first page, which the allocator
+  knows the block by: it goes with the block's last output, and until then a block of a mebibyte or
+  less on a card, and one on the host, keeps it; a larger block on a card hands its memory back all
+  the same, keeping only its address.
 - **On PyTorch**, and on a card whose driver does not offer virtual memory management, the block is
   freed when the last output on it ends, not before: torch frees a tensor's storage whole, and so
   does `cudaFree` a block. A run places outputs in such a block only where they leave at most a
@@ -1287,8 +1294,10 @@ Console.WriteLine($"{use.AttachedBytes} of {use.LimitBytes} bytes attached, {use
 copied there by the context's runs, or left there as its runs' outputs — every output of a run
 on the card, until it is deleted, collected or detached.
 `ReadDeviceMemoryUse()` reports `AttachedBytes`, `AttachedTensors` and `LimitBytes` (`null`
-with no budget, or for a host context). A tensor on two contexts counts on both; dead,
-collected or `Detach`ed tensors drop out.
+with no budget, or for a host context). A tensor on two contexts counts on both; collected or
+`Detach`ed tensors drop out, and so do dead ones once their memory is released. A tensor deleted
+with `DeleteAsync` while a run, or the session of a graph loaded with `LoadCompiled`, still reads
+it keeps counting until that reader stands down, since its memory is still on the card until then.
 
 **A transfer it cannot take is refused before allocating** — `To`, `CopyTo`, a run's card copy
 of a tensor it cannot read in place, and a `To` that

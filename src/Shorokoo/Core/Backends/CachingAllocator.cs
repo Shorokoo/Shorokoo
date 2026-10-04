@@ -16,7 +16,7 @@ namespace Shorokoo.Core.Backends;
 /// program's own and one loaded in isolation over the same file — and a runtime keeps one allocator
 /// per device for every session it builds, whichever backend asked. So the allocator, its accounts
 /// and the charging that picks an account are this assembly's, which every copy of a backend
-/// shares, and a runtime is handed it once (<see cref="ClaimRuntime"/>): the sessions of either
+/// shares, and a runtime is handed it once (<see cref="HandTo"/>): the sessions of either
 /// backend then charge their own accounts, and are held to their own limits.</para>
 ///
 /// <para><b>Why the session's allocator is Shorokoo's.</b> ONNX Runtime writes a run's every output
@@ -111,6 +111,10 @@ internal sealed unsafe class CachingAllocator
     /// <summary>What the card's arena of small blocks carves in.</summary>
     private const long SmallUnit = 512;
 
+    /// <summary>The most a request may ask for: more than any device holds, and far enough below the
+    /// largest size there is that rounding a request up to its class cannot run past it.</summary>
+    private const long Largest = 1L << 62;
+
     private static readonly object _registryGate = new();
     private static readonly Dictionary<int, CachingAllocator> _byDevice = [];
 
@@ -156,8 +160,9 @@ internal sealed unsafe class CachingAllocator
     /// <summary>What a block is: its size class, what was asked for, the account it is charged to,
     /// where its memory came from, the account's call it was last counted in, whether that account
     /// has handed it over (<see cref="HandOver"/>), and the parts of it handed back while the rest
-    /// was still in use (<see cref="ReleaseRange"/>) — by offset, in order, none where none was —
-    /// with their bytes, and those of them that had been asked for.</summary>
+    /// was still in use (<see cref="ReleaseRange"/>) — by offset, in order, none where none was;
+    /// whether the memory of its first granule went back to the card with the block still carved
+    /// over it — with their bytes, and those of them that had been asked for.</summary>
     private struct Block
     {
         internal long Size;
@@ -167,6 +172,7 @@ internal sealed unsafe class CachingAllocator
         internal Source Source;
         internal bool HandedOver;
         internal List<(long Start, long End)>? Released;
+        internal bool FirstGone;
         internal long ReleasedBytes;
         internal long ReleasedRequested;
     }
@@ -189,16 +195,23 @@ internal sealed unsafe class CachingAllocator
 
         private int Slot(IntPtr key) => (int)(((ulong)key >> 6) * 0x9E3779B97F4A7C15UL >> 40) & (_entries.Length - 1);
 
-        internal void Add(IntPtr key, in Block value)
+        /// <summary>Adds <paramref name="value"/> under <paramref name="key"/>; false, adding nothing,
+        /// where a block is out under that address already.</summary>
+        internal bool Add(IntPtr key, in Block value)
         {
             if ((_count + 1) * 2 > _entries.Length) Grow();
             var entries = _entries;
             var mask = entries.Length - 1;
             var i = Slot(key);
-            while (entries[i].Key != IntPtr.Zero && entries[i].Key != key) i = (i + 1) & mask;
-            if (entries[i].Key == IntPtr.Zero) _count++;
+            while (entries[i].Key != IntPtr.Zero)
+            {
+                if (entries[i].Key == key) return false;
+                i = (i + 1) & mask;
+            }
+            _count++;
             entries[i].Key = key;
             entries[i].Value = value;
+            return true;
         }
 
         internal ref Block Find(IntPtr key)
@@ -250,15 +263,18 @@ internal sealed unsafe class CachingAllocator
     }
 
     private CachingAllocator(int device)
+        : this(device, device == Host ? HostMemory.Supported ? HostMemory.Instance : null : CardMemory.For(device))
+    {
+    }
+
+    /// <summary>An allocator for <paramref name="device"/> — the host for -1, a card otherwise — whose
+    /// arenas are backed by <paramref name="backing"/>, or which takes every block of its own from the
+    /// device where that is null.</summary>
+    internal CachingAllocator(int device, ArenaBacking? backing)
     {
         _device = device;
-        if (device == Host)
-            _backing = HostMemory.Supported ? HostMemory.Instance : null;
-        else if (CardMemory.For(device) is { } card)
-        {
-            _backing = card;
-            _small = new Arena(card, unit: SmallUnit, chunkBytes: 256L << 20);
-        }
+        _backing = backing;
+        if (device != Host && backing is not null) _small = new Arena(backing, unit: SmallUnit, chunkBytes: 256L << 20);
         Placements = new Account(this, "placements", keepsLargeBlocks: device != Host);
         lock (_registryGate)
         {
@@ -279,14 +295,21 @@ internal sealed unsafe class CachingAllocator
     internal static IntPtr FreeEntry => (IntPtr)(delegate* unmanaged<IntPtr, IntPtr, void>)&FreeCallback;
 
     /// <summary>
-    /// Whether the runtime whose environment is <paramref name="environment"/> still has to be handed
-    /// this allocator: true the first time a runtime is named, for the caller to register it there,
-    /// and false after, however many backends bind that runtime. A runtime keeps one allocator per
-    /// device, so a second registration would take the device over from the first.
+    /// Hands this allocator to the runtime whose environment is <paramref name="environment"/>
+    /// through <paramref name="register"/>, once: the first time that runtime is named, and not again
+    /// however many backends bind it. A runtime keeps one allocator per device, so a second
+    /// registration would take the device over from the first. A registration the runtime refuses —
+    /// <paramref name="register"/> throwing — leaves the runtime without it, so the next backend to
+    /// name that runtime registers it again and is refused again, as loudly.
     /// </summary>
-    internal bool ClaimRuntime(IntPtr environment)
+    internal void HandTo(IntPtr environment, Action register)
     {
-        using (_gate.Hold()) return _runtimes.Add(environment);
+        lock (_runtimes)
+        {
+            if (_runtimes.Contains(environment)) return;
+            register();
+            _runtimes.Add(environment);
+        }
     }
 
     /// <summary>Whether this is a card's allocator.</summary>
@@ -325,28 +348,51 @@ internal sealed unsafe class CachingAllocator
     /// </summary>
     [UnmanagedCallersOnly]
     private static IntPtr AllocCallback(IntPtr state, nuint size, byte* reason, int capacity)
+        => AllocateOrRefuse(state, size, reason is null || capacity <= 0 ? default : new Span<byte>(reason, capacity));
+
+    /// <summary>What <see cref="AllocCallback"/> answers: a block of <paramref name="size"/> bytes from
+    /// the allocator <paramref name="state"/> names, or null with the reason written into
+    /// <paramref name="reason"/>. Nothing escapes it: wording a failure can fail too — the memory a
+    /// message takes may be the very memory there is none of, or the failure may not say what it
+    /// is — and then a reason fixed in advance is written, with nothing to allocate.</summary>
+    internal static IntPtr AllocateOrRefuse(IntPtr state, nuint size, Span<byte> reason)
     {
-        string? refusal;
         try
         {
-            var block = Of(state).Allocate(size > long.MaxValue ? long.MaxValue : (long)size, out refusal);
-            if (block != IntPtr.Zero) return block;
+            try
+            {
+                var block = Of(state).Allocate(size > long.MaxValue ? long.MaxValue : (long)size, out var refusal);
+                if (block != IntPtr.Zero) return block;
+                Write(refusal ?? $"Failed to allocate {size} bytes.", reason);
+            }
+            catch (Exception failure)
+            {
+                Write($"Failed to allocate {size} bytes: Shorokoo's allocator failed ({failure.Message}).", reason);
+            }
         }
-        catch (Exception failure)
+        catch
         {
-            refusal = $"Failed to allocate {size} bytes: Shorokoo's allocator failed ({failure.Message}).";
+            Write("Failed to allocate: Shorokoo's allocator failed."u8, reason);
         }
-        Write(refusal ?? $"Failed to allocate {size} bytes.", reason, capacity);
         return IntPtr.Zero;
     }
 
     /// <summary><paramref name="text"/> into <paramref name="buffer"/> as UTF-8, cut short where it
     /// does not fit, and NUL-terminated.</summary>
-    private static void Write(string text, byte* buffer, int capacity)
+    private static void Write(string text, Span<byte> buffer)
     {
-        if (buffer is null || capacity <= 0) return;
-        var span = new Span<byte>(buffer, capacity - 1);
-        System.Text.Unicode.Utf8.FromUtf16(text, span, out _, out var written, replaceInvalidSequences: true, isFinalBlock: true);
+        if (buffer.IsEmpty) return;
+        System.Text.Unicode.Utf8.FromUtf16(text, buffer[..^1], out _, out var written, replaceInvalidSequences: true, isFinalBlock: true);
+        buffer[written] = 0;
+    }
+
+    /// <summary><paramref name="text"/>, UTF-8 already, into <paramref name="buffer"/>, cut short where
+    /// it does not fit, and NUL-terminated: nothing allocated.</summary>
+    private static void Write(ReadOnlySpan<byte> text, Span<byte> buffer)
+    {
+        if (buffer.IsEmpty) return;
+        var written = Math.Min(text.Length, buffer.Length - 1);
+        text[..written].CopyTo(buffer);
         buffer[written] = 0;
     }
 
@@ -402,7 +448,9 @@ internal sealed unsafe class CachingAllocator
     /// this device (<see cref="Charge"/>) or to <see cref="Placements"/>; or null, with
     /// <paramref name="refusal"/> saying why, for a block the account's limit has no room for or
     /// the device has no memory for. What is kept for reuse goes back first: the account's own
-    /// before its limit refuses, everything the device keeps before the device does.
+    /// before its limit refuses, as much as makes room, everything the device keeps before the device
+    /// does — and on a card what the asking call let go of, once the card is done with it, waited for
+    /// outside the lock and only where nothing else makes room.
     ///
     /// <para>The reason is worded for <c>AllocationFailureReport</c>, which reads it out of the
     /// failure ONNX Runtime raises: it says the allocation failed and names the memory — the CUDA
@@ -414,62 +462,90 @@ internal sealed unsafe class CachingAllocator
         if (bytes <= 0) return IntPtr.Zero;
         var scope = t_scope;
         var account = scope?.AccountOn(this) ?? Placements;
+        if (bytes > Largest)
+        {
+            using (_gate.Hold()) account.Refusals++;
+            refusal = OnCard
+                ? $"Failed to allocate {bytes} bytes {Where}: {Allocator} serves nothing that large, more than any card holds."
+                : $"Failed to allocate {bytes} bytes {Where}: more than any process could commit (a bad allocation).";
+            return IntPtr.Zero;
+        }
         var size = ClassOf(bytes);
         var source = SourceOf(size);
         List<(IntPtr, long)>? release = null;
         var carved = IntPtr.Zero;
-        using (_gate.Hold())
+        // On a card what this call let go of goes back only once the card is done with the work the
+        // call queued: where the request needs it, the card is waited for -- outside the lock, which
+        // every allocation and free on the device takes -- and the request asked afresh.
+        for (var waited = false; ; waited = true)
         {
-            if (account == Placements) BeginPlacementsCall();
-            if (scope is not null && scope.TakeHeld(account, size, out var held, out var call))
-                return Hand(held, size, bytes, account, source, call);
-            if (account.TakeKept(size, out held, out call))
-                return Hand(held, size, bytes, account, source, call);
-            // What the account would hold from the device with one more block of this class.
-            var excess = account.HeldBytes + size - Math.Max(account.MaxUsed, account.Used + size);
-            if (account.LimitUnderLock is { } limit && account.Charged + account.KeptBytes + size > limit)
+            if (waited)
             {
-                // Under a budget what it keeps goes back first -- kept, and on a card what this call
-                // let go of, which handing back waits for the card to be done with -- and then only
-                // what it has out counts.
-                if (OnCard) CudaRuntime.Synchronize(_device);
-                release = ShedAll(account, scope);
-                if (account.Charged + size > limit)
-                {
-                    account.Refusals++;
-                    refusal = $"Failed to allocate {bytes} bytes {Where}: {Allocator} may hold {limit} "
-                        + "bytes there for this session, what the device-memory budget "
-                        + $"(DeviceMemorySettings.LimitBytes) leaves its run, and it holds {account.Charged}.";
-                }
+                Release(release);
+                release = null;
+                AwaitCard();
             }
-            if (refusal is null && source != Source.Own)
+            using (_gate.Hold())
             {
-                carved = CarveFor(account, size, source, excess, out var counted);
-                if (carved == IntPtr.Zero)
+                if (account == Placements) BeginPlacementsCall();
+                if (scope is not null && scope.TakeHeld(account, size, out var held, out var call))
+                    return Hand(held, size, bytes, account, source, call);
+                if (account.TakeKept(size, out held, out call))
+                    return Hand(held, size, bytes, account, source, call);
+                if (account.LimitUnderLock is { } limit && account.Charged + account.KeptBytes + size > limit)
                 {
-                    // The device is full: what is kept anywhere on it goes back -- on a card once the
-                    // card is done with it -- and the request is tried once more.
-                    if (OnCard) CudaRuntime.Synchronize(_device);
-                    ReleaseEverythingCachedUnderLock(release ??= []);
-                    carved = CarveFor(account, size, source, excess: 0, out counted);
+                    // Under a budget what the account keeps goes back first, as much as makes room;
+                    // then what this call let go of on a card, once the card is done with it; and
+                    // then only what it has out counts.
+                    release = Shed(account, account.Charged + account.KeptBytes + size - limit);
+                    if (account.Charged + account.KeptBytes + size > limit && scope is not null && scope.Holds(account))
+                    {
+                        if (!waited) continue;
+                        foreach (var (block, blockSize, from, last) in scope.TakeAllHeld(account)) account.Keep(block, blockSize, from, last);
+                        release.AddRange(Shed(account, account.Charged + account.KeptBytes + size - limit));
+                    }
+                    if (account.Charged + size > limit)
+                    {
+                        account.Refusals++;
+                        refusal = $"Failed to allocate {bytes} bytes {Where}: {Allocator} may hold {limit} "
+                            + "bytes there for this session, what the device-memory budget "
+                            + $"(DeviceMemorySettings.LimitBytes) leaves its run, and it holds {account.Charged}.";
+                    }
                 }
-                if (carved == IntPtr.Zero)
+                // What the account would hold from the device with one more block of this class.
+                var excess = account.HeldBytes + size - Math.Max(account.MaxUsed, account.Used + size);
+                if (refusal is null && source != Source.Own)
                 {
-                    account.Refusals++;
-                    refusal = Refusal(bytes);
+                    carved = CarveFor(account, size, source, excess, out var counted);
+                    // The device is full: on a card, once the card is done with what this call let
+                    // go of, ...
+                    if (carved == IntPtr.Zero && OnCard && !waited) continue;
+                    if (carved == IntPtr.Zero)
+                    {
+                        // ... what is kept anywhere on it goes back, and that too, and the request is
+                        // tried once more.
+                        ReleaseEverythingCachedUnderLock(release ??= [], scope);
+                        carved = CarveFor(account, size, source, excess: 0, out counted);
+                    }
+                    if (carved == IntPtr.Zero)
+                    {
+                        account.Refusals++;
+                        refusal = Refusal(bytes);
+                    }
+                    else
+                    {
+                        account.Blocks++;
+                        Hand(carved, size, bytes, account, source, counted);
+                        // On the host what is over the account's mark goes back at once; on a card as
+                        // the call charging the account ends (Scope.End), where one does.
+                        if (!OnCard || scope is null || !scope.Charges(account))
+                            (release ??= []).AddRange(Shed(account, account.HeldBytes - account.Bound));
+                    }
                 }
-                else
-                {
-                    account.Blocks++;
-                    Hand(carved, size, bytes, account, source, counted);
-                    // On the host what is over the account's mark goes back at once; on a card as the
-                    // call charging the account ends (Scope.End), where one does.
-                    if (!OnCard || scope is null || !scope.Charges(account))
-                        (release ??= []).AddRange(Shed(account, account.HeldBytes - account.Bound));
-                }
+                else if (refusal is null && (!OnCard || scope is null || !scope.Charges(account)))
+                    (release ??= []).AddRange(Shed(account, excess));
             }
-            else if (refusal is null && (!OnCard || scope is null || !scope.Charges(account)))
-                (release ??= []).AddRange(Shed(account, excess));
+            break;
         }
         Release(release);
         if (carved != IntPtr.Zero) return carved;
@@ -477,9 +553,10 @@ internal sealed unsafe class CachingAllocator
         var own = Fresh(size);
         if (own == IntPtr.Zero)
         {
-            // The device is full: what is kept anywhere on it goes back, and the request is tried
-            // once more.
-            ReleaseEverythingCached();
+            // The device is full: what is kept anywhere on it goes back, and what this call let go
+            // of -- the card waiting for the work it has in hand as each block goes back to it --
+            // and the request is tried once more.
+            ReleaseEverythingCached(scope);
             own = Fresh(size);
             if (own == IntPtr.Zero)
             {
@@ -521,7 +598,8 @@ internal sealed unsafe class CachingAllocator
         {
             arena.Uncarve(larger, largerSize);
             block = arena.Carve(size, mayCommit: false);
-            counted = call;
+            // Counted where the block is carved from memory the account had: fresh memory counts.
+            if (block != IntPtr.Zero) counted = call;
         }
         var giveWay = excess * 8 >= size ? long.MaxValue : excess;
         for (long givenWay = 0; block == IntPtr.Zero && givenWay < giveWay && account.GiveWayOldest(fromArena: true, out var kept, out var keptSize, out _); givenWay += keptSize)
@@ -577,15 +655,18 @@ internal sealed unsafe class CachingAllocator
     /// <summary>Records <paramref name="block"/> as handed to <paramref name="account"/>, and as used
     /// by the account's call where it was not counted in it already (<paramref name="call"/> is the
     /// call it was last counted in).</summary>
+    /// <exception cref="InvalidOperationException">A block is out at that address already: the two
+    /// could not be told apart as they are let go of.</exception>
     private IntPtr Hand(IntPtr block, long size, long requested, Account account, Source source, long call)
     {
+        if (!_blocks.Add(block, new Block { Size = size, Requested = requested, Account = account, Source = source, Call = account.CallNumber }))
+            throw new InvalidOperationException($"Shorokoo's allocator was about to hand out the block at 0x{block:x} {Where} while a block it handed out there is still in use.");
         Observer?.Invoke(new Event(true, OnCard, block, requested, size, Fresh: call < 0));
         if (call != account.CallNumber)
         {
             account.Used += size;
             if (account.Used > account.MaxUsed) account.MaxUsed = account.Used;
         }
-        _blocks.Add(block, new Block { Size = size, Requested = requested, Account = account, Source = source, Call = account.CallNumber });
         account.InUse += size;
         account.Requested += requested;
         account.Allocations++;
@@ -606,24 +687,23 @@ internal sealed unsafe class CachingAllocator
         if (pointer == IntPtr.Zero) return;
         var scope = t_scope;
         List<(IntPtr, long)>? release = null;
+        Block block;
         using (_gate.Hold())
         {
-            if (!_blocks.Remove(pointer, out var block)) return;
+            if (!_blocks.Remove(pointer, out block)) return;
             Observer?.Invoke(new Event(false, OnCard, pointer, block.Requested - block.ReleasedRequested, block.Size - block.ReleasedBytes, Fresh: false));
             var account = block.Account;
             account.InUse -= block.Size - block.ReleasedBytes;
             account.Requested -= block.Requested - block.ReleasedRequested;
             if (block.HandedOver) account.HandedOver -= block.Size - block.ReleasedBytes;
-            if (block.Released is { } released)
+            if (block.Released is not null || block.FirstGone)
             {
                 // Parts of it went back while the rest was in use, so what is left is not a block to
-                // keep whole: it goes back to the arena as those parts did -- on a card once work
-                // this thread's call queued is done with it.
-                if (OnCard && scope is not null && scope.Charges(account)) CudaRuntime.Synchronize(_device);
-                var arena = ArenaOf(block.Source, account);
-                foreach (var (from, to) in Outside(released, 0, block.Size)) arena.Uncarve(pointer + (nint)from, to - from);
-                account.Blocks--;
-                if (account.Closed) Emptied(account, block.Source);
+                // keep whole: it goes back to the arena as those parts did -- on a card where this
+                // thread's call charges its account, once the card is done with the work the call
+                // queued, waited for outside the lock.
+                if (OnCard && scope is not null && scope.Charges(account)) goto waitForTheCard;
+                UncarveRest(pointer, block);
                 return;
             }
             if (!account.Closed)
@@ -648,6 +728,23 @@ internal sealed unsafe class CachingAllocator
             release = GoneFromClosed(account, pointer, block.Size, block.Source);
         }
         Release(release);
+        return;
+
+    waitForTheCard:
+        AwaitCard();
+        using (_gate.Hold()) UncarveRest(pointer, block);
+    }
+
+    /// <summary>What is left of <paramref name="block"/>, at <paramref name="pointer"/>, once parts of
+    /// it went back while the rest was in use, back to the arena those parts went back to. Under the
+    /// lock.</summary>
+    private void UncarveRest(IntPtr pointer, in Block block)
+    {
+        var account = block.Account;
+        var arena = ArenaOf(block.Source, account);
+        foreach (var (from, to) in Outside(block.Released, 0, block.Size)) arena.Uncarve(pointer + (nint)from, to - from);
+        account.Blocks--;
+        if (account.Closed) Emptied(account, block.Source);
     }
 
     /// <summary>A block of closed <paramref name="account"/> let go of: back where it came from, and
@@ -712,9 +809,14 @@ internal sealed unsafe class CachingAllocator
     /// covers. The whole units of the block's arena lying inside it — 4 KiB pages on the host,
     /// granules on a card, 512 bytes in the card's arena of small blocks — go back to the arena:
     /// still committed, for the account's next request to be carved from, and shed as what the
-    /// account keeps is. On a card,
-    /// where this thread's call charges the block's account, the card is waited for first: work the
-    /// call queued may still read the range. Answers the bytes handed back that lie in the part —
+    /// account keeps is. All but the block's first unit, which stays carved for as long as the block
+    /// is out: the block is known by its address until it is let go of, and a block carved there
+    /// meanwhile could not be told from it. Where that unit is a granule of its own, as in an
+    /// account's arena on a card, its memory goes back to the card all the same, its address staying
+    /// the block's. On a card,
+    /// where this thread's call charges the block's account, the card is waited for first — outside
+    /// the lock, which every allocation and free on the device takes: work the call queued may still
+    /// read the range. Answers the bytes handed back that lie in the part —
     /// up to what was asked for of the block, where it runs on to the end, not the rest of the last
     /// unit — none for a block of its own from the device, and none for a part handed back already.
     /// </summary>
@@ -722,8 +824,10 @@ internal sealed unsafe class CachingAllocator
     {
         if (pointer == IntPtr.Zero || offset < 0 || (length <= 0 && !toTheEnd)) return 0;
         var scope = t_scope;
-        using (_gate.Hold())
+        for (var waited = false; ; waited = true)
         {
+            if (waited) AwaitCard();
+            using var gate = _gate.Hold();
             ref var block = ref _blocks.Find(pointer);
             if (Unsafe.IsNullRef(ref block) || block.Source == Source.Own) return 0;
             var account = block.Account;
@@ -732,14 +836,24 @@ internal sealed unsafe class CachingAllocator
             var start = (offset + unit - 1) / unit * unit;
             var end = toTheEnd ? block.Size : Math.Min(block.Size, (offset + length) / unit * unit);
             if (end <= start) return 0;
-            var pieces = Outside(block.Released, start, end);
-            if (pieces.Count == 0) return 0;
-            if (OnCard && scope is not null && scope.Charges(account)) CudaRuntime.Synchronize(_device);
+            var pieces = Outside(block.Released, Math.Max(start, unit), end);
+            // The first unit's memory goes back only where it is a granule of its own.
+            var first = start == 0 && !block.FirstGone && OnCard && block.Source == Source.Arena;
+            if (pieces.Count == 0 && !first) return 0;
+            if (!waited && OnCard && scope is not null && scope.Charges(account)) continue;
+            if (first && arena.DecommitCarved(pointer, unit) == unit)
+            {
+                block.FirstGone = true;
+                account.Shrinkages++;
+                pieces.Insert(0, (0, unit));
+            }
+            else if (pieces.Count == 0)
+                return 0;
             long released = 0, inside = 0;
             var partEnd = toTheEnd ? block.Requested : offset + length;
             foreach (var (from, to) in pieces)
             {
-                arena.Uncarve(pointer + (nint)from, to - from);
+                if (from >= unit) arena.Uncarve(pointer + (nint)from, to - from);
                 released += to - from;
                 inside += Math.Max(0, Math.Min(to, partEnd) - Math.Max(from, offset));
                 var asked = Math.Max(0, Math.Min(to, block.Requested) - from);
@@ -747,7 +861,8 @@ internal sealed unsafe class CachingAllocator
                 block.ReleasedRequested += asked;
                 account.Requested -= asked;
             }
-            block.Released = Merged(block.Released, pieces);
+            if (block.FirstGone) pieces.RemoveAll(piece => piece.Start == 0);
+            if (pieces.Count > 0) block.Released = Merged(block.Released, pieces);
             block.ReleasedBytes += released;
             account.InUse -= released;
             if (block.HandedOver) account.HandedOver -= released;
@@ -817,6 +932,21 @@ internal sealed unsafe class CachingAllocator
             return IntPtr.Zero;
         }
     }
+
+    /// <summary>Waits for the work the card has in hand, as handing back memory some of that work may
+    /// still read must.</summary>
+    /// <exception cref="InvalidOperationException">The card could not be waited for: nothing is handed
+    /// back that its work may still read.</exception>
+    private void AwaitCard()
+    {
+        if (_backing is { } backing ? backing.AwaitDevice() : CudaRuntime.Synchronize(_device)) return;
+        throw new InvalidOperationException(
+            $"Shorokoo's allocator could not wait for CUDA device {_device} to finish the work it has in hand, "
+            + "so it hands back none of the memory that work may still read.");
+    }
+
+    /// <summary>Whether this allocator's lock is taken, by any thread.</summary>
+    internal bool Locked => _gate.Taken;
 
     /// <summary>Hands <paramref name="blocks"/> of their own, each with its size class, back to the
     /// device. Outside the lock: on a card each waits for the work the card has in hand.</summary>
@@ -917,32 +1047,38 @@ internal sealed unsafe class CachingAllocator
         Release(release);
     }
 
-    /// <summary>Hands back everything kept on the device, in every account still open, and answers
-    /// how many bytes that was.</summary>
-    private long ReleaseEverythingCached()
+    /// <summary>Hands back everything kept on the device, in every account still open — and what the
+    /// call <paramref name="scope"/> holds on a card, the card being done with it — and answers how
+    /// many bytes that was.</summary>
+    internal long ReleaseEverythingCached(Scope? scope = null)
     {
         List<(IntPtr Block, long Size)> release = [];
         long bytes;
-        using (_gate.Hold()) bytes = ReleaseEverythingCachedUnderLock(release);
+        using (_gate.Hold()) bytes = ReleaseEverythingCachedUnderLock(release, scope);
         Release(release);
         return bytes;
     }
 
     /// <summary><see cref="ReleaseEverythingCached"/>, under the lock, blocks of their own added to
     /// <paramref name="release"/>.</summary>
-    private long ReleaseEverythingCachedUnderLock(List<(IntPtr, long)> release)
+    private long ReleaseEverythingCachedUnderLock(List<(IntPtr, long)> release, Scope? scope)
     {
-        long before = 0, after = 0;
-        foreach (var account in _accounts)
-        {
-            before += account.HeldBytes - account.InUse;
-            release.AddRange(ShedAll(account, scope: null));
-            after += account.HeldBytes - account.InUse;
-        }
-        var smallBefore = _small?.IdleBytes ?? 0;
+        // What goes back is what the device stops holding: the memory the arenas hand back, and the
+        // blocks of their own released -- not what the accounts stop keeping, since a small block
+        // kept goes back into the card's arena of small blocks and a host block into its
+        // account's, and leaves the device only with its granule.
+        var from = release.Count;
+        var before = CommittedBytes;
+        foreach (var account in _accounts) release.AddRange(ShedAll(account, scope));
         _small?.DecommitAll(out _);
-        return before - after + smallBefore;
+        var own = 0L;
+        for (var i = from; i < release.Count; i++) own += release[i].Item2;
+        return before - CommittedBytes + own;
     }
+
+    /// <summary>What the device's arenas hold committed: every open account's, and the card's arena
+    /// of small blocks. Under the lock.</summary>
+    private long CommittedBytes => _accounts.Sum(account => account.Arena?.CommittedBytes ?? 0) + (_small?.CommittedBytes ?? 0);
 
     /// <summary>
     /// Hands back to every device — the host and each card this process has allocated on —
@@ -1089,9 +1225,8 @@ internal sealed unsafe class CachingAllocator
         /// call it was counted in, so it is counted in a call once.</summary>
         internal long CallNumber;
 
-        // The calls charging the account now, and for the device's own account how many session calls
-        // had ended on the device when its call began.
-        internal int Calls;
+        // For the device's own account, how many session calls had ended on the device when its call
+        // began.
         internal long CallsSeen;
 
         /// <summary>A call begins: what is in use now is what it starts out using.</summary>
@@ -1280,12 +1415,12 @@ internal sealed unsafe class CachingAllocator
         return new ChargeScope(scope);
     }
 
-    /// <summary>A call charging <paramref name="account"/> begins: its first, where no other is
-    /// under way, begins what the account's call uses.</summary>
+    /// <summary>A call charging <paramref name="account"/> begins, and with it what the account's
+    /// call uses — whatever other call is under way, so that calls overlapping one another without
+    /// end still count what they use afresh, rather than everything any of them ever used.</summary>
     private static void Begin(Account account)
     {
-        using (account.Allocator._gate.Hold())
-            if (account.Calls++ == 0) account.BeginCall();
+        using (account.Allocator._gate.Hold()) account.BeginCall();
     }
 
     /// <summary>The disposable <see cref="Charge"/> answers.</summary>
@@ -1305,12 +1440,19 @@ internal sealed unsafe class CachingAllocator
 
         private HeldBlocks? _held;
 
+        // The bytes of the blocks it holds.
+        private long _holding;
+
         internal Account? AccountOn(CachingAllocator allocator)
             => card is not null && card.Allocator == allocator ? card
                 : host is not null && host.Allocator == allocator ? host
                 : null;
 
         internal bool Charges(Account account) => account == card || account == host;
+
+        /// <summary>Whether this call holds blocks it let go of for <paramref name="account"/>. Under
+        /// the allocator's lock.</summary>
+        internal bool Holds(Account account) => account == card && _holding > 0;
 
         /// <summary>Holds <paramref name="block"/>, which this call let go of, for its own reuse.
         /// Under the allocator's lock.</summary>
@@ -1323,6 +1465,7 @@ internal sealed unsafe class CachingAllocator
             }
             _held.Push(size, block, source, call);
             account.Held += size;
+            _holding += size;
         }
 
         /// <summary>Every block this call let go of for <paramref name="account"/>, taken out of its
@@ -1335,6 +1478,7 @@ internal sealed unsafe class CachingAllocator
             {
                 blocks.Add((block, size, source, call));
                 account.Held -= size;
+                _holding -= size;
             }
             return blocks;
         }
@@ -1346,6 +1490,7 @@ internal sealed unsafe class CachingAllocator
             if (account == card && _held is not null && _held.Pop(size, out block, out call))
             {
                 account.Held -= size;
+                _holding -= size;
                 return true;
             }
             block = IntPtr.Zero;
@@ -1368,13 +1513,13 @@ internal sealed unsafe class CachingAllocator
             List<(IntPtr, long)> release = [];
             using (allocator._gate.Hold())
             {
-                account.Calls--;
                 allocator._callsEnded++;
                 if (account == card && _held is not null)
                 {
                     while (_held.TakeAny(out var block, out var size, out var source, out var call))
                     {
                         account.Held -= size;
+                        _holding -= size;
                         if (!account.Closed)
                         {
                             account.Keep(block, size, source, call);
@@ -1488,6 +1633,9 @@ internal sealed unsafe class CachingAllocator
             if (Interlocked.CompareExchange(ref _taken, 1, 0) != 0) Wait();
             return new Held(ref _taken);
         }
+
+        /// <summary>Whether the lock is taken now.</summary>
+        internal bool Taken => Volatile.Read(ref _taken) != 0;
 
         [MethodImpl(MethodImplOptions.NoInlining)]
         private void Wait()

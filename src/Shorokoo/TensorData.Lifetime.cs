@@ -51,6 +51,15 @@ namespace Shorokoo
         /// refuses on and <see cref="TryDelete"/> declines on.</summary>
         internal bool IsLocked => _life.IsLocked;
 
+        /// <summary>
+        /// Whether this tensor's memory is still where it was allocated: while the tensor lives, and
+        /// after it is deleted while something still reads it — a run, through
+        /// <see cref="DeleteAsync"/>, or a compiled graph's session reading it as a weight — until
+        /// the last of them stands down. What a device-memory budget counts, since that memory is
+        /// still taken.
+        /// </summary>
+        internal bool HoldsItsMemory => !IsDisposed || _life.HoldsItsMemory;
+
         /// <summary>How a refusal names this tensor: "Tensor (4,):Float32".</summary>
         internal string Describe() => $"Tensor {this}";
 
@@ -180,6 +189,15 @@ namespace Shorokoo
         /// cancelled while waiting. The tensor stays deleted.</exception>
         public Task<bool> DeleteAsync(TimeSpan timeout, CancellationToken cancellationToken = default)
             => _life.DeleteAsync(timeout, cancellationToken);
+
+        /// <summary>
+        /// Ends this tensor's life with <paramref name="death"/> whoever is reading it: marks it dead
+        /// now, and releases its memory now where nothing reads it and otherwise when the last reader
+        /// stands down — asking none of them to stop, as <see cref="DeleteAsync"/> would. Never
+        /// throws for a reader, so an owner letting go of what it owns always finishes; a tensor
+        /// already dead is left as it is.
+        /// </summary>
+        internal void DeleteOnceUnread(TensorDeath death) => _life.Retire(death);
 
         /// <summary>
         /// Ends this tensor's life deliberately, if no run is reading it: marks it dead with
@@ -345,6 +363,14 @@ namespace Shorokoo
 
         /// <summary>A short name for the cause, for a diagnostic that wants one.</summary>
         internal string Cause { get; }
+
+        /// <summary>A weight a compiled graph's session read where it was, deleted with that
+        /// graph.</summary>
+        internal static TensorDeath DeletedWithItsGraph { get; } = new("deleted with its compiled graph", what =>
+            $"{what} was a weight of a compiled graph loaded with LoadCompiled or ImportCompiledOnnx, "
+            + "read by that graph's session where it was, and was deleted when the graph was disposed "
+            + "-- directly, or with the compute context that compiled it -- so nothing may read it "
+            + "any more.");
 
         /// <summary>Deleted: <c>Delete</c>, <c>Dispose</c>, <c>TryDelete</c> or
         /// <c>DeleteAsync</c>.</summary>

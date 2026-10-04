@@ -1390,12 +1390,38 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
         var compiled = context.LoadCompiled(path, "ema");
         var weight = Assert.Single(compiled.SuppliedTensors);
         Assert.Equal([weight], context.Tensors);
+        var held = context.ReadDeviceMemoryUse();
         Assert.Throws<InvalidOperationException>(weight.Delete);
         Assert.False(weight.TryDelete());
         Assert.Throws<InvalidOperationException>(() => context.Detach(weight));
         Assert.False(await weight.DeleteAsync(TimeSpan.Zero));
+        Assert.Equal(held, context.ReadDeviceMemoryUse());
         Assert.Equal(expected, compiled.Execute(numOut.Shared(), input.Shared())[0].ToTensorData().AccessRawMemory().ToArray());
         compiled.Dispose();
+        Assert.True(((ILifetimeOwner)weight).Life.IsReleased);
+    }
+
+    [Fact]
+    public void TestDisposingAContextDisposesEveryLoadedGraphAndAWeightAnotherContextReadsGoesWhenThatReadEnds()
+    {
+        var numOut = TensorData(DType.Int64, [], 64L);
+        var model = FCLayer.ComputationGraph.ToConcreteArchitecture([numOut, TensorDataWithSmallVals(DType.Float32, [2L, 64L])]).ToConcreteModel();
+        var path = P("compiled-read-elsewhere.skpt");
+        Persistence.From(model).WithModel().WithWeights().Save(path);
+
+        var context = new ComputeContext();
+        using var other = new ComputeContext();
+        CompiledGraph[] loaded = [context.LoadCompiled(path), context.LoadCompiled(path)];
+        var read = Assert.Single(loaded[0].SuppliedTensors);
+
+        using (other.Lock(read))
+        {
+            context.Dispose();
+            Assert.All(loaded, graph => Assert.True(graph.IsDisposed));
+            Assert.All(loaded.SelectMany(graph => graph.SuppliedTensors), weight => Assert.True(weight.IsDisposed));
+            Assert.False(((ILifetimeOwner)read).Life.IsReleased);
+        }
+        Assert.True(((ILifetimeOwner)read).Life.IsReleased);
     }
 
     [Fact]

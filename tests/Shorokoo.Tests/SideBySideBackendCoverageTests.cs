@@ -1001,9 +1001,9 @@ internal static class SideBySideModel
     internal const double FullPrecisionTolerance = 2e-5;
 
     /// <summary>What <see cref="LargeLayers"/> may deviate by from the host's where the card computes
-    /// float32 in TensorFloat-32, rounding each operand's significand to 11 bits. Measured on an RTX 4090:
-    /// 2.5e-3 for the product, 1.8e-3 for the convolution and 1.3e-3 for the LSTM on ONNX Runtime and
-    /// PyTorch, and 2.5e-3 for the product and 8.5e-4 for the LSTM on JAX.</summary>
+    /// float32 in TensorFloat-32, rounding each operand's significand to 11 bits. Measured on an RTX 4090,
+    /// Windows and Linux: at most 2.5e-3 for the product, 1.8e-3 for the convolution and 1.3e-3 for the
+    /// LSTM on ONNX Runtime and PyTorch, and 2.5e-3 for the product and 8.5e-4 for the LSTM on JAX.</summary>
     internal const double TensorFloat32Tolerance = 1e-2;
 
     internal static void AssertFullPrecision(float[][] host, float[][] card)

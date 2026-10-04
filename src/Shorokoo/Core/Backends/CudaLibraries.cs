@@ -34,7 +34,9 @@ public static partial class CudaLibraries
     /// Fills the shared cache with the pinned cuDNN and cuBLAS where it does not hold them yet, and
     /// loads them into this process; returns at once when they are loaded already. The ONNX Runtime
     /// CUDA backend calls it before its execution provider loads. Call it yourself at startup to fetch
-    /// them then rather than on the first CUDA run, or before a backend of your own loads them.
+    /// them then rather than on the first CUDA run, or before a backend of your own loads them: for a
+    /// session built on ONNX Runtime directly, before anything of its CUDA provider, since setting an
+    /// <c>OrtCUDAProviderOptions</c>' options already loads the provider, and cuBLAS with it.
     /// </summary>
     /// <exception cref="InvalidOperationException">A pinned library is in neither the cache nor a copy
     /// that matches it exactly, and its wheel could not be fetched; the message names the library,

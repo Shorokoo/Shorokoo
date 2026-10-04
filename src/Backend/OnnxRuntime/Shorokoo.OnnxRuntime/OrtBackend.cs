@@ -1098,8 +1098,9 @@ public abstract class OrtBackend : IShorokooBackend
     {
         ArgumentNullException.ThrowIfNull(deviceMemory);
         ArgumentNullException.ThrowIfNull(precision);
-        // Before the provider is loaded: it imports cuBLAS and loads cuDNN by name, so they bind to
-        // the pinned copies every CUDA backend of the process shares rather than to whatever PATH offers.
+        // Before the provider is loaded -- which updating its options below already does: it imports
+        // cuBLAS and loads cuDNN by name, so they bind to the pinned copies every CUDA backend of the
+        // process shares rather than to whatever PATH offers.
         CudaLibraries.Prepare();
         // OrtCUDAProviderOptions is a SafeHandle that ORT takes as a bare IntPtr, exactly like
         // the SessionOptions above, so it needs the same `using`: the options are read during

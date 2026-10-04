@@ -1070,7 +1070,9 @@ internal entry points by name and bind to whichever copy of a name was loaded fi
 
 So whatever else in the process loads cuDNN or cuBLAS has to do so once the pinned copies are
 loaded: a CUDA session of your own built on ONNX Runtime directly, say, calls
-`CudaLibraries.Prepare()` before appending its provider. A process that already holds another
+`CudaLibraries.Prepare()` before it touches the CUDA provider at all — setting an
+`OrtCUDAProviderOptions`' options with `UpdateOptions` already loads the provider, and cuBLAS with
+it, as appending it to a session does. A process that already holds another
 release when the ONNX Runtime CUDA backend prepares the pinned one — any copy, under the name a
 pinned file is loaded by, that is not that file — is refused before anything is loaded: the
 backend's first session fails with an `InvalidOperationException` naming the copies held. Loading

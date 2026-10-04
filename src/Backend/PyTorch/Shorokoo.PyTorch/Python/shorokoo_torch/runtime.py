@@ -592,12 +592,14 @@ def writes_into(out, like):
 
 def _fast_writers():
     """Per support function, how it writes its result into a tensor it is handed allocating nothing,
-    exactly as it computes it: ("out", f) for torch's f taking out=, over floating-point operands;
-    ("relu", None) for the activation torch has only an in-place form of; ("matmul", f) for a
-    product of two matrices or stacks of them, over floating-point operands; ("fill", None) for
-    constant_of_shape; ("cat", None) for concat, part by part; ("own", None) for a function that
-    takes the tensor itself as `_out` and writes its result there, step by step, allocating nothing
-    a plain call does not allocate too (`writes_into`)."""
+    exactly as it computes it: ("out", f) for torch's f taking out=, over floating-point operands
+    all of the result's type; ("relu", None) for the activation torch has only an in-place form of;
+    ("matmul", f) for a product of two matrices or stacks of them, over floating-point operands;
+    ("fill", None) for constant_of_shape; ("cat", None) for concat, part by part; ("own", None) for
+    a function that takes the tensor itself as `_out` and writes its result there, step by step,
+    allocating nothing a plain call does not allocate too (`writes_into`). The .NET side places a
+    value only where its node is one of these forms (TorchPlacements.Memory); a call one declines
+    all the same is computed and copied in (`place_into`)."""
     global _fast
     if _fast is None:
         from . import ops_conv_pool as cp, ops_elementwise as e, ops_linalg as la, ops_logic as lo, ops_norm as n, ops_shape as s
@@ -750,17 +752,19 @@ def place_into(slot, own, function, *args, **kwargs):
     """`function(*args, **kwargs)` -- a node of the translated graph -- written into the range of
     placement slot `slot` and returned there, where the run hands one over: by torch writing the
     result into it where `function` has a form that does (_fast_writers), else by copying the result
-    in. Where the run hands over none, or the result cannot go there, the result as computed --
-    copied into memory of its own where `own` says the placement was proved with the value out of
-    its operands' memory and it is still in it. A function returning a tuple -- a node whose first
-    output alone is used -- has that first element placed, and the tuple returned."""
+    in -- a function that takes the range itself (`_out`) handed it, and every other computing its
+    result as it would without one. Where the run hands over none, or the result cannot go there,
+    the result as computed -- copied into memory of its own where `own` says the placement was
+    proved with the value out of its operands' memory and it is still in it. A function returning a
+    tuple -- a node whose first output alone is used -- has that first element placed, and the
+    tuple returned."""
     state = _placing.get()
     target = state.target(slot) if state is not None else None
     fast = _fast_writers().get(function) if target is not None else None
     if fast is not None and fast[0] != "own" and _write_fast(fast, target, args, kwargs):
         state.written[slot] = target
         return target
-    value = function(*args, _out=target, **kwargs) if fast is not None else function(*args, **kwargs)
+    value = function(*args, _out=target, **kwargs) if fast is not None and fast[0] == "own" else function(*args, **kwargs)
     rest = None
     if isinstance(value, tuple):
         value, rest = value[0], value[1:]

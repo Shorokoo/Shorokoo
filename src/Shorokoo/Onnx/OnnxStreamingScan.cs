@@ -79,14 +79,15 @@ namespace Shorokoo.Onnx
 
         /// <summary>The model in <paramref name="file"/>, its large tensor payloads referenced in
         /// place rather than read. A truncated or malformed file throws
-        /// <see cref="EndOfStreamException"/> or <see cref="ProtoBuf.ProtoException"/>, as parsing
-        /// it whole does.</summary>
+        /// <see cref="EndOfStreamException"/> or <see cref="ProtoBuf.ProtoException"/>, and one
+        /// nested <see cref="OnnxProtobuf.MaxDepth"/> levels deep or more throws
+        /// <see cref="InvalidOperationException"/>, as parsing it whole does.</summary>
         internal static ModelProto ReadModel(FileStream file)
         {
             var model = new OnnxStreamingScan(file, file.Name).Scan();
             ScannedInjection?.Invoke(file.Name);
             using var stream = new MemoryStream(model, writable: false);
-            return ProtoBuf.Serializer.Deserialize<ModelProto>(stream);
+            return OnnxProtobuf.ReadModel(stream);
         }
 
         /// <summary>The refusal of a model with a sparse initializer, which the importer does not
@@ -112,7 +113,7 @@ namespace Shorokoo.Onnx
         {
             long end = _file.Length;
             _file.Position = 0;
-            long size = Message(Kind.Model, end);
+            long size = Message(Kind.Model, end, 0);
             if (size > Array.MaxLength)
                 throw new InvalidDataException(
                     $"'{_path}': the ONNX model holds {size} bytes besides the weights it references, " +
@@ -121,13 +122,13 @@ namespace Shorokoo.Onnx
             _output = GC.AllocateUninitializedArray<byte>((int)size);
             _nextSize = 0;
             _file.Position = 0;
-            Message(Kind.Model, end);
+            Message(Kind.Model, end, 0);
             if (_written != size)
                 throw new IOException($"'{_path}' changed while it was read.");
             return _output;
         }
 
-        private long Message(Kind kind, long end)
+        private long Message(Kind kind, long end, int depth)
         {
             long size = 0;
             while (_file.Position < end)
@@ -141,18 +142,27 @@ namespace Shorokoo.Onnx
                     continue;
                 }
                 long length = ReadLength(end);
-                size += Child(key, ChildOf(kind, field), _file.Position + length);
+                size += Child(key, ChildOf(kind, field), _file.Position + length, depth + 1);
             }
             return size;
         }
 
-        private long Child(ulong key, Kind kind, long end)
+        /// <summary>The message of <paramref name="kind"/> running to <paramref name="end"/>,
+        /// <paramref name="depth"/> levels below the model, with its key and length prefix. Refused
+        /// where the parse of the rewritten model would refuse it (<see cref="OnnxProtobuf.MaxDepth"/>),
+        /// before the walk descends any further: the walk recurses as the messages nest, so a file
+        /// nested deep enough would otherwise overflow the stack.</summary>
+        private long Child(ulong key, Kind kind, long end, int depth)
         {
+            if (depth >= OnnxProtobuf.MaxDepth)
+                throw new InvalidOperationException(
+                    $"'{_path}': the ONNX model nests a message {depth} levels deep at byte {_file.Position}; " +
+                    $"a model is read to a depth of {OnnxProtobuf.MaxDepth - 1}.");
             int slot = _nextSize++;
             if (_output is null) _sizes.Add(0);
             long size = WriteVarint(key);
             if (_output is not null) size += WriteVarint((ulong)_sizes[slot]);
-            long body = kind == Kind.Tensor ? Tensor(end) : Message(kind, end);
+            long body = kind == Kind.Tensor ? Tensor(end) : Message(kind, end, depth);
             if (_output is null) size += WriteVarint((ulong)(_sizes[slot] = body));
             return size + body;
         }

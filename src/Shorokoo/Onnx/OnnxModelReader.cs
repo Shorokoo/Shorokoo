@@ -145,7 +145,7 @@ namespace Shorokoo.Onnx
                 string? externalDataDirectory = null,
                 IReadOnlyDictionary<string, long[]>? inputShapes = null)
         {
-            var model = ProtoBuf.Serializer.Deserialize<IR.ModelProto>(inputStream);
+            var model = OnnxProtobuf.ReadModel(inputStream);
             return FromModelProtoWithKindTag(model, externalDataDirectory, inputShapes);
         }
 

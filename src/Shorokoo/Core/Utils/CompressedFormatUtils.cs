@@ -372,7 +372,7 @@ namespace Shorokoo.Core.Utils
             ModelProto model;
             using (var ms = new MemoryStream(decompressedBytes))
             {
-                model = Serializer.Deserialize<ModelProto>(ms);
+                model = OnnxProtobuf.ReadModel(ms);
             }
 
             // Clear raw data so the JSON serialization stays compact
@@ -468,7 +468,7 @@ namespace Shorokoo.Core.Utils
             ModelProto model;
             using (var ms = new MemoryStream(decompressedBytes))
             {
-                model = Serializer.Deserialize<ModelProto>(ms);
+                model = OnnxProtobuf.ReadModel(ms);
             }
 
             // Strip all raw tensor data so the JSON stays compact and human-readable.

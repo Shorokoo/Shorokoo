@@ -337,7 +337,7 @@ PipelineState? state = info.Skpt!.GetUserData<PipelineState>();  // default when
   compressed by the option. The zip framing stays STORED; a compressed entry extracts to
   a `.zst`-decodable stream.
 - An entry whose bytes contradict its declared compression fails loudly on load.
-- A Zstd entry is one frame whose header declares its decompressed size, which bounds the
+- A Zstd entry's frame header declares its decompressed size, which bounds the
   tensors the entry may claim before any is allocated; a frame that declares none is
   refused. A `.zsafetensor` file is held to the same rule.
 

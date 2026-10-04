@@ -1141,9 +1141,8 @@ internal sealed unsafe class CachingAllocator
         /// call it was counted in, so it is counted in a call once.</summary>
         internal long CallNumber;
 
-        // The calls charging the account now, and for the device's own account how many session calls
-        // had ended on the device when its call began.
-        internal int Calls;
+        // For the device's own account, how many session calls had ended on the device when its call
+        // began.
         internal long CallsSeen;
 
         /// <summary>A call begins: what is in use now is what it starts out using.</summary>
@@ -1332,12 +1331,12 @@ internal sealed unsafe class CachingAllocator
         return new ChargeScope(scope);
     }
 
-    /// <summary>A call charging <paramref name="account"/> begins: its first, where no other is
-    /// under way, begins what the account's call uses.</summary>
+    /// <summary>A call charging <paramref name="account"/> begins, and with it what the account's
+    /// call uses — whatever other call is under way, so that calls overlapping one another without
+    /// end still count what they use afresh, rather than everything any of them ever used.</summary>
     private static void Begin(Account account)
     {
-        using (account.Allocator._gate.Hold())
-            if (account.Calls++ == 0) account.BeginCall();
+        using (account.Allocator._gate.Hold()) account.BeginCall();
     }
 
     /// <summary>The disposable <see cref="Charge"/> answers.</summary>
@@ -1420,7 +1419,6 @@ internal sealed unsafe class CachingAllocator
             List<(IntPtr, long)> release = [];
             using (allocator._gate.Hold())
             {
-                account.Calls--;
                 allocator._callsEnded++;
                 if (account == card && _held is not null)
                 {

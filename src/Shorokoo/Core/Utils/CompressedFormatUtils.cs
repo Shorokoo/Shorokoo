@@ -75,7 +75,7 @@ namespace Shorokoo.Core.Utils
         /// <summary>
         /// The tensors of a compressed SafeTensors file, decoded as they are read: neither the file
         /// nor its decompressed payload is ever whole in memory, only the tensors themselves
-        /// (Shorokoo/Shorokoo#436). The size the frame header declares for the payload bounds what
+        /// (Shorokoo/Shorokoo#436). The size the frame header must declare for the payload bounds what
         /// its header may claim, so a tensor the payload cannot hold is refused before it is
         /// allocated; a failure of the decoder itself is the file failing to decompress, and is
         /// refused as that rather than as whatever the reader was reading when it happened.
@@ -88,12 +88,13 @@ namespace Shorokoo.Core.Utils
                 bufferSize: 1 << 16, FileOptions.SequentialScan);
             var head = new byte[ZstdFrameHeaderMaxBytes];
             int got = file.ReadAtLeast(head, head.Length, throwOnEndOfStream: false);
+            long declared = DeclaredZstdContentSize(head.AsSpan(0, got), reason => new InvalidDataException(
+                $"'{filePath}': {reason} — the file is corrupt or not a compressed SafeTensors file."));
             using var decoded = new DecodingReadStream(
                 new DecompressionStream(new PrefixedReadStream(head, got, file)),
                 e => new InvalidDataException(
                     $"'{filePath}': failed to Zstd-decompress the file — it is corrupt or truncated. ({e.Message})", e));
-            return SafeTensorLoader.ReadSafeTensors(
-                decoded, DeclaredZstdContentSize(head.AsSpan(0, got)), (_, _) => ComputeContext.Host, filePath);
+            return SafeTensorLoader.ReadSafeTensors(decoded, declared, (_, _) => ComputeContext.Host, filePath);
         }
 
         /// <summary>
@@ -372,7 +373,7 @@ namespace Shorokoo.Core.Utils
             ModelProto model;
             using (var ms = new MemoryStream(decompressedBytes))
             {
-                model = Serializer.Deserialize<ModelProto>(ms);
+                model = OnnxProtobuf.ReadModel(ms);
             }
 
             // Clear raw data so the JSON serialization stays compact
@@ -468,7 +469,7 @@ namespace Shorokoo.Core.Utils
             ModelProto model;
             using (var ms = new MemoryStream(decompressedBytes))
             {
-                model = Serializer.Deserialize<ModelProto>(ms);
+                model = OnnxProtobuf.ReadModel(ms);
             }
 
             // Strip all raw tensor data so the JSON stays compact and human-readable.
@@ -675,19 +676,27 @@ namespace Shorokoo.Core.Utils
 
         /// <summary>
         /// The decompressed size the Zstd frame starting <paramref name="frameStart"/> declares in
-        /// its header, or <c>null</c> where it declares none (a streaming writer that did not know
-        /// it), where the bytes do not start a Zstd frame, or where they end inside its header.
-        /// What bounds a streamed payload's header before a byte of it is believed.
+        /// its header: what bounds a streamed payload's header before a byte of it is believed.
+        /// Every frame Shorokoo writes declares it (<see cref="WriteZstdFrame"/>), so bytes that do
+        /// not start a Zstd frame declaring it are refused, with the exception
+        /// <paramref name="malformed"/> makes of the reason: ones that start no Zstd frame, end
+        /// inside its header, or start one that declares no size.
         /// </summary>
-        internal static unsafe long? DeclaredZstdContentSize(ReadOnlySpan<byte> frameStart)
+        internal static unsafe long DeclaredZstdContentSize(
+            ReadOnlySpan<byte> frameStart, Func<string, Exception> malformed)
         {
-            // A skippable frame answers 0 here, which is not the size of anything that follows it.
-            if (!SkptFileFormat.LooksLikeZstdFrame(frameStart)) return null;
+            // A skippable frame is not one, and answers 0 below, which is not the size of anything
+            // that follows it.
+            if (!SkptFileFormat.LooksLikeZstdFrame(frameStart)) throw malformed("its bytes are not a Zstd frame");
             ulong size;
             fixed (byte* p = frameStart)
                 size = ZstdSharp.Unsafe.Methods.ZSTD_getFrameContentSize(p, (nuint)frameStart.Length);
-            // ZSTD_CONTENTSIZE_UNKNOWN and ZSTD_CONTENTSIZE_ERROR are the two largest values.
-            return size >= ulong.MaxValue - 1 || size > long.MaxValue ? null : (long)size;
+            // ZSTD_CONTENTSIZE_UNKNOWN is the largest value, and ZSTD_CONTENTSIZE_ERROR the next.
+            if (size == ulong.MaxValue)
+                throw malformed("its Zstd frame declares no decompressed size, which every frame written here declares");
+            if (size == ulong.MaxValue - 1 || size > long.MaxValue)
+                throw malformed("its Zstd frame header is malformed or cut short");
+            return (long)size;
         }
 
         /// <summary>

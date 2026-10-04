@@ -416,10 +416,12 @@ public class CoreUtilsCoverageTests
     }
 
     [Fact]
-    public void TestAPieceOfAHostTensorPastTwoGibibytesIsWrittenAndReadAtItsOffset()
+    public void TestAHostTensorPastTwoGibibytesIsWrittenAndReadAtItsOffsetsAndSavedWhole()
     {
+        const long Length = (1L << 31) + 8;
         var backend = DefaultBackend.Instance;
-        using var value = backend.CreateUninitializedTensorInBackendMemory(ShorokooTensorElementType.UInt8, [(1L << 31) + 8]);
+        var value = backend.CreateUninitializedTensorInBackendMemory(ShorokooTensorElementType.UInt8, [Length]);
+        var tensor = TensorData.Create(new Shape([Length]), DType.UInt8, value, backend);
         byte[] piece = [1, 2, 3, 4];
         foreach (var offset in (long[])[5L, 1L << 31])
         {
@@ -428,6 +430,62 @@ public class CoreUtilsCoverageTests
             Assert.True(backend.TryCopyTensorRangeToHost(value, offset, read));
             Assert.Equal(piece, read);
         }
+
+        var saved = new ByteSamplingStream([5L, 8L, 1L << 31, (1L << 31) + 3]);
+        tensor.WriteContentTo(saved);
+        tensor.Delete();
+        Assert.Equal(Length, saved.Length);
+        Assert.Equal((byte[])[1, 4, 1, 4], saved.Values);
+    }
+
+    [Fact]
+    public void TestAHostTensorPastFourGibibytesIsMeasuredWholeAndNeverReadThroughATruncatedSpan()
+    {
+        const long Elements = (1L << 30) + 2, Bytes = 4 * Elements;
+        var backend = DefaultBackend.Instance;
+        var head = GC.AllocateArray<float>(4, pinned: true);
+        var value = new OrtTensorValue(OrtValue.CreateTensorValueWithData(
+            OrtMemoryInfo.DefaultInstance, Microsoft.ML.OnnxRuntime.Tensors.TensorElementType.Float, [Elements],
+            Marshal.UnsafeAddrOfPinnedArrayElement(head, 0), Bytes));
+        var tensor = TensorData.Create(new Shape([Elements]), DType.Float32, value, backend);
+
+        Assert.Equal(Bytes, tensor.ContentByteLength);
+        Assert.Equal((int)Elements, tensor.As<float32>().AccessMemory().Length);
+        Assert.Equal((int)Elements, value.GetTensorDataAsSpan<float>().Length);
+        Assert.Equal((int)Elements, value.GetTensorMutableDataAsSpan<float>().Length);
+        Assert.Throws<OverflowException>(() => value.GetTensorDataAsSpan<byte>().Length);
+        Assert.Throws<NotSupportedException>(() => SkptFileFormat.EntryPayload.Produced(
+            s => SafeTensorLoader.SaveSafeTensorsToStream(s, [new SafeTensor("w", tensor, "F32", [Elements])])));
+        Assert.Throws<ArgumentException>(
+            () => backend.CreateTensorFromRawBytes(ShorokooTensorElementType.Float, new byte[16], [Elements]));
+        tensor.Delete();
+        GC.KeepAlive(head);
+    }
+
+    /// <summary>Keeps the byte at each sampled offset of what is written to it, and counts the
+    /// rest.</summary>
+    private sealed class ByteSamplingStream(long[] sampled) : Stream
+    {
+        private readonly List<byte> _values = [];
+        private long _position;
+        public byte[] Values => [.. _values];
+        public override void Write(ReadOnlySpan<byte> buffer)
+        {
+            foreach (var offset in sampled)
+                if (offset >= _position && offset < _position + buffer.Length)
+                    _values.Add(buffer[(int)(offset - _position)]);
+            _position += buffer.Length;
+        }
+        public override void Write(byte[] buffer, int offset, int count) => Write(buffer.AsSpan(offset, count));
+        public override bool CanRead => false;
+        public override bool CanSeek => false;
+        public override bool CanWrite => true;
+        public override long Length => _position;
+        public override long Position { get => _position; set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
     }
 
     [Fact]

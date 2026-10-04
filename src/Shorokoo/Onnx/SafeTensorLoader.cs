@@ -281,16 +281,15 @@ namespace Shorokoo.Onnx
         /// are laid out, which is the order they were written — not the order the JSON header lists
         /// them in. Nothing past the last tensor's bytes is read.
         ///
-        /// <para><paramref name="available"/> is the payload's length where it is known up front,
-        /// and lets a truncated file (interrupted download/copy, disk full, …) be refused before a
-        /// byte of data is read, with a <see cref="ModelException"/> naming the declared and actual
-        /// sizes. A decompressing stream passes the size its frame header declares. A stream of
-        /// unknown length — a frame that declares none — is refused the same way where it ends
-        /// early, but only once it does, so a header claiming more than the stream holds is believed
-        /// until then. On any failure the tensors already read are deleted.</para>
+        /// <para><paramref name="available"/> is the payload's length, known up front, and lets a
+        /// truncated file (interrupted download/copy, disk full, …) be refused before a byte of data
+        /// is read, with a <see cref="ModelException"/> naming the declared and actual sizes: no
+        /// header claiming more than the payload holds is believed. A decompressing stream passes the
+        /// size its frame header declares. On any failure the tensors already read are
+        /// deleted.</para>
         /// </summary>
         internal static List<SafeTensor> ReadSafeTensors(
-            Stream source, long? available, Func<string, long, ComputeContext> placement, string origin)
+            Stream source, long available, Func<string, long, ComputeContext> placement, string origin)
         {
             var lengthField = new byte[8];
             int got = source.ReadAtLeast(lengthField, 8, throwOnEndOfStream: false);
@@ -302,11 +301,11 @@ namespace Shorokoo.Onnx
             long headerLength = BitConverter.ToInt64(lengthField, 0);
             if (headerLength <= 0)
                 throw new InvalidOperationException($"Invalid header length: {headerLength}");
-            if (available is long total && headerLength > total - 8)
+            if (headerLength > available - 8)
                 throw new ModelException(ErrorCodes.ST002, $"SafeTensor file '{origin}'",
                     $"truncated SafeTensor file — the header declares {headerLength} bytes of JSON header, " +
-                    $"but only {total - 8} byte(s) follow the length field (the file has " +
-                    $"{total} bytes). The file was likely cut short by an interrupted download or copy.");
+                    $"but only {available - 8} byte(s) follow the length field (the file has " +
+                    $"{available} bytes). The file was likely cut short by an interrupted download or copy.");
             if (headerLength > int.MaxValue)
                 throw new ModelException(ErrorCodes.ST002, $"SafeTensor file '{origin}'",
                     $"the header declares {headerLength} bytes of JSON header, more than any SafeTensors " +
@@ -393,7 +392,7 @@ namespace Shorokoo.Onnx
 
         /// <summary>One tensor's header entry, checked against what the payload can hold.</summary>
         private static HeaderEntry ParseHeaderEntry(
-            string tensorName, object tensorMeta, long dataOffset, long? available, string origin)
+            string tensorName, object tensorMeta, long dataOffset, long available, string origin)
         {
             var metaDict = JsonSerializer.Deserialize<Dictionary<string, object>>(JsonSerializer.Serialize(tensorMeta))
                 ?? throw new InvalidOperationException("Failed to parse tensor metadata");
@@ -408,11 +407,11 @@ namespace Shorokoo.Onnx
             // Unsigned sum: both terms are non-negative longs, so this cannot overflow the way a
             // signed dataOffset + endOffset could for an absurd corrupt endOffset.
             ulong requiredBytes = (ulong)dataOffset + (ulong)endOffset;
-            if (available is long total && requiredBytes > (ulong)total)
+            if (requiredBytes > (ulong)available)
                 throw new ModelException(ErrorCodes.ST003, $"SafeTensor file '{origin}'",
                     $"truncated SafeTensor file — tensor '{tensorName}' declares data_offsets " +
                     $"[{startOffset}, {endOffset}), which requires the file to hold " +
-                    $"{requiredBytes} bytes, but the file has {total} bytes. " +
+                    $"{requiredBytes} bytes, but the file has {available} bytes. " +
                     "The file was likely cut short by an interrupted download or copy.");
 
             var dtype = SafeTensorDTypeToDType(dtypeName);

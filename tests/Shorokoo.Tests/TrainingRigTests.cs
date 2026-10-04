@@ -692,9 +692,7 @@ public class TrainingRigFromScratchCoverageTests
         Assert.Equal(step.HandedComputes, step.ChosenComputes);
     }
 
-    /// <summary>The LSTM benchmark's step at four times its batch, built on <paramref name="context"/>:
-    /// the backend's peak of the step handed to the memory-aware pass and of the one it chose, and what
-    /// each computes from the same inputs.</summary>
+    // The LSTM benchmark's step at four times its batch.
     internal static (long Handed, long Chosen, float[][] HandedComputes, float[][] ChosenComputes) RecurrentStep(ComputeContext context)
     {
         long[] shape = [32L, 32L, 64L];
@@ -760,9 +758,7 @@ public class TrainingRigFromScratchCoverageTests
 
     private static NodeProto Op(string op, string inputs, string outputs) => ComputeContextLifetimeCoverageTests.Op(op, inputs, outputs);
 
-    /// <summary>What <see cref="Shorokoo.OnnxRuntime.OrtRunMemory"/> models a run of a graph of
-    /// <paramref name="nodes"/> holding at once, on the host or a card, with a zero, a two and a three
-    /// as initializers it may read.</summary>
+    // With a zero, a two and a three as initializers the nodes may read.
     private static long? OrtPeak(string inputs, string outputs, bool onHost, OutputAlias[] aliases, params NodeProto[] nodes)
     {
         var graph = ComputeContextLifetimeCoverageTests.WithInts(ComputeContextLifetimeCoverageTests.WithInts(ComputeContextLifetimeCoverageTests.WithInts(
@@ -771,9 +767,7 @@ public class TrainingRigFromScratchCoverageTests
         return Shorokoo.OnnxRuntime.OrtRunMemory.Peak(graph, fed, aliases, onHost);
     }
 
-    /// <summary>Whether the host backend's model of a run of the training step a rig builds for
-    /// <paramref name="model"/> comes within a thirty-second of the most a session's run of that step
-    /// asks of its own account, every output held.</summary>
+    // Within a thirty-second of the most the step's run asks of its session's account, every output held.
     private static bool ModelledAgainstRun(ComputationGraph model, long[] shape)
     {
         using var context = new ComputeContext();
@@ -822,8 +816,6 @@ public class TrainingRigFromScratchCoverageTests
         => Assert.True(HostStepPeak(Benchmarks.MemoryPassConv.ComputationGraph, [8L, 3L, 64L, 64L], handed: false)
                        <= HostStepPeak(Benchmarks.MemoryPassConv.ComputationGraph, [8L, 3L, 64L, 64L], handed: true));
 
-    /// <summary>The most the arenas of an ONNX Runtime host context held while a rig on it ran two
-    /// resident steps: the step the memory-aware pass chose, or the step it was handed.</summary>
     private static long HostStepPeak(ComputationGraph model, long[] shape, bool handed)
     {
         using var context = new ComputeContext { Diagnostics = new DiagnosticSettings { CollectRunStatistics = true } };

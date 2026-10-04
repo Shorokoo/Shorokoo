@@ -1317,8 +1317,7 @@ public class CrossDeviceRoutingCoverageTests
         }
     }
 
-    /// <summary>Every entry of the archive at <paramref name="path"/>, by name, with the second it
-    /// was saved at blanked out: two saves of the same thing differ in nothing else.</summary>
+    // The second each entry was saved at is the one thing two saves of the same state differ in.
     private static Dictionary<string, string> Unstamped(string path)
     {
         using var archive = System.IO.Compression.ZipFile.OpenRead(path);
@@ -1474,7 +1473,6 @@ public class CrossDeviceRoutingCoverageTests
         /// with.</summary>
         internal bool LimitsInPlace { get; init; }
 
-        /// <summary>The limits its sessions were given in place, in order.</summary>
         internal List<long> InPlaceLimits { get; } = [];
 
         /// <summary>How many of its next releases throw after recording what they were given.</summary>
@@ -1579,7 +1577,6 @@ public class CrossDeviceRoutingCoverageTests
         /// device backend does, rather than declining so the whole value is copied.</summary>
         internal bool CopiesRanges { get; init; }
 
-        /// <summary>How many ranges of its values it has copied back to the host.</summary>
         public int RangeCopies { get; private set; }
 
         public bool TryCopyTensorRangeToHost(IShorokooTensorValue value, long byteOffset, Span<byte> destination)
@@ -1590,7 +1587,6 @@ public class CrossDeviceRoutingCoverageTests
             return true;
         }
 
-        /// <summary>How many ranges of its values it has written from the host.</summary>
         public int RangeWrites { get; private set; }
 
         public bool TryCopyHostToTensorRange(IShorokooTensorValue value, long byteOffset, ReadOnlySpan<byte> source)
@@ -1753,10 +1749,8 @@ public class CrossDeviceRoutingCoverageTests
     {
         internal byte[] Bytes => data;
 
-        /// <summary>The memory it is in, where a backend made it; null for a value of no runtime.</summary>
         internal MemoryLocation? Where { get; init; }
 
-        /// <summary>Its elements, where it is a string tensor.</summary>
         internal string[]? Strings { get; init; }
 
         internal int Disposals { get; private set; }

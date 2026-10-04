@@ -647,7 +647,11 @@ optimizer's temporaries take no memory of their own either
 
 Results are bit-identical with or without it, and there is nothing to configure. On a card a
 resident run thus holds its state once rather than twice; under a device-memory budget the state
-is counted once — see [inference.md](inference.md#a-contexts-device-memory-budget).
+is counted once — see [inference.md](inference.md#a-contexts-device-memory-budget). A step's peak
+falls by what of the new state a step writing it beside the old would hold at its busiest, which
+is not always all of it. The update's temporaries take memory of their own on ONNX Runtime either
+way, and under AdamW it frees one of them before it writes a weight's new value, so a step over
+one large weight peaks lower by the weight's two moments rather than by its whole state.
 
 ### What construction costs
 
@@ -678,8 +682,9 @@ did not let a step consume (fed `.Shared()`, or `.TryConsume()` while shared) ho
 behind small managed handles, so the rig triggers a garbage collection once more than 32 MiB of
 such state has accumulated across steps, and backs off (doubling the threshold) while collections
 reclaim nothing, e.g. when you keep every checkpoint. You need not collect yourself. Initial
-checkpoints count against the same budget; a resident run's `Step` bypasses it, `StepToCheckpoint`
-results do not.
+checkpoints count against the same budget. A resident run's `Step` bypasses it, but a checkpoint
+the run hands out — from `StepToCheckpoint` or `TakeCheckpoint` — counts once a later step has
+moved on from it.
 
 On a large model the build can take minutes; see [Watching a long build](#watching-a-long-build).
 
@@ -874,9 +879,9 @@ An allocation failure in a step is rethrown as a `ComputeContextException` with 
 reporting:
 
 - **Which pool**: `HOST memory` (a failed host allocation; a bare `bad allocation` is host even on
-  a GPU) or `DEVICE memory` (the accelerator's own). ONNX Runtime's own arena words a failure the
-  same on the host as on a card, so on a CPU-only session such a failure reads as host. Where the backend names no allocator on a
-  session with device memory, the report says so.
+  a GPU) or `DEVICE memory` (the accelerator's own). On ONNX Runtime the allocator every session
+  allocates through names the memory it failed to allocate, the card's or the host's. Where the
+  backend names no allocator on a session with device memory, the report says so.
 - **What the step held**: trainable parameters, model state, optimizer state and the batch, each
   with tensor count and size, plus the five largest tensors.
 - **The card's figures** (where a CUDA runtime is installed; `DeviceMemory.Read()`): used, free and

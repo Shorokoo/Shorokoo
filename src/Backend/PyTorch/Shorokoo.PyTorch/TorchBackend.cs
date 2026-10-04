@@ -69,6 +69,9 @@ public abstract class TorchBackend : IShorokooBackend
         PrecisionSettings precision)
         => TorchRunMemory.Peak(model, outputAliases, onHost: !OnCuda);
 
+    /// <summary>It has one: <see cref="TorchRunMemory"/>.</summary>
+    bool IShorokooBackend.ModelsARun => true;
+
     /// <summary>Its model walks the model it is handed and builds nothing of torch's.</summary>
     bool IShorokooBackend.ModelsARunQuickly => true;
 

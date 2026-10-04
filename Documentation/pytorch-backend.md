@@ -127,8 +127,8 @@ is never modified: one whose PyTorch carries the pinned release runs beside anot
 on its own copy of that release. On Windows, one whose PyTorch bundles another release cannot load
 it into a process that already holds the pinned one, and starting it there fails with
 `PythonEnvironmentFailure.CudaLibraryConflict`, naming the copies held; on Linux its PyTorch binds
-to the pinned copy already loaded, and runs where that release is at least the one it was built
-against.
+to the pinned copy already loaded, and runs where that release has everything PyTorch takes from
+it, and where it lacks something, starting it fails with `CudaLibraryConflict` too.
 
 ## The Python environment
 

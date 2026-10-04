@@ -60,15 +60,18 @@ public sealed class PythonEnvironment
     public PythonEnvironmentSource Source { get; }
 
     /// <summary>
-    /// The folder of NVIDIA libraries PyTorch's Windows wheel bundles and loads by path —
-    /// <c>torch\lib</c> — where the environment has one; null on other systems, where PyTorch
-    /// takes them from NVIDIA's own wheels.
+    /// The folder the environment's NVIDIA libraries are under, where it has one: on Windows the
+    /// <c>torch\lib</c> PyTorch's wheel bundles them in and loads them from by path; else the
+    /// <c>nvidia</c> folder NVIDIA's own wheels install them under, each in a folder of its own,
+    /// which PyTorch's Linux wheel takes them from.
     /// </summary>
     internal string? CudaLibraryDirectory
         => OperatingSystem.IsWindows() && Path.Combine(SitePackages, "torch", "lib") is var torchLib
            && System.IO.Directory.Exists(torchLib)
             ? torchLib
-            : null;
+            : Path.Combine(SitePackages, "nvidia") is var nvidia && System.IO.Directory.Exists(nvidia)
+                ? nvidia
+                : null;
 
     /// <summary>The same environment, recorded as having come from <paramref name="source"/>.</summary>
     internal PythonEnvironment As(PythonEnvironmentSource source)

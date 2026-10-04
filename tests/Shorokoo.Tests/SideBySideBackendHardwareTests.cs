@@ -455,9 +455,17 @@ public class SideBySideBackendHardwareTests
     }
 
     [SideBySideCudaFact]
-    public void TestAConvolutionOnTheCardAfterTheProcessLoadedTheCudnnOnThePathEndsInAResultOrARefusalNamingTheCopyHeld()
+    public void TestACudaBackendStartedAfterTheProcessLoadedAnotherReleaseOfThePinnedCudnnRefusesNamingTheCopyHeld()
     {
-        Assert.Equal(0, InAChildProcess([], "onnxruntime-convolution-after-the-paths-cudnn"));
+        var other = Directory.CreateDirectory(Path.Combine(Path.GetTempPath(), "shorokoo-other-cudnn-" + Guid.NewGuid().ToString("N"))).FullName;
+        try
+        {
+            Assert.Equal(0, InAChildProcess([], "onnxruntime-convolution-after-another-cudnn", other));
+        }
+        finally
+        {
+            Directory.Delete(other, recursive: true);
+        }
     }
 
     /// <summary>What <c>dotnet Shorokoo.Tests.dll</c> runs: one case of a test that needs a process of
@@ -466,11 +474,12 @@ public class SideBySideBackendHardwareTests
     {
         ["cuda-backends", var first] => BothCudaBackendsRun(pytorchFirst: first == "pytorch-first") ? 0 : 1,
         ["onnxruntime-convolution"] => AConvolutionEndsInAResultOrAnException(),
-        ["onnxruntime-convolution-after-the-paths-cudnn"] => AConvolutionAfterThePathsCudnnEndsInAResultOrARefusalNamingIt(),
+        ["onnxruntime-convolution-after-another-cudnn", var other] => AConvolutionAfterAnotherCudnnIsRefusedNamingIt(other),
+        ["cuda-wheel-download", var root, var url, var served] => SideBySideBackendCoverageTests.DownloadEndedWithItsProcess(root, url, served),
         _ => 1,
     };
 
-    private static int InAChildProcess(Dictionary<string, string?> environment, params string[] args)
+    internal static int InAChildProcess(Dictionary<string, string?> environment, params string[] args)
     {
         var dotnet = Path.Combine(RuntimeEnvironment.GetRuntimeDirectory(), "..", "..", "..", Windows ? "dotnet.exe" : "dotnet");
         var start = new ProcessStartInfo(dotnet, [typeof(SideBySideBackendHardwareTests).Assembly.Location, .. args])
@@ -516,12 +525,15 @@ public class SideBySideBackendHardwareTests
         catch (Exception) { return 0; }
     }
 
-    private static int AConvolutionAfterThePathsCudnnEndsInAResultOrARefusalNamingIt()
+    private static int AConvolutionAfterAnotherCudnnIsRefusedNamingIt(string other)
     {
-        string[] held = Windows ? ["cudnn_graph64_9.dll", "cudnn_ops64_9.dll"] : ["libcudnn_graph.so.9", "libcudnn_ops.so.9"];
-        foreach (var name in held) NativeLibrary.TryLoad(name, out _);
-        try { return ConvolutionRuns(LoadCuda()) ? 0 : 1; }
-        catch (InvalidOperationException refusal) when (refusal.Message.Contains(held[0])) { return 0; }
+        var cudnn = CudaLibraryPins.Current!.Libraries.Single(pin => pin.Name == "cudnn");
+        var shim = cudnn.Files.Single(file => file.FileName is "cudnn64_9.dll" or "libcudnn.so.9").FileName;
+        var copy = Path.Combine(other, shim);
+        File.WriteAllBytes(copy, [.. File.ReadAllBytes(Path.Combine(CudaLibraryCache.DefaultRoot, cudnn.CacheKey, shim)), 0]);
+        NativeLibrary.Load(copy);
+        try { return ConvolutionRuns(LoadCuda()) ? 2 : 1; }
+        catch (InvalidOperationException refusal) when (refusal.Message.Contains(shim) && refusal.Message.Contains(other)) { return 0; }
     }
 
     private static bool OneCopyOfEachCudaLibrary()

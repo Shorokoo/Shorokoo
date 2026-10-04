@@ -1390,12 +1390,38 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
         var compiled = context.LoadCompiled(path, "ema");
         var weight = Assert.Single(compiled.SuppliedTensors);
         Assert.Equal([weight], context.Tensors);
+        var held = context.ReadDeviceMemoryUse();
         Assert.Throws<InvalidOperationException>(weight.Delete);
         Assert.False(weight.TryDelete());
         Assert.Throws<InvalidOperationException>(() => context.Detach(weight));
         Assert.False(await weight.DeleteAsync(TimeSpan.Zero));
+        Assert.Equal(held, context.ReadDeviceMemoryUse());
         Assert.Equal(expected, compiled.Execute(numOut.Shared(), input.Shared())[0].ToTensorData().AccessRawMemory().ToArray());
         compiled.Dispose();
+        Assert.True(((ILifetimeOwner)weight).Life.IsReleased);
+    }
+
+    [Fact]
+    public void TestDisposingAContextDisposesEveryLoadedGraphAndAWeightAnotherContextReadsGoesWhenThatReadEnds()
+    {
+        var numOut = TensorData(DType.Int64, [], 64L);
+        var model = FCLayer.ComputationGraph.ToConcreteArchitecture([numOut, TensorDataWithSmallVals(DType.Float32, [2L, 64L])]).ToConcreteModel();
+        var path = P("compiled-read-elsewhere.skpt");
+        Persistence.From(model).WithModel().WithWeights().Save(path);
+
+        var context = new ComputeContext();
+        using var other = new ComputeContext();
+        CompiledGraph[] loaded = [context.LoadCompiled(path), context.LoadCompiled(path)];
+        var read = Assert.Single(loaded[0].SuppliedTensors);
+
+        using (other.Lock(read))
+        {
+            context.Dispose();
+            Assert.All(loaded, graph => Assert.True(graph.IsDisposed));
+            Assert.All(loaded.SelectMany(graph => graph.SuppliedTensors), weight => Assert.True(weight.IsDisposed));
+            Assert.False(((ILifetimeOwner)read).Life.IsReleased);
+        }
+        Assert.True(((ILifetimeOwner)read).Life.IsReleased);
     }
 
     [Fact]
@@ -1546,7 +1572,51 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
     }
 
     [Fact]
-    public void TestZstdSkptEntryDeclaresItsSizeSoAnOversizedTensorIsRefusedUpFront()
+    public void TestAZstdReadReportsItsFrameFailingAsCorruptionAndTheStreamUnderItFailingAsItself()
+    {
+        var random = new Random(7);
+        var payload = new byte[1 << 18];
+        random.NextBytes(payload);
+        var frame = CompressedFormatUtils.Compress(payload);
+        Exception? Read(Stream stored) => Record.Exception(() =>
+        {
+            using var decoded = new DecodingReadStream(
+                new ZstdSharp.DecompressionStream(stored), e => new InvalidDataException("corrupt", e));
+            decoded.CopyTo(Stream.Null);
+        });
+
+        var diskError = new IOException("The device is not ready.");
+        Assert.Same(diskError, Read(new FailingReadStream(frame, frame.Length / 2, diskError)));
+        Assert.IsType<InvalidDataException>(Read(new MemoryStream(frame[..(frame.Length / 2)])));
+        Assert.Null(Read(new MemoryStream(frame)));
+    }
+
+    /// <summary>Reads <c>bytes</c>, and fails with <c>failure</c> once a read reaches
+    /// <c>failAt</c>.</summary>
+    private sealed class FailingReadStream(byte[] bytes, int failAt, Exception failure) : Stream
+    {
+        private int _position;
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            if (_position + count > failAt) throw failure;
+            int n = Math.Min(count, bytes.Length - _position);
+            Array.Copy(bytes, _position, buffer, offset, n);
+            _position += n;
+            return n;
+        }
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => _position; set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
+
+    [Fact]
+    public void TestEveryZstdFrameReadMustDeclareItsSizeSoAnOversizedTensorIsRefusedUpFront()
     {
         var (model, numOut, input) = BuildCompressibleSkptModel();
         var path = P("zstd-size.skpt");
@@ -1566,6 +1636,18 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
             e.Key == SkptFileFormat.ConfigEntryName ? System.Text.Encoding.UTF8.GetBytes(config.ToJsonString())
             : e.Key == SkptFileFormat.WeightsEntryPath ? huge : e.Value))]);
         Assert.Equal(ErrorCodes.ST003, Assert.Throws<ModelException>(() => Persistence.Load(tamperedPath)).ErrorCode);
+
+        using var undeclaring = new ZstdSharp.Compressor(CompressedFormatUtils.DefaultCompressionLevel);
+        undeclaring.SetParameter(ZstdSharp.Unsafe.ZSTD_cParameter.ZSTD_c_contentSizeFlag, 0);
+        var unsized = undeclaring.Wrap(CompressedFormatUtils.Decompress(stored)).ToArray();
+        config["data"]!["weights"]!["sha256"] = SkptFileFormat.Sha256Hex(unsized);
+        RewriteSkpt(tamperedPath, [.. entries.Select(e => (e.Key,
+            e.Key == SkptFileFormat.ConfigEntryName ? System.Text.Encoding.UTF8.GetBytes(config.ToJsonString())
+            : e.Key == SkptFileFormat.WeightsEntryPath ? unsized : e.Value))]);
+        Assert.Contains(SkptFileFormat.WeightsEntryPath, Assert.Throws<InvalidDataException>(() => Persistence.Load(tamperedPath)).Message);
+        var unsizedSafeTensors = P("unsized.zsafetensor");
+        File.WriteAllBytes(unsizedSafeTensors, unsized);
+        Assert.Contains(unsizedSafeTensors, Assert.Throws<InvalidDataException>(() => CompressedFormatUtils.LoadCompressedSafeTensors(unsizedSafeTensors)).Message);
     }
 
     /// <summary>Every file of a .skpt checkpoint directory keyed by its manifest-style relative

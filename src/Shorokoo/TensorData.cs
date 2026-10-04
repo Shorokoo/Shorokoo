@@ -375,10 +375,17 @@ namespace Shorokoo
         /// <summary>
         /// The storage bytes copied into an array the caller owns, valid however long the caller
         /// keeps it — <see cref="AccessRawMemory"/> plus the copy, with the tensor kept alive across
-        /// it. A tensor in a device's memory stays where it is, alive. Prefer this wherever the whole
-        /// buffer is being copied anyway.
+        /// it. A tensor in a device's memory stays where it is, alive, and its contents are copied
+        /// once: out of the host copy <see cref="AccessRawMemory"/> holds where it is still alive,
+        /// and otherwise straight off the device into the array returned. Prefer this wherever the
+        /// whole buffer is being copied anyway.
         /// </summary>
-        public byte[] CopyRawMemory() => Reading(() => AccessRawMemory().ToArray());
+        public byte[] CopyRawMemory() => Reading(() =>
+        {
+            ThrowIfDisposed();
+            if (IsHostResident) return AccessRawStorage().ToArray();
+            return HeldHostCopy() is { } held ? held.AsSpan().ToArray() : CopyContentBytes();
+        });
 
         /// <summary>
         /// The elements copied into an array of V the caller owns, valid however long the caller
@@ -386,11 +393,25 @@ namespace Shorokoo
         /// <see cref="CopyRawMemory"/> is the same copy as bytes, for any dtype. This is
         /// <see cref="AccessMemory{V}"/> plus the copy, done safely: taking a span is the tensor's
         /// last read, so copying out of one by hand races the collection that frees what it points
-        /// at (Shorokoo/Shorokoo#178). A tensor in a device's memory stays where it is, alive.
-        /// Prefer this wherever the whole buffer is being copied anyway.
+        /// at (Shorokoo/Shorokoo#178). A tensor in a device's memory stays where it is, alive, and its
+        /// contents are copied once where its backend can copy them straight into the array
+        /// returned. Prefer this wherever the whole buffer is being copied anyway.
         /// </summary>
         /// <exception cref="InvalidCastException">V is not this tensor's element storage type.</exception>
-        public V[] CopyMemory<V>() where V : unmanaged => Reading(() => AccessMemory<V>().ToArray());
+        public V[] CopyMemory<V>() where V : unmanaged => Reading(() =>
+        {
+            ThrowIfDisposed();
+            CheckElementType<V>();
+            // Through the host copy wherever there is no single copy to make straight into the array:
+            // a tensor the host reads, one whose host copy is already held, a string tensor, and one
+            // nothing can copy out at all, which is refused there in its own words.
+            if (IsHostResident || HeldHostCopy() is not null || DType.IsSameElementTypeAs(DType.Utf8) || !CanBeCopiedOut)
+                return AccessMemory<V>().ToArray();
+            var elements = new V[ContentByteLength / System.Runtime.CompilerServices.Unsafe.SizeOf<V>()];
+            return TryCopyContentRange(0, MemoryMarshal.AsBytes(elements.AsSpan()))
+                ? elements
+                : AccessMemory<V>().ToArray();
+        });
 
         /// <summary>
         /// One element, read safely — the single-value counterpart of <see cref="CopyMemory{V}"/>,
@@ -433,10 +454,72 @@ namespace Shorokoo
         /// </summary>
         private byte[] HostCopy()
         {
-            if (Volatile.Read(ref _hostCopy) is { } held && held.TryGetTarget(out var bytes)) return bytes;
-            bytes = Reading(CopyContentBytes);
+            if (HeldHostCopy() is { } held) return held;
+            var bytes = Reading(CopyContentBytes);
             Volatile.Write(ref _hostCopy, new WeakReference<byte[]>(bytes));
             return bytes;
+        }
+
+        /// <summary>The host copy an earlier read of a tensor in a device's memory made, where it is
+        /// still alive; null where there is none.</summary>
+        private byte[]? HeldHostCopy()
+            => Volatile.Read(ref _hostCopy) is { } held && held.TryGetTarget(out var bytes) ? bytes : null;
+
+        /// <summary>
+        /// Copies <paramref name="destination"/>'s length of this tensor's contents, starting
+        /// <paramref name="byteOffset"/> bytes in, into <paramref name="destination"/>: out of its
+        /// own storage where the host reads it, and otherwise through the backend that made its
+        /// memory, which copies just that range off the device. False, having copied nothing, where
+        /// that backend cannot copy part of a value; the caller then reads the contents whole.
+        /// Without the liveness check: the caller holds this tensor's lock.
+        /// </summary>
+        private protected virtual bool TryCopyContentRange(long byteOffset, Span<byte> destination)
+        {
+            AccessRawStorage().Slice(checked((int)byteOffset), destination.Length).CopyTo(destination);
+            // The span is a window onto storage this tensor owns and roots nothing itself
+            // (Shorokoo/Shorokoo#178).
+            GC.KeepAlive(this);
+            return true;
+        }
+
+        /// <summary>
+        /// Copies the rows <paramref name="rows"/> of this tensor, each <paramref name="rowBytes"/>
+        /// bytes of its contents, into <paramref name="destination"/> one after the other, under a
+        /// reader lock for the length of the copy. Rows that follow one another in the tensor are
+        /// copied as one range, so a run of them costs one copy wherever the tensor is; a tensor in
+        /// a device's memory has only those rows copied off it, never its whole contents. False,
+        /// having copied nothing that counts, where the backend that made its memory cannot copy
+        /// part of a value; the caller then reads the contents whole.
+        /// </summary>
+        /// <exception cref="ObjectDisposedException">The tensor is dead.</exception>
+        internal bool TryCopyRows(int[] rows, int rowBytes, Span<byte> destination)
+        {
+            _life.AcquireReadLock(OutsideARun.CopyingOut);
+            try
+            {
+                ThrowIfDisposed();
+                for (int k = 0; k < rows.Length;)
+                {
+                    var run = 1;
+                    while (k + run < rows.Length && rows[k + run] == rows[k] + run) run++;
+                    var piece = destination.Slice(k * rowBytes, run * rowBytes);
+                    if (!TryCopyContentRange((long)rows[k] * rowBytes, piece))
+                    {
+                        // A backend answers for a value, not for a piece of it: one that copied the
+                        // first rows and declines later ones has failed, not declined.
+                        if (k == 0) return false;
+                        throw new InvalidOperationException(
+                            $"{AllocatingBackend.Description} copied the first rows of {Describe()} out "
+                            + "of its memory and then declined the rest.");
+                    }
+                    k += run;
+                }
+                return true;
+            }
+            finally
+            {
+                _life.ReleaseReadLock(OutsideARun.CopyingOut);
+            }
         }
 
         /// <summary>
@@ -780,6 +863,19 @@ namespace Shorokoo
         }
 
         /// <inheritdoc/>
+        private protected override bool TryCopyContentRange(long byteOffset, Span<byte> destination)
+        {
+            if (backing.IsHostAccessible)
+                backing.GetTensorDataAsSpan<byte>().Slice(checked((int)byteOffset), destination.Length).CopyTo(destination);
+            else if (!AllocatingBackend.TryCopyTensorRangeToHost(backing, byteOffset, destination))
+                return false;
+            // Taking the span, or the pointer the backend copies from, is the value's last read
+            // (Shorokoo/Shorokoo#178).
+            GC.KeepAlive(backing);
+            return true;
+        }
+
+        /// <inheritdoc/>
         private protected override IReadOnlyList<string> CopyContentStrings()
             => backing.IsHostAccessible
                 ? backing.GetStringTensorData()
@@ -791,25 +887,35 @@ namespace Shorokoo
                     + "not host memory, so its elements cannot be read here. ToHost() takes a copy "
                     + "in host memory.");
 
-        /// <inheritdoc/>
+        /// <summary>
+        /// Laid out from the element type and shape, wherever the value is, rather than read off a
+        /// span over its storage: a span's length is an <see cref="int"/>, so no span measures a
+        /// tensor past 2 GiB.
+        /// </summary>
         internal override long ContentByteLength
-            => this.Value.IsHostAccessible
-                ? this.Value.GetTensorDataAsSpan<byte>().Length
-                : TensorElementLayout.ByteLength(backing.ElementType, backing.Shape);
+        {
+            get
+            {
+                var value = this.Value;
+                return TensorElementLayout.ByteLength(value.ElementType, value.Shape);
+            }
+        }
 
         /// <summary>
-        /// The storage's own bytes where the host can read them, and otherwise the value streamed
-        /// out of the provider's memory through one bounded buffer by the backend that made it.
+        /// The storage's own bytes where the host can read them all through one span, and otherwise
+        /// the value streamed through one bounded buffer by the backend that made it — out of the
+        /// provider's memory, or out of host memory longer than one span reaches.
         /// </summary>
         private protected override void WriteContentBytes(Stream destination)
         {
-            if (backing.IsHostAccessible)
+            var length = ContentByteLength;
+            if (backing.IsHostAccessible && length <= int.MaxValue)
             {
                 destination.Write(backing.GetTensorDataAsSpan<byte>());
                 GC.KeepAlive(backing);
                 return;
             }
-            StagedReadBack.Write(AllocatingBackend, backing, ContentByteLength, destination);
+            StagedReadBack.Write(AllocatingBackend, backing, length, destination);
             GC.KeepAlive(backing);
         }
 

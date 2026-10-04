@@ -47,12 +47,47 @@ internal static class CudaRuntime
     /// <summary>The runtime's allocation entry points, bound together or not at all.</summary>
     private sealed record Allocation(Malloc Malloc, Free Free, GetDevice GetDevice, SetDevice SetDevice, GetLastError Clear, DeviceSynchronize Synchronize);
 
-    private static readonly object _gate = new();
-    private static MemGetInfo? _memGetInfo;
-    private static GetDevice? _getDevice;
-    private static GetPciBusId? _getPciBusId;
-    private static Allocation? _allocation;
-    private static bool _bound;
+    /// <summary>Every entry point bound: <c>cudaMemGetInfo</c>, and those of the rest the library
+    /// exports.</summary>
+    private sealed record Entries(MemGetInfo MemGetInfo, GetDevice? GetDevice, GetPciBusId? GetPciBusId, Allocation? Allocation);
+
+    private static readonly Binding<Entries> _binding = new(BindLibrary);
+
+    /// <summary>
+    /// A native library's entry points, bound on first use by <c>bind</c>, which answers them — null
+    /// where they cannot be had — and whether that answer is final. One that is not — the library
+    /// could not be loaded, as when it is asked for before the backend that ships it has loaded it —
+    /// is asked for again at the next use, until one is.
+    /// </summary>
+    internal sealed class Binding<T>(Func<(bool Final, T? Bound)> bind) where T : class
+    {
+        private readonly object _gate = new();
+        private bool _final;
+        private T? _bound;
+
+        /// <summary>The entry points, or null.</summary>
+        internal T? Value
+        {
+            get
+            {
+                lock (_gate)
+                {
+                    if (_final) return _bound;
+                    // Binding is best effort -- a reading is worth nothing next to failing a run, and
+                    // TryMemGetInfo promises to report rather than throw.
+                    try
+                    {
+                        (_final, _bound) = bind();
+                    }
+                    catch (Exception)
+                    {
+                        (_final, _bound) = (true, null);
+                    }
+                    return _bound;
+                }
+            }
+        }
+    }
 
     /// <summary>
     /// Reads the device-wide free and total memory of the current CUDA device. False when
@@ -81,7 +116,7 @@ internal static class CudaRuntime
     internal static bool TryGetDevice(out int device)
     {
         device = 0;
-        if (Bind() is null || _getDevice is not { } getDevice) return false;
+        if (_binding.Value?.GetDevice is not { } getDevice) return false;
         return getDevice(out device) == 0;
     }
 
@@ -93,7 +128,7 @@ internal static class CudaRuntime
     /// </summary>
     internal static string? TryGetPciBusId(int device)
     {
-        if (Bind() is null || _getPciBusId is not { } getPciBusId) return null;
+        if (_binding.Value?.GetPciBusId is not { } getPciBusId) return null;
         // The form is 12 characters, domain:bus:device.function, and a terminator; the rest is spare.
         var buffer = new byte[64];
         if (getPciBusId(buffer, buffer.Length, device) != 0) return null;
@@ -174,50 +209,42 @@ internal static class CudaRuntime
         }
     }
 
-    private static Allocation? BindAllocation()
-    {
-        Bind();
-        return _allocation;
-    }
+    private static Allocation? BindAllocation() => _binding.Value?.Allocation;
 
-    private static MemGetInfo? Bind()
+    private static MemGetInfo? Bind() => _binding.Value?.MemGetInfo;
+
+    /// <summary>The runtime library's entry points: none, and not final, where the library cannot be
+    /// loaded; none, and final, where it lacks <c>cudaMemGetInfo</c>.</summary>
+    private static (bool Final, Entries? Bound) BindLibrary()
     {
-        lock (_gate)
+        if (!NativeLibrary.TryLoad(LibraryName, out var library)) return (false, null);
+        if (!NativeLibrary.TryGetExport(library, "cudaMemGetInfo", out var export))
         {
-            if (_bound) return _memGetInfo;
-            try
-            {
-                if (!NativeLibrary.TryLoad(LibraryName, out var library)) return null;
-                if (NativeLibrary.TryGetExport(library, "cudaMemGetInfo", out var export))
-                    // The library stays loaded on purpose: the delegate points into it.
-                {
-                    _memGetInfo = Marshal.GetDelegateForFunctionPointer<MemGetInfo>(export);
-                    if (NativeLibrary.TryGetExport(library, "cudaGetDevice", out var getDevice))
-                        _getDevice = Marshal.GetDelegateForFunctionPointer<GetDevice>(getDevice);
-                    if (NativeLibrary.TryGetExport(library, "cudaDeviceGetPCIBusId", out var getPciBusId))
-                        _getPciBusId = Marshal.GetDelegateForFunctionPointer<GetPciBusId>(getPciBusId);
-                    if (_getDevice is { } current
-                        && NativeLibrary.TryGetExport(library, "cudaMalloc", out var malloc)
-                        && NativeLibrary.TryGetExport(library, "cudaFree", out var free)
-                        && NativeLibrary.TryGetExport(library, "cudaSetDevice", out var setDevice)
-                        && NativeLibrary.TryGetExport(library, "cudaGetLastError", out var lastError)
-                        && NativeLibrary.TryGetExport(library, "cudaDeviceSynchronize", out var synchronize))
-                        _allocation = new Allocation(
-                            Marshal.GetDelegateForFunctionPointer<Malloc>(malloc),
-                            Marshal.GetDelegateForFunctionPointer<Free>(free),
-                            current,
-                            Marshal.GetDelegateForFunctionPointer<SetDevice>(setDevice),
-                            Marshal.GetDelegateForFunctionPointer<GetLastError>(lastError),
-                            Marshal.GetDelegateForFunctionPointer<DeviceSynchronize>(synchronize));
-                }
-                else
-                    NativeLibrary.Free(library);
-            }
-            // Binding is best effort -- a reading is worth nothing next to failing a run, and
-            // TryMemGetInfo promises to report rather than throw.
-            catch (Exception) { _memGetInfo = null; _getDevice = null; _getPciBusId = null; _allocation = null; }
-            finally { _bound = true; }
-            return _memGetInfo;
+            NativeLibrary.Free(library);
+            return (true, null);
         }
+        // The library stays loaded on purpose: the delegates point into it.
+        var memGetInfo = Marshal.GetDelegateForFunctionPointer<MemGetInfo>(export);
+        GetDevice? current = NativeLibrary.TryGetExport(library, "cudaGetDevice", out var getDevice)
+            ? Marshal.GetDelegateForFunctionPointer<GetDevice>(getDevice)
+            : null;
+        GetPciBusId? busId = NativeLibrary.TryGetExport(library, "cudaDeviceGetPCIBusId", out var getPciBusId)
+            ? Marshal.GetDelegateForFunctionPointer<GetPciBusId>(getPciBusId)
+            : null;
+        Allocation? allocation = null;
+        if (current is not null
+            && NativeLibrary.TryGetExport(library, "cudaMalloc", out var malloc)
+            && NativeLibrary.TryGetExport(library, "cudaFree", out var free)
+            && NativeLibrary.TryGetExport(library, "cudaSetDevice", out var setDevice)
+            && NativeLibrary.TryGetExport(library, "cudaGetLastError", out var lastError)
+            && NativeLibrary.TryGetExport(library, "cudaDeviceSynchronize", out var synchronize))
+            allocation = new Allocation(
+                Marshal.GetDelegateForFunctionPointer<Malloc>(malloc),
+                Marshal.GetDelegateForFunctionPointer<Free>(free),
+                current,
+                Marshal.GetDelegateForFunctionPointer<SetDevice>(setDevice),
+                Marshal.GetDelegateForFunctionPointer<GetLastError>(lastError),
+                Marshal.GetDelegateForFunctionPointer<DeviceSynchronize>(synchronize));
+        return (true, new Entries(memGetInfo, current, busId, allocation));
     }
 }

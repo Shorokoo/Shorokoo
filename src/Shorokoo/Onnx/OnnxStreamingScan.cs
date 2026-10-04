@@ -19,9 +19,10 @@ namespace Shorokoo.Onnx
     /// <para>Tensors are found where the importer reads them: graph initializers and the tensors of
     /// node attributes, through nested graphs and function bodies. A payload is referenced when it
     /// is <c>raw_data</c>, or packed <c>float_data</c> of a float tensor or <c>double_data</c> of a
-    /// double one (the same little-endian bytes), exactly the shape's worth of bytes, and the tensor
-    /// carries no external data of its own — no <c>external_data</c> entry, and no
-    /// <c>data_location</c> but <c>DEFAULT</c>. Any other payload stays inline, as it is read without
+    /// double one (the same little-endian bytes), exactly the shape's worth of bytes in one piece,
+    /// the tensor holds no other piece of a payload, and it carries no external data of its own —
+    /// no <c>external_data</c> entry, and no <c>data_location</c> but <c>DEFAULT</c>. Any other
+    /// payload stays inline, each field where it stands, as it is read without
     /// the scan: the varint-coded ones (<c>int32_data</c>, <c>int64_data</c>, <c>uint64_data</c>),
     /// strings, and a tensor's bytes that disagree with its shape. Everything else in the file is
     /// kept as it is. A sparse initializer, which the importer does not read, is refused.</para>
@@ -79,14 +80,15 @@ namespace Shorokoo.Onnx
 
         /// <summary>The model in <paramref name="file"/>, its large tensor payloads referenced in
         /// place rather than read. A truncated or malformed file throws
-        /// <see cref="EndOfStreamException"/> or <see cref="ProtoBuf.ProtoException"/>, as parsing
-        /// it whole does.</summary>
+        /// <see cref="EndOfStreamException"/> or <see cref="ProtoBuf.ProtoException"/>, and one
+        /// nested <see cref="OnnxProtobuf.MaxDepth"/> levels deep or more throws
+        /// <see cref="InvalidOperationException"/>, as parsing it whole does.</summary>
         internal static ModelProto ReadModel(FileStream file)
         {
             var model = new OnnxStreamingScan(file, file.Name).Scan();
             ScannedInjection?.Invoke(file.Name);
             using var stream = new MemoryStream(model, writable: false);
-            return ProtoBuf.Serializer.Deserialize<ModelProto>(stream);
+            return OnnxProtobuf.ReadModel(stream);
         }
 
         /// <summary>The refusal of a model with a sparse initializer, which the importer does not
@@ -112,7 +114,7 @@ namespace Shorokoo.Onnx
         {
             long end = _file.Length;
             _file.Position = 0;
-            long size = Message(Kind.Model, end);
+            long size = Message(Kind.Model, end, 0);
             if (size > Array.MaxLength)
                 throw new InvalidDataException(
                     $"'{_path}': the ONNX model holds {size} bytes besides the weights it references, " +
@@ -121,13 +123,13 @@ namespace Shorokoo.Onnx
             _output = GC.AllocateUninitializedArray<byte>((int)size);
             _nextSize = 0;
             _file.Position = 0;
-            Message(Kind.Model, end);
+            Message(Kind.Model, end, 0);
             if (_written != size)
                 throw new IOException($"'{_path}' changed while it was read.");
             return _output;
         }
 
-        private long Message(Kind kind, long end)
+        private long Message(Kind kind, long end, int depth)
         {
             long size = 0;
             while (_file.Position < end)
@@ -141,99 +143,105 @@ namespace Shorokoo.Onnx
                     continue;
                 }
                 long length = ReadLength(end);
-                size += Child(key, ChildOf(kind, field), _file.Position + length);
+                size += Child(key, ChildOf(kind, field), _file.Position + length, depth + 1);
             }
             return size;
         }
 
-        private long Child(ulong key, Kind kind, long end)
+        /// <summary>The message of <paramref name="kind"/> running to <paramref name="end"/>,
+        /// <paramref name="depth"/> levels below the model, with its key and length prefix. Refused
+        /// where the parse of the rewritten model would refuse it (<see cref="OnnxProtobuf.MaxDepth"/>),
+        /// before the walk descends any further: the walk recurses as the messages nest, so a file
+        /// nested deep enough would otherwise overflow the stack.</summary>
+        private long Child(ulong key, Kind kind, long end, int depth)
         {
+            if (depth >= OnnxProtobuf.MaxDepth)
+                throw new InvalidOperationException(
+                    $"'{_path}': the ONNX model nests a message {depth} levels deep at byte {_file.Position}; " +
+                    $"a model is read to a depth of {OnnxProtobuf.MaxDepth - 1}.");
             int slot = _nextSize++;
             if (_output is null) _sizes.Add(0);
             long size = WriteVarint(key);
             if (_output is not null) size += WriteVarint((ulong)_sizes[slot]);
-            long body = kind == Kind.Tensor ? Tensor(end) : Message(kind, end);
+            long body = kind == Kind.Tensor ? Tensor(end) : Message(kind, end, depth);
             if (_output is null) size += WriteVarint((ulong)(_sizes[slot] = body));
             return size + body;
         }
 
+        /// <summary>
+        /// A tensor, rewritten: each field written where it stands, but for a payload referenced in
+        /// place of being copied (see the class). The fields the decision rests on may stand
+        /// anywhere in the message, so it is walked once to read them and again to write it. What is
+        /// kept so keeps its order, which matters for a payload written in pieces: a repeated field
+        /// may be written partly packed and partly unpacked, and its elements are read in the order
+        /// its pieces stand.
+        /// </summary>
         private long Tensor(long end)
         {
-            long size = 0;
+            long start = _file.Position;
             int dataType = 0;
             var dims = new List<long>();
             bool external = false;
-            var payloads = new List<(ulong Key, int Field, long Offset, long Length)>();
+            int payloads = 0;
+            (int Field, long Offset, long Length)? flat = null;
             while (_file.Position < end)
             {
-                var (key, field, wire) = ReadKey(end);
-                if (wire == WireLengthDelimited && field is RawDataField or FloatDataField or DoubleDataField)
+                var (_, field, wire) = ReadKey(end);
+                if (field is RawDataField or FloatDataField or DoubleDataField)
                 {
+                    payloads++;
+                    if (wire != WireLengthDelimited)
+                    {
+                        Skip(wire, end);
+                        continue;
+                    }
                     long length = ReadLength(end);
-                    payloads.Add((key, field, _file.Position, length));
+                    flat = (field, _file.Position, length);
                     _file.Seek(length, SeekOrigin.Current);
                     continue;
                 }
                 external |= field == ExternalDataField;
                 if (field == DataLocationField && wire == WireVarint)
-                {
-                    var value = ReadVarint(end);
-                    external |= value == (ulong)TensorProto.DataLocation.External;
-                    size += WriteVarint(key) + WriteVarint(value);
-                }
+                    external |= ReadVarint(end) == (ulong)TensorProto.DataLocation.External;
                 else if (field == 2 && wire == WireVarint)
-                {
-                    var value = ReadVarint(end);
-                    dataType = unchecked((int)value);
-                    size += WriteVarint(key) + WriteVarint(value);
-                }
+                    dataType = unchecked((int)ReadVarint(end));
                 else if (field == 1 && wire == WireVarint)
-                {
-                    var value = ReadVarint(end);
-                    dims.Add(unchecked((long)value));
-                    size += WriteVarint(key) + WriteVarint(value);
-                }
+                    dims.Add(unchecked((long)ReadVarint(end)));
                 else if (field == 1 && wire == WireLengthDelimited)
                 {
-                    long length = ReadLength(end);
-                    long packedEnd = _file.Position + length;
-                    int first = dims.Count;
+                    long packedEnd = ReadLength(end) + _file.Position;
                     while (_file.Position < packedEnd)
                         dims.Add(unchecked((long)ReadVarint(packedEnd)));
-                    long packed = 0;
-                    for (int i = first; i < dims.Count; i++)
-                        packed += VarintLength(unchecked((ulong)dims[i]));
-                    size += WriteVarint(key) + WriteVarint((ulong)packed);
-                    for (int i = first; i < dims.Count; i++)
-                        size += WriteVarint(unchecked((ulong)dims[i]));
                 }
                 else
-                {
+                    Skip(wire, end);
+            }
+
+            bool referenced = payloads == 1 && !external && flat is { } only
+                && only.Length >= MinReferencedBytes
+                && (only.Field == RawDataField ? dataType != StringType
+                    : only.Field == FloatDataField ? dataType == FloatType : dataType == DoubleType)
+                && only.Length == OnnxExternalData.TryGetExpectedByteLength(
+                    new TensorProto { data_type = dataType, Dims = [.. dims] });
+
+            _file.Position = start;
+            long size = 0;
+            while (_file.Position < end)
+            {
+                var (key, field, wire) = ReadKey(end);
+                if (referenced && field is RawDataField or FloatDataField or DoubleDataField)
+                    Skip(wire, end);
+                else
                     size += CopyField(key, wire, end);
-                }
             }
+            if (!referenced) return size;
 
-            if (payloads.Count == 1 && !external && payloads[0] is var (_, only, offset, bytes)
-                && bytes >= MinReferencedBytes
-                && (only == RawDataField ? dataType != StringType
-                    : only == FloatDataField ? dataType == FloatType : dataType == DoubleType)
-                && bytes == OnnxExternalData.TryGetExpectedByteLength(
-                    new TensorProto { data_type = dataType, Dims = [.. dims] }))
-            {
-                size += WriteExternalEntry(OnnxExternalData.LocationKey, _location);
-                size += WriteExternalEntry(OnnxExternalData.OffsetKey, offset.ToString(CultureInfo.InvariantCulture));
-                size += WriteExternalEntry(OnnxExternalData.LengthKey, bytes.ToString(CultureInfo.InvariantCulture));
-                size += WriteVarint(DataLocationField << 3 | WireVarint);
-                size += WriteVarint((ulong)TensorProto.DataLocation.External);
-                return size;
-            }
-
-            foreach (var (key, _, start, length) in payloads)
-            {
-                _file.Position = start;
-                size += WriteVarint(key) + WriteVarint((ulong)length) + Copy(length);
-            }
-            _file.Position = end;
+            var (_, offset, bytes) = flat!.Value;
+            size += WriteExternalEntry(OnnxExternalData.LocationKey, _location);
+            size += WriteExternalEntry(OnnxExternalData.OffsetKey, offset.ToString(CultureInfo.InvariantCulture));
+            size += WriteExternalEntry(OnnxExternalData.LengthKey, bytes.ToString(CultureInfo.InvariantCulture));
+            size += WriteVarint(DataLocationField << 3 | WireVarint);
+            size += WriteVarint((ulong)TensorProto.DataLocation.External);
             return size;
         }
 
@@ -283,6 +291,31 @@ namespace Shorokoo.Onnx
                 case WireLengthDelimited:
                     long length = ReadLength(end);
                     return size + WriteVarint((ulong)length) + Copy(length);
+                default:
+                    throw new ProtoBuf.ProtoException($"Unsupported wire type {wire} at byte {_file.Position}.");
+            }
+        }
+
+        /// <summary>Reads past a field's value, writing nothing.</summary>
+        private void Skip(int wire, long end)
+        {
+            switch (wire)
+            {
+                case WireVarint:
+                    ReadVarint(end);
+                    return;
+                case WireFixed64:
+                    RequireWithin(end, 8);
+                    _file.Seek(8, SeekOrigin.Current);
+                    return;
+                case WireFixed32:
+                    RequireWithin(end, 4);
+                    _file.Seek(4, SeekOrigin.Current);
+                    return;
+                case WireLengthDelimited:
+                    long length = ReadLength(end);
+                    _file.Seek(length, SeekOrigin.Current);
+                    return;
                 default:
                     throw new ProtoBuf.ProtoException($"Unsupported wire type {wire} at byte {_file.Position}.");
             }

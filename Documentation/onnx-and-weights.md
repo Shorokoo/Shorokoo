@@ -181,7 +181,9 @@ into its own tensor: the file is scanned rather than parsed whole, and a tensor 
 float / double tensor) is read from where it lies, as external data in the model's own file is.
 A weight stored as varints (`int32_data`, `int64_data`, `uint64_data`) or strings is decoded
 as it is parsed. From bytes or a stream, the protobuf is parsed whole. A sparse initializer
-is refused, naming the file: the importer does not read one, so store it dense.
+is refused, naming the file: the importer does not read one, so store it dense. A model that
+nests a message 100 levels deep or more, protobuf's own default recursion limit, is
+refused however it is read.
 
 ## Save/load Shorokoo graph format (`.srk` / `.zsrk`)
 

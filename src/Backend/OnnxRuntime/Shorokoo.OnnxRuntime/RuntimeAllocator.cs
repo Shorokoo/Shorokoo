@@ -13,8 +13,11 @@ namespace Shorokoo.OnnxRuntime;
 /// <para>The allocator itself is the process's, whichever copy of this backend asks for it, so two
 /// backends that bind one runtime — the program's own and one loaded in isolation over the same
 /// file — share it, and their sessions each charge their own accounts. The runtime is handed it once
-/// (<see cref="CachingAllocator.ClaimRuntime"/>): it keeps one allocator per device, and a second
-/// registration would take the device over from the first.</para>
+/// (<see cref="CachingAllocator.HandTo"/>): it keeps one allocator per device, and a second
+/// registration would take the device over from the first. Where the runtime refuses it — something
+/// else registered an allocator for the device first, say — making this fails, and nothing is kept:
+/// every later request asks again and fails again, rather than building sessions that would allocate
+/// in memory Shorokoo does not manage.</para>
 ///
 /// <para>Held for the life of the process, as everything registered with the runtime is.</para>
 /// </summary>
@@ -50,7 +53,7 @@ internal sealed class RuntimeAllocator
         _info = InfoFor(device);
         var native = NativeAllocator.Create(
             Shared.State, CachingAllocator.AllocateEntry, CachingAllocator.FreeEntry, OrtEnvironment.PointerOf(_info));
-        if (Shared.ClaimRuntime(OrtEnvironment.EnvironmentHandle())) OrtEnvironment.Register(native);
+        Shared.HandTo(OrtEnvironment.EnvironmentHandle(), () => OrtEnvironment.Register(native));
         Managed = OrtEnvironment.Wrap(native);
     }
 

@@ -209,7 +209,7 @@ internal static class TorchRunMemory
     /// <summary>
     /// Whether the translation hands <paramref name="node"/>'s output <paramref name="output"/> back
     /// over its input <paramref name="input"/>: a slice, a reshape, a transpose, an expansion or a
-    /// split of its first input, a cast to the type it has, a one-input sum, mean, maximum or minimum, a
+    /// split of its first input, a cast to the type it has, a one-input sum, maximum or minimum, a
     /// clip without bounds, a reduction — of no axis, as the caller tells by size — and a branch, which
     /// may hand back what it captured (<see cref="PlacementMemory.PyTorch"/>), as anything the model
     /// does not know may. Every other operator computes a result of its own.
@@ -222,7 +222,7 @@ internal static class TorchRunMemory
             "Slice" or "Identity" or "Reshape" or "Squeeze" or "Unsqueeze" or "Flatten" or "Transpose" or "Expand" or "Split" => input == 0,
             "Cast" => input == 0 && shapes.TryGetValue(node.Inputs[0], out var from) && shapes.TryGetValue(node.Outputs[output], out var to)
                       && from.ElementType == to.ElementType,
-            "Max" or "Min" or "Sum" or "Mean" or "Clip" or "If" => PlacementMemory.PyTorch.SharesUnlessPlaced(node, input, output),
+            "Max" or "Min" or "Sum" or "Clip" or "If" => PlacementMemory.PyTorch.SharesUnlessPlaced(node, input, output),
             _ => node.OpType.StartsWith("Reduce", StringComparison.Ordinal) && PlacementMemory.PyTorch.SharesUnlessPlaced(node, input, output),
         };
     }

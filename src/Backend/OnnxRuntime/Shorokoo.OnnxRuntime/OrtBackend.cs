@@ -1723,15 +1723,20 @@ public abstract class OrtBackend : IShorokooBackend
     /// </summary>
     private static OrtTensorValue Allocate(TensorElementType elementType, ReadOnlySpan<byte> bytes, long[] shape)
     {
+        // Laid out from the element type and shape, before anything is allocated, rather than read
+        // off a span over the allocation: ORT casts that span's length to int unchecked, so a
+        // buffer past 4 GiB would measure as what it holds beyond the last 4 GiB, and too few bytes
+        // for it would pass.
+        var required = TensorElementLayout.ByteLength((ShorokooTensorElementType)(int)elementType, shape);
+        if (bytes.Length < required)
+            throw new ArgumentException(
+                $"Supplied data of {bytes.Length} bytes is less than shape size {required} bytes.",
+                nameof(bytes));
         var wrapped = new OrtTensorValue(
             OrtValue.CreateAllocatedTensorValue(RuntimeAllocator.ForHost().Managed, elementType, shape));
         try
         {
             var destination = wrapped.Inner.GetTensorMutableRawData();
-            if (bytes.Length < destination.Length)
-                throw new ArgumentException(
-                    $"Supplied data of {bytes.Length} bytes is less than shape size {destination.Length} bytes.",
-                    nameof(bytes));
             // A caller may hand over a buffer longer than the shape covers — the node-definition
             // tables do — in which case the surplus is not part of the tensor and is not read.
             bytes.Slice(0, destination.Length).CopyTo(destination);

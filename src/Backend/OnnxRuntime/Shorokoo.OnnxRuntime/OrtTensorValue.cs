@@ -261,6 +261,7 @@ internal sealed class OrtTensorValue : IShorokooTensorValue
     public ReadOnlySpan<T> GetTensorDataAsSpan<T>() where T : unmanaged
     {
         ThrowIfNotHostAccessible();
+        if (BufferBytes > int.MaxValue) return WholeBuffer<T>();
         if (typeof(T) == typeof(ShoFloat16))
             return MemoryMarshal.Cast<OrtFloat16, T>(Inner.GetTensorDataAsSpan<OrtFloat16>());
         if (typeof(T) == typeof(ShoBFloat16))
@@ -271,12 +272,42 @@ internal sealed class OrtTensorValue : IShorokooTensorValue
     public Span<T> GetTensorMutableDataAsSpan<T>() where T : unmanaged
     {
         ThrowIfNotHostAccessible();
+        if (BufferBytes > int.MaxValue) return WholeBuffer<T>();
         if (typeof(T) == typeof(ShoFloat16))
             return MemoryMarshal.Cast<OrtFloat16, T>(Inner.GetTensorMutableDataAsSpan<OrtFloat16>());
         if (typeof(T) == typeof(ShoBFloat16))
             return MemoryMarshal.Cast<OrtBFloat16, T>(Inner.GetTensorMutableDataAsSpan<OrtBFloat16>());
         return Inner.GetTensorMutableDataAsSpan<T>();
     }
+
+    // The buffer's length in bytes, read from ORT the first time: a value's size never changes.
+    // -1 until then.
+    private long _bufferBytes = -1;
+
+    private long BufferBytes
+    {
+        get
+        {
+            var bytes = Volatile.Read(ref _bufferBytes);
+            if (bytes >= 0) return bytes;
+            bytes = Inner.GetTensorSizeInBytes();
+            GC.KeepAlive(Inner);
+            Volatile.Write(ref _bufferBytes, bytes);
+            return bytes;
+        }
+    }
+
+    /// <summary>
+    /// A span over the whole of a buffer longer than a span of bytes can be, addressed from where it
+    /// starts. ORT's own spans cannot be used for one: each starts as a span of bytes over the whole
+    /// buffer, whose length ORT casts to <c>int</c> unchecked, so past 2 GiB it turns negative and
+    /// the span refuses it, and past 4 GiB it wraps round to a length that fits — a 4.5 GiB tensor
+    /// read as 0.5 GiB with nothing to say so. Here the elements are counted checked: as many as an
+    /// <c>int</c> counts, and <see cref="OverflowException"/> for more — a span of bytes among them —
+    /// rather than a span over less than the buffer.
+    /// </summary>
+    private unsafe Span<T> WholeBuffer<T>() where T : unmanaged
+        => new((void*)OrtBackend.AddressOf(Inner), checked((int)(BufferBytes / sizeof(T))));
 
     // Each of the four accessors below, and the four reads above them, hands ORT a bare handle off
     // `Inner` and then has no further use for it, so the JIT retires the local at that read --

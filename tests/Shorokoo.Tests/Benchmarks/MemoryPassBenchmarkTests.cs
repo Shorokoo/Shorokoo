@@ -105,7 +105,8 @@ public partial class MemoryPassLstm
 /// is the run's peak, the largest of five. It is measured only on Linux, in a process started with
 /// <c>MALLOC_MMAP_THRESHOLD_=16384 MALLOC_TRIM_THRESHOLD_=0 MALLOC_TOP_PAD_=0</c> — without them glibc
 /// keeps freed tensors and the mark never moves — and gated, where the baseline has it too, by
-/// <see cref="RealPeakRegressionFactor"/> plus <see cref="RealPeakNoiseFloorBytes"/>. Where the pass
+/// <see cref="RealPeakRegressionFactor"/> plus <see cref="RealPeakNoiseFloorBytes"/>, since one step
+/// whose peak is a few MiB reads anywhere from 1 to 5 MiB in separate processes. Where the pass
 /// hands back the step it was handed, the step is read once for both columns. <c>KernelTimeMs</c>
 /// (ONNX Runtime's profiler, a subgraph's kernels counted once) and <c>OrtOrderVsGraph</c> /
 /// <c>OrtOrderVsReverseDfs</c> (how much of the profiled kernel order follows the model's node order,
@@ -124,7 +125,7 @@ public class MemoryPassBenchmarkTests
     private const double PeakRegressionFactor = 1.05;
     private const double ComputeRegressionFactor = 1.25;
     private const double RealPeakRegressionFactor = 1.10;
-    private const long RealPeakNoiseFloorBytes = 1L << 20;
+    private const long RealPeakNoiseFloorBytes = 4L << 20;
     private const double ReliefRetentionFactor = 0.85;
     private const string BaselineStrategy = "Baseline";
     private const string OnnxRuntime = "onnxruntime";

@@ -42,7 +42,7 @@ public partial class RigScalingStack12
 }
 
 /// <summary>12 trainable tables of 12 different shapes, <c>[4096 + i, 384]</c>: twelve slices,
-/// so twelve initialization sessions, which is what gives the retention arm twelve arenas a result
+/// so twelve initialization sessions, which is what gives the retention arm twelve sessions a result
 /// could keep alive.</summary>
 [Module]
 public partial class RigScalingDistinct12
@@ -99,22 +99,23 @@ internal static class RigScalingStack
 /// It pins the shape that broke, not every way construction could get slower.</para>
 ///
 /// <para><b>Bytes retained.</b> Running the parameters on sessions of their own is only
-/// affordable because each result holds only its own bytes; a result that kept its session's
-/// arena would keep that whole arena alive, and a forced collection could not reclaim it, since
-/// the values are genuinely referenced as the rig's initial weights. Measured around
+/// affordable because each result holds only its own bytes; a result that kept its session alive
+/// would keep the session's own memory with it, and the blocks its runs let go of where the session
+/// keeps them for its next run, and a forced collection could not reclaim either, since the values
+/// are genuinely referenced as the rig's initial weights. Measured around
 /// initialization alone, not around a whole <see cref="TrainingRig.FromScratch"/>: a rig
 /// legitimately retains 100-150 MiB of graphs and state, which is both larger and noisier than the
-/// signal. And measured outside the managed heap, where an arena lives: the heap's own commit and
-/// decommit around a collection moves tens of MiB either way. The values live there too, each in
+/// signal. And measured outside the managed heap, where a session and its blocks live: the heap's
+/// own commit and decommit around a collection moves tens of MiB either way. The values live there too, each in
 /// memory of its own, so what is gated is what is retained beyond their own bytes. Measured over
 /// twelve tables of twelve shapes, so twelve sessions: sessions are shared by same-shaped
-/// parameters, and a result that kept its session's arena would keep it alive, so it is the number
-/// of sessions, and the size of what they computed, that a regression here multiplies. A healthy
+/// parameters, so it is the number of sessions, and the size of what they computed, that a
+/// regression here multiplies. A healthy
 /// reading is near zero, so a known native block is read too, to show the instrument sees one.
 /// Optimizer-state seeding is the other per-parameter run loop that keeps its outputs, and they
-/// hold only their own bytes the same way — but its graph is a fill rather than a draw, so the
-/// arena one would keep is small enough to sit inside that noise, and no memory gate discriminates
-/// it. It is not pinned here.</para>
+/// hold only their own bytes the same way — but its graph is a fill rather than a draw, so what
+/// one of its sessions would keep is small enough to sit inside that noise, and no memory gate
+/// discriminates it. It is not pinned here.</para>
 ///
 /// <para>Each budget sits well above the measured behaviour and well below the broken law, so
 /// jitter never trips one. The timing points are best-of-<see cref="TimingRuns"/>: a single
@@ -132,10 +133,11 @@ public class RigConstructionScalingTests
     /// cheaper per parameter); the quadratic law gives ~6.</summary>
     private const double MaxPerParameterCostGrowth = 2.0;
 
-    /// <summary>Measured -3 to +1 MiB of native memory beyond the values' own 72 MiB across a
-    /// 12-session initialization; results that each keep their session's arena retain 211-216 MiB,
-    /// values included, over twice the budget beyond them.</summary>
-    private const long RetainedBudgetBytes = 64L * 1024 * 1024;
+    /// <summary>Measured -4 to +5 MiB of native memory beyond the values' own 72 MiB across a
+    /// 12-session initialization, Windows and Linux. Results that each keep their session alive
+    /// retain 42-59 MiB beyond them, and 443-461 MiB where the sessions also keep what their runs
+    /// let go of.</summary>
+    private const long RetainedBudgetBytes = 24L * 1024 * 1024;
 
     /// <summary>The native memory the retention instrument is shown, to prove it reads one.</summary>
     private const int ControlBytes = 64 * 1024 * 1024;
@@ -229,17 +231,7 @@ public class RigConstructionScalingTests
         return proc.PeakWorkingSet64;
     }
 
-    /// <summary>
-    /// The working set outside the managed heap, after a blocking full collection: what native
-    /// allocators hold. A result holds its own bytes here, which the caller takes off, and one that
-    /// kept its session's arena would keep that arena here too. The managed heap is left out because
-    /// its own commit and decommit — tens of MiB either way around a collection — swamp the signal.
-    /// </summary>
-    /// <summary>
-    /// What <see cref="LiveNativeBytes"/> reads of <paramref name="bytes"/> taken outside the
-    /// managed heap and touched: the positive control for the retention arm, whose healthy reading
-    /// is near zero and so cannot show by itself that the instrument sees anything.
-    /// </summary>
+    // The positive control for the retention arm, whose healthy reading is near zero.
     private static long NativeBytesSeenOf(int bytes)
     {
         long before = LiveNativeBytes();
@@ -256,6 +248,8 @@ public class RigConstructionScalingTests
         }
     }
 
+    // The working set outside the managed heap, whose own commit and decommit around a collection
+    // moves tens of MiB either way.
     private static long LiveNativeBytes()
     {
         GC.Collect();

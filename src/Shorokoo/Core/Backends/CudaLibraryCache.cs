@@ -64,19 +64,102 @@ internal static partial class CudaLibraryCache
         return Path.Combine(root, "shorokoo");
     }
 
-    /// <summary>Whether <paramref name="directory"/> is a filled folder of <paramref name="pin"/>.</summary>
+    /// <summary>
+    /// Whether <paramref name="directory"/> is a filled folder of <paramref name="pin"/>: marked filled
+    /// with its wheel, and each file still the size the pin gives it and written no later than the
+    /// marker. A folder's files can be hard links to an installed copy's, which whatever installs into
+    /// that folder may write over in place; this tells such a write without reading a byte of the
+    /// files, and <see cref="Provision"/> then checks the folder whole, and fills it again where a file
+    /// is not the pinned one.
+    /// </summary>
     internal static bool IsComplete(string directory, CudaLibraryPin pin)
+    {
+        if (!Marked(directory, pin)) return false;
+        var filled = File.GetLastWriteTimeUtc(Path.Combine(directory, CompleteMarker));
+        return pin.Files.All(file => StampOf(Path.Combine(directory, file.FileName)) is { } stamp
+            && stamp.Size == file.Size && stamp.LastWriteUtc <= filled);
+    }
+
+    /// <summary>Whether <paramref name="directory"/> is marked filled with <paramref name="pin"/>'s
+    /// wheel.</summary>
+    private static bool Marked(string directory, CudaLibraryPin pin)
     {
         var marker = Path.Combine(directory, CompleteMarker);
         try
         {
             return File.Exists(marker) && File.ReadAllText(marker).Trim() == pin.WheelSha256;
         }
-        catch (IOException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             return false;
         }
     }
+
+    /// <summary>What the file system says of a file without its contents being opened: which file it
+    /// is — the same for every hard link to it — its size and when it was last written.</summary>
+    internal readonly record struct FileStamp(ulong Volume, ulong Index, long Size, DateTime LastWriteUtc);
+
+    /// <summary>The stamp of the file at <paramref name="path"/>, following links, or null where there
+    /// is none. Read whatever share another handle on the file allows, a loaded library's
+    /// included.</summary>
+    internal static FileStamp? StampOf(string path)
+    {
+        if (OperatingSystem.IsWindows()) return WindowsStampOf(path);
+        if (OperatingSystem.IsLinux()) return LinuxStampOf(path);
+        var info = new FileInfo(path);
+        return info.Exists ? new FileStamp(0, 0, info.Length, info.LastWriteTimeUtc) : null;
+    }
+
+    /// <summary>Whether <paramref name="a"/> and <paramref name="b"/> are one file, under two names or
+    /// one.</summary>
+    internal static bool SameFile(string a, string b)
+        => StampOf(a) is { Index: not 0 } first && StampOf(b) is { } second
+           && (first.Volume, first.Index) == (second.Volume, second.Index);
+
+    private static FileStamp? WindowsStampOf(string path)
+    {
+        // No access to the contents, so no share mode another handle holds refuses it.
+        using var handle = CreateFile(ExtendedLength(path), 0, FileShareAll, IntPtr.Zero, OpenExisting, BackupSemantics, IntPtr.Zero);
+        if (handle.IsInvalid || !GetFileInformationByHandle(handle, out var info)) return null;
+        return new FileStamp(info.VolumeSerial, ((ulong)info.IndexHigh << 32) | info.IndexLow,
+            ((long)info.SizeHigh << 32) | info.SizeLow, DateTime.FromFileTimeUtc(((long)info.WriteHigh << 32) | info.WriteLow));
+    }
+
+    private static unsafe FileStamp? LinuxStampOf(string path)
+    {
+        var statx = stackalloc byte[256];
+        if (Statx(AtCurrentDirectory, path, 0, StatxBasicStats, statx) != 0) return null;
+        var seconds = *(long*)(statx + 112);
+        var nanoseconds = *(uint*)(statx + 120);
+        return new FileStamp(((ulong)*(uint*)(statx + 136) << 32) | *(uint*)(statx + 140), *(ulong*)(statx + 32), *(long*)(statx + 40),
+            DateTime.UnixEpoch.AddSeconds(seconds).AddTicks(nanoseconds / 100));
+    }
+
+    private const uint FileShareAll = 7;
+    private const uint OpenExisting = 3;
+    private const uint BackupSemantics = 0x02000000;
+    private const int AtCurrentDirectory = -100;
+    private const uint StatxBasicStats = 0x7ff;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ByHandleFileInformation
+    {
+        public uint Attributes, CreationLow, CreationHigh, AccessLow, AccessHigh, WriteLow, WriteHigh;
+        public uint VolumeSerial, SizeHigh, SizeLow, Links, IndexHigh, IndexLow;
+    }
+
+    [LibraryImport("kernel32.dll", EntryPoint = "CreateFileW", StringMarshalling = StringMarshalling.Utf16, SetLastError = true)]
+    private static partial Microsoft.Win32.SafeHandles.SafeFileHandle CreateFile(
+        string fileName, uint desiredAccess, uint shareMode, IntPtr securityAttributes, uint creationDisposition,
+        uint flagsAndAttributes, IntPtr templateFile);
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool GetFileInformationByHandle(
+        Microsoft.Win32.SafeHandles.SafeFileHandle file, out ByHandleFileInformation information);
+
+    [LibraryImport("libc", EntryPoint = "statx", StringMarshalling = StringMarshalling.Utf8, SetLastError = true)]
+    private static unsafe partial int Statx(int directory, string path, int flags, uint mask, byte* statx);
 
     /// <summary>
     /// Where an installed copy of <paramref name="pin"/> is looked for, in order. First the provisioned
@@ -186,7 +269,10 @@ internal static partial class CudaLibraryCache
     /// the wheel. Serialised across threads and processes by a lock file beside the folder.
     /// </summary>
     /// <exception cref="InvalidOperationException">No source matches and the wheel could not be
-    /// fetched; the message names the release, where it was looked for and the download's size.</exception>
+    /// fetched — the network failed, or no byte of it arrived for <see cref="DefaultStall"/>, or it was
+    /// not all there within what is left of <paramref name="timeout"/>; the message names the release,
+    /// where it was looked for and the download's size.</exception>
+    /// <exception cref="IOException">The folder or the wheel could not be written: a full disk, say.</exception>
     internal static string Provision(CudaLibraryPin pin, string root, IEnumerable<string> localSources, TimeSpan timeout)
     {
         var directory = Path.Combine(root, pin.CacheKey);
@@ -198,7 +284,7 @@ internal static partial class CudaLibraryCache
         try
         {
             using var fileLock = AcquireFileLock(directory + ".lock", timeout - clock.Elapsed, directory, timeout);
-            if (!IsComplete(directory, pin)) Fill(pin, directory, localSources);
+            if (!IsComplete(directory, pin)) Fill(pin, directory, localSources, Left(timeout, clock));
         }
         finally
         {
@@ -207,8 +293,20 @@ internal static partial class CudaLibraryCache
         return directory;
     }
 
-    private static void Fill(CudaLibraryPin pin, string directory, IEnumerable<string> localSources)
+    /// <summary>What is left of <paramref name="timeout"/> once <paramref name="clock"/> has run, and
+    /// never less than nothing.</summary>
+    internal static TimeSpan Left(TimeSpan timeout, Stopwatch clock)
+        => timeout - clock.Elapsed is var left && left > TimeSpan.Zero ? left : TimeSpan.Zero;
+
+    private static void Fill(CudaLibraryPin pin, string directory, IEnumerable<string> localSources, TimeSpan timeout)
     {
+        // A folder marked filled with this wheel whose files' times moved, copied from another machine
+        // say, is kept where every file still is the pinned one, and marked again.
+        if (Marked(directory, pin) && MatchesExactly(directory, pin))
+        {
+            Mark(directory, pin);
+            return;
+        }
         if (Directory.Exists(directory)) Directory.Delete(directory, recursive: true);
         Directory.CreateDirectory(directory);
         try
@@ -217,12 +315,12 @@ internal static partial class CudaLibraryCache
                 foreach (var file in pin.Files)
                     LinkOrCopy(Path.Combine(source, file.FileName), Path.Combine(directory, file.FileName));
             else
-                Download(pin, directory);
+                Download(pin, directory, timeout);
             foreach (var file in pin.Files)
                 if (!Matches(Path.Combine(directory, file.FileName), file))
                     throw new InvalidDataException(
                         $"{file.FileName} of {pin}, filled into '{directory}', is not the file its wheel records.");
-            File.WriteAllText(Path.Combine(directory, CompleteMarker), pin.WheelSha256);
+            Mark(directory, pin);
         }
         catch
         {
@@ -232,57 +330,113 @@ internal static partial class CudaLibraryCache
         }
     }
 
-    private static void Download(CudaLibraryPin pin, string directory)
+    /// <summary>Marks <paramref name="directory"/> filled with <paramref name="pin"/>'s wheel, written
+    /// no earlier than any of its files was, so that <see cref="IsComplete"/> tells a file written to
+    /// since.</summary>
+    private static void Mark(string directory, CudaLibraryPin pin)
     {
+        var marker = Path.Combine(directory, CompleteMarker);
+        File.WriteAllText(marker, pin.WheelSha256);
+        var latest = pin.Files.Max(file => StampOf(Path.Combine(directory, file.FileName))?.LastWriteUtc ?? DateTime.MinValue);
+        if (latest > File.GetLastWriteTimeUtc(marker)) File.SetLastWriteTimeUtc(marker, latest);
+    }
+
+    private static void Download(CudaLibraryPin pin, string directory, TimeSpan timeout)
+    {
+        // Into a file that goes with its handle: deleted on close on Windows, which the system does
+        // however the process ends, and unlinked as soon as it is made elsewhere. A download ended
+        // with its process leaves none of it behind.
         var wheel = directory + ".wheel";
+        using var target = new FileStream(wheel, FileMode.Create, FileAccess.ReadWrite, FileShare.None, 1 << 16,
+            OperatingSystem.IsWindows() ? FileOptions.DeleteOnClose : FileOptions.None);
+        if (!OperatingSystem.IsWindows()) File.Delete(wheel);
+        Fetch(pin, directory, target, timeout);
+        target.Position = 0;
+        if (target.Length != pin.WheelSize || Convert.ToHexStringLower(SHA256.HashData(target)) != pin.WheelSha256)
+            throw new InvalidDataException($"The wheel fetched from {pin.Wheel} is not the one {pin} pins: its size or SHA-256 differs.");
+        target.Position = 0;
+        using var archive = new ZipArchive(target, ZipArchiveMode.Read, leaveOpen: true);
+        foreach (var file in pin.Files)
+            (archive.GetEntry(file.WheelPath)
+                ?? throw new InvalidDataException($"The wheel {pin.Wheel} has no {file.WheelPath}."))
+                .ExtractToFile(Path.Combine(directory, file.FileName));
+    }
+
+    /// <summary>How long a download may go with no byte of it arriving.</summary>
+    internal static readonly TimeSpan DefaultStall = TimeSpan.FromMinutes(1);
+
+    /// <summary>
+    /// Writes the wheel of <paramref name="pin"/>, the cache folder <paramref name="directory"/> is
+    /// filled from, into <paramref name="target"/>: from the network, or from the file the pin names.
+    /// A download is given up where no byte of it arrives for <paramref name="stall"/>
+    /// (<see cref="DefaultStall"/> when null), or it is not all there within <paramref name="timeout"/>
+    /// (<see cref="DefaultTimeout"/> when null).
+    /// </summary>
+    /// <exception cref="InvalidOperationException">The wheel could not be read; the message says why,
+    /// and what to do.</exception>
+    /// <exception cref="IOException"><paramref name="target"/> could not be written.</exception>
+    internal static void Fetch(CudaLibraryPin pin, string directory, Stream target, TimeSpan? timeout = null, TimeSpan? stall = null)
+    {
+        var (whole, quiet) = (timeout ?? DefaultTimeout, stall ?? DefaultStall);
+        using var deadline = new CancellationTokenSource(whole);
+        using var waiting = CancellationTokenSource.CreateLinkedTokenSource(deadline.Token);
+        Exception Failed(Exception cause) => Unavailable(pin, directory, cause is OperationCanceledException
+            ? new TimeoutException(deadline.IsCancellationRequested
+                ? $"It had not all arrived after {whole}."
+                : $"No byte of it arrived for {quiet}.", cause)
+            : cause);
+        HttpResponseMessage? response = null;
+        Stream? source = null;
         try
         {
-            using (var target = new FileStream(wheel, FileMode.Create, FileAccess.ReadWrite, FileShare.None))
+            try
             {
-                Fetch(pin, directory, target);
-                target.Position = 0;
-                if (target.Length != pin.WheelSize || Convert.ToHexStringLower(SHA256.HashData(target)) != pin.WheelSha256)
-                    throw new InvalidDataException($"The wheel fetched from {pin.Wheel} is not the one {pin} pins: its size or SHA-256 differs.");
+                if (pin.Wheel.IsFile)
+                    source = File.OpenRead(pin.Wheel.LocalPath);
+                else
+                {
+                    // The synchronous send, and each read waited on where it stands: this runs inside a
+                    // backend's own synchronous call, and HttpClient's reads continue on the pool, never
+                    // on the caller's context.
+                    using var request = new HttpRequestMessage(HttpMethod.Get, pin.Wheel);
+                    waiting.CancelAfter(quiet);
+                    response = Http.Value.Send(request, HttpCompletionOption.ResponseHeadersRead, waiting.Token);
+                    response.EnsureSuccessStatusCode();
+                    source = response.Content.ReadAsStream(waiting.Token);
+                }
             }
-            using var archive = ZipFile.OpenRead(wheel);
-            foreach (var file in pin.Files)
-                (archive.GetEntry(file.WheelPath)
-                    ?? throw new InvalidDataException($"The wheel {pin.Wheel} has no {file.WheelPath}."))
-                    .ExtractToFile(Path.Combine(directory, file.FileName));
+            catch (Exception ex) when (ex is HttpRequestException or OperationCanceledException or IOException or UnauthorizedAccessException)
+            {
+                throw Failed(ex);
+            }
+            var buffer = new byte[1 << 16];
+            while (true)
+            {
+                int read;
+                try
+                {
+                    waiting.CancelAfter(quiet);
+                    read = pin.Wheel.IsFile ? source.Read(buffer) : source.ReadAsync(buffer, waiting.Token).AsTask().GetAwaiter().GetResult();
+                }
+                catch (Exception ex) when (ex is HttpRequestException or OperationCanceledException or IOException or UnauthorizedAccessException)
+                {
+                    throw Failed(ex);
+                }
+                if (read == 0) return;
+                try
+                {
+                    target.Write(buffer, 0, read);
+                }
+                catch (IOException ex)
+                {
+                    throw new IOException($"The wheel of {pin}, fetched to fill '{directory}', could not be written: {ex.Message}", ex);
+                }
+            }
         }
         finally
         {
-            File.Delete(wheel);
-        }
-    }
-
-    /// <summary>Writes the wheel of <paramref name="pin"/>, the cache folder <paramref name="directory"/>
-    /// is filled from, into <paramref name="target"/>: from the network, or from the file the pin
-    /// names.</summary>
-    internal static void Fetch(CudaLibraryPin pin, string directory, Stream target)
-    {
-        try
-        {
-            if (pin.Wheel.IsFile)
-            {
-                using var source = File.OpenRead(pin.Wheel.LocalPath);
-                source.CopyTo(target);
-            }
-            else
-            {
-                // The synchronous send: this runs inside a backend's own synchronous call, and
-                // blocking on an asynchronous one there could wait on the caller's context.
-                using var request = new HttpRequestMessage(HttpMethod.Get, pin.Wheel);
-                using var response = Http.Value.Send(request, HttpCompletionOption.ResponseHeadersRead);
-                response.EnsureSuccessStatusCode();
-                using var source = response.Content.ReadAsStream();
-                source.CopyTo(target);
-            }
-        }
-        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException
-                                       or IOException or UnauthorizedAccessException)
-        {
-            throw Unavailable(pin, directory, ex);
+            source?.Dispose();
+            response?.Dispose();
         }
     }
 
@@ -295,7 +449,7 @@ internal static partial class CudaLibraryCache
             cause);
 
     private static string WhereLookedFor(CudaLibraryPin pin, bool windows)
-        => (windows, pin.Name) switch
+        => $"in the CUDA {pin.CudaMajor} Python environments provisioned beside the cache, " + (windows, pin.Name) switch
         {
             (true, "cudnn") => @"on PATH, in %CUDNN_PATH% and under %ProgramFiles%\NVIDIA\CUDNN",
             (true, _) => $@"on PATH, in %CUDA_PATH% and in the CUDA {pin.CudaMajor} toolkits under %ProgramFiles%\NVIDIA GPU Computing Toolkit\CUDA",
@@ -339,7 +493,9 @@ internal static partial class CudaLibraryCache
     /// <paramref name="installed"/> folders or the wheel otherwise. A copy that is another release is
     /// left as it is. Done once per pin set: the environment then holds <see cref="LinkedMarker"/>.
     /// A file another process has loaded cannot be replaced; it stays a copy until a later call, and
-    /// is the very same release meanwhile. True when every copy is a link.
+    /// is the very same release meanwhile. Such a copy is not read, nor is one that is the cache's
+    /// file already, so a call made while another process holds the environment's libraries costs
+    /// no more than looking at them. True when every copy is a link.
     /// </summary>
     internal static bool LinkEnvironment(
         string environment, string sitePackages, CudaLibraryPins pins, string root,
@@ -356,11 +512,36 @@ internal static partial class CudaLibraryCache
             if (!IsComplete(cache, pin))
                 cache = Provision(pin, root, [.. copies.Select(path => Path.GetDirectoryName(path)!).Distinct(), .. installed(pin)], timeout);
             foreach (var file in pin.Files)
-                foreach (var copy in EnvironmentFiles(sitePackages, file).Where(File.Exists).Where(path => Matches(path, file)))
-                    linked &= ReplaceWithLink(copy, Path.Combine(cache, file.FileName));
+            {
+                var cached = Path.Combine(cache, file.FileName);
+                foreach (var copy in EnvironmentFiles(sitePackages, file).Where(File.Exists))
+                {
+                    if (SameFile(copy, cached) || StampOf(copy)?.Size != file.Size) continue;
+                    if (!Replaceable(copy))
+                        linked = false;
+                    else if (Matches(copy, file))
+                        linked &= ReplaceWithLink(copy, cached);
+                }
+            }
         }
         if (linked) File.WriteAllText(marker, pins.Identity);
         return linked;
+    }
+
+    /// <summary>Whether the file at <paramref name="path"/> can be written, and so replaced: not a
+    /// library another process has loaded, on Windows, nor a file another handle holds against
+    /// writing.</summary>
+    private static bool Replaceable(string path)
+    {
+        try
+        {
+            using var handle = File.OpenHandle(path, FileMode.Open, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete);
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
     }
 
     /// <summary>Replaces <paramref name="path"/> with a hard link to <paramref name="target"/>. False

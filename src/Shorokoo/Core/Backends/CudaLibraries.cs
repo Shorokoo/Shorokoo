@@ -25,7 +25,7 @@ namespace Shorokoo.Core.Backends;
 /// CUDA backend calls it before its provider loads; a provisioned Python environment's own copies are
 /// hard links to the cache's files, so PyTorch, loading them by path, loads the very same files.</para>
 /// </summary>
-public static class CudaLibraries
+public static partial class CudaLibraries
 {
     private static readonly object Gate = new();
     private static bool _prepared;
@@ -38,10 +38,12 @@ public static class CudaLibraries
     /// </summary>
     /// <exception cref="InvalidOperationException">A pinned library is in neither the cache nor a copy
     /// that matches it exactly, and its wheel could not be fetched; the message names the library,
-    /// where it was looked for and the size of the download. Or the process already holds another
-    /// release of a pinned library, which something loaded before this was called, and the pinned
-    /// one cannot load beside it; the message names the copies held.</exception>
+    /// where it was looked for and the size of the download. Or the process already holds, under the
+    /// name a pinned file is loaded by, a copy that is not that file — another release, which something
+    /// loaded before this was called — to which the pinned libraries would bind; nothing is loaded, and
+    /// the message names the copies held.</exception>
     /// <exception cref="InvalidDataException">The wheel fetched is not the one pinned.</exception>
+    /// <exception cref="IOException">The cache folder could not be written: a full disk, say.</exception>
     /// <exception cref="TimeoutException">Another process has been filling the cache folder for longer
     /// than an hour.</exception>
     public static void Prepare()
@@ -51,6 +53,18 @@ public static class CudaLibraries
         {
             if (_prepared) return;
             var root = CudaLibraryCache.DefaultRoot;
+            // Before anything is fetched or loaded. A pinned file loaded by its path beside another copy
+            // of its name is a second library, and what imports that name binds to the copy loaded first:
+            // where that copy lacks an entry point the load fails, and where it does not -- always on
+            // Linux, whose loader binds by soname -- the backend runs on it, and says nothing.
+            if (OtherReleasesHeld(pins, root, HeldUnder) is { } held)
+                throw new InvalidOperationException(
+                    $"This process already holds another release of the CUDA libraries every CUDA backend shares "
+                    + $"({held}), loaded before the CUDA backend prepared the pinned "
+                    + $"{string.Join(" and ", pins.Libraries)}. Those libraries load one another by name, so the "
+                    + "pinned copies would bind to the ones held, and two releases do not mix. Call "
+                    + $"{nameof(CudaLibraries)}.{nameof(Prepare)}() before anything else in the process loads "
+                    + "cuDNN or cuBLAS: a CUDA session of your own, or another framework's CUDA backend.");
             // cuBLAS first: cuDNN loads cuBLASLt by name, and has to find this one.
             foreach (var pin in pins.Libraries.OrderBy(pin => pin.Name == "cudnn"))
             {
@@ -62,27 +76,109 @@ public static class CudaLibraries
                 // In the pinned order, which puts what a file imports by name ahead of it. Loaded for
                 // the life of the process, like every library a backend binds.
                 foreach (var file in pin.Files)
-                {
-                    try
-                    {
-                        NativeLibrary.Load(Path.Combine(directory, file.FileName));
-                    }
-                    catch (DllNotFoundException ex) when (Conflict(directory, PinnedFileNames(pins), LoadedModules()) is { } held)
-                    {
-                        throw new InvalidOperationException(
-                            $"The pinned {pin} cannot be loaded from '{directory}' ({ex.Message}). This process "
-                            + $"already holds another release of some of its libraries ({held}), loaded before the "
-                            + "CUDA backend prepared the pinned one. Those libraries load one another by name, so "
-                            + "the pinned copies bind to the ones held, and two releases do not mix. Call "
-                            + $"{nameof(CudaLibraries)}.{nameof(Prepare)}() before anything else in the process loads "
-                            + "cuDNN or cuBLAS: a CUDA session of your own, or another framework's CUDA backend.",
-                            ex);
-                    }
-                }
+                    NativeLibrary.Load(Path.Combine(directory, file.FileName));
             }
             _prepared = true;
         }
     }
+
+    /// <summary>
+    /// The copies this process holds, under the names the files of <paramref name="pins"/> are loaded
+    /// by, that are not those files — <paramref name="heldUnder"/> naming the copy a name binds to, or
+    /// null where none is loaded — each named with its version and folder; or null where it holds none.
+    /// A copy is the pinned file where it is the cache's under <paramref name="root"/>, by any name —
+    /// a provisioned environment's links to it among them — or has the size and SHA-256 the pin gives
+    /// it.
+    /// </summary>
+    internal static string? OtherReleasesHeld(CudaLibraryPins pins, string root, Func<string, string?> heldUnder)
+    {
+        var held = new List<string>();
+        foreach (var pin in pins.Libraries)
+            foreach (var file in pin.Files)
+                if (heldUnder(file.FileName) is { Length: > 0 } path && !IsPinned(path, file, Path.Combine(root, pin.CacheKey, file.FileName)))
+                    held.Add(Describe(path));
+        return held.Count == 0 ? null : string.Join("; ", held);
+    }
+
+    private static bool IsPinned(string path, CudaLibraryFile file, string cached)
+    {
+        if (CudaLibraryCache.SameFile(path, cached)) return true;
+        try
+        {
+            return CudaLibraryCache.Matches(path, file);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>The file a library <paramref name="name"/> names binds to in this process — the copy
+    /// of that name its loader holds, the first loaded — or null where it holds none.</summary>
+    internal static string? HeldUnder(string name)
+        => OperatingSystem.IsWindows() ? HeldUnderOnWindows(name)
+            : OperatingSystem.IsLinux() ? HeldUnderOnLinux(name)
+            : null;
+
+    private static unsafe string? HeldUnderOnWindows(string name)
+    {
+        var module = GetModuleHandle(name);
+        if (module == IntPtr.Zero) return null;
+        var path = stackalloc char[32768];
+        var length = GetModuleFileName(module, path, 32768);
+        return length == 0 ? null : new string(path, 0, (int)length);
+    }
+
+    private static unsafe string? HeldUnderOnLinux(string name)
+    {
+        var (open, info, close) = Loader.Value;
+        var utf8 = Marshal.StringToCoTaskMemUTF8(name);
+        try
+        {
+            // RTLD_NOLOAD: the object a load of this name would bind to, where one is loaded, and
+            // nothing loaded where none is.
+            var handle = ((delegate* unmanaged<IntPtr, int, IntPtr>)open)(utf8, RtldLazy | RtldNoLoad);
+            if (handle == IntPtr.Zero) return null;
+            try
+            {
+                IntPtr map;
+                if (((delegate* unmanaged<IntPtr, int, IntPtr*, int>)info)(handle, RtldDiLinkMap, &map) != 0) return null;
+                // A link_map's second field is the file's name, as it was found.
+                return Marshal.PtrToStringUTF8(Marshal.ReadIntPtr(map, IntPtr.Size)) is { Length: > 0 } path ? path : null;
+            }
+            finally
+            {
+                ((delegate* unmanaged<IntPtr, int>)close)(handle);
+            }
+        }
+        finally
+        {
+            Marshal.FreeCoTaskMem(utf8);
+        }
+    }
+
+    private const int RtldLazy = 0x1;
+    private const int RtldNoLoad = 0x4;
+    private const int RtldDiLinkMap = 2;
+
+    /// <summary><c>dlopen</c>, <c>dlinfo</c> and <c>dlclose</c>: in the C library, or in
+    /// <c>libdl</c> where the C library is older than glibc 2.34.</summary>
+    private static readonly Lazy<(IntPtr Open, IntPtr Info, IntPtr Close)> Loader = new(() =>
+    {
+        foreach (var library in (string[])["libc.so.6", "libdl.so.2"])
+            if (NativeLibrary.TryLoad(library, out var handle)
+                && NativeLibrary.TryGetExport(handle, "dlopen", out var open)
+                && NativeLibrary.TryGetExport(handle, "dlinfo", out var info)
+                && NativeLibrary.TryGetExport(handle, "dlclose", out var close))
+                return (open, info, close);
+        throw new EntryPointNotFoundException("dlopen, dlinfo and dlclose are in neither libc.so.6 nor libdl.so.2.");
+    });
+
+    [LibraryImport("kernel32.dll", EntryPoint = "GetModuleHandleW", StringMarshalling = StringMarshalling.Utf16)]
+    private static partial IntPtr GetModuleHandle(string name);
+
+    [LibraryImport("kernel32.dll", EntryPoint = "GetModuleFileNameW")]
+    private static unsafe partial uint GetModuleFileName(IntPtr module, char* path, uint size);
 
     /// <summary>
     /// The pinned libraries <paramref name="directory"/> ships that this process already holds another
@@ -120,13 +216,30 @@ public static class CudaLibraries
             .Where(path => File.Exists(Path.Combine(directory, Path.GetFileName(path))))
             // A copy of the very same file, under another path, binds as well as the folder's own.
             .Where(path => !SameContents(path, Path.Combine(directory, Path.GetFileName(path))))
-            .Select(path => $"{Path.GetFileName(path)} {FileVersionInfo.GetVersionInfo(path).FileVersion} from '{Path.GetDirectoryName(path)}'")
+            .Select(Describe)
             .ToList();
         return held.Count == 0 ? null : string.Join("; ", held);
     }
 
+    /// <summary>A library file as a message names it: its name, its version where it states one, and
+    /// its folder.</summary>
+    private static string Describe(string path)
+    {
+        string? version;
+        try
+        {
+            version = FileVersionInfo.GetVersionInfo(path).FileVersion;
+        }
+        catch (FileNotFoundException)
+        {
+            version = null;
+        }
+        return $"{Path.GetFileName(path)}{(version is { Length: > 0 } ? " " + version : "")} from '{Path.GetDirectoryName(path)}'";
+    }
+
     private static bool SameContents(string a, string b)
     {
+        if (CudaLibraryCache.SameFile(a, b)) return true;
         using var first = File.OpenRead(a);
         using var second = File.OpenRead(b);
         return first.Length == second.Length && CudaLibraryCache.Sha256Of(first) == CudaLibraryCache.Sha256Of(second);

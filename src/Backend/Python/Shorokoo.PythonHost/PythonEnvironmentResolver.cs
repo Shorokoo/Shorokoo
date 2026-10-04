@@ -110,7 +110,7 @@ public static class PythonEnvironmentResolver
             // environment built by the process it waited for needs none.
             if (!IsComplete(directory, lockFile))
                 Build(FindUv(options, variables), lockFile, directory, options.ProvisioningTimeout, deadline);
-            LinkCudaLibraries(directory, lockFile, variables, options.ProvisioningTimeout);
+            LinkCudaLibraries(directory, lockFile, variables, CudaLibraryCache.Left(options.ProvisioningTimeout, deadline));
         }
         finally
         {
@@ -140,9 +140,9 @@ public static class PythonEnvironmentResolver
     /// Windows, the <c>nvidia</c> wheels' folders on Linux — hard links to the shared cache's, so a
     /// process that runs PyTorch beside another CUDA backend loads one copy of each, whichever starts
     /// first. The cache is filled from these very copies where it is empty, which downloads nothing.
-    /// Called holding the environment's lock; a copy another process has loaded stays a copy of the
-    /// same release, and is linked by a later call. The cache and the installed copies are where
-    /// <paramref name="variables"/> say.
+    /// Called holding the environment's lock, with what is left of the provisioning's timeout; a copy
+    /// another process has loaded stays a copy of the same release, and is linked by a later call. The
+    /// cache and the installed copies are where <paramref name="variables"/> say.
     /// </summary>
     private static void LinkCudaLibraries(
         string directory, PythonEnvironmentLock lockFile, Func<string, string?> variables, TimeSpan timeout)

@@ -603,6 +603,8 @@ public class SideBySideBackendCoverageTests
 
         Assert.Equal([4, 5], Refilled(path => File.WriteAllBytes(path, [4, 6, 7])));
         Assert.Equal([4, 5], Refilled(path => { File.WriteAllBytes(path, [4, 6]); File.SetLastWriteTimeUtc(path, DateTime.UtcNow.AddMinutes(1)); }));
+        File.Delete(pin.Wheel.LocalPath);
+        Assert.Equal([4, 5], Refilled(path => { File.SetLastWriteTimeUtc(path, DateTime.UtcNow.AddMinutes(1)); File.Delete(path); }));
     }
 
     [Fact]
@@ -614,6 +616,10 @@ public class SideBySideBackendCoverageTests
         var clock = Stopwatch.StartNew();
 
         Assert.Throws<InvalidOperationException>(() => CudaLibraryCache.Provision(pin, scratch.Root, [], TimeSpan.FromSeconds(2)));
+        Assert.True(clock.Elapsed < TimeSpan.FromSeconds(10));
+        clock.Restart();
+        Assert.IsType<TimeoutException>(Assert.Throws<InvalidOperationException>(
+            () => CudaLibraryCache.Fetch(pin, scratch.Root, new MemoryStream(), TimeSpan.FromMinutes(1), stall: TimeSpan.FromSeconds(1))).InnerException);
         Assert.True(clock.Elapsed < TimeSpan.FromSeconds(10));
     }
 
@@ -787,8 +793,19 @@ public class SideBySideBackendCoverageTests
         string[] Loaded(params string[] folders) => [.. folders.SelectMany(folder => Directory.GetFiles(folder))];
 
         Assert.Null(CudaLibraries.Conflict(torchLib, pinned, Loaded(torchLib, sameRelease)));
-        Assert.Equal($"cudnn_graph64_9.dll  from '{otherRelease}'", CudaLibraries.Conflict(torchLib, pinned, Loaded(torchLib, sameRelease, otherRelease)));
+        Assert.Equal($"cudnn_graph64_9.dll from '{otherRelease}'", CudaLibraries.Conflict(torchLib, pinned, Loaded(torchLib, sameRelease, otherRelease)));
         Assert.Null(CudaLibraries.Conflict(Path.Combine(scratch.Root, "none"), pinned, Loaded(otherRelease)));
+
+        var pin = scratch.Pin("cudnn", 13, ("cudnn_graph64_9.dll", [2]), ("cudnn64_9.dll", [1]));
+        var cache = CudaLibraryCache.Provision(pin, scratch.Root, [torchLib], TimeSpan.FromSeconds(30));
+        string? Held(params string[] copies) => CudaLibraries.OtherReleasesHeld(new CudaLibraryPins([pin], null, null, []), scratch.Root,
+            name => copies.FirstOrDefault(copy => Path.GetFileName(copy) == name));
+        Assert.Null(Held());
+        Assert.Null(Held(Path.Combine(cache, "cudnn64_9.dll"), Path.Combine(torchLib, "cudnn_graph64_9.dll")));
+        Assert.Null(Held(Path.Combine(sameRelease, "cudnn64_9.dll")));
+        Assert.Equal($"cudnn_graph64_9.dll from '{otherRelease}'", Held(Path.Combine(sameRelease, "cudnn64_9.dll"), Path.Combine(otherRelease, "cudnn_graph64_9.dll")));
+        Assert.NotNull(CudaLibraries.HeldUnder(OperatingSystem.IsWindows() ? "kernel32.dll" : "libc.so.6"));
+        Assert.Null(CudaLibraries.HeldUnder("shorokoo-nothing-of-this-name.dll"));
     }
 
     /// <summary>A folder of its own for one test's cache, its installed copies and the wheels its
@@ -834,15 +851,20 @@ public class SideBySideBackendCoverageTests
             _ = Task.Run(async () =>
             {
                 while (!_stop.IsCancellationRequested)
-                {
-                    using var client = await _listener.AcceptTcpClientAsync(_stop.Token);
-                    var stream = client.GetStream();
-                    await stream.ReadAtLeastAsync(new byte[4096], 1, throwOnEndOfStream: false, _stop.Token);
-                    await stream.WriteAsync((byte[])[.. "HTTP/1.1 200 OK\r\nContent-Length: 1048576\r\n\r\n"u8, .. new byte[16]], _stop.Token);
-                    if (served is not null) File.WriteAllText(served, "");
-                    await Task.Delay(TimeSpan.FromSeconds(20), _stop.Token);
-                }
+                    _ = Serve(await _listener.AcceptTcpClientAsync(_stop.Token), served);
             });
+        }
+
+        private async Task Serve(TcpClient client, string? served)
+        {
+            using (client)
+            {
+                var stream = client.GetStream();
+                await stream.ReadAtLeastAsync(new byte[4096], 1, throwOnEndOfStream: false, _stop.Token);
+                await stream.WriteAsync((byte[])[.. "HTTP/1.1 200 OK\r\nContent-Length: 1048576\r\n\r\n"u8, .. new byte[16]], _stop.Token);
+                if (served is not null) File.WriteAllText(served, "");
+                await Task.Delay(TimeSpan.FromSeconds(20), _stop.Token);
+            }
         }
 
         public Uri Url { get; }

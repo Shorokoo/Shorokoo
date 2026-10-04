@@ -390,9 +390,12 @@ internal sealed class OrtSession : IShorokooSession
     /// everything it let go of has gone back to them.</summary>
     private void HandBackIfAsked(RunSettings? runSettings)
     {
-        if (runSettings?.ShrinkArenaAfterRun != true) return;
-        if (_cardAccount is { } card) card.Allocator.ReleaseCached(card);
-        _hostAccount.Allocator.ReleaseCached(_hostAccount);
+        if (runSettings is null) return;
+        if (runSettings.ShrinkArenaAfterRun)
+        {
+            if (_cardAccount is { } card) card.Allocator.ReleaseCached(card);
+            _hostAccount.Allocator.ReleaseCached(_hostAccount);
+        }
     }
 
     /// <summary>

@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Microsoft.ML.OnnxRuntime;
 using Shorokoo.Core.Backends;
@@ -38,10 +39,16 @@ internal sealed class OrtTensorValue : IShorokooTensorValue
     {
         _inner = inner;
         _lease = new HeldLease(range);
+        LeasesOfInnerValues.Add(inner, _lease);
     }
 
     // The lease on the range this value stands on, or null for one that owns its memory whole.
     private readonly HeldLease? _lease;
+
+    // Each lease kept reachable from the ORT value over the range as well as from this wrapper: a
+    // native call is handed the ORT value alone, and keeps that alive across the call, not this --
+    // and the lease of a value collected undeleted goes as it is collected, the range with it.
+    private static readonly ConditionalWeakTable<OrtValue, HeldLease> LeasesOfInnerValues = new();
 
     /// <summary>Where this value stands on a block it shares, or null for one that owns its memory
     /// whole.</summary>

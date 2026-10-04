@@ -1418,7 +1418,20 @@ public class ComputeContextLifetimeCoverageTests
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private static void Abandon(Func<object> make) => make();
+    private static OrtValue InnerOnly(Func<OrtTensorValue> make) => make().Inner;
+
+    /// <summary>What <paramref name="block"/> holds after a collection while only the ORT value
+    /// inside the value <paramref name="make"/> stands on it with is kept.</summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static long HeldWithOnlyTheInnerValueKept(Func<OrtTensorValue> make, SharedBlock block)
+    {
+        var inner = InnerOnly(make);
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        var held = block.HeldBytes;
+        GC.KeepAlive(inner);
+        return held;
+    }
 
     /// <summary>Of the two outputs a run of <see cref="TwoHalves"/> places on one block, one, and
     /// the block; the other is dropped undeleted.</summary>
@@ -1440,7 +1453,8 @@ public class ComputeContextLifetimeCoverageTests
         var owner = (OrtTensorValue)backend.CreateTensorInBackendMemory(ShorokooTensorElementType.Float, new byte[Floats * 4], [Floats]);
         var block = OrtBackend.BlockOver(owner, Floats * 4, () => backend.Release(owner));
         var first = OrtBackend.View(owner, 0, ShorokooTensorElementType.Float, [1L << 17], 512L << 10, block, 0);
-        Abandon(() => OrtBackend.View(owner, 512L << 10, ShorokooTensorElementType.Float, [1L << 17], 512L << 10, block, 512L << 10));
+        Assert.Equal(Floats * 4, HeldWithOnlyTheInnerValueKept(
+            () => OrtBackend.View(owner, 512L << 10, ShorokooTensorElementType.Float, [1L << 17], 512L << 10, block, 512L << 10), block));
         using var context = new ComputeContext();
         var (kept, placed) = OneOfTwoOnABlock(context);
         GC.Collect();

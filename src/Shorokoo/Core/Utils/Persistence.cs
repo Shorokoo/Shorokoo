@@ -688,16 +688,18 @@ namespace Shorokoo
                     // happens to be -- a truncated frame mid-tensor, say. A failure of the decoder
                     // itself is the entry failing to decompress, and is refused as that, not as
                     // whatever the reader was reading when it happened. The decompressed size the
-                    // frame header declares, where it declares one, bounds what the entry's own
-                    // header may claim, so a tensor the entry cannot hold is refused before it is
-                    // allocated.
+                    // frame header must declare bounds what the entry's own header may claim, so a
+                    // tensor the entry cannot hold is refused before it is allocated.
+                    long declared = CompressedFormatUtils.DeclaredZstdContentSize(head.AsSpan(0, got), reason =>
+                        new InvalidDataException(
+                            $"'{filePath}': data entry '{dataKey}' ('{dataEntry.Entry}'): {reason} — the " +
+                            "checkpoint is corrupt or was modified."));
                     using (var decoded = new DecodingReadStream(
                         new ZstdSharp.DecompressionStream(payload, leaveOpen: true),
                         e => new InvalidDataException(
                             $"'{filePath}': failed to Zstd-decompress data entry '{dataKey}' " +
                             $"('{dataEntry.Entry}') — the checkpoint is corrupt or was modified. ({e.Message})", e)))
-                        return SafeTensorLoader.ReadSafeTensors(decoded,
-                            CompressedFormatUtils.DeclaredZstdContentSize(head.AsSpan(0, got)),
+                        return SafeTensorLoader.ReadSafeTensors(decoded, declared,
                             (_, elements) => destination(elements), filePath);
 
                 default:

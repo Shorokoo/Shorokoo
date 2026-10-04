@@ -249,8 +249,8 @@ public class GpuExecutionTests
     {
         const long MiB = 1024 * 1024;
         using var context = new ComputeContext { DeviceMemory = new DeviceMemorySettings { LimitBytes = 512 * MiB } };
-        var (both, together) = ComputeContextLifetimeCoverageTests.OutputsOnBlocksEnding(context, ComputeContextLifetimeCoverageTests.TwoHalves(), 4096, 1024);
-        var (one, _) = ComputeContextLifetimeCoverageTests.OutputsOnBlocksEnding(context, ComputeContextLifetimeCoverageTests.TwoHalves(oneHalf: true), 4096, 1024);
+        var (both, together) = ComputeContextLifetimeCoverageTests.OutputsOnBlocksEnding(context, ComputeContextLifetimeCoverageTests.TwoHalves(), 4096, 1024, firstPage: 0);
+        var (one, _) = ComputeContextLifetimeCoverageTests.OutputsOnBlocksEnding(context, ComputeContextLifetimeCoverageTests.TwoHalves(oneHalf: true), 4096, 1024, firstPage: 0);
         Assert.Equal(2, together);
         Assert.True(one[0].OnBlocks > 0);
         Assert.All(both, stage => Assert.Equal((stage.OnBlocks, stage.OnBlocks), (stage.InUse - both[^1].InUse, stage.Books)));
@@ -1173,6 +1173,30 @@ public class GpuExecutionTests
         card.Shared.Close(account);
 
         Assert.Equal((0L, 4096 + (1L << 20) + (2L << 20)), (large, held));
+    }
+
+    [CudaFact]
+    public void CudaProvider_ABlockHandsItsFirstGranuleBackToTheCardButKeepsItsAddressUntilItGoes()
+    {
+        var card = RuntimeAllocator.ForCard(0);
+        var account = card.Shared.Open("probe");
+        OrtValue Take(long floats)
+        {
+            using (CachingAllocator.Charge(null, account))
+                return OrtValue.CreateAllocatedTensorValue(card.Managed, Microsoft.ML.OnnxRuntime.Tensors.TensorElementType.Float, [floats]);
+        }
+
+        var first = Take(3L << 19);
+        var address = OrtBackend.AddressOf(first);
+        card.Shared.ReleaseRange(address, 0, 4L << 20, toTheEnd: false);
+        var held = card.Shared.Statistics(account).TotalAllocatedBytes;
+        var second = Take(1L << 19);
+        var aliased = OrtBackend.AddressOf(second) == address;
+        second.Dispose();
+        first.Dispose();
+        card.Shared.Close(account);
+
+        Assert.Equal((4L << 20, false), (held, aliased));
     }
 
     [CudaFact]

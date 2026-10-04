@@ -1270,12 +1270,13 @@ public class ComputeContextLifetimeCoverageTests
     /// <summary>
     /// <paramref name="graph"/> run consuming A and B, each a value a session made in its own memory,
     /// and its outputs deleted one by one: after the run and after each deletion, what that session
-    /// has in use, the bytes of the outputs still standing on a block with the first page of each
-    /// block none of them stands at the start of, which stays with the block until it goes, and what
+    /// has in use, the bytes of the outputs still standing on a block with <paramref name="firstPage"/>
+    /// for each block none of them stands at the start of — what the allocator keeps of such a block
+    /// until it goes — and what
     /// <paramref name="context"/>'s books hold; and the most outputs that stood on one block.
     /// </summary>
     internal static ((long InUse, long OnBlocks, long Books)[] Stages, int MostOnABlock) OutputsOnBlocksEnding(
-        ComputeContext context, InternalComputationGraph graph, int rows, int columns)
+        ComputeContext context, InternalComputationGraph graph, int rows, int columns, long firstPage)
     {
         var (a, b, _) = TwoHalvesValues(rows, columns);
         var x = InputTensor<float32>("x", rank: 2);
@@ -1293,7 +1294,7 @@ public class ComputeContextLifetimeCoverageTests
         void Stage()
         {
             var standing = outputs.Where(o => !o.IsDisposed && o.Block is not null).ToList();
-            var firstPages = standing.GroupBy(o => o.Block).Count(block => block.All(o => ((IOnnxData)o).Value.Range!.Value.Offset != 0)) * (4L << 10);
+            var firstPages = standing.GroupBy(o => o.Block).Count(block => block.All(o => ((IOnnxData)o).Value.Range!.Value.Offset != 0)) * firstPage;
             stages.Add((made.ReadArenaStatistics()!.Value.InUseBytes, standing.Sum(o => o.ByteCount) + firstPages, context.ReadDeviceMemoryUse().AttachedBytes));
         }
         Stage();
@@ -1309,8 +1310,8 @@ public class ComputeContextLifetimeCoverageTests
     public void TestOutputsOnOneBlockOfASessionsMemoryEachFreeTheirOwnPagesAndWhatNoneStandsOnGoesWithTheRun()
     {
         using var context = new ComputeContext();
-        var (both, together) = OutputsOnBlocksEnding(context, TwoHalves(), 1024, 1024);
-        var (one, _) = OutputsOnBlocksEnding(context, TwoHalves(oneHalf: true), 1024, 1024);
+        var (both, together) = OutputsOnBlocksEnding(context, TwoHalves(), 1024, 1024, firstPage: 4L << 10);
+        var (one, _) = OutputsOnBlocksEnding(context, TwoHalves(oneHalf: true), 1024, 1024, firstPage: 4L << 10);
         Assert.Equal(2, together);
         Assert.True(one[0].OnBlocks > 0);
         Assert.All(both, stage => Assert.Equal(stage.OnBlocks, stage.InUse - both[^1].InUse));

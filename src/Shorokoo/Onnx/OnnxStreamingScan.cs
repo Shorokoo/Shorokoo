@@ -80,9 +80,9 @@ namespace Shorokoo.Onnx
 
         /// <summary>The model in <paramref name="file"/>, its large tensor payloads referenced in
         /// place rather than read. A truncated or malformed file throws
-        /// <see cref="EndOfStreamException"/> or <see cref="ProtoBuf.ProtoException"/>, and one
-        /// nested <see cref="OnnxProtobuf.MaxDepth"/> levels deep or more throws
-        /// <see cref="InvalidOperationException"/>, as parsing it whole does.</summary>
+        /// <see cref="EndOfStreamException"/> or <see cref="ProtoBuf.ProtoException"/> — one nested
+        /// <see cref="OnnxProtobuf.MaxDepth"/> levels deep or more among them — as parsing it whole
+        /// does.</summary>
         internal static ModelProto ReadModel(FileStream file)
         {
             var model = new OnnxStreamingScan(file, file.Name).Scan();
@@ -156,7 +156,7 @@ namespace Shorokoo.Onnx
         private long Child(ulong key, Kind kind, long end, int depth)
         {
             if (depth >= OnnxProtobuf.MaxDepth)
-                throw new InvalidOperationException(
+                throw new ProtoBuf.ProtoException(
                     $"'{_path}': the ONNX model nests a message {depth} levels deep at byte {_file.Position}; " +
                     $"a model is read to a depth of {OnnxProtobuf.MaxDepth - 1}.");
             int slot = _nextSize++;

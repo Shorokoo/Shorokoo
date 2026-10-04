@@ -379,13 +379,13 @@ public class OnnxExternalDataTests
             ModelProto Scan(string path) { using var file = OnnxStreamingScan.Open(path); return OnnxStreamingScan.ReadModel(file); }
 
             Assert.NotNull(Scan(Written("deepest.onnx", Nested(graph, subgraphs, 99))).Graph);
-            Assert.Throws<InvalidOperationException>(() => Scan(Written("deeper.onnx", Nested(graph, subgraphs, 100))));
+            Assert.Throws<ProtoBuf.ProtoException>(() => Scan(Written("deeper.onnx", Nested(graph, subgraphs, 100))));
             foreach (var (name, bytes) in (ValueTuple<string, byte[]>[])[("subgraphs.onnx", Nested(graph, subgraphs, 100_000)), ("types.onnx", Nested(input, sequences, 100_000))])
             {
                 var path = Written(name, bytes);
                 Assert.Contains(path, Assert.Throws<InvalidDataException>(() => Persistence.ImportOnnx(path)).Message);
-                Assert.Throws<InvalidOperationException>(() => OnnxModelImporter.FromOnnxModel(path));
-                Assert.Throws<InvalidOperationException>(() => OnnxModelImporter.FromOnnxModel(bytes));
+                Assert.Throws<ProtoBuf.ProtoException>(() => OnnxModelImporter.FromOnnxModel(path));
+                Assert.Throws<ProtoBuf.ProtoException>(() => OnnxModelImporter.FromOnnxModel(bytes));
             }
         });
     }

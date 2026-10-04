@@ -9,11 +9,11 @@ namespace Shorokoo.Onnx
     /// which a message may nest at most <see cref="MaxDepth"/> levels below the model.
     ///
     /// <para>protobuf-net's default type model allows 512 levels and refuses the 512th by throwing,
-    /// at a depth where its readers have used up nearly all of a thread's stack, so unwinding that
-    /// exception overflows what is left and the process dies with it. A file of a few kilobytes is
-    /// enough. Under this one the refusal comes while there is stack to spare: a hundred is
-    /// protobuf's own default recursion limit, under which ONNX's reference implementation parses a
-    /// model, so no model it reads nests any deeper.</para>
+    /// at a depth where its readers have used up nearly all of a thread's default stack, so
+    /// unwinding that exception overflows what is left and the process dies with it. A file of a
+    /// few kilobytes is enough. Under this one the refusal comes while there is stack to spare: a
+    /// hundred is protobuf's own default recursion limit, under which ONNX's reference
+    /// implementation parses a model, so no model it reads nests any deeper.</para>
     /// </summary>
     internal static class OnnxProtobuf
     {

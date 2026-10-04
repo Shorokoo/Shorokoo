@@ -893,9 +893,14 @@ internal sealed unsafe class CachingAllocator
 
     /// <summary>Waits for the work the card has in hand, as handing back memory some of that work may
     /// still read must.</summary>
+    /// <exception cref="InvalidOperationException">The card could not be waited for: nothing is handed
+    /// back that its work may still read.</exception>
     private void AwaitCard()
     {
-        _ = _backing is { } backing ? backing.AwaitDevice() : CudaRuntime.Synchronize(_device);
+        if (_backing is { } backing ? backing.AwaitDevice() : CudaRuntime.Synchronize(_device)) return;
+        throw new InvalidOperationException(
+            $"Shorokoo's allocator could not wait for CUDA device {_device} to finish the work it has in hand, "
+            + "so it hands back none of the memory that work may still read.");
     }
 
     /// <summary>Whether this allocator's lock is taken, by any thread.</summary>

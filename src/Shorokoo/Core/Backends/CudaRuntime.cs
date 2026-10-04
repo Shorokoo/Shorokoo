@@ -55,7 +55,9 @@ internal static class CudaRuntime
 
     /// <summary>
     /// A native library's entry points, bound on first use by <c>bind</c>, which answers them — null
-    /// where they cannot be had — and whether that answer is final.
+    /// where they cannot be had — and whether that answer is final. One that is not — the library
+    /// could not be loaded, as when it is asked for before the backend that ships it has loaded it —
+    /// is asked for again at the next use, until one is.
     /// </summary>
     internal sealed class Binding<T>(Func<(bool Final, T? Bound)> bind) where T : class
     {
@@ -75,13 +77,12 @@ internal static class CudaRuntime
                     // TryMemGetInfo promises to report rather than throw.
                     try
                     {
-                        (_, _bound) = bind();
+                        (_final, _bound) = bind();
                     }
                     catch (Exception)
                     {
-                        _bound = null;
+                        (_final, _bound) = (true, null);
                     }
-                    _final = true;
                     return _bound;
                 }
             }

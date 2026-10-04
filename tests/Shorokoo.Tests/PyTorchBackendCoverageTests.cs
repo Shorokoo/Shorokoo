@@ -293,8 +293,7 @@ public class PyTorchBackendCoverageTests
         }
     }
 
-    /// <summary>What <paramref name="op"/> reducing no axis, <c>noop_with_empty_axes</c> set, makes of
-    /// -0, 1 and -2, a zero written with its sign.</summary>
+    // What op makes of -0, 1 and -2 reducing no axis with noop_with_empty_axes set, a zero with its sign.
     private static string NoopReduced(IShorokooBackend backend, string op)
     {
         var graph = Graph(["x"], ["y"], Node(op, ["x", "axes"], ["y"], attributes: Int("noop_with_empty_axes", 1)));
@@ -340,9 +339,7 @@ public class PyTorchBackendCoverageTests
         Assert.Equal("NaN", Clipped(backend, float.NaN, 1f, 2f));
     }
 
-    /// <summary>What <c>Clip</c> makes of 67 elements equal to <paramref name="x"/> — enough to fill
-    /// a vectorized kernel's loop and leave a tail — as each distinct result, a zero written with
-    /// its sign.</summary>
+    // 67 elements fill a vectorized kernel's loop and leave a tail; each distinct result, a zero with its sign.
     private static string Clipped(IShorokooBackend backend, float x, float? lo, float? hi)
     {
         string[] bounds = [lo is null ? "" : "lo", hi is null ? "" : "hi"];
@@ -1173,8 +1170,7 @@ public class PyTorchBackendCoverageTests
         Assert.Equal("neg exp shape", Calls(GraphOn("x:float[4]", "c s", Op("Neg", "x", "b"), Op("Exp", "b", "c"), Op("Shape", "c", "s"))));
     }
 
-    /// <summary>The support functions the translation of <paramref name="graph"/> calls, in the order
-    /// it calls them, each one written over an operand of it marked so.</summary>
+    // In call order; "over:" marks a call written over an operand.
     private static string Calls(GraphProto graph, bool over = false)
     {
         var model = ProtoBuf.Serializer.Deserialize<ModelProto>(new MemoryStream(Serialize(graph)));
@@ -1224,7 +1220,6 @@ public class PyTorchBackendCoverageTests
         Assert.Equal(step.HandedComputes, step.ChosenComputes);
     }
 
-    /// <summary>Torch on the CPU, its steps judged by torch's model of a run on a card.</summary>
     private sealed class JudgedAsOnACard() : TorchBackend(() => PythonEnvironmentLock.Cpu, null, cudaDeviceId: null), IShorokooBackend
     {
         long? IShorokooBackend.ModelledRunPeak(ModelProto model, IReadOnlyList<OutputAlias> outputAliases, PrecisionSettings precision)
@@ -1316,17 +1311,10 @@ public class PyTorchBackendCoverageTests
             Op("Exp", "a", "e"), Op("ReduceSum", "e axes", "s"), Op("Mul", "a s", "O")), "axes", 1)));
     }
 
-    /// <summary>What <see cref="TorchRunMemory"/> models a run of <paramref name="graph"/> holding at
-    /// once beyond its inputs, with <paramref name="aliases"/>' outputs written into their
-    /// inputs.</summary>
     private static long? RunPeak(GraphProto graph, params OutputAlias[] aliases) => TorchRunMemory.Peak(new ModelProto { Graph = graph }, aliases);
 
-    /// <summary><see cref="RunPeak(GraphProto, OutputAlias[])"/> on the host or a card.</summary>
     private static long? RunPeak(GraphProto graph, bool onHost) => TorchRunMemory.Peak(new ModelProto { Graph = graph }, [], onHost);
 
-    /// <summary>Whether the training step a rig on a torch context runs holds no more at its peak
-    /// than the step before the memory-aware pass would, each as the translation runs it: in its
-    /// order, a view as its input's memory, and a node written over an operand dying there.</summary>
     private static bool PassHoldsNoMoreOnTorch(ComputationGraph model, long[] shape)
     {
         using var context = new ComputeContext(Torch);
@@ -1356,9 +1344,7 @@ public class PyTorchBackendCoverageTests
                                              + "(__import__('shorokoo_torch.ops_conv_pool', fromlist=['_']), torch.ones(2, 2, 3, 3))"));
     }
 
-    /// <summary>Whether the translation's convolution of a convolution's input and output gradient,
-    /// each with its batch and channel axes swapped, computes the convolution torch computes for
-    /// them, and does it as torch's gradient of the convolution's weights.</summary>
+    // The translation's weight gradient of a convolution, against torch's own.
     internal static string WeightGradient(int batch, int sizes, int kernel, int stride, int dilation, int pad, TorchBackend? backend = null)
         => Evaluated($$"""
             (lambda C, F, x, w: (lambda g: str((C.conv(x.transpose(0, 1), g.transpose(0, 1), strides=[{{dilation}}] * 2, dilations=[{{stride}}] * 2, pads=[{{pad}}] * 4)
@@ -1428,9 +1414,7 @@ public class PyTorchBackendCoverageTests
         Assert.Equal("1", Blocks("[t]"));
     }
 
-    /// <summary>How many of the inputs a run is handed may take placed values, of the first:
-    /// <paramref name="args"/> are the run's arguments, over a tensor <c>t</c> of four floats, and
-    /// <paramref name="moved"/> the values it computes on, the arguments themselves by default.</summary>
+    // args: the run's arguments over a tensor t of four floats; moved: the values it computes on.
     private static string Blocks(string args, string moved = "a", string constants = "[]")
         => Evaluated($"(lambda rt, t: (lambda a: len(rt._Placing(a, {moved}, [(0, 0, 8, 1, [2], -1)], torch.device('cpu'), {constants}).blocks))({args}))"
                      + "(__import__('shorokoo_torch.runtime', fromlist=['_']), torch.zeros(4))");
@@ -1443,18 +1427,10 @@ public class PyTorchBackendCoverageTests
         => ComputeContextLifetimeCoverageTests.WithInts(ComputeContextLifetimeCoverageTests.WithInts(ComputeContextLifetimeCoverageTests.WithInts(
             GraphOn("a:float[524288] b:float[524288]", outputs, nodes), "zero", 0), "half", 262144), "end", 524288);
 
-    /// <summary>
-    /// Where each output of <paramref name="graph"/> stands after a run that consumes every input —
-    /// <c>O@a+16</c> for 16 bytes into input a's memory, <c>O@-</c> for memory of its own — once the
-    /// run is shown to compute what a run consuming nothing computes.
-    /// </summary>
+    // Each output as O@a+16 (16 bytes into input a's memory) or O@- (memory of its own).
     private static string Placed(GraphProto graph, bool consume = true, bool feedTwice = false) => PlacedOn(Torch, graph, consume, feedTwice);
 
-    /// <summary>
-    /// <see cref="Placed"/> on <paramref name="backend"/>; on a card, with <c> allocating</c> after
-    /// it where the consuming run did not allocate at least its outputs' bytes less there than the
-    /// run consuming nothing.
-    /// </summary>
+    // On a card, " allocating" follows where the consuming run did not allocate its outputs' bytes less.
     internal static string PlacedOn(TorchBackend backend, GraphProto graph, bool consume = true, bool feedTwice = false)
     {
         using var session = backend.CreateSession(Serialize(graph), default, default, DeviceMemorySettings.Default, DiagnosticSettings.Default, []);
@@ -1490,8 +1466,6 @@ public class PyTorchBackendCoverageTests
         return placed.Where + (backend.OnCuda && placed.Allocated + placed.Bytes > plain.Allocated ? " allocating" : "");
     }
 
-    /// <summary>What <paramref name="run"/> answers, and the most torch's CUDA allocator held at once
-    /// beyond what it held as the run began.</summary>
     internal static (long Peak, T Result) CardPeak<T>(Func<T> run)
     {
         using (PythonRuntime.Gil())
@@ -1504,7 +1478,6 @@ public class PyTorchBackendCoverageTests
         }
     }
 
-    /// <summary>Every byte torch's CUDA allocator has handed out in this process, or 0 off a card.</summary>
     private static long CardAllocated(TorchBackend backend)
     {
         if (!backend.OnCuda) return 0;

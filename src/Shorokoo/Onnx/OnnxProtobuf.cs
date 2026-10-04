@@ -1,4 +1,6 @@
+using System;
 using System.IO;
+using ProtoBuf;
 using ProtoBuf.Meta;
 using Shorokoo.Core.Factory.IR;
 
@@ -30,9 +32,23 @@ namespace Shorokoo.Onnx
             return model;
         }
 
-        /// <summary>The model in <paramref name="stream"/>. One nested <see cref="MaxDepth"/> levels
-        /// deep or more throws <see cref="System.InvalidOperationException"/>; a truncated or
-        /// otherwise malformed one throws as protobuf-net refuses it.</summary>
-        internal static ModelProto ReadModel(Stream stream) => _model.Deserialize<ModelProto>(stream);
+        /// <summary>
+        /// The model in <paramref name="stream"/>. Bytes protobuf-net refuses throw
+        /// <see cref="ProtoException"/>, as every malformed protobuf does — a model nested
+        /// <see cref="MaxDepth"/> levels deep or more among them, which protobuf-net itself refuses
+        /// with an <see cref="InvalidOperationException"/> no caller would take for a malformed
+        /// file — or <see cref="EndOfStreamException"/> where they end early.
+        /// </summary>
+        internal static ModelProto ReadModel(Stream stream)
+        {
+            try
+            {
+                return _model.Deserialize<ModelProto>(stream);
+            }
+            catch (InvalidOperationException e) when (e is not ObjectDisposedException)
+            {
+                throw new ProtoException($"The model's protobuf could not be read: {e.Message}", e);
+            }
+        }
     }
 }

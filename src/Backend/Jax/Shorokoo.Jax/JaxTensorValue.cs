@@ -125,6 +125,16 @@ public sealed class JaxTensorValue : IShorokooTensorValue
         return new Span<T>((void*)_address, checked((int)(_byteCount / sizeof(T))));
     }
 
+    /// <summary>The <paramref name="count"/> bytes at <paramref name="byteOffset"/> into this
+    /// tensor's buffer, addressed from where the buffer starts, so a piece of a tensor longer than
+    /// any span is reached as one of a short tensor is.</summary>
+    unsafe Span<byte> IShorokooTensorValue.HostPiece(long byteOffset, int count)
+    {
+        ThrowIfNotReadable<byte>();
+        IShorokooTensorValue.PieceWithin(byteOffset, count, _byteCount);
+        return new Span<byte>((byte*)_address + byteOffset, count);
+    }
+
     public IReadOnlyList<string> GetStringTensorData()
         => throw new InvalidOperationException($"This is a {ElementType} tensor; JAX has no string tensors.");
 

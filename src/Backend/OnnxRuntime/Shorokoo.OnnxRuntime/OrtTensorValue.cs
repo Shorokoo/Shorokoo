@@ -298,6 +298,16 @@ internal sealed class OrtTensorValue : IShorokooTensorValue
     private unsafe Span<T> WholeBuffer<T>() where T : unmanaged
         => new((void*)OrtBackend.AddressOf(Inner), checked((int)(BufferBytes / sizeof(T))));
 
+    /// <summary>The <paramref name="count"/> bytes at <paramref name="byteOffset"/> into this
+    /// tensor's buffer, addressed from where the buffer starts, so a piece of a tensor longer than
+    /// any span is reached as one of a short tensor is.</summary>
+    unsafe Span<byte> IShorokooTensorValue.HostPiece(long byteOffset, int count)
+    {
+        ThrowIfNotHostAccessible();
+        IShorokooTensorValue.PieceWithin(byteOffset, count, BufferBytes);
+        return new Span<byte>((byte*)OrtBackend.AddressOf(Inner) + byteOffset, count);
+    }
+
     // Each of the four accessors below, and the four reads above them, hands ORT a bare handle off
     // `Inner` and then has no further use for it, so the JIT retires the local at that read --
     // before the native call even starts. OrtValue is a plain class with an ordinary finalizer that

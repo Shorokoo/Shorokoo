@@ -1248,6 +1248,52 @@ public class CrossDeviceRoutingCoverageTests
     }
 
     [Fact]
+    public void TestAnInMemoryLoaderOverACardReadsOnlyTheRowsOfEachBatchOffIt()
+    {
+        var card = new StubBackend(ComputeDevice.Cuda, 0) { CopiesRanges = true };
+        using var context = new ComputeContext(card);
+        var (inputs, targets) = (TrainingRigHelpers.InBatch(1f, 2f, 3f, 4f), TrainingRigHelpers.TargetBatch(2f, 4f, 6f, 8f));
+        var onCard = new InMemoryDataLoader(inputs.CopyTo(context), targets.CopyTo(context), batchSize: 2);
+        var shuffled = new InMemoryDataLoader(inputs.CopyTo(context), targets.CopyTo(context), batchSize: 2, shuffle: true, seed: 7);
+        var onHost = new InMemoryDataLoader(inputs, targets, batchSize: 2, shuffle: true, seed: 7);
+
+        Assert.Equal([1f, 2f], BatchInput(onCard.Next()));
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        Assert.Equal([3f, 4f], BatchInput(onCard.Next()));
+        Assert.Equal((0, 4), (card.HostCopies, card.RangeCopies));
+        Assert.Equal([.. Enumerable.Range(0, 4).SelectMany(_ => BatchInput(onHost.Next()))], Enumerable.Range(0, 4).SelectMany(_ => BatchInput(shuffled.Next())));
+        Assert.Equal(0, card.HostCopies);
+    }
+
+    private static float[] BatchInput(DataBatch batch) => ((TensorData)((TensorDataStruct)batch.Input).Fields["input"]).As<float32>().CopyMemory();
+
+    [Fact]
+    public void TestInitializingOptimizerStateCopiesNoCardParameterOffItAndCopyingOneOutCopiesItsContentsOnce()
+    {
+        var card = new StubBackend(ComputeDevice.Cuda, 0) { CopiesRanges = true };
+        using var context = new ComputeContext(card);
+        var (h, p, g) = (InputVector<float32>("h"), InputVector<float32>("p"), InputVector<float32>("g"));
+        var param = Floats(4).CopyTo(context);
+        Shorokoo.Core.Nodes.Processors.Fast.FastNormalizeOptimizerGraph.RunStateInitGraph(
+            new InternalComputationGraph([h, p, g], [p + g * h]), context, [Floats(1)], 1, _ => param);
+        Assert.Equal((0, 0), (card.HostCopies, card.RangeCopies));
+        Assert.False(param.IsDisposed);
+
+        TensorData[] onCard = [Floats(1 << 18).CopyTo(context), Floats(1 << 18).CopyTo(context)];
+        Assert.True(AllocatedBy(() => onCard[0].CopyMemory<float>()) < 3 << 19);
+        Assert.True(AllocatedBy(() => onCard[1].CopyRawMemory()) < 3 << 19);
+        Assert.Equal((1, 1), (card.HostCopies, card.RangeCopies));
+    }
+
+    private static long AllocatedBy(Action read)
+    {
+        var before = GC.GetAllocatedBytesForCurrentThread();
+        read();
+        return GC.GetAllocatedBytesForCurrentThread() - before;
+    }
+
+    [Fact]
     public void TestAWeightSetOnACardIsSavedAsTheSameSetOnTheHostIs()
     {
         var model = FCLayer.ComputationGraph.ToConcreteArchitecture([TensorData(DType.Int64, [], 4L), TensorData([4L, 4L], new float[16])]).ToConcreteModel();

@@ -84,16 +84,24 @@ def _mean(x, dims, keep):
 def _sum(x, dims, keep):
     """torch.sum over `dims`. On a card, a sum over the leading axes of a contiguous floating-point
     tensor leaving fewer values than each one adds up -- a bias's gradient, summed over the batch --
-    is taken in two stages, a block of leading rows at a time and then the blocks' sums: summed at
-    once, torch's kernel stages partial sums in a buffer twice the input's size."""
+    is taken in two stages: the rows cut into about the square root of their count of equal blocks
+    summed block onto block, then the rows of that sum, any rows the blocks leave over summed apart.
+    Summed at once, torch's kernel stages partial sums in a buffer twice the input's size. The
+    partial sums of a 16-bit type are kept in float32 and the total rounded once, as torch's own sum
+    accumulates."""
     rows = math.prod(x.shape[:len(dims)])
     columns = x.numel() // rows if rows else 0
     if (x.is_cuda and x.is_floating_point() and dims == list(range(len(dims))) and x.is_contiguous()
             and rows >= 1024 and 0 < columns < rows):
-        block = max(d for d in range(1, math.isqrt(rows) + 1) if rows % d == 0)
-        total = x.reshape(block, rows // block, columns).sum(0).sum(0)
+        accumulate = torch.float32 if x.dtype in (torch.float16, torch.bfloat16) else x.dtype
+        flat = x.reshape(rows, columns)
+        blocks = math.isqrt(rows)
+        whole = rows - rows % blocks
+        total = flat[:whole].reshape(blocks, whole // blocks, columns).sum(0, dtype=accumulate).sum(0)
+        if whole < rows:
+            total = total + flat[whole:].sum(0, dtype=accumulate)
         shape = ([1] * len(dims) if keep else []) + list(x.shape[len(dims):])
-        return total.reshape(shape)
+        return total.to(x.dtype).reshape(shape)
     return torch.sum(x, dims, keepdim=keep)
 
 

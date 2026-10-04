@@ -53,15 +53,17 @@ namespace Shorokoo.Runtime
 
         /// <summary>
         /// What is attached to this context in its own memory, against its device-memory budget:
-        /// the bytes of the live tensors on its books that are in its memory — on a GPU backend,
+        /// the bytes of the tensors on its books whose memory is in its memory — on a GPU backend,
         /// the card's — how many they are, and the budget, where one is in force.
         ///
         /// <para>That is what the budget counts. A transfer onto this context is refused when what is
         /// attached plus what it would add passes <see cref="DeviceMemoryUse.LimitBytes"/>, and a
         /// session compiled or run here is limited to what is left. A tensor on two
-        /// contexts' books counts on both; one that dies, is collected or is detached
-        /// (<see cref="Detach"/>) drops out. <see cref="Host"/> keeps no books and reads as
-        /// nothing.</para>
+        /// contexts' books counts on both; one that is collected or detached
+        /// (<see cref="Detach"/>) drops out, and so does one that dies once its memory is released —
+        /// which, for a tensor deleted while something still reads it, a run or a compiled graph's
+        /// session, is when the last of them stands down. <see cref="Host"/> keeps no books and
+        /// reads as nothing.</para>
         ///
         /// <para>It is a reading: it walks this context's list, and nothing is remembered.</para>
         /// </summary>
@@ -80,10 +82,12 @@ namespace Shorokoo.Runtime
         internal long? BudgetIn() => _isHost || MemorySpace.IsHost ? null : DeviceMemory.LimitBytes;
 
         /// <summary>
-        /// The bytes of the live tensors attached to this context in its own memory, and how many
-        /// they are. A run's outputs are among them once the run has returned, apart from what its
-        /// session's runs are limited to. Tensors standing on one shared block count the block
-        /// once, for what of its memory is still held while any of them lives.
+        /// The bytes of the tensors attached to this context whose memory is in its own memory, and
+        /// how many they are: the live ones, and the dead ones whose memory waits on a reader
+        /// (<see cref="TensorData.HoldsItsMemory"/>). A run's outputs are among them once the run has
+        /// returned, apart from what its session's runs are limited to. Tensors standing on one
+        /// shared block count the block once, for what of its memory is still held while any of
+        /// them lives.
         /// </summary>
         internal (long Bytes, int Tensors) AttachedIn()
         {
@@ -100,7 +104,7 @@ namespace Shorokoo.Runtime
             var tensors = 0;
             foreach (var tensor in _attached.Snapshot())
             {
-                if (tensor.IsDisposed || tensor.Space != space) continue;
+                if (!tensor.HoldsItsMemory || tensor.Space != space) continue;
                 if (tensor.Block is { } block)
                 {
                     if ((blocks ??= new(ReferenceEqualityComparer.Instance)).Add(block)) bytes += block.HeldBytes;
@@ -121,7 +125,7 @@ namespace Shorokoo.Runtime
         {
             if (tensor.Block is not { } block) return tensor.ByteCount;
             foreach (var attached in _attached.Snapshot())
-                if (!attached.IsDisposed && ReferenceEquals(attached.Block, block)) return 0;
+                if (attached.HoldsItsMemory && ReferenceEquals(attached.Block, block)) return 0;
             foreach (var other in alongside ?? [])
                 if (!ReferenceEquals(other, tensor) && !other.IsDisposed && ReferenceEquals(other.Block, block)) return 0;
             return block.HeldBytes;

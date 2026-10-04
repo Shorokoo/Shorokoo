@@ -510,6 +510,13 @@ namespace Shorokoo
             return new TensorDataStruct(data.Definition, fields);
         }
 
+        /// <summary>
+        /// The rows <paramref name="indices"/> of <paramref name="src"/>, copied into a new host
+        /// tensor. Only those rows are read, wherever <paramref name="src"/> is: a dataset on a card
+        /// has just the batch's rows copied off it, a run of consecutive rows as one copy. Only where
+        /// its backend cannot copy part of a value is the whole of it read, through the host copy the
+        /// tensor holds.
+        /// </summary>
         private static TensorData GatherRows(TensorData src, int[] indices)
         {
             long[] dims = src.Shape.Dims;
@@ -518,16 +525,16 @@ namespace Shorokoo
             long rowElems = 1;
             for (int d = 1; d < dims.Length; d++) rowElems *= dims[d];
 
-            var raw = src.AccessRawMemory();
             long totalElems = n * rowElems;
-            int elemBytes = totalElems == 0 ? 0 : raw.Length / checked((int)totalElems);
+            int elemBytes = totalElems == 0 ? 0 : checked((int)(src.ContentByteLength / totalElems));
             int rowBytes = checked((int)rowElems) * elemBytes;
 
             byte[] outBytes = new byte[indices.Length * rowBytes];
-            for (int k = 0; k < indices.Length; k++)
+            if (outBytes.Length > 0 && !src.TryCopyRows(indices, rowBytes, outBytes))
             {
-                int srcOffset = indices[k] * rowBytes;
-                raw.Slice(srcOffset, rowBytes).CopyTo(outBytes.AsSpan(k * rowBytes, rowBytes));
+                var raw = src.AccessRawMemory();
+                for (int k = 0; k < indices.Length; k++)
+                    raw.Slice(indices[k] * rowBytes, rowBytes).CopyTo(outBytes.AsSpan(k * rowBytes, rowBytes));
             }
 
             long[] outDims = new long[dims.Length];

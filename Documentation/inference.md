@@ -336,6 +336,10 @@ var y = compiled.Execute(x);
 
 - The weights belong to the compiled graph and are freed when it is disposed. There is no graph
   with the weights to edit or save; load one with `Persistence.Load` for that.
+- A weight another context's run is reading through `.Shared()` when its graph is disposed is
+  deleted all the same, and its memory is freed when that run is done with it. While the graph
+  lives, `Delete` refuses its weights, `TryDelete` declines, and `DeleteAsync` deletes one and
+  counts it on the context's budget until the graph is disposed.
 - Weights of at most about a thousand elements stay in the graph on the host, where the compiler
   reads such values.
 - The runtime does not fold or fuse over the weights it is handed, so results can round differently
@@ -1301,8 +1305,10 @@ Console.WriteLine($"{use.AttachedBytes} of {use.LimitBytes} bytes attached, {use
 copied there by the context's runs, or left there as its runs' outputs — every output of a run
 on the card, until it is deleted, collected or detached.
 `ReadDeviceMemoryUse()` reports `AttachedBytes`, `AttachedTensors` and `LimitBytes` (`null`
-with no budget, or for a host context). A tensor on two contexts counts on both; dead,
-collected or `Detach`ed tensors drop out.
+with no budget, or for a host context). A tensor on two contexts counts on both; collected or
+`Detach`ed tensors drop out, and so do dead ones once their memory is released. A tensor deleted
+with `DeleteAsync` while a run, or the session of a graph loaded with `LoadCompiled`, still reads
+it keeps counting until that reader stands down, since its memory is still on the card until then.
 
 **A transfer it cannot take is refused before allocating** — `To`, `CopyTo`, a run's card copy
 of a tensor it cannot read in place, and a `To` that

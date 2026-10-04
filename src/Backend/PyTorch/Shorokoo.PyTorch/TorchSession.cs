@@ -33,8 +33,9 @@ namespace Shorokoo.PyTorch;
 /// <see cref="PrecisionSettings"/> as it starts, under the interpreter lock: off, which is full
 /// <c>float32</c> precision, unless the session was built allowing TensorFloat-32. torch releases
 /// that lock inside each operator, so runs on cards that set the switches differently do not run at
-/// once: a run that allows TensorFloat-32 is the only torch run on a card while it runs, and runs in
-/// full precision run beside one another. A run on the CPU reads neither switch and sets neither.</para>
+/// once: runs in one precision run beside one another, and a run in the other waits until they are
+/// done (<see cref="TorchPrecisionGate"/>). A run on the CPU reads neither switch and sets
+/// neither.</para>
 /// </summary>
 internal sealed class TorchSession : IShorokooSession
 {
@@ -58,6 +59,7 @@ internal sealed class TorchSession : IShorokooSession
     private readonly PyObject _constantStorages;
     private readonly PyObject _constantIds;
     private TorchPlacements? _placements;
+    private int _stoppedPlacing;
     private int _disposed;
 
     // torch's CUDA caching allocator is the whole process's, so a cap on it is too: a run under a
@@ -66,9 +68,9 @@ internal sealed class TorchSession : IShorokooSession
     private static readonly ConcurrentDictionary<int, ReaderWriterLockSlim> DeviceRuns = new();
 
     // torch's TensorFloat-32 switches are the whole process's, so runs on cards that set them
-    // differently must not overlap: a run allowing TensorFloat-32 holds this exclusively, and runs in
-    // full precision share it. Taken before a device's lock, by every run on a card and no other.
-    private static readonly ReaderWriterLockSlim Float32Runs = new(LockRecursionPolicy.SupportsRecursion);
+    // differently must not overlap, and runs that set them alike may. Taken before a device's lock,
+    // by every run on a card and no other.
+    private static readonly TorchPrecisionGate Float32Runs = new();
 
     private TorchSession(
         TorchBackend backend, TorchRuntime runtime, TranslatedModel model, ShorokooLogSeverity logSeverity,
@@ -215,8 +217,12 @@ internal sealed class TorchSession : IShorokooSession
     /// <summary>Where this session's consuming runs place their values; null where it places none.</summary>
     internal TorchPlacements? Placements => _placements;
 
+    /// <summary>Stops placing values in consumed memory, and writing nodes over consumed inputs
+    /// (<see cref="TorchInPlace"/>): a consuming run then writes nothing into what it consumed but
+    /// the pairs it binds.</summary>
     void IShorokooSession.StopPlacing()
     {
+        Volatile.Write(ref _stoppedPlacing, 1);
         _placements?.Dispose();
         _placements = null;
     }
@@ -342,8 +348,11 @@ internal sealed class TorchSession : IShorokooSession
                 : _placements.EntryFor(feeds, TorchPlacements.Blocks(_inputNames, inputs, consumed, feeds, targets), outputNames);
             if (entry?.Main is null) entry = null;
             // The inputs the run consumed and holds alone, which an element-wise node may be written over
-            // (TorchInPlace) -- every one but those the plan places values in.
-            int[] writable = consumed is null ? [] : [.. TorchPlacements.Blocks(_inputNames, inputs, consumed, feeds, []).Except(entry?.Blocks ?? [])];
+            // (TorchInPlace) -- every one but those the plan places values in; none once the session
+            // has stopped placing.
+            int[] writable = consumed is null || Volatile.Read(ref _stoppedPlacing) != 0
+                ? []
+                : [.. TorchPlacements.Blocks(_inputNames, inputs, consumed, feeds, []).Except(entry?.Blocks ?? [])];
 
             // A flag in native memory the run reads before every node, and the token's callback
             // sets: it needs no interpreter lock to set, so a cancellation lands while the run holds
@@ -359,8 +368,7 @@ internal sealed class TorchSession : IShorokooSession
                 ? DeviceRuns.GetOrAdd(_backend.CudaDeviceId, static _ => new ReaderWriterLockSlim(LockRecursionPolicy.SupportsRecursion))
                 : null;
             if (device is null) return Invoke(feeds, wanted, outputNames, targets, entry, writable, stop, runSettings, out aliasedInputs);
-            if (_tensorFloat32) Float32Runs.EnterWriteLock();
-            else Float32Runs.EnterReadLock();
+            Float32Runs.Enter(_tensorFloat32);
             try
             {
                 var capped = _limitBytes is not null;
@@ -378,8 +386,7 @@ internal sealed class TorchSession : IShorokooSession
             }
             finally
             {
-                if (_tensorFloat32) Float32Runs.ExitWriteLock();
-                else Float32Runs.ExitReadLock();
+                Float32Runs.Exit(_tensorFloat32);
             }
         }
         finally

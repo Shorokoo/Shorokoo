@@ -570,6 +570,13 @@ public class TensorDataApiCoverageTests
 
         Assert.Empty(members.Where(m => m.ReturnType.IsGenericType && writable.Contains(m.ReturnType.GetGenericTypeDefinition())));
         Assert.Contains(members, m => m.Name == nameof(TensorData.AccessMemory));
+
+        var outsideTheBackendInterface = typeof(TensorData).Assembly.GetExportedTypes()
+            .Where(t => t.Namespace != typeof(IShorokooTensorValue).Namespace)
+            .SelectMany(t => t.GetMethods(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic
+                | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.DeclaredOnly))
+            .Where(m => m.IsPublic || m.IsFamily || m.IsFamilyOrAssembly);
+        Assert.Empty(outsideTheBackendInterface.Where(m => m.ReturnType == typeof(IShorokooTensorValue)));
     }
 
     [Fact]

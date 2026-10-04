@@ -647,6 +647,19 @@ public class SideBySideBackendCoverageTests
     }
 
     [Fact]
+    public void TestAHardLinkIsMadeBetweenPathsLongerThanWindowsMaxPath()
+    {
+        using var scratch = new CudaScratch();
+        var deep = Directory.CreateDirectory(Path.Combine(scratch.Root, new string('d', 120), new string('e', 120))).FullName;
+        var existing = Path.Combine(deep, "cudnn64_9.dll");
+        File.WriteAllBytes(existing, [4, 5]);
+
+        Assert.True(CudaLibraryCache.TryCreateHardLink(Path.Combine(deep, "cudnn64_9.link.dll"), existing));
+        File.AppendAllText(existing, "+");
+        Assert.Equal(3, new FileInfo(Path.Combine(deep, "cudnn64_9.link.dll")).Length);
+    }
+
+    [Fact]
     public void TestTheCacheAndTheCopiesLookedForAreWhereEachSystemKeepsThem()
     {
         var cudnn = new CudaLibraryPin("cudnn", "9.24.0.43", 13, "nvidia-cudnn-cu13", new Uri("https://example.invalid/cudnn.whl"), "", 0,

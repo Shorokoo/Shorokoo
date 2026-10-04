@@ -439,7 +439,7 @@ internal class ShapeInferenceInterpreter
         //
         // SEQUENCE_CONSTRUCT requires all bundled tensors to share a dtype, so for
         // ops with mixed-dtype outputs (TopK values+indices, Dropout output+mask, etc.)
-        // we fall back to the legacy direct-outputs path. We don't know dtypes upfront,
+        // the session returns the op's outputs directly. We don't know dtypes upfront,
         // so we attempt the sequence path first; if ORT rejects it (dtype mismatch or
         // any other reason) we retry without the wrap.
         var realOutputKeys = freshOutputKeys.Where(k => k.HasValue).Select(k => k!.Value).ToList();
@@ -579,10 +579,10 @@ internal class ShapeInferenceInterpreter
         }
         catch (Exception) when (CatchShapeInferenceErrors())
         {
-            // Storing a value used to be an expression that could not fail, and this one can: a
-            // string tensor has no flat bytes to copy, and a device-resident one needs a CUDA
-            // runtime that may not be there. Keeping the shape and dropping the value costs this
-            // node its constant folding; letting it out would cost the whole pass.
+            // Storing a value can fail: a string tensor has no flat bytes to copy, and a
+            // device-resident one needs a CUDA runtime that may not be there. Keeping the shape and
+            // dropping the value costs this node its constant folding; letting it out would cost
+            // the whole pass.
             return null;
         }
     }

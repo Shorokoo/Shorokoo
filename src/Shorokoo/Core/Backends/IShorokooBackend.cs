@@ -413,9 +413,9 @@ public interface IShorokooBackend
     // (Shorokoo/Shorokoo#359).
     //
     // The default fills it after all, from a zeroed buffer through the member above, and so buys
-    // nothing: it is here because this interface is an ABI, and a member without a body is a
-    // backend outside this repository that no longer compiles. A backend that does not override
-    // this keeps paying the copy it always paid; overriding it is what stops paying.
+    // nothing: it is here because this interface is an ABI, and a member without a body would not
+    // compile in a backend outside this repository. A backend that does not override this pays for
+    // the copy; overriding it is what stops paying.
     //
     // Sizing that buffer is TensorElementLayout's table -- the same one a backend's own byte-wise
     // constructor reads -- so the element types CreateTensorFromRawBytes turns away are turned

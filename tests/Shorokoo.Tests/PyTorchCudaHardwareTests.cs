@@ -322,6 +322,26 @@ public class PyTorchCudaHardwareTests
     public void TestATensorPastTwoGibibytesIsLoadedOntoTheCardByThePiece()
         => Assert.Equal((StagedReadBack.StagingBytes, StagedReadBack.StagingBytes, true), LoadedPastTwoGibibytes(Cuda.Value));
 
+    [TorchCudaFact]
+    public void TestAPieceOfACardTensorIsWrittenAndReadAtAnyByteOffset()
+        => Assert.Equal(PieceWrittenAtFive, PieceWrittenIntoACardTensor(Cuda.Value));
+
+    /// <summary>Six bytes read three bytes into four zero floats after 1, 2, 3, 4 were written five
+    /// bytes in, and then the whole of them.</summary>
+    internal static readonly byte[] PieceWrittenAtFive = [0, 0, 1, 2, 3, 4, 0, 0, 0, 0, 0, 1, 2, 3, 4, 0, 0, 0, 0, 0, 0, 0];
+
+    /// <summary>What <see cref="PieceWrittenAtFive"/> describes, of a tensor on
+    /// <paramref name="backend"/>'s card, once a piece past its end is refused.</summary>
+    internal static byte[] PieceWrittenIntoACardTensor(IShorokooBackend backend)
+    {
+        using var value = backend.CreateTensorInBackendMemory(ShorokooTensorElementType.Float, new byte[16], [4]);
+        var read = new byte[6];
+        Assert.True(backend.TryCopyHostToTensorRange(value, 5, [1, 2, 3, 4]));
+        Assert.True(backend.TryCopyTensorRangeToHost(value, 3, read));
+        Assert.Throws<ArgumentOutOfRangeException>(() => backend.TryCopyTensorRangeToHost(value, 14, read));
+        return [.. read, .. backend.CopyTensorToHost(value)];
+    }
+
     /// <summary>The int32s a tensor past 2 GiB holds: 0, 1, 2 and on.</summary>
     private const long CountedPastTwoGibibytes = 5L << 27;
 

@@ -626,6 +626,59 @@ public class PyTorchBackendCoverageTests
     }
 
     [Fact]
+    public void TestRunsInOnePrecisionRunBesideOneAnotherAndRunsInTheOtherWaitTheirTurn()
+    {
+        Assert.True(Overlap(true, true));
+        Assert.True(Overlap(false, false));
+        Assert.False(Overlap(true, false));
+        Assert.False(Overlap(false, true));
+        Assert.False(JoinsPastAWaiter(true));
+        Assert.False(JoinsPastAWaiter(false));
+    }
+
+    /// <summary>Whether a run in <paramref name="second"/>'s precision enters while one in
+    /// <paramref name="first"/>'s holds the gate.</summary>
+    private static bool Overlap(bool first, bool second)
+    {
+        var gate = new TorchPrecisionGate();
+        gate.Enter(first);
+        try { return Task.Run(() => EntersAndLeaves(gate, second)).Result; }
+        finally { gate.Exit(first); }
+    }
+
+    /// <summary>Whether a run in <paramref name="held"/>'s precision joins one holding the gate
+    /// while a run in the other waits, which enters once the holder leaves.</summary>
+    private static bool JoinsPastAWaiter(bool held)
+    {
+        var gate = new TorchPrecisionGate();
+        gate.Enter(held);
+        var waiter = Task.Run(() => EntersAndLeaves(gate, !held, wait: true));
+        SpinWait.SpinUntil(() => gate.Waiting(!held) == 1);
+        var joined = Task.Run(() => EntersAndLeaves(gate, held)).Result;
+        gate.Exit(held);
+        Assert.True(waiter.Result);
+        return joined;
+    }
+
+    private static bool EntersAndLeaves(TorchPrecisionGate gate, bool tensorFloat32, bool wait = false)
+    {
+        if (wait) gate.Enter(tensorFloat32);
+        else if (!gate.TryEnter(tensorFloat32)) return false;
+        gate.Exit(tensorFloat32);
+        return true;
+    }
+
+    [Fact]
+    public void TestAFailedImportIsACudaLibraryConflictWhereTheProcessHoldsAnotherReleaseAndAMissingPackageWhereNothingImports()
+    {
+        Assert.Equal(PythonEnvironmentFailure.CudaLibraryConflict, TorchRuntime.ImportFailure("ImportError", () => "cudnn64_9.dll", out _));
+        Assert.Equal(PythonEnvironmentFailure.CudaLibraryConflict, TorchRuntime.ImportFailure("OSError", () => "cudnn64_9.dll", out _));
+        Assert.Equal(PythonEnvironmentFailure.MissingPackage, TorchRuntime.ImportFailure("ModuleNotFoundError", () => "cudnn64_9.dll", out _));
+        Assert.Equal(PythonEnvironmentFailure.MissingPackage, TorchRuntime.ImportFailure("ImportError", () => null, out _));
+        Assert.Null(TorchRuntime.ImportFailure("OSError", () => null, out _));
+    }
+
+    [Fact]
     public void TestEveryConsumedFeedIsReleasedExactlyOnceHoweverTheRunEnds()
     {
         using var session = Torch.CreateSession(Onnx("Neg", (int)ShorokooTensorElementType.Float), default, default, DeviceMemorySettings.Default);
@@ -1056,6 +1109,14 @@ public class PyTorchBackendCoverageTests
     }
 
     [Fact]
+    public void TestAnOutputIsNotWrittenIntoItsInputWhereAValueWrittenOverThatInputIsStillRead()
+    {
+        Assert.Equal((null, "9 38 87 156 35400"), Aliased("a:float[4] b:float[4]", "O:float[4] M", [Op("Mul", "a b", "t"), Op("ReduceSumSquare", "t", "M"), Op("Sub", "t b", "O")]));
+        Assert.Equal((null, "9 38 87 156 10 40 90 160"), Aliased("a:float[4] b:float[4]", "O:float[4] T:float[4]", [Op("Mul", "a b", "T"), Op("Sub", "T b", "O")]));
+        Assert.Equal(("a", "9 38 87 156"), Aliased("a:float[4] b:float[4]", "O:float[4]", [Op("Mul", "a b", "t"), Op("Sub", "t b", "O")]));
+    }
+
+    [Fact]
     public void TestAnAliasedOutputHoldsTheConsumedMemoryWhichTheRunReleasesExactlyOnce()
     {
         var graph = ComputeContextLifetimeCoverageTests.GraphOf("a:float[4] b:float[4]", "O:float[4]", Op("Sub", "a b", "O"));
@@ -1162,6 +1223,53 @@ public class PyTorchBackendCoverageTests
         Assert.Equal("O@-", Placed(GraphOn("a:float[64] b:float[64]", "O", Op("Neg", "a", "t"), Op("Exp", "t", "u"), Op("Add", "u b", "O"))));
         Assert.Equal("O@-", Placed(GraphOn("a:float[64] b:float[64]", "O", Op("Neg", "a", "t"), Op("Greater", "t b", "m"), Op("Where", "m b t", "O"))));
         Assert.Equal("O@-", Placed(GraphOn("a:float[8,8] s:float[8]", "O", Op("Softmax", "a", "t"), Op("LayerNormalization", "t s", "O"))));
+    }
+
+    [Fact]
+    public void TestAValueTorchCannotWriteIntoARangeIsNotPlacedAndOneHandedARangeAnywayIsComputedAndCopiedThere()
+    {
+        Assert.Equal("O@-", Placed(GraphOn("a:float[262144] e:int64[262144]", "O", Op("Pow", "a e", "O"))));
+        Assert.Equal("O@-", Placed(GraphOn("a:float[262144,4] v:float[4] b:float[262144]", "O", Op("MatMul", "a v", "O"))));
+        Assert.Equal("(True, [8.0, 8.0, 8.0, 8.0])", PlacedInto("E.pow_, torch.full((4,), 2.0), torch.full((4,), 3)"));
+        Assert.Equal("(True, [2.0, 2.0, 2.0, 2.0])", PlacedInto("L.matmul, torch.ones(4, 2), torch.ones(2)"));
+    }
+
+    /// <summary>Whether <c>place_into</c> called with <paramref name="call"/> for a slot over a range
+    /// of four floats hands back that range, and what the range then holds.</summary>
+    private static string PlacedInto(string call)
+        => Evaluated("(lambda rt, t: __import__('contextvars').copy_context().run(lambda: (rt._placing.set(rt._Placing([t], [t], [(0, 0, 16, 1, [4], -1)], torch.device('cpu'), [])), "
+                     + $"rt.place_into(0, False, {call}).data_ptr() == t.data_ptr(), t.tolist())[1:]))(__import__('shorokoo_torch.runtime', fromlist=['_']), torch.zeros(4))");
+
+    [Fact]
+    public void TestASessionStoppedFromPlacingWritesNothingOverTheInputsItsRunsConsumeAndOneBuiltForASingleRunStillDoes()
+    {
+        Assert.Equal([-1f, -2f, -3f, -4f], ConsumedAfterARun(null));
+        Assert.Equal([1f, 2f, 3f, 4f], ConsumedAfterARun(null, stopPlacing: true));
+        Assert.Equal([-1f, -2f, -3f, -4f], ConsumedAfterARun(new ComputeContext(Torch)));
+        Assert.Equal([-1f, -2f, -3f, -4f], ConsumedAfterARun(new ComputeContext(Torch), placing: false));
+        Assert.Equal([1f, 2f, 3f, 4f], ConsumedAfterARun(new ComputeContext(Torch) { ValuePlacement = false }));
+        Assert.Equal([1f, 2f, 3f, 4f], ConsumedAfterARun(new ComputeContext(Torch) { OutputAliasing = false }));
+    }
+
+    /// <summary>What the memory of the input a run of <c>Neg</c> consumed holds once the run is over:
+    /// a run of a session of the backend's own, stopped from placing where
+    /// <paramref name="stopPlacing"/>, or of one <paramref name="context"/> builds, built for a single
+    /// run where not <paramref name="placing"/>.</summary>
+    private static float[] ConsumedAfterARun(ComputeContext? context, bool placing = true, bool stopPlacing = false)
+    {
+        var model = Serialize(GraphOn("x:float[4]", "O", Op("Neg", "x", "O")));
+        using var owner = context;
+        using var session = context?.BuildSession(Torch, model, ShorokooGraphOptimization.EnableAll, DeviceMemorySettings.Default, placing: placing)
+            ?? Torch.CreateSession(model, default, default, DeviceMemorySettings.Default);
+        if (stopPlacing) session.StopPlacing();
+        var x = (TorchTensorValue)Torch.CreateTensor([1f, 2f, 3f, 4f], [4]);
+        TorchTensorValue seen;
+        using (PythonRuntime.Gil()) seen = TorchTensorValue.Wrap(Torch.Runtime, x.Value.InvokeMethod("detach"), ShorokooTensorElementType.Float);
+        using (seen)
+        {
+            session.RunConsuming(new Dictionary<string, IShorokooTensorValue> { ["x"] = x }, [x], ["O"], RunSettings.Default)[0].Dispose();
+            return seen.GetTensorDataAsSpan<float>().ToArray();
+        }
     }
 
     [Fact]

@@ -165,7 +165,7 @@ internal sealed class TorchPlacements : IDisposable
         try
         {
             shapes = PlacementShapes.Evaluate(graph, given);
-            proof = new PlacementProof(graph, blockBytes, shapes, outputNames.ToHashSet(StringComparer.Ordinal), PlacementMemory.PyTorch);
+            proof = new PlacementProof(graph, blockBytes, shapes, outputNames.ToHashSet(StringComparer.Ordinal), Memory(shapes));
         }
         catch (ArgumentException ex)
         {
@@ -234,6 +234,30 @@ internal sealed class TorchPlacements : IDisposable
                 entry.Refusal = ex.Format();
             }
         }
+    }
+
+    /// <summary>
+    /// How a run with <paramref name="shapes"/> lays its values out (<see cref="PlacementMemory.PyTorch"/>),
+    /// writing a value into a range only through the forms the support package writes there
+    /// allocating nothing: a <c>Pow</c> through torch's <c>out=</c> form only with its exponent of
+    /// its base's type, and a <c>MatMul</c> only of two matrices or stacks of them, each operand of
+    /// two dimensions or more — the operands its <c>_write_fast</c> takes.
+    /// </summary>
+    internal static PlacementMemory Memory(IReadOnlyDictionary<string, PlacementShapes.Value> shapes)
+        => PlacementMemory.PyTorch with
+        {
+            Writes = (node, elementType) => PlacementMemory.PyTorch.Writes(node, elementType) && WritesItsOperands(node, shapes),
+        };
+
+    private static bool WritesItsOperands(NodeProto node, IReadOnlyDictionary<string, PlacementShapes.Value> shapes)
+    {
+        PlacementShapes.Value? Operand(int slot) => slot < node.Inputs.Count && shapes.TryGetValue(node.Inputs[slot], out var value) ? value : null;
+        return node.OpType switch
+        {
+            "Pow" => Operand(0) is { } x && Operand(1) is { } y && x.ElementType == y.ElementType,
+            "MatMul" => Operand(0) is { Shape.Length: >= 2 } && Operand(1) is { Shape.Length: >= 2 },
+            _ => true,
+        };
     }
 
     public void Dispose()

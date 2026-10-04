@@ -111,16 +111,15 @@ internal sealed class TorchRuntime
                 using var runtime = Py.Import("shorokoo_torch.runtime");
                 return new TorchRuntime(environment, runtime);
             }
-            catch (PythonException ex) when (ex.Type.Name is "ModuleNotFoundError" or "ImportError")
+            catch (PythonException ex) when (ImportFailure(
+                ex.Type.Name, () => cudaLibraries is null ? null : CudaLibraries.Conflict(cudaLibraries), out var held) is { } failure)
             {
-                throw new PythonEnvironmentException(PythonEnvironmentFailure.MissingPackage,
-                    $"The Python environment at '{environment.Directory}' cannot import what the PyTorch "
-                    + $"backend needs ({ex.Message}). Install torch and numpy into it, or leave "
-                    + $"{PythonEnvironmentResolver.EnvironmentVariable} unset to have an environment provisioned.",
-                    ex);
-            }
-            catch (PythonException ex) when (cudaLibraries is not null && CudaLibraries.Conflict(cudaLibraries) is { } held)
-            {
+                if (failure == PythonEnvironmentFailure.MissingPackage)
+                    throw new PythonEnvironmentException(PythonEnvironmentFailure.MissingPackage,
+                        $"The Python environment at '{environment.Directory}' cannot import what the PyTorch "
+                        + $"backend needs ({ex.Message}). Install torch and numpy into it, or leave "
+                        + $"{PythonEnvironmentResolver.EnvironmentVariable} unset to have an environment provisioned.",
+                        ex);
                 throw new PythonEnvironmentException(PythonEnvironmentFailure.CudaLibraryConflict,
                     $"PyTorch cannot load the CUDA libraries in '{cudaLibraries}' ({ex.Message}). This process "
                     + $"already holds another release of some of them ({held}). Those libraries load one another "
@@ -131,5 +130,20 @@ internal sealed class TorchRuntime
                     ex);
             }
         }
+    }
+
+    /// <summary>
+    /// What an import of the support package that raised Python's <paramref name="exceptionType"/>
+    /// failed of: the CUDA libraries, where this process holds another release of some of them
+    /// (<paramref name="conflict"/> names those, as <paramref name="held"/>) — which fails the import
+    /// as an <c>ImportError</c> as readily as an <c>OSError</c>; else a missing package, for a module
+    /// that is not there or did not import; else nothing this can name. A module that is not there at
+    /// all is a missing package whatever the process holds.
+    /// </summary>
+    internal static PythonEnvironmentFailure? ImportFailure(string exceptionType, Func<string?> conflict, out string? held)
+    {
+        held = exceptionType == "ModuleNotFoundError" ? null : conflict();
+        if (held is not null) return PythonEnvironmentFailure.CudaLibraryConflict;
+        return exceptionType is "ModuleNotFoundError" or "ImportError" ? PythonEnvironmentFailure.MissingPackage : null;
     }
 }

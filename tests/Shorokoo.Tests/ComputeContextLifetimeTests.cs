@@ -1902,7 +1902,7 @@ public class ComputeContextLifetimeCoverageTests
     /// <c>RunFeeds.Prepare</c>'s refusal is for.</summary>
     private sealed class UnlockableParam : NamedModelParam
     {
-        public override IShorokooTensorValue ToTensorValue() => throw new NotSupportedException();
+        internal override IShorokooTensorValue ToTensorValue() => throw new NotSupportedException();
         public override TensorData ToTensorData() => throw new NotSupportedException();
         public override TensorData<T> ToTensorData<T>() => throw new NotSupportedException();
         public override TensorDataSequence ToTensorDataSequence() => throw new NotSupportedException();

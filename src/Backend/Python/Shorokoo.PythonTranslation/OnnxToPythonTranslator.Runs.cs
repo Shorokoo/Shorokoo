@@ -84,7 +84,7 @@ internal sealed partial class OnnxToPythonTranslator
         ArgumentNullException.ThrowIfNull(dialect);
         var graph = model.Graph ?? throw dialect.Unsupported(
             UnsupportedReason.UnsupportedModel, null, null, "The model has no graph.");
-        var plan = AliasPlan.For(graph, outputAliases);
+        var plan = AliasPlan.For(graph, outputAliases, over);
         var translator = new OnnxToPythonTranslator(dialect) { _aliasPlan = plan, _placed = placed, _over = over };
         var translated = translator.Run(model, graph);
         return translated with { Aliases = plan?.Slots(translated.InputNames) ?? [] };
@@ -183,6 +183,7 @@ internal sealed partial class OnnxToPythonTranslator
     {
         private readonly GraphProto _graph;
         private readonly List<(OutputAlias Alias, NodeProto? Writer)> _pairs;
+        private readonly IReadOnlyDictionary<string, int>? _over;
         private readonly Dictionary<NodeProto, PlannedWrite> _writes = new(ReferenceEqualityComparer.Instance);
         private readonly HashSet<string> _initializers = new(StringComparer.Ordinal);
 
@@ -190,10 +191,11 @@ internal sealed partial class OnnxToPythonTranslator
         // holds reads from outside itself.
         private readonly List<(NodeProto Node, HashSet<string> Reads)> _reads = [];
 
-        private AliasPlan(GraphProto graph, List<(OutputAlias Alias, NodeProto? Writer)> pairs)
+        private AliasPlan(GraphProto graph, List<(OutputAlias Alias, NodeProto? Writer)> pairs, IReadOnlyDictionary<string, int>? over)
         {
             _graph = graph;
             _pairs = pairs;
+            _over = over;
             foreach (var node in graph.Nodes)
             {
                 var reads = new HashSet<string>(node.Inputs.Where(input => input.Length > 0), StringComparer.Ordinal);
@@ -211,8 +213,9 @@ internal sealed partial class OnnxToPythonTranslator
         }
 
         /// <summary>The plan for the pairs of <paramref name="aliases"/> the graph proves, or null
-        /// where it proves none.</summary>
-        public static AliasPlan? For(GraphProto graph, IReadOnlyList<OutputAlias> aliases)
+        /// where it proves none, in a translation writing the nodes <paramref name="over"/> names over
+        /// their operands.</summary>
+        public static AliasPlan? For(GraphProto graph, IReadOnlyList<OutputAlias> aliases, IReadOnlyDictionary<string, int>? over)
         {
             if (aliases.Count == 0) return null;
             var proved = OutputAliasProof.Prove(graph, aliases);
@@ -229,7 +232,7 @@ internal sealed partial class OnnxToPythonTranslator
                 .. proved.Where(a => !strings.Contains(a.Output))
                     .Select(a => (a, producers.GetValueOrDefault(a.Output))),
             ];
-            return pairs.Count == 0 ? null : new AliasPlan(graph, pairs);
+            return pairs.Count == 0 ? null : new AliasPlan(graph, pairs, over);
         }
 
         /// <summary>Whether <paramref name="node"/> is one torch can be told to write into memory
@@ -245,7 +248,8 @@ internal sealed partial class OnnxToPythonTranslator
         /// The values already made when <paramref name="write"/>'s node runs that something still to
         /// come reads — a node not yet written, a subgraph one of those holds, or the graph's own
         /// outputs — and that could be the input's memory: the input itself, and anything made from
-        /// it by an operator not known to make memory of its own. What has been written is read off
+        /// it by an operator not known to make memory of its own, or written over it
+        /// (<see cref="MayShare"/>). What has been written is read off
         /// <paramref name="isBound"/>, the names the statements so far have given values, so that the
         /// answer holds whatever order the nodes are written in.
         /// </summary>
@@ -263,19 +267,27 @@ internal sealed partial class OnnxToPythonTranslator
         }
 
         /// <summary><paramref name="input"/>, and every value made from it — or from one of those —
-        /// by an operator not known to make memory of its own.</summary>
+        /// by an operator not known to make memory of its own, or by a node the translation writes
+        /// over it (the support package's <c>_over</c>), which hands its result back in the operand's
+        /// memory, an operator of fresh memory though it is.</summary>
         private HashSet<string> MayShare(string input)
         {
             // One pass in graph order is the whole closure: a graph's nodes come after what they read.
             var found = new HashSet<string>(StringComparer.Ordinal) { input };
             foreach (var (node, reads) in _reads)
             {
-                if (IsFresh(node) || !reads.Overlaps(found)) continue;
+                if (!reads.Overlaps(found) || (IsFresh(node) && !WrittenOver(node, found))) continue;
                 foreach (var output in node.Outputs)
                     if (output.Length > 0) found.Add(output);
             }
             return found;
         }
+
+        /// <summary>Whether the translation may write <paramref name="node"/> over an operand among
+        /// <paramref name="found"/>.</summary>
+        private bool WrittenOver(NodeProto node, HashSet<string> found)
+            => _over is not null && node.Outputs.Count > 0 && _over.TryGetValue(node.Outputs[0], out var slot)
+               && slot < node.Inputs.Count && found.Contains(node.Inputs[slot]);
 
         private static bool IsFresh(NodeProto node)
             => node.Domain is "" or "ai.onnx" ? FreshOutputs.Contains(node.OpType) : node.Domain == TrainingDomain;

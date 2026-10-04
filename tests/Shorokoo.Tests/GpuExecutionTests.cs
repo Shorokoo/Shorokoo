@@ -613,7 +613,22 @@ public class GpuExecutionTests
         Assert.Equal(System.Runtime.InteropServices.MemoryMarshal.AsBytes<float>(values).ToArray(), onCard.CopyRawMemory());
         Assert.Equal<object>([2f, 4f, 6f], onCard.DebugData);
         Assert.Equal((MemorySpace.Cuda(0), false, false), (onCard.Space, onCard.IsHostResident, onCard.IsDisposed));
+        Assert.Equal(System.Runtime.InteropServices.MemoryMarshal.AsBytes<float>((float[])[4f, 8f, 12f]).ToArray(), doubled.Execute(onCard.Shared())[0].ToTensorData().CopyRawMemory());
         Assert.Equal([4f, 8f, 12f], doubled.Execute(onCard)[0].ToTensorData().As<float32>().CopyMemory());
+    }
+
+    [CudaFact]
+    public void CudaProvider_AnInMemoryLoaderOverTheCardBatchesAsOneOverTheHostDoes()
+    {
+        using var ctx = new ComputeContext();
+        var (inputs, targets) = (TrainingRigHelpers.InBatch(1f, 2f, 3f, 4f, 5f, 6f), TrainingRigHelpers.TargetBatch(2f, 4f, 6f, 8f, 10f, 12f));
+        var (onCardInputs, onCardTargets) = (inputs.CopyTo(ctx), targets.CopyTo(ctx));
+        var onCard = new InMemoryDataLoader(onCardInputs, onCardTargets, batchSize: 3, shuffle: true, seed: 7);
+        var onHost = new InMemoryDataLoader(inputs, targets, batchSize: 3, shuffle: true, seed: 7);
+        float[] Rows(DataBatch batch) => ((TensorData)((TensorDataStruct)batch.Target).Fields["targets"]).As<float32>().CopyMemory();
+
+        Assert.False(((TensorData)onCardTargets.Fields["targets"]).IsHostResident);
+        Assert.Equal([.. Enumerable.Range(0, 4).SelectMany(_ => Rows(onHost.Next()))], Enumerable.Range(0, 4).SelectMany(_ => Rows(onCard.Next())));
     }
 
     /// <summary>

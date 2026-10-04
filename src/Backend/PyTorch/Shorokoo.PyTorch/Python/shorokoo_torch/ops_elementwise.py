@@ -1,7 +1,10 @@
 """ONNX elementwise math and activations, over torch tensors.
 
-Every helper is functional -- it never writes into a tensor it is handed -- and takes the node's
-inputs positionally and its attributes as keywords named as ONNX names them, with ONNX's defaults.
+Every helper takes the node's inputs positionally and its attributes as keywords named as ONNX
+names them, with ONNX's defaults, and writes into no tensor it is handed but the `_out` a few take:
+clip, gelu, softmax and log_softmax write their result into `_out`, which a run hands them only
+while it computes no gradient -- a range of memory the run consumed, or an operand nothing reads
+after the node, their very input among them (the runtime's place_into and write_over).
 """
 
 import functools

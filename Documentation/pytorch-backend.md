@@ -287,9 +287,10 @@ so the per-session settings map only partly:
 **Precision on CUDA.** `float32` is computed in full `float32` precision unless the context allows
 TensorFloat-32 ([Precision](inference.md#precision-gpu-backends)). torch's two switches for it are
 the whole process's, so a run sets them from its session as it starts — about 0.3 µs — whatever
-they were before, and runs of sessions that set them differently do not overlap: while a run that
-allows TensorFloat-32 is running, the other runs on the cards wait, and the other way round. A run
-on the CPU sets neither.
+they were before, and runs of sessions that set them differently do not overlap: runs in one
+precision run on the cards beside one another, and a run in the other waits until they are done —
+runs arriving in the first precision meanwhile wait behind it, so neither keeps the other out. A
+run on the CPU sets neither.
 
 ## Limitations
 

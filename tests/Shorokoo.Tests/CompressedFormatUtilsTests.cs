@@ -1546,7 +1546,7 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
     }
 
     [Fact]
-    public void TestZstdSkptEntryDeclaresItsSizeSoAnOversizedTensorIsRefusedUpFront()
+    public void TestEveryZstdFrameReadMustDeclareItsSizeSoAnOversizedTensorIsRefusedUpFront()
     {
         var (model, numOut, input) = BuildCompressibleSkptModel();
         var path = P("zstd-size.skpt");
@@ -1566,6 +1566,18 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
             e.Key == SkptFileFormat.ConfigEntryName ? System.Text.Encoding.UTF8.GetBytes(config.ToJsonString())
             : e.Key == SkptFileFormat.WeightsEntryPath ? huge : e.Value))]);
         Assert.Equal(ErrorCodes.ST003, Assert.Throws<ModelException>(() => Persistence.Load(tamperedPath)).ErrorCode);
+
+        using var undeclaring = new ZstdSharp.Compressor(CompressedFormatUtils.DefaultCompressionLevel);
+        undeclaring.SetParameter(ZstdSharp.Unsafe.ZSTD_cParameter.ZSTD_c_contentSizeFlag, 0);
+        var unsized = undeclaring.Wrap(CompressedFormatUtils.Decompress(stored)).ToArray();
+        config["data"]!["weights"]!["sha256"] = SkptFileFormat.Sha256Hex(unsized);
+        RewriteSkpt(tamperedPath, [.. entries.Select(e => (e.Key,
+            e.Key == SkptFileFormat.ConfigEntryName ? System.Text.Encoding.UTF8.GetBytes(config.ToJsonString())
+            : e.Key == SkptFileFormat.WeightsEntryPath ? unsized : e.Value))]);
+        Assert.Contains(SkptFileFormat.WeightsEntryPath, Assert.Throws<InvalidDataException>(() => Persistence.Load(tamperedPath)).Message);
+        var unsizedSafeTensors = P("unsized.zsafetensor");
+        File.WriteAllBytes(unsizedSafeTensors, unsized);
+        Assert.Contains(unsizedSafeTensors, Assert.Throws<InvalidDataException>(() => CompressedFormatUtils.LoadCompressedSafeTensors(unsizedSafeTensors)).Message);
     }
 
     /// <summary>Every file of a .skpt checkpoint directory keyed by its manifest-style relative

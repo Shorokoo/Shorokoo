@@ -169,7 +169,9 @@ internal sealed class Arena
     /// <summary>
     /// Hands back to the system the committed granules no block is over, idle longest first, until
     /// they come to <paramref name="bytes"/> or none is left: a run of adjacent ones at a time.
-    /// Answers the bytes handed back, and in <paramref name="runs"/> how many runs that was.
+    /// Answers the bytes handed back, and in <paramref name="runs"/> how many runs that was. Where the
+    /// system will not take a run back, it stays committed and idle, and nothing more is handed back
+    /// this time.
     /// </summary>
     internal long Decommit(long bytes, out int runs)
     {
@@ -184,12 +186,12 @@ internal sealed class Arena
             while (first > 0 && IsIdle(chunk, first - 1)) first--;
             while (last + 1 < chunk.Committed.Length && IsIdle(chunk, last + 1)) last++;
             var count = last - first + 1;
+            if (!_backing.Decommit(chunk.Base, chunk.State, first, count)) break;
             for (var g = first; g <= last; g++)
             {
                 Unidle(chunk, g);
                 chunk.Committed[g] = false;
             }
-            _backing.Decommit(chunk.Base, chunk.State, first, count);
             CommittedBytes -= count * _granule;
             released += count * _granule;
             runs++;
@@ -222,14 +224,15 @@ internal sealed class Arena
 
     /// <summary>
     /// Releases the address space of every chunk no block is carved in, after handing back what is
-    /// committed there: what an arena whose account has closed does once its last block goes.
+    /// committed there: what an arena whose account has closed does once its last block goes. A chunk
+    /// the system would not take all of its memory back from stays, for a later call to try again.
     /// </summary>
     internal void ReleaseEmptyChunks()
     {
         DecommitAll(out _);
         for (var i = 0; i < _chunks.Count; i++)
         {
-            if (_chunks[i] is not { CarvedUnits: 0 } chunk) continue;
+            if (_chunks[i] is not { CarvedUnits: 0 } chunk || chunk.Committed.AsSpan().Contains(true)) continue;
             RemoveFree((chunk.Units, chunk.Index, 0));
             _backing.Release(chunk.Base, chunk.Bytes, chunk.State);
             ReservedBytes -= chunk.Bytes;
@@ -460,6 +463,13 @@ internal abstract class ArenaBacking
 /// mapping with no access, made readable and writable to commit and dropped with
 /// <c>madvise(MADV_DONTNEED)</c> to decommit. Committed pages are zeroed by the system as they are
 /// first touched, and are the process's from then until decommitted.
+///
+/// <para>On Linux a range committed once stays readable and writable as it is decommitted: Linux
+/// keeps a mapping for each stretch of address space of one protection, and a process may have only
+/// so many (<c>vm.max_map_count</c>), so a granule going back to no access between two committed
+/// ones would cost two more — enough, granule by granule, to run a process out of them. What
+/// <c>MADV_DONTNEED</c> drops is the process's no more either way, and is zeroed as it is next
+/// touched.</para>
 /// </summary>
 internal sealed partial class HostMemory : ArenaBacking
 {
@@ -496,14 +506,8 @@ internal sealed partial class HostMemory : ArenaBacking
     {
         var at = @base + (nint)(first * Granule);
         var bytes = (nuint)(count * Granule);
-        if (OperatingSystem.IsWindows())
-        {
-            VirtualFree(at, bytes, MemDecommit);
-            return true;
-        }
-        madvise(at, bytes, MadvDontNeed);
-        mprotect(at, bytes, ProtNone);
-        return true;
+        if (OperatingSystem.IsWindows()) return VirtualFree(at, bytes, MemDecommit);
+        return madvise(at, bytes, MadvDontNeed) == 0;
     }
 
     private const uint MemCommit = 0x1000;

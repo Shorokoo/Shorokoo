@@ -1030,7 +1030,7 @@ public class CoreUtilsCoverageTests
         again.Dispose();
         host.Shared.Close(account);
 
-        Assert.Equal([4 * MiB + 4096, Page, Page, 0, MiB, 0, 3 * MiB - 2 * Page + 4096], figures);
+        Assert.Equal([4 * MiB + 4096, Page, 0, 0, MiB, 0, 3 * MiB - Page + 4096], figures);
         Assert.True(reused);
         Assert.Equal(0L, host.Shared.Statistics(account).TotalAllocatedBytes);
     }
@@ -1110,6 +1110,21 @@ public class CoreUtilsCoverageTests
         host.Shared.Close(account);
 
         Assert.Equal((false, 0L), (aliased, inUse));
+    }
+
+    [Fact]
+    public void TestABlockOnACardHandsBackItsFirstGranulesMemoryButKeepsItsAddressUntilItGoes()
+    {
+        const long G = FakeCard.GranuleBytes;
+        var card = new FakeCard();
+        var first = card.Allocator.Allocate(3 * G, out _);
+        card.Allocator.ReleaseRange(first, 0, 2 * G, toTheEnd: false);
+        var committed = card.Committed;
+        var second = card.Allocator.Allocate(G, out _);
+        card.Allocator.Free(first);
+        card.Allocator.Free(second);
+
+        Assert.Equal((2 * G, false, 0L), (committed, second == first, card.Allocator.Statistics(card.Allocator.Placements).InUseBytes));
     }
 
     [Fact]

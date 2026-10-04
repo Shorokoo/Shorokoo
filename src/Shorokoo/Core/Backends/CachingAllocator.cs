@@ -156,8 +156,9 @@ internal sealed unsafe class CachingAllocator
     /// <summary>What a block is: its size class, what was asked for, the account it is charged to,
     /// where its memory came from, the account's call it was last counted in, whether that account
     /// has handed it over (<see cref="HandOver"/>), and the parts of it handed back while the rest
-    /// was still in use (<see cref="ReleaseRange"/>) — by offset, in order, none where none was —
-    /// with their bytes, and those of them that had been asked for.</summary>
+    /// was still in use (<see cref="ReleaseRange"/>) — by offset, in order, none where none was;
+    /// whether the memory of its first granule went back to the card with the block still carved
+    /// over it — with their bytes, and those of them that had been asked for.</summary>
     private struct Block
     {
         internal long Size;
@@ -167,6 +168,7 @@ internal sealed unsafe class CachingAllocator
         internal Source Source;
         internal bool HandedOver;
         internal List<(long Start, long End)>? Released;
+        internal bool FirstGone;
         internal long ReleasedBytes;
         internal long ReleasedRequested;
     }
@@ -189,16 +191,23 @@ internal sealed unsafe class CachingAllocator
 
         private int Slot(IntPtr key) => (int)(((ulong)key >> 6) * 0x9E3779B97F4A7C15UL >> 40) & (_entries.Length - 1);
 
-        internal void Add(IntPtr key, in Block value)
+        /// <summary>Adds <paramref name="value"/> under <paramref name="key"/>; false, adding nothing,
+        /// where a block is out under that address already.</summary>
+        internal bool Add(IntPtr key, in Block value)
         {
             if ((_count + 1) * 2 > _entries.Length) Grow();
             var entries = _entries;
             var mask = entries.Length - 1;
             var i = Slot(key);
-            while (entries[i].Key != IntPtr.Zero && entries[i].Key != key) i = (i + 1) & mask;
-            if (entries[i].Key == IntPtr.Zero) _count++;
+            while (entries[i].Key != IntPtr.Zero)
+            {
+                if (entries[i].Key == key) return false;
+                i = (i + 1) & mask;
+            }
+            _count++;
             entries[i].Key = key;
             entries[i].Value = value;
+            return true;
         }
 
         internal ref Block Find(IntPtr key)
@@ -593,15 +602,18 @@ internal sealed unsafe class CachingAllocator
     /// <summary>Records <paramref name="block"/> as handed to <paramref name="account"/>, and as used
     /// by the account's call where it was not counted in it already (<paramref name="call"/> is the
     /// call it was last counted in).</summary>
+    /// <exception cref="InvalidOperationException">A block is out at that address already: the two
+    /// could not be told apart as they are let go of.</exception>
     private IntPtr Hand(IntPtr block, long size, long requested, Account account, Source source, long call)
     {
+        if (!_blocks.Add(block, new Block { Size = size, Requested = requested, Account = account, Source = source, Call = account.CallNumber }))
+            throw new InvalidOperationException($"Shorokoo's allocator was about to hand out the block at 0x{block:x} {Where} while a block it handed out there is still in use.");
         Observer?.Invoke(new Event(true, OnCard, block, requested, size, Fresh: call < 0));
         if (call != account.CallNumber)
         {
             account.Used += size;
             if (account.Used > account.MaxUsed) account.MaxUsed = account.Used;
         }
-        _blocks.Add(block, new Block { Size = size, Requested = requested, Account = account, Source = source, Call = account.CallNumber });
         account.InUse += size;
         account.Requested += requested;
         account.Allocations++;
@@ -630,14 +642,14 @@ internal sealed unsafe class CachingAllocator
             account.InUse -= block.Size - block.ReleasedBytes;
             account.Requested -= block.Requested - block.ReleasedRequested;
             if (block.HandedOver) account.HandedOver -= block.Size - block.ReleasedBytes;
-            if (block.Released is { } released)
+            if (block.Released is not null || block.FirstGone)
             {
                 // Parts of it went back while the rest was in use, so what is left is not a block to
                 // keep whole: it goes back to the arena as those parts did -- on a card once work
                 // this thread's call queued is done with it.
                 if (OnCard && scope is not null && scope.Charges(account)) AwaitCard();
                 var arena = ArenaOf(block.Source, account);
-                foreach (var (from, to) in Outside(released, 0, block.Size)) arena.Uncarve(pointer + (nint)from, to - from);
+                foreach (var (from, to) in Outside(block.Released, 0, block.Size)) arena.Uncarve(pointer + (nint)from, to - from);
                 account.Blocks--;
                 if (account.Closed) Emptied(account, block.Source);
                 return;
@@ -728,7 +740,11 @@ internal sealed unsafe class CachingAllocator
     /// covers. The whole units of the block's arena lying inside it — 4 KiB pages on the host,
     /// granules on a card, 512 bytes in the card's arena of small blocks — go back to the arena:
     /// still committed, for the account's next request to be carved from, and shed as what the
-    /// account keeps is. On a card,
+    /// account keeps is. All but the block's first unit, which stays carved for as long as the block
+    /// is out: the block is known by its address until it is let go of, and a block carved there
+    /// meanwhile could not be told from it. Where that unit is a granule of its own, as in an
+    /// account's arena on a card, its memory goes back to the card all the same, its address staying
+    /// the block's. On a card,
     /// where this thread's call charges the block's account, the card is waited for first: work the
     /// call queued may still read the range. Answers the bytes handed back that lie in the part —
     /// up to what was asked for of the block, where it runs on to the end, not the rest of the last
@@ -748,14 +764,24 @@ internal sealed unsafe class CachingAllocator
             var start = (offset + unit - 1) / unit * unit;
             var end = toTheEnd ? block.Size : Math.Min(block.Size, (offset + length) / unit * unit);
             if (end <= start) return 0;
-            var pieces = Outside(block.Released, start, end);
-            if (pieces.Count == 0) return 0;
+            var pieces = Outside(block.Released, Math.Max(start, unit), end);
+            // The first unit's memory goes back only where it is a granule of its own.
+            var first = start == 0 && !block.FirstGone && OnCard && block.Source == Source.Arena;
+            if (pieces.Count == 0 && !first) return 0;
             if (OnCard && scope is not null && scope.Charges(account)) AwaitCard();
+            if (first && arena.DecommitCarved(pointer, unit) == unit)
+            {
+                block.FirstGone = true;
+                account.Shrinkages++;
+                pieces.Insert(0, (0, unit));
+            }
+            else if (pieces.Count == 0)
+                return 0;
             long released = 0, inside = 0;
             var partEnd = toTheEnd ? block.Requested : offset + length;
             foreach (var (from, to) in pieces)
             {
-                arena.Uncarve(pointer + (nint)from, to - from);
+                if (from >= unit) arena.Uncarve(pointer + (nint)from, to - from);
                 released += to - from;
                 inside += Math.Max(0, Math.Min(to, partEnd) - Math.Max(from, offset));
                 var asked = Math.Max(0, Math.Min(to, block.Requested) - from);
@@ -763,7 +789,8 @@ internal sealed unsafe class CachingAllocator
                 block.ReleasedRequested += asked;
                 account.Requested -= asked;
             }
-            block.Released = Merged(block.Released, pieces);
+            if (block.FirstGone) pieces.RemoveAll(piece => piece.Start == 0);
+            if (pieces.Count > 0) block.Released = Merged(block.Released, pieces);
             block.ReleasedBytes += released;
             account.InUse -= released;
             if (block.HandedOver) account.HandedOver -= released;

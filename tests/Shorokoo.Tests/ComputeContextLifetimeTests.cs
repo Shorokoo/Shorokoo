@@ -1270,7 +1270,8 @@ public class ComputeContextLifetimeCoverageTests
     /// <summary>
     /// <paramref name="graph"/> run consuming A and B, each a value a session made in its own memory,
     /// and its outputs deleted one by one: after the run and after each deletion, what that session
-    /// has in use, the bytes of the outputs still standing on a block, and what
+    /// has in use, the bytes of the outputs still standing on a block with the first page of each
+    /// block none of them stands at the start of, which stays with the block until it goes, and what
     /// <paramref name="context"/>'s books hold; and the most outputs that stood on one block.
     /// </summary>
     internal static ((long InUse, long OnBlocks, long Books)[] Stages, int MostOnABlock) OutputsOnBlocksEnding(
@@ -1289,8 +1290,12 @@ public class ComputeContextLifetimeCoverageTests
         var outputs = context.Compile(graph).Execute(Made(a), Made(b)).Select(o => o.ToTensorData()).ToList();
         var most = outputs.Where(o => o.Block is not null).GroupBy(o => o.Block).Max(g => (int?)g.Count()) ?? 0;
         List<(long, long, long)> stages = [];
-        void Stage() => stages.Add((made.ReadArenaStatistics()!.Value.InUseBytes,
-            outputs.Where(o => !o.IsDisposed && o.Block is not null).Sum(o => o.ByteCount), context.ReadDeviceMemoryUse().AttachedBytes));
+        void Stage()
+        {
+            var standing = outputs.Where(o => !o.IsDisposed && o.Block is not null).ToList();
+            var firstPages = standing.GroupBy(o => o.Block).Count(block => block.All(o => ((IOnnxData)o).Value.Range!.Value.Offset != 0)) * (4L << 10);
+            stages.Add((made.ReadArenaStatistics()!.Value.InUseBytes, standing.Sum(o => o.ByteCount) + firstPages, context.ReadDeviceMemoryUse().AttachedBytes));
+        }
         Stage();
         foreach (var output in outputs)
         {
@@ -1327,7 +1332,7 @@ public class ComputeContextLifetimeCoverageTests
             output.Delete();
             if (!block.IsReleased) held.Add(block.HeldBytes);
         }
-        Assert.Equal([4L << 20, 2L << 20], held);
+        Assert.Equal([4L << 20, (2L << 20) + (4L << 10)], held);
     }
 
     /// <summary>

@@ -198,6 +198,23 @@ internal sealed class Arena
     /// <summary>Hands back to the system every committed granule no block is over.</summary>
     internal long DecommitAll(out int runs) => Decommit(long.MaxValue, out runs);
 
+    /// <summary>
+    /// Hands back to the system the memory of the whole granules at <paramref name="address"/> for
+    /// <paramref name="bytes"/>, which stay carved: a part of a block nothing reads any more whose
+    /// address must not be carved again while the block is out. In an arena whose unit is its
+    /// granule. Answers the bytes handed back: none where the system would not take them.
+    /// </summary>
+    internal long DecommitCarved(IntPtr address, long bytes)
+    {
+        var chunk = ChunkOf(address);
+        var first = ((long)address - (long)chunk.Base) / _granule;
+        var count = bytes / _granule;
+        if (!_backing.Decommit(chunk.Base, chunk.State, first, count)) return 0;
+        for (var g = first; g < first + count; g++) chunk.Committed[g] = false;
+        CommittedBytes -= count * _granule;
+        return count * _granule;
+    }
+
     /// <summary>Whether no block is carved in the arena.</summary>
     internal bool IsEmpty => CarvedBytes == 0;
 

@@ -45,5 +45,9 @@
          placements and hands back values standing on a shared block (Core/Backends/PlacementProof.cs,
          Core/Backends/SharedBlock.cs), which are this assembly's. -->
     <InternalsVisibleTo Include="Shorokoo.PyTorch" />
+    <!-- A backend's host values address a piece of their own buffer for the range copies
+         (Core/Backends/IShorokooTensorValue.cs, HostPiece), which is how one longer than a span is
+         saved and loaded. -->
+    <InternalsVisibleTo Include="Shorokoo.Jax" />
   </ItemGroup>
 </Project>

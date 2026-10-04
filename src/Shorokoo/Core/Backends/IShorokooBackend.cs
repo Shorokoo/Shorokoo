@@ -342,18 +342,15 @@ public interface IShorokooBackend
     //
     // Returns false, having copied nothing, where this backend cannot copy part of a value; the
     // caller then falls back to CopyTensorToHost. The default serves a value the host can read
-    // itself, and a backend whose provider keeps values in its own memory overrides it where it can
-    // reach an arbitrary range of the allocation.
+    // itself, of any size, out of the piece of its buffer the value addresses (HostPiece), and a
+    // backend whose provider keeps values in its own memory overrides it where it can reach an
+    // arbitrary range of the allocation.
     bool TryCopyTensorRangeToHost(IShorokooTensorValue value, long byteOffset, Span<byte> destination)
     {
         ArgumentNullException.ThrowIfNull(value);
         if (!value.IsHostAccessible) return false;
-        var source = value.GetTensorDataAsSpan<byte>();
-        if (byteOffset < 0 || byteOffset > source.Length - destination.Length)
-            throw new ArgumentOutOfRangeException(nameof(byteOffset),
-                $"{destination.Length} bytes from offset {byteOffset} run past the value's {source.Length}.");
-        source.Slice((int)byteOffset, destination.Length).CopyTo(destination);
-        // The span is the value's last read (Shorokoo/Shorokoo#178).
+        value.HostPiece(byteOffset, destination.Length).CopyTo(destination);
+        // The piece is the value's last read (Shorokoo/Shorokoo#178).
         GC.KeepAlive(value);
         return true;
     }
@@ -365,17 +362,14 @@ public interface IShorokooBackend
     //
     // Returns false, having copied nothing, where this backend cannot write part of a value; the
     // caller then falls back to CreateTensorInBackendMemory over the whole contents. The default
-    // serves a value the host can write itself.
+    // serves a value the host can write itself, of any size, into the piece of its buffer the value
+    // addresses (HostPiece).
     bool TryCopyHostToTensorRange(IShorokooTensorValue value, long byteOffset, ReadOnlySpan<byte> source)
     {
         ArgumentNullException.ThrowIfNull(value);
         if (!value.IsHostAccessible) return false;
-        var destination = value.GetTensorMutableDataAsSpan<byte>();
-        if (byteOffset < 0 || byteOffset > destination.Length - source.Length)
-            throw new ArgumentOutOfRangeException(nameof(byteOffset),
-                $"{source.Length} bytes from offset {byteOffset} run past the value's {destination.Length}.");
-        source.CopyTo(destination.Slice((int)byteOffset, source.Length));
-        // The span is the value's last read (Shorokoo/Shorokoo#178).
+        source.CopyTo(value.HostPiece(byteOffset, source.Length));
+        // The piece is the value's last read (Shorokoo/Shorokoo#178).
         GC.KeepAlive(value);
         return true;
     }

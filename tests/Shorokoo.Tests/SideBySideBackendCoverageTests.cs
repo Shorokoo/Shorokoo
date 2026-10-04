@@ -808,6 +808,27 @@ public class SideBySideBackendCoverageTests
         Assert.Null(CudaLibraries.HeldUnder("shorokoo-nothing-of-this-name.dll"));
     }
 
+    [Fact]
+    public void TestAnEnvironmentWhoseCudaLibrariesAreNvidiasWheelsNamesAnotherReleaseTheProcessHoldsOfThem()
+    {
+        using var scratch = new CudaScratch();
+        var environment = scratch.Folder();
+        var windows = OperatingSystem.IsWindows();
+        var home = Directory.CreateDirectory(Path.Combine(scratch.Root, "python", windows ? "" : "bin")).FullName;
+        File.WriteAllText(Path.Combine(environment, "pyvenv.cfg"), $"home = {home}\nversion_info = 3.12.0\n");
+        File.WriteAllBytes(windows ? Path.Combine(home, "python312.dll") : Path.Combine(Directory.CreateDirectory(Path.Combine(home, "..", "lib")).FullName, "libpython3.12.so"), [0]);
+        var opened = Shorokoo.PythonHost.PythonEnvironment.Open(environment, "3.12", Shorokoo.PythonHost.PythonEnvironmentSource.Explicit);
+        var nvidia = Path.Combine(opened.SitePackages, "nvidia");
+        File.WriteAllBytes(Path.Combine(Directory.CreateDirectory(Path.Combine(nvidia, "cudnn", "lib")).FullName, "libcudnn.so.9"), [1]);
+        File.WriteAllBytes(Path.Combine(Directory.CreateDirectory(Path.Combine(nvidia, "cu13", "lib")).FullName, "libcublas.so.13"), [5]);
+        var other = scratch.Folder(("libcudnn.so.9", [9]));
+        string[] pinned = ["libcudnn.so.9", "libcublas.so.13"];
+
+        Assert.Equal(nvidia, opened.CudaLibraryDirectory);
+        Assert.Equal($"libcudnn.so.9 from '{other}'", CudaLibraries.Conflict(nvidia, pinned, [Path.Combine(other, "libcudnn.so.9"), Path.Combine(nvidia, "cu13", "lib", "libcublas.so.13")]));
+        Assert.Null(CudaLibraries.Conflict(nvidia, pinned, [Path.Combine(nvidia, "cudnn", "lib", "libcudnn.so.9")]));
+    }
+
     /// <summary>A folder of its own for one test's cache, its installed copies and the wheels its
     /// pins name, deleted afterwards.</summary>
     private sealed class CudaScratch : IDisposable

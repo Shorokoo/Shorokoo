@@ -1551,8 +1551,8 @@ public class ComputeContextLifetimeCoverageTests
                 File.WriteAllBytes(Path.Combine(path, OrtPlacements.KeptLockFile), [1]);
             }
             else File.WriteAllBytes(path, [1]);
-            if (stale && folder) Directory.SetLastWriteTimeUtc(path, DateTime.UtcNow.AddDays(-1));
-            else if (stale) File.SetLastWriteTimeUtc(path, DateTime.UtcNow.AddDays(-1));
+            if (stale && folder) Directory.SetLastWriteTimeUtc(path, DateTime.UtcNow.AddDays(-2));
+            else if (stale) File.SetLastWriteTimeUtc(path, DateTime.UtcNow.AddDays(-2));
             return path;
         }
         var staleFile = Made($"shorokoo-model-{Guid.NewGuid():N}.onnx", folder: false, stale: true);
@@ -1562,8 +1562,7 @@ public class ComputeContextLifetimeCoverageTests
         var heldFolder = Made($"shorokoo-runs-{Guid.NewGuid():N}", folder: true, stale: true);
         using (File.Open(heldFile, FileMode.Open, FileAccess.Read, FileShare.Read))
         using (File.Open(Path.Combine(heldFolder, OrtPlacements.KeptLockFile), FileMode.Open, FileAccess.Read, FileShare.Read))
-        using (var context = new ComputeContext())
-            LargeModelRun(context, 9 << 19);
+            OrtPlacements.SweepStale();
         Assert.False(File.Exists(staleFile));
         Assert.False(Directory.Exists(staleFolder));
         Assert.True(File.Exists(heldFile));

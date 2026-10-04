@@ -425,15 +425,34 @@ public abstract class OrtBackend : IShorokooBackend
             session.Placements = new OrtPlacements(
                 model,
                 written,
-                (variant, directory, externalData, shared) => Wrap(NewSession(
-                    variant, externalData is null ? graphOptimization : ShorokooGraphOptimization.DisableAll, logSeverity,
-                    deviceMemory, diagnostics with { TraceNodePlacement = false },
-                    directory, intraOpThreads, suppliedInitializers, precision,
-                    accounts: shared ? (session.HostAccount, session.CardAccount) : null, externalDataDirectory: externalData), []),
+                VariantBuilderFor(session, graphOptimization, logSeverity, deviceMemory, diagnostics, intraOpThreads, suppliedInitializers, precision),
                 this,
-                () => session.HeldBytes);
+                HeldBy(session));
         return session;
     }
+
+    /// <summary>
+    /// How the placements of <paramref name="session"/> build a session over a model of their own —
+    /// a variant charging <paramref name="session"/>'s allocator accounts, or a probe charging
+    /// accounts of its own — as <paramref name="session"/> was built. Made apart from the build so
+    /// that it holds what it names and nothing else: a closure the build's own lambdas share would
+    /// hold the model's bytes too, for as long as the placements live.
+    /// </summary>
+    private OrtPlacements.VariantBuilder VariantBuilderFor(
+        OrtSession session, ShorokooGraphOptimization graphOptimization, ShorokooLogSeverity logSeverity,
+        DeviceMemorySettings deviceMemory, DiagnosticSettings diagnostics, int intraOpThreads,
+        IReadOnlyList<SuppliedInitializer> suppliedInitializers, PrecisionSettings precision)
+        => (variant, modelFile, directory, externalData, shared) => Wrap(NewSession(
+            variant, externalData is null ? graphOptimization : ShorokooGraphOptimization.DisableAll, logSeverity,
+            deviceMemory, diagnostics with { TraceNodePlacement = false },
+            directory, intraOpThreads, suppliedInitializers, precision,
+            accounts: shared ? (session.HostAccount, session.CardAccount) : null, externalDataDirectory: externalData,
+            modelFile: modelFile), []);
+
+    /// <summary>What <paramref name="session"/> holds of its allocators' memory, read as its placements
+    /// build a variant; made apart from the build for the reason <see cref="VariantBuilderFor"/>
+    /// is.</summary>
+    private static Func<long> HeldBy(OrtSession session) => () => session.HeldBytes;
 
     /// <summary>
     /// The weights of <paramref name="model"/> a session on a card reads from copies of this
@@ -526,13 +545,9 @@ public abstract class OrtBackend : IShorokooBackend
         IReadOnlyList<SuppliedInitializer> handed = [.. suppliedInitializers, .. kept.Select(k => new SuppliedInitializer(k.Name, k.Value))];
         session.Placements = new OrtPlacements(
             directory, runs, kept.Select(k => k.Name).ToHashSet(StringComparer.Ordinal),
-            (variant, optimized, externalData, shared) => Wrap(NewSession(
-                variant, externalData is null ? graphOptimization : ShorokooGraphOptimization.DisableAll, logSeverity,
-                deviceMemory, diagnostics with { TraceNodePlacement = false },
-                optimized, intraOpThreads, handed, precision,
-                accounts: shared ? (session.HostAccount, session.CardAccount) : null, externalDataDirectory: externalData), []),
+            VariantBuilderFor(session, graphOptimization, logSeverity, deviceMemory, diagnostics, intraOpThreads, handed, precision),
             this,
-            () => session.HeldBytes);
+            HeldBy(session));
         return session;
     }
 
@@ -630,13 +645,14 @@ public abstract class OrtBackend : IShorokooBackend
     }
 
     /// <summary>
-    /// An ONNX Runtime session over <paramref name="model"/>, writing the graph it will run into
-    /// <paramref name="optimizedDirectory"/> where one is named, and charging what it allocates to
-    /// <paramref name="accounts"/> where they are given — another session's, which keeps them —
-    /// or to accounts of its own.
+    /// An ONNX Runtime session over <paramref name="model"/> — or, where it is null, over the model
+    /// in <paramref name="modelFile"/>, which ONNX Runtime reads itself — writing the graph it will
+    /// run into <paramref name="optimizedDirectory"/> where one is named, and charging what it
+    /// allocates to <paramref name="accounts"/> where they are given — another session's, which
+    /// keeps them — or to accounts of its own.
     /// </summary>
     internal BuiltSession NewSession(
-        byte[] model,
+        byte[]? model,
         ShorokooGraphOptimization graphOptimization,
         ShorokooLogSeverity logSeverity,
         DeviceMemorySettings deviceMemory,
@@ -647,12 +663,13 @@ public abstract class OrtBackend : IShorokooBackend
         PrecisionSettings precision,
         (CachingAllocator.Account Host, CachingAllocator.Account? Card)? accounts = null,
         string? externalDataDirectory = null,
-        IReadOnlyList<TensorProto>? weightsToShare = null)
+        IReadOnlyList<TensorProto>? weightsToShare = null,
+        string? modelFile = null)
     {
         try
         {
             return NewSessionOnce(model, graphOptimization, logSeverity, deviceMemory, diagnostics, optimizedDirectory,
-                intraOpThreads, suppliedInitializers, precision, accounts, externalDataDirectory, weightsToShare);
+                intraOpThreads, suppliedInitializers, precision, accounts, externalDataDirectory, weightsToShare, modelFile);
         }
         catch (OnnxRuntimeException refused) when (refused.Message.Contains("CreateEnvWithGlobalThreadPools", StringComparison.Ordinal))
         {
@@ -660,12 +677,12 @@ public abstract class OrtBackend : IShorokooBackend
             // on them: from now on every session keeps its own.
             OrtEnvironment.NoSharedThreadPools();
             return NewSessionOnce(model, graphOptimization, logSeverity, deviceMemory, diagnostics, optimizedDirectory,
-                intraOpThreads, suppliedInitializers, precision, accounts, externalDataDirectory, weightsToShare);
+                intraOpThreads, suppliedInitializers, precision, accounts, externalDataDirectory, weightsToShare, modelFile);
         }
     }
 
     private BuiltSession NewSessionOnce(
-        byte[] model,
+        byte[]? model,
         ShorokooGraphOptimization graphOptimization,
         ShorokooLogSeverity logSeverity,
         DeviceMemorySettings deviceMemory,
@@ -676,7 +693,8 @@ public abstract class OrtBackend : IShorokooBackend
         PrecisionSettings precision,
         (CachingAllocator.Account Host, CachingAllocator.Account? Card)? accounts,
         string? externalDataDirectory,
-        IReadOnlyList<TensorProto>? weightsToShare)
+        IReadOnlyList<TensorProto>? weightsToShare,
+        string? modelFile)
     {
         // The `using` is load-bearing, not tidiness. SessionOptions is a SafeHandle, so it
         // carries a critical finalizer that calls OrtReleaseSessionOptions, and ORT takes its
@@ -745,7 +763,7 @@ public abstract class OrtBackend : IShorokooBackend
                     }
             InferenceSession session;
             using (CachingAllocator.Charge(host, card))
-                session = new InferenceSession(model, options);
+                session = model is null ? new InferenceSession(modelFile!, options) : new InferenceSession(model, options);
             // The values themselves are the caller's to keep alive for the session's life; this
             // keeps them reachable across the constructor, which takes them as bare handles.
             GC.KeepAlive(suppliedInitializers);

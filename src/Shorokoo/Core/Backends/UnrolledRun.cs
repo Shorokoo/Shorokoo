@@ -27,10 +27,19 @@ namespace Shorokoo.Core.Backends;
 ///
 /// <para>Null where a loop's trip count or condition cannot be told, a sequence reaches a node
 /// other than the sequence operators and <c>Identity</c>, or the graph holds a branch (<c>If</c>) or
-/// a <c>Scan</c>, whose bodies it does not run through.</para>
+/// a <c>Scan</c>, whose bodies it does not run through; and where unrolling would make more than
+/// <see cref="MaxNodes"/> nodes.</para>
 /// </summary>
 internal static class UnrolledRun
 {
+    /// <summary>
+    /// The most nodes a run is unrolled to. A run past it — a loop of a hundred thousand iterations,
+    /// or loops nested deep — is not told: a backend's model of a run asked about it answers that it
+    /// cannot tell, rather than walk, and hold, a run that size for every graph the memory-aware pass
+    /// asks it about.
+    /// </summary>
+    internal const int MaxNodes = 1 << 17;
+
     /// <summary>The domain of the nodes that read what a list holds.</summary>
     internal const string HoldDomain = "shorokoo.run";
 
@@ -287,8 +296,13 @@ internal static class UnrolledRun
             var current = inputs.Skip(2).ToList();
             var scans = Enumerable.Range(0, body.Outputs.Count - 1 - carried).Select(_ => new List<string>()).ToList();
             var condition = inputs.Count > 1 && inputs[1].Length > 0 ? inputs[1] : "";
+            // Each iteration makes its counter and its body's nodes at least: a loop that would run
+            // past what is left of the cap is not unrolled, and one whose iterations make more than
+            // that, through loops of their own or sequences held, stops where the run reaches it.
+            if (keepGoing != 0 && trips > (MaxNodes - Order.Count) / (body.Nodes.Count + 1)) return false;
             for (long iteration = 0; iteration < trips && keepGoing != 0; iteration++)
             {
+                if (Order.Count > MaxNodes) return false;
                 var rename = new Dictionary<string, string>(StringComparer.Ordinal);
                 var counter = Fresh(body.Inputs[0].Name);
                 Emit(Constant(counter, (int)TensorProto.DataType.Int64, iteration));

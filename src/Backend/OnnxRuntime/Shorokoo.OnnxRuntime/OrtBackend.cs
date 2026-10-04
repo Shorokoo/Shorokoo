@@ -197,6 +197,9 @@ public abstract class OrtBackend : IShorokooBackend
         }
     }
 
+    /// <summary>It has one: <see cref="OrtRunMemory"/>, over the graph a session writes out.</summary>
+    bool IShorokooBackend.ModelsARun => true;
+
     /// <summary>ONNX Runtime's allocation plan, with what its CPU kernels hold beside their outputs
     /// where this backend runs on the host.</summary>
     Shorokoo.Core.AutoDiffCheckpointing.RunLayout IShorokooBackend.RunLayout => _cudaDeviceId is null

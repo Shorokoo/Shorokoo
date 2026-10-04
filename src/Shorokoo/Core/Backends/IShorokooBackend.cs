@@ -279,6 +279,13 @@ public interface IShorokooBackend
     internal long? ModelledRunPeak(Shorokoo.Core.Factory.IR.ModelProto model, IReadOnlyList<OutputAlias> outputAliases,
         PrecisionSettings precision) => null;
 
+    // Whether this backend has the model of a run ModelledRunPeak answers from -- which may still
+    // answer null for a graph it cannot tell. The training rig asks ModelledRunPeak nothing of a
+    // backend without one: each question is a model built for that backend, only to hear null.
+    //
+    // A decorator forwards this, as it forwards every member with a default body.
+    internal bool ModelsARun => false;
+
     // Whether ModelledRunPeak answers in about the time the memory-aware pass takes to evaluate a
     // graph itself -- building nothing of this backend's own, a session say -- so that the pass may
     // weigh the many candidates its search leaves on a plateau by it, rather than only the steps

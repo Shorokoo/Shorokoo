@@ -245,13 +245,14 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
         /// <summary>
         /// Zeroes a gradient on its way out of an <c>IfElse</c> arm that did not run.
         ///
-        /// <para>An arm's forward is computed whether or not the condition picks it, and the arm
-        /// that did not run is handed a zero incoming gradient — so its contribution is
-        /// mathematically zero and arithmetic usually delivers that. Not always: an arm guarding a
-        /// computation that is invalid off its own path (<c>sqrt</c> of what is negative there,
-        /// a division by what is zero there) has a non-finite derivative, and NaN times zero is
-        /// NaN, not zero. That NaN then lands in the parameter's gradient and destroys the weight
-        /// on the very step the arm was not taken (Shorokoo/Shorokoo#313).</para>
+        /// <para>The backward of an arm is emitted at module scope, over the forward flattened out
+        /// of its branches, so the arm that did not run is still handed an incoming gradient: a
+        /// zero. Its contribution is then mathematically zero, but arithmetic does not always
+        /// deliver that: an arm guarding a computation that is invalid off its own path
+        /// (<c>sqrt</c> of what is negative there, a division by what is zero there) has a
+        /// non-finite derivative, and NaN times zero is NaN, not zero. That NaN would land in the
+        /// parameter's gradient and destroy the weight on the very step the arm was not taken
+        /// (Shorokoo/Shorokoo#313).</para>
         ///
         /// <para>Selecting is not arithmetic: an <c>If</c> hands back the branch it picks and never
         /// reads the other, so the zero it returns is a zero. The gate goes where the gradient
@@ -265,21 +266,24 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
         /// accumulates onto an absent optional rather than leaving it alone
         /// (Shorokoo/Shorokoo#314).</para>
         ///
-        /// <para>The zero takes its shape from the tensor the gradient is for, not from the
-        /// gradient. The gate's two branches are what the simplify after this pass scopes the arm's
-        /// backward into: read only by the branch taken with the arm, it runs only when the arm
-        /// ran, as the arm's forward does. A zero shaped off the gradient would read that backward
-        /// from the other branch and keep all of it at module scope, where it runs on every step
-        /// and fails on what is valid only on the arm's own path — a <c>Gather</c>'s indices
-        /// scattered back into a tensor they do not fit (Shorokoo/Shorokoo#492). An optional's
-        /// value may be absent where the arm did not run, so its zero still reads the
-        /// gradient.</para>
+        /// <para>A gradient leaving one run of nested arms is gated once per arm it crosses, each
+        /// gate an <c>If</c> on that arm's own condition with the gradient on the arm's side, and
+        /// its zero takes its shape from the tensor the gradient is for, not from the gradient.
+        /// The gate's taken branch is then the backward's only reader, and the simplify after this
+        /// pass scopes the backward into it: it runs only when the arm ran, as the arm's forward
+        /// does. A zero shaped off the gradient would read that backward from the other branch and
+        /// keep all of it at module scope, where it runs on every step and fails on what is valid
+        /// only on the arm's own path — a <c>Gather</c>'s indices scattered back into a tensor
+        /// they do not fit (Shorokoo/Shorokoo#492). An optional's value may be absent where the
+        /// arm did not run, so its zero still reads the gradient.</para>
         ///
-        /// <para>The arm's forward intermediates that its backward reads stay in the arm too:
-        /// read only from the gate's taken branch, on the arm's own condition, they are handed out
-        /// of the arm's <c>If</c> to it (<see cref="Fast.FastIfBranchScoper"/>). The backward
-        /// reads what the forward computed, a random draw included, and nothing of the arm runs
-        /// on a step that does not take it.</para>
+        /// <para>The arm's forward values that this backward reads stay in the arm too: read only
+        /// from the gate's taken branch, on the arm's own condition, they are handed out of the
+        /// arm's <c>If</c> to it (<see cref="Fast.FastIfBranchScoper"/>).</para>
+        ///
+        /// <para>A gradient whose node runs under several runs of arms is gated once, on whether
+        /// any of them ran. No one branch holds such a backward, so it stays at module scope and
+        /// its zero reads the gradient.</para>
         /// </summary>
         private static Variable GateOnLeavingAnArm(
             Variable grad,

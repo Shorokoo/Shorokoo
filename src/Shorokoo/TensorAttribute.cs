@@ -299,7 +299,8 @@ namespace Shorokoo
         /// <summary>
         /// A <see cref="TensorData"/> holding a copy of these elements, in the framework's own host
         /// memory — or, for elements past one managed array, in host memory of the backend that
-        /// holds them, copied a piece at a time.
+        /// holds them (of the one <see cref="ComputeContext.Default"/> runs on, where the runtime
+        /// that made them was not recorded), copied a piece at a time.
         ///
         /// <para>A copy, always. This attribute is immutable and every graph that captured it holds
         /// the same one, so a tensor sharing its bytes would be a way to edit a description through
@@ -322,8 +323,11 @@ namespace Shorokoo
             if (_held is not null)
             {
                 // Through one bounded buffer into host memory of the backend the held tensor is in,
-                // since no managed array holds the copy either.
-                var backend = _held.AllocatingBackend;
+                // since no managed array holds the copy either -- or, for a tensor whose producer was
+                // not recorded, which allocates nothing, of the one ComputeContext.Default runs on.
+                var backend = _held.AllocatingBackend is Core.Backends.UnrecordedBackend
+                    ? ComputeContext.Default.ResolvedBackend
+                    : _held.AllocatingBackend;
                 using var source = _held.OpenContentStream();
                 return TensorData.Create(Shape, atStorageDType ? StorageDType : DType,
                     Core.Backends.StagedUpload.ReadIntoHostMemory(

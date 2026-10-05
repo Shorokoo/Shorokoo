@@ -180,7 +180,8 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
             using var session = new Microsoft.ML.OnnxRuntime.InferenceSession(onnx);
             using var lengthValue = Microsoft.ML.OnnxRuntime.OrtValue.CreateTensorValueFromMemory((long[])[Length], []);
             using var inputValue = Microsoft.ML.OnnxRuntime.OrtValue.CreateTensorValueFromMemory((float[])[10f, 20f, 30f, 40f], [4L]);
-            using var outputs = session.Run(new Microsoft.ML.OnnxRuntime.RunOptions(), session.InputNames, [lengthValue, inputValue], session.OutputNames);
+            using var runOptions = new Microsoft.ML.OnnxRuntime.RunOptions();
+            using var outputs = session.Run(runOptions, session.InputNames, [lengthValue, inputValue], session.OutputNames);
             Assert.Equal(expected, outputs[0].GetTensorDataAsSpan<float>().ToArray());
         }
         finally

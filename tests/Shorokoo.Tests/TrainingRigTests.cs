@@ -2868,6 +2868,13 @@ public class TrainingRigTrainingLoopCoverageTests
     }
 
     [Fact]
+    public void TestAComparisonCastToAMaskInAnIfElseArmTrains()
+    {
+        Assert.Equal<float>([0.9f, 0.6f], TrainedParams(ComparisonMaskInOneIfArmModel.ComputationGraph, true, 1f, 2f));
+        Assert.Equal<float>([0.9f, 0.6f], TrainedParams(ComparisonMaskInOneIfArmModel.ComputationGraph, false, 1f, 2f));
+    }
+
+    [Fact]
     public void TestADropoutInAnIfElseArmTrainsOnTheMaskItsForwardDrew()
     {
         var (loss, weights) = LossAndTrainedParams(DropoutSquaredInOneIfArmModel.ComputationGraph, true, 1f, 1f, 1f, 1f, 1f, 1f, 1f, 1f);

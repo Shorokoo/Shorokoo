@@ -2593,6 +2593,18 @@ public partial class DropoutSquaredInOneIfArmModel
     }
 }
 
+/// <summary>A gain kept where it is not negative, by a comparison cast to a mask, in one arm of an
+/// <c>IfElse</c> on an input condition.</summary>
+[Module]
+public partial class ComparisonMaskInOneIfArmModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t, Scalar<bit> cond)
+    {
+        var y = t * Ones.Init([Scalar(2L)]);
+        return cond.IfElse(y * (y >= Scalar(0f)).Cast<float32>(), y);
+    }
+}
+
 /// <summary>A value gathered at indices valid only for longer inputs and reshaped twice, in an
 /// <c>IfElse</c> arm those inputs alone take.</summary>
 [Module]

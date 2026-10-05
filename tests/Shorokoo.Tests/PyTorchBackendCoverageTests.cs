@@ -1797,6 +1797,20 @@ public class PyTorchBackendCoverageTests
         CoreUtilsCoverageTests.AssertAHostTensorPastTwoGibibytesIsCopiedByThePiece(t => t.To(context));
     }
 
+    [Fact]
+    public void TestAGraphOverATensorPastTwoGibibytesIsRefusedOnTorchNamingTheProtobufCeiling()
+        => AssertAGraphOverATensorPastTwoGibibytesIsRefused(Torch);
+
+    internal static void AssertAGraphOverATensorPastTwoGibibytesIsRefused(IShorokooBackend backend)
+    {
+        var (attribute, _) = CoreUtilsCoverageTests.AttributePastTwoGibibytes();
+        var graph = new InternalComputationGraph([], [OnnxOp.Shape(OnnxOp.Constant(attribute))]);
+        var context = new ComputeContext(backend);
+
+        Assert.Contains("protobuf caps at 2 GiB", Assert.Throws<NotSupportedException>(() => context.Execute(graph)).Message);
+        Assert.Contains("protobuf caps at 2 GiB", Assert.Throws<NotSupportedException>(() => context.Compile(graph)).Message);
+    }
+
     internal static PyTuple HostFloats(long address, long elements)
     {
         PyObject[] dims = [elements.ToPython()];

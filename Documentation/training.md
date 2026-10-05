@@ -1171,10 +1171,11 @@ savedBytes += save.BytesWritten;
 ```
 
 The flat safetensors save streams each tensor from its storage with no extra copy, and a load reads
-the file forward a tensor at a time, so a file of any size is read back whole as long as each tensor
-in it is under 2 GiB. A tensor of 2 GiB or more is saved, and loads into a context whose memory is a
-backend's, but cannot be read back into the framework's own host memory
-([#48](https://github.com/Shorokoo/Shorokoo/issues/48)).
+the file forward a tensor at a time, so a file of any size, holding tensors of any size, is read back
+whole. Into host memory, a tensor one managed array holds (`Array.MaxLength` bytes, just under
+2 GiB) is read into the framework's own host memory; a larger one is read through one bounded host
+buffer (8 MiB) into host memory of the backend `ComputeContext.Default` runs on, so it is never whole
+in a managed array, and a run on that context reads it where it is.
 
 The `.skpt` save also streams each entry straight from the tensors' storage, with no managed copy of
 the training state. An entry compressed with `WithZstdCompressedData` is compressed as it streams,
@@ -1186,9 +1187,9 @@ intact.
 
 A checkpoint in device memory is saved from there: the flat and `.skpt` saves (file and directory
 form) write each tensor through one bounded host staging buffer (8 MiB), piece by piece, so the
-state is never whole in host memory. On ONNX Runtime CUDA the CUDA runtime copies the pieces; a
-backend that cannot copy part of a tensor (the PyTorch and JAX backends) stages one whole tensor at
-a time instead. The `.skpt` save reads each device tensor twice, once to hash it for the manifest
+state is never whole in host memory. On ONNX Runtime CUDA the CUDA runtime copies the pieces, and
+PyTorch and JAX copy them with their own operations; JAX brings a tensor no larger than the buffer
+home whole. The `.skpt` save reads each device tensor twice, once to hash it for the manifest
 and once to write it, and binds the model it writes from the weights' shapes and dtypes, copying
 only the smallest weights to the host. There is no direct device-to-disk path.
 

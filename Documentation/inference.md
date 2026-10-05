@@ -346,6 +346,11 @@ var y = compiled.Execute(x);
   in the last bits from the same model compiled from its graph.
 - On a backend that cannot use weights where they are (PyTorch, JAX), `LoadCompiled` is
   `Compile(Persistence.Load(...))`.
+- A graph holds each of its weights in one managed array, so a weight of more bytes than one holds
+  (`Array.MaxLength`, just under 2 GiB) cannot be bound into a graph: `Persistence.Load`,
+  `Persistence.ImportOnnx`, `Persistence.ImportSafeTensors` and `LoadCompiled` on PyTorch or JAX
+  refuse it with `NotSupportedException`. `LoadCompiled` and `ImportCompiledOnnx` on an ONNX
+  Runtime context, CPU or CUDA, read it into the context's memory instead.
 - `ImportCompiledOnnx` imports the `.onnx` as `Persistence.ImportOnnx` does and refuses it
   alike, with the same `namingScheme` and `inputShapes` overloads. Its weights are read from where
   they lie in the file, inline in the protobuf or in an external-data side file alike, so the
@@ -445,7 +450,8 @@ contract. In short, a backend provides:
   `CopyTensorToHost` and `TryCopyTensorRangeToHost`. Their defaults serve a backend whose memory
   the host reads; a backend that computes in memory of its own overrides each of them.
 - **Values in its runtime's host memory** — `CreateTensor`, `CreateTensorFromRawBytes`,
-  `CreateStringTensor`, `CreateSequence` — and `Release`, the one path its memory goes back by.
+  `CreateUninitializedHostTensor` (one a later move fills, of any size), `CreateStringTensor`,
+  `CreateSequence` — and `Release`, the one path its memory goes back by.
 
 ### The backend types
 
@@ -822,6 +828,12 @@ is `HostBackend.Instance`, readable by every host backend. `ComputeContext.Host`
 memory as a target for `To` and `CopyTo`; `Compile`, `Execute`, `Run` and `Eval` on it refuse,
 and it cannot be disposed.
 
+The framework's own host memory is one managed array per tensor, which holds at most
+`Array.MaxLength` bytes (just under 2 GiB). A larger tensor loaded or copied into host memory goes
+into host memory of a backend instead, through one bounded buffer (8 MiB) a piece at a time, never
+whole in a managed array: of the target context's backend, and of the one `ComputeContext.Default`
+runs on for `ComputeContext.Host`, `ToHost()` and a load into host memory.
+
 A graph's literals are
 [`TensorAttribute`s](core-types.md#two-kinds-of-concrete-tensor-tensordata-and-tensorattribute),
 immutable and without lifetime.
@@ -834,7 +846,7 @@ A tensor's memory never moves. None of these changes the tensor it is called on:
 |---|---|
 | `t.To(context)` | `t` itself, if `context`'s backend can read its memory as it stands; otherwise a new copy in `context`'s memory. Either way attached to `context`. |
 | `t.CopyTo(context)` | Always a new, independent copy in `context`'s memory, attached to `context`. |
-| `t.ToHost()` | `t` itself, if the host can read its memory; otherwise a new copy in the framework's own host memory, attached to nothing. |
+| `t.ToHost()` | `t` itself, if the host can read its memory; otherwise a new copy in host memory, attached to nothing. |
 
 A backend reads memory in place only on **the same device and the same runtime**. Host memory
 from a C# array counts as every host backend's. Two backends over one ONNX Runtime share card

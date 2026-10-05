@@ -189,10 +189,8 @@ static (TensorData x, TensorData y) MakeBatch(long seed)
 None of these shows in a small first run. Each can end a long one.
 
 - **Checkpoint size.** A `.skpt` data entry of 2 GiB or more, or an archive of 4 GiB or more, is refused
-  when saved. A flat safetensors file of any size loads back, but a single tensor of 2 GiB or more
-  in it cannot be loaded into host memory
-  ([#48](https://github.com/Shorokoo/Shorokoo/issues/48)). See
-  [skpt-checkpoints.md](skpt-checkpoints.md).
+  when saved. A flat safetensors file loads back whatever its size and the size of each tensor in
+  it. See [skpt-checkpoints.md](skpt-checkpoints.md).
 - **Save cost.** What a save allocates and how long it takes grow with the checkpoint:
   [What a save costs](training.md#what-a-save-costs).
 - **Out of memory.** A failed allocation arrives as `CR009` and says which pool ran out. On

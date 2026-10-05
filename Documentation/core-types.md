@@ -292,7 +292,9 @@ reading their elements throws.
 
 A tensor built from a C# array, including a checkpoint tensor parsed for binding,
 moves without a copy. A runtime-owned buffer (possibly on a card) or a string tensor
-is copied; the source memory is released either way.
+is copied; the source memory is released either way. An attribute keeps its elements in
+one managed array, so a tensor of more bytes than one holds (`Array.MaxLength`, just
+under 2 GiB) is refused with `NotSupportedException` and left as it was.
 
 `MoveToAttribute()` accepts any live tensor, a run output included, but refuses one a
 run is still reading. To keep a result and also make a literal of it, move a copy:

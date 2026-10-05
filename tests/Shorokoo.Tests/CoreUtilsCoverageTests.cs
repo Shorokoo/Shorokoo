@@ -1290,6 +1290,22 @@ public class CoreUtilsCoverageTests
     }
 
     [Fact]
+    public void TestARequestWhatALimitedAccountHasOutLeavesNoRoomForIsRefusedWithoutWaitingForTheCard()
+    {
+        const long G = FakeCard.GranuleBytes;
+        var card = new FakeCard();
+        var account = card.Allocator.Open("probe");
+        account.Limit = 8 * G;
+        using (CachingAllocator.Charge(null, account))
+        {
+            var kept = card.Allocator.Allocate(6 * G, out _);
+            card.Allocator.Free(card.Allocator.Allocate(2 * G, out _));
+            Assert.Equal((IntPtr.Zero, 0, 2 * G), (card.Allocator.Allocate(4 * G, out _), card.Waits, account.Held));
+            card.Allocator.Free(kept);
+        }
+    }
+
+    [Fact]
     public void TestTheCardIsWaitedForOutsideTheAllocatorsLockAndOnlyForWhatTheAskingCallLetGoOf()
     {
         const long G = FakeCard.GranuleBytes;

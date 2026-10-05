@@ -496,13 +496,18 @@ internal sealed unsafe class CachingAllocator
                 {
                     // Under a budget what the account keeps goes back first, as much as makes room;
                     // then what this call let go of on a card, once the card is done with it; and
-                    // then only what it has out counts.
-                    release = Shed(account, account.Charged + account.KeptBytes + size - limit);
-                    if (account.Charged + account.KeptBytes + size > limit && scope is not null && scope.Holds(account))
+                    // then only what it has out counts. Where what it has out leaves no room already,
+                    // nothing it keeps or holds could make any: none of it goes, and the card is not
+                    // waited for.
+                    if (account.Charged + size <= limit)
                     {
-                        if (!waited) continue;
-                        foreach (var (block, blockSize, from, last) in scope.TakeAllHeld(account)) account.Keep(block, blockSize, from, last);
-                        release.AddRange(Shed(account, account.Charged + account.KeptBytes + size - limit));
+                        release = Shed(account, account.Charged + account.KeptBytes + size - limit);
+                        if (account.Charged + account.KeptBytes + size > limit && scope is not null && scope.Holds(account))
+                        {
+                            if (!waited) continue;
+                            foreach (var (block, blockSize, from, last) in scope.TakeAllHeld(account)) account.Keep(block, blockSize, from, last);
+                            release.AddRange(Shed(account, account.Charged + account.KeptBytes + size - limit));
+                        }
                     }
                     if (account.Charged + size > limit)
                     {

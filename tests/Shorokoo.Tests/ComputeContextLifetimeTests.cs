@@ -1523,6 +1523,28 @@ public class ComputeContextLifetimeCoverageTests
     }
 
     [Fact]
+    public void TestASessionWhosePlanningRanOutOfMemoryStillPlacesTheSignaturesItAdopted()
+    {
+        var (a, b, l) = TwoHalvesValues(1024, 1024);
+        var (c, d, _) = TwoHalvesValues(512, 1024);
+        using var context = new ComputeContext();
+        var compiled = context.Compile(TwoHalves());
+        compiled.Execute(TensorData([1024L, 1024L], a), TensorData([1024L, 1024L], b));
+        OrtPlacements.PlanningFault = () => new OutOfMemoryException();
+        try
+        {
+            compiled.Execute(TensorData([512L, 1024L], c), TensorData([512L, 1024L], d));
+        }
+        finally
+        {
+            OrtPlacements.PlanningFault = null;
+        }
+        var outputs = compiled.Execute(TensorData([1024L, 1024L], a), TensorData([1024L, 1024L], b));
+        Assert.NotNull(outputs[0].ToTensorData().Block);
+        Assert.True(l.Zip(Floats(outputs[0].ToTensorData()), (x, y) => MathF.Abs(x - y) < 1e-5f).All(x => x));
+    }
+
+    [Fact]
     public void TestPlanningTheFirstRunOfALargeModelCopiesNoneOfItIntoManagedMemory()
     {
         const int N = 9 << 19;
@@ -1539,35 +1561,68 @@ public class ComputeContextLifetimeCoverageTests
     [Fact]
     public void TestAKeptModelFileOrFolderNoProcessHoldsIsSweptOnceStaleAndOneHeldOrFreshIsNot()
     {
-        string Made(string name, bool folder, bool stale)
+        string Temp(string prefix, string suffix = "") => Path.Combine(Path.GetTempPath(), $"{prefix}{Guid.NewGuid():N}{suffix}");
+        string[] files = [Temp("shorokoo-model-", ".onnx"), Temp("shorokoo-model-", ".onnx"), Temp("shorokoo-model-", ".onnx")];
+        string[] folders = [Temp("shorokoo-runs-"), Temp("shorokoo-runs-")];
+        var (staleFile, heldFile, freshFile, staleFolder, heldFolder) = (files[0], files[1], files[2], folders[0], folders[1]);
+        var old = DateTime.UtcNow.AddDays(-2);
+        try
         {
-            var path = Path.Combine(Path.GetTempPath(), name);
-            if (folder)
+            foreach (var file in files) File.WriteAllBytes(file, [1]);
+            foreach (var folder in folders)
             {
-                Directory.CreateDirectory(path);
-                File.WriteAllBytes(Path.Combine(path, OrtPlacements.KeptLockFile), [1]);
+                Directory.CreateDirectory(folder);
+                File.WriteAllBytes(Path.Combine(folder, OrtPlacements.KeptLockFile), [1]);
             }
-            else File.WriteAllBytes(path, [1]);
-            if (stale && folder) Directory.SetLastWriteTimeUtc(path, DateTime.UtcNow.AddDays(-2));
-            else if (stale) File.SetLastWriteTimeUtc(path, DateTime.UtcNow.AddDays(-2));
-            return path;
+            using (File.Open(heldFile, FileMode.Open, FileAccess.Read, FileShare.Read))
+            using (File.Open(Path.Combine(heldFolder, OrtPlacements.KeptLockFile), FileMode.Open, FileAccess.Read, FileShare.Read))
+            {
+                File.SetLastWriteTimeUtc(staleFile, old);
+                File.SetLastWriteTimeUtc(heldFile, old);
+                Directory.SetLastWriteTimeUtc(staleFolder, old);
+                Directory.SetLastWriteTimeUtc(heldFolder, old);
+                OrtPlacements.SweepStale();
+            }
+            Assert.False(File.Exists(staleFile));
+            Assert.False(Directory.Exists(staleFolder));
+            Assert.True(File.Exists(heldFile));
+            Assert.True(File.Exists(freshFile));
+            Assert.True(Directory.Exists(heldFolder));
         }
-        var staleFile = Made($"shorokoo-model-{Guid.NewGuid():N}.onnx", folder: false, stale: true);
-        var heldFile = Made($"shorokoo-model-{Guid.NewGuid():N}.onnx", folder: false, stale: true);
-        var freshFile = Made($"shorokoo-model-{Guid.NewGuid():N}.onnx", folder: false, stale: false);
-        var staleFolder = Made($"shorokoo-runs-{Guid.NewGuid():N}", folder: true, stale: true);
-        var heldFolder = Made($"shorokoo-runs-{Guid.NewGuid():N}", folder: true, stale: true);
-        using (File.Open(heldFile, FileMode.Open, FileAccess.Read, FileShare.Read))
-        using (File.Open(Path.Combine(heldFolder, OrtPlacements.KeptLockFile), FileMode.Open, FileAccess.Read, FileShare.Read))
-            OrtPlacements.SweepStale();
-        Assert.False(File.Exists(staleFile));
-        Assert.False(Directory.Exists(staleFolder));
-        Assert.True(File.Exists(heldFile));
-        Assert.True(File.Exists(freshFile));
-        Assert.True(Directory.Exists(heldFolder));
-        File.Delete(heldFile);
-        File.Delete(freshFile);
-        Directory.Delete(heldFolder, recursive: true);
+        finally
+        {
+            foreach (var file in files) File.Delete(file);
+            foreach (var folder in folders.Where(Directory.Exists)) Directory.Delete(folder, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void TestTheFirstFileASessionsPlacementsKeepStartsTheSweepOfStaleOnesOnce()
+    {
+        var backend = DefaultBackend.Instance;
+        (bool Started, int Swept) Sweeping(Func<IShorokooSession> build)
+        {
+            var swept = 0;
+            var sweep = new OrtPlacements.StaleSweep(() => Interlocked.Increment(ref swept));
+            OrtPlacements.SweepOnThisThread = sweep;
+            try
+            {
+                using (build())
+                using (build()) { }
+            }
+            finally
+            {
+                OrtPlacements.SweepOnThisThread = null;
+            }
+            if (sweep.Started) sweep.Start().Wait();
+            return (sweep.Started, swept);
+        }
+        const int N = 5 << 20;
+        var large = GraphOf($"x:float[1,{N}]", $"y:float[1,{N}]", Op("Add", "x b", "y"));
+        large.Initializers.Add(new TensorProto { Name = "b", data_type = 1, Dims = [1, N], RawData = new byte[4 * N] });
+        Assert.Equal((true, 1), Sweeping(() => backend.CreateSession(
+            ModelOf(large), ShorokooGraphOptimization.EnableAll, ShorokooLogSeverity.Fatal, new DeviceMemorySettings(), DiagnosticSettings.Default)));
+        Assert.Equal((true, 1), Sweeping(() => Aliasing(backend, GraphOf("a:float[4] b:float[4]", "O:float[4]", Op("Sub", "a b", "O")))));
     }
 
     [Fact]

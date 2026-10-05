@@ -592,6 +592,18 @@ public class CoreUtilsCoverageTests
             () => OnnxEngine.Eval(OnnxOp.ConstantOfShape(OnnxOp.Shape(Scalar(1f)), attribute))).Message);
     }
 
+    [Fact]
+    public void TestAnInputFreeOneShotRunOverALiteralPastTwoGibibytesIsBuiltUnoptimizedAsAnyInputFreeOneIs()
+    {
+        List<GraphOptimizationLevel> seen = [];
+        using var context = new ComputeContext(new OptimizationProbe(seen));
+        var (attribute, _) = AttributePastTwoGibibytes();
+
+        context.Execute(new InternalComputationGraph([], [OnnxOp.Shape(Scalar(1f))]));
+        context.Execute(new InternalComputationGraph([], [OnnxOp.Shape(OnnxOp.Constant(attribute))]));
+        Assert.Equal([GraphOptimizationLevel.ORT_DISABLE_ALL, GraphOptimizationLevel.ORT_DISABLE_ALL], seen);
+    }
+
     /// <summary>An attribute over a host tensor of 2 GiB + 8 bytes, moved into it as it stands with
     /// <paramref name="writes"/> made at their offsets, and the value it holds.</summary>
     internal static (TensorAttribute Attribute, IShorokooTensorValue Value) AttributePastTwoGibibytes(
@@ -827,6 +839,9 @@ public class CoreUtilsCoverageTests
         public CapturingBackendProbe(List<(DeviceMemorySettings, PrecisionSettings)> seen)
             : base((_, mem, precision) => { lock (seen) seen.Add((mem, precision)); }, ComputeDevice.Cpu, cudaDeviceId: null) { }
     }
+
+    private sealed class OptimizationProbe(List<GraphOptimizationLevel> seen) : OrtBackend(
+        (options, _, _) => { lock (seen) seen.Add(options.GraphOptimizationLevel); }, ComputeDevice.Cpu, cudaDeviceId: null);
 
     /// <summary>Records the settings each run was handed. No outputs, so every run returns nothing
     /// and every overload can be driven without a model.</summary>

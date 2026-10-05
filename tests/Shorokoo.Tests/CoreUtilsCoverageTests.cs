@@ -591,6 +591,17 @@ public class CoreUtilsCoverageTests
         return (attribute, value);
     }
 
+    [Fact]
+    public void TestAttributesPastTwoGibibytesLeftToTheCollectorMakeItCollect()
+        => Utils.OwnProcess.Run(typeof(CoreUtilsCoverageTests), nameof(AttributesPastTwoGibibytesLeftToTheCollectorMakeItCollect));
+
+    internal static void AttributesPastTwoGibibytesLeftToTheCollectorMakeItCollect()
+    {
+        var collections = GC.CollectionCount(2);
+        for (int i = 0; i < 8; i++) AttributePastTwoGibibytes();
+        Assert.True(GC.CollectionCount(2) - collections >= 3);
+    }
+
     // Keeps what the first write hands it, and stops the writer there.
     private sealed class FirstWriteStream : Stream
     {

@@ -482,9 +482,12 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 }
             }
 
+            // A constant is no work to run and valid on every path, so it stays where every reader
+            // can see it rather than cost an output and a placeholder.
             foreach (var b in kept)
                 foreach (var node in blocks[b].Nodes)
                 {
+                    if (node.OpCode == OpCodes.CONSTANT) continue;
                     if (!ctx.ConsumersOf.TryGetValue(node.Key, out var consumers)) continue;
                     foreach (var grp in node.FullOutputs)
                         foreach (var key in grp.Value)

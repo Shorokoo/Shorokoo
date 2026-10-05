@@ -2592,3 +2592,67 @@ public partial class DropoutSquaredInOneIfArmModel
         return cond.IfElse(dropped * dropped, y);
     }
 }
+
+/// <summary>A value gathered at indices valid only for longer inputs and reshaped twice, in an
+/// <c>IfElse</c> arm those inputs alone take.</summary>
+[Module]
+public partial class GatheredAndReshapedTwiceInAnUntakenIfElseArmModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var picked = (Tensor<float32>)OnnxOp.Gather(t, Vector(5L, 5L), axis: 0);
+        var r = (Tensor<float32>)OnnxOp.Reshape((Tensor<float32>)OnnxOp.Reshape(picked, Vector(2L, 1L), allowZero: false), Vector(2L), allowZero: false);
+        return (t.Reduce(ReduceKind.Max, keepDims: false).Scalar() > Scalar(100f)).IfElse(r, t);
+    }
+}
+
+/// <summary>A value of one <c>IfElse</c> arm reshaped twice in the same arm of a second
+/// <c>IfElse</c> on the same condition.</summary>
+[Module]
+public partial class ValueReshapedTwiceInASecondIfElseOnTheSameConditionModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t, Scalar<bit> cond)
+    {
+        var a = t * t + Scalar(1f);
+        return cond.IfElse(a, t) + cond.IfElse((Tensor<float32>)OnnxOp.Reshape((Tensor<float32>)OnnxOp.Reshape(a, Vector(2L, 1L), allowZero: false), Vector(2L), allowZero: false), t);
+    }
+}
+
+/// <summary>A gain gathered at indices valid only for longer inputs, in the untaken arm of an
+/// <c>IfElse</c>, and read by both arms of an <c>IfElse</c> nested in it on another
+/// condition.</summary>
+[Module]
+public partial class GainGatheredInAnUntakenArmAndReadByBothArmsOfANestedIfElseModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var y = t * Ones.Init([Scalar(2L)]);
+        var max = t.Reduce(ReduceKind.Max, keepDims: false).Scalar();
+        var picked = (Tensor<float32>)OnnxOp.Gather(y, Vector(5L, 5L), axis: 0);
+        return (max > Scalar(100f)).IfElse((max > Scalar(1f)).IfElse(picked * Scalar(2f), picked * Scalar(3f)), y);
+    }
+}
+
+/// <summary>A value of one <c>IfElse</c>'s then arm read again in the then arm of a second
+/// <c>IfElse</c> on the same condition.</summary>
+[Module]
+public partial class SharedValueInTwoIfElsesOnTheSameConditionModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t, Scalar<bit> c)
+    {
+        var a = t * t + Scalar(1f);
+        return c.IfElse(a, t) + c.IfElse(a * Scalar(2f), t);
+    }
+}
+
+/// <summary><see cref="SharedValueInTwoIfElsesOnTheSameConditionModel"/> with the shared value on
+/// the else side.</summary>
+[Module]
+public partial class SharedElseValueInTwoIfElsesOnTheSameConditionModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t, Scalar<bit> c)
+    {
+        var a = t * t + Scalar(1f);
+        return c.IfElse(t, a) + c.IfElse(t, a * Scalar(2f));
+    }
+}

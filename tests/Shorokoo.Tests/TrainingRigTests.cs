@@ -2757,6 +2757,7 @@ public class TrainingRigTrainingLoopCoverageTests
         Assert.Equal(2.5f, LossAfterOneStep(GainGatheredInAnUntakenElseArmModel.ComputationGraph), 1e-4f);
         Assert.Equal(2.5f, LossAfterOneStep(GainGatheredInANestedUntakenIfElseArmModel.ComputationGraph), 1e-4f);
         Assert.Equal(4f, LossAfterOneStep(GainGatheredInATakenIfElseArmModel.ComputationGraph), 1e-4f);
+        Assert.Equal(2.5f, LossAfterOneStep(GainGatheredInAnUntakenArmAndReadByBothArmsOfANestedIfElseModel.ComputationGraph), 1e-4f);
     }
 
     [Fact]

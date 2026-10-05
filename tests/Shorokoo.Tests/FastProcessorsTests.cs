@@ -156,6 +156,20 @@ public class FastProcessorsCoverageTests
             .Select(p => p.ModelId).Distinct().Count());
     }
 
+    [Fact]
+    public void TestAnIfElseArmRunsOnlyWhenTaken()
+    {
+        TensorData t = TensorData([2L], 1f, 2f);
+        Assert.True(AutoTest.AdvancedTestGraph<SharedValueInTwoIfElsesOnTheSameConditionModel>([], [t, Flag(true)], expected: [6.0, 15.0]));
+        Assert.True(AutoTest.AdvancedTestGraph<SharedValueInTwoIfElsesOnTheSameConditionModel>([], [t, Flag(false)], expected: [2.0, 4.0]));
+        Assert.True(AutoTest.AdvancedTestGraph<SharedElseValueInTwoIfElsesOnTheSameConditionModel>([], [t, Flag(false)], expected: [6.0, 15.0]));
+        Assert.True(AutoTest.AdvancedTestGraph<SharedElseValueInTwoIfElsesOnTheSameConditionModel>([], [t, Flag(true)], expected: [2.0, 4.0]));
+        Assert.True(AutoTest.AdvancedTestGraph<ValueReshapedTwiceInASecondIfElseOnTheSameConditionModel>([], [t, Flag(true)], expected: [4.0, 10.0]));
+        Assert.True(AutoTest.AdvancedTestGraph<ValueReshapedTwiceInASecondIfElseOnTheSameConditionModel>([], [t, Flag(false)], expected: [2.0, 4.0]));
+        Assert.True(AutoTest.AdvancedTestGraph<GatheredAndReshapedTwiceInAnUntakenIfElseArmModel>([], [t], expected: [1.0, 2.0]));
+        Assert.True(AutoTest.AdvancedTestGraph<GainGatheredInAnUntakenArmAndReadByBothArmsOfANestedIfElseModel>([], [t], expected: [1.0, 2.0]));
+    }
+
     private static bool GateBlocks(string opCode)
     {
         var graph = new InternalComputationGraph();

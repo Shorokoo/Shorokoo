@@ -36,7 +36,7 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
         Assert.Equal((float[])[1f, 2f, 3f, 4f], loaded.SelectMany(t => t.Data.As<float32>().CopyMemory<float>()).ToArray());
     }
 
-    [Fact(Skip = "#48: a host load reads each tensor into one byte array, which holds fewer bytes than this tensor's 2 GiB + 8")]
+    [Fact]
     public void TestATensorPastTwoGibibytesInASafeTensorsFileIsReadIntoHostMemory()
     {
         const int Elements = (1 << 29) + 2;
@@ -47,9 +47,16 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
             file.Write(BitConverter.GetBytes(5f));
         }
         var loaded = SafeTensorLoader.LoadSafeTensors(path).Single().Data;
-
-        Assert.Equal(4L * Elements, loaded.ContentByteLength);
-        Assert.Equal(5f, loaded.ValueAt<float>(Elements - 1));
+        try
+        {
+            Assert.True(loaded.IsHostResident);
+            Assert.Equal(4L * Elements, loaded.ContentByteLength);
+            Assert.Equal(5f, loaded.ValueAt<float>(Elements - 1));
+        }
+        finally
+        {
+            loaded.Delete();
+        }
     }
 
     // A SafeTensors file of float tensors at the data offsets given, each starting with the values

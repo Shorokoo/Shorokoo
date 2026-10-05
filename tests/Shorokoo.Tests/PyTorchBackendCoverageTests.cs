@@ -1593,8 +1593,17 @@ public class PyTorchBackendCoverageTests
         return placed.Where + (backend.OnCuda && placed.Allocated + placed.Bytes > plain.Allocated ? " allocating" : "");
     }
 
+    internal static void ReleaseWhatEarlierTestsLeft()
+    {
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        GC.Collect();
+        using (PythonRuntime.Gil()) Finalizer.Instance.Collect();
+    }
+
     internal static (long Peak, T Result) CardPeak<T>(Func<T> run)
     {
+        ReleaseWhatEarlierTestsLeft();
         long before;
         using (PythonRuntime.Gil())
         {

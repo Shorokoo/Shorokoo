@@ -148,10 +148,12 @@ public class PyTorchCudaHardwareTests
         using var free = Cuda.Value.CreateSession(NegModel(), default, default, DeviceMemorySettings.Default);
         using var tight = Cuda.Value.CreateSession(NegModel(), default, default, new DeviceMemorySettings { LimitBytes = mebibyte });
         using var roomy = Cuda.Value.CreateSession(NegModel(), default, default, new DeviceMemorySettings { LimitBytes = 64 * mebibyte });
+        PyTorchBackendCoverageTests.ReleaseWhatEarlierTestsLeft();
         var before = free.ReadArenaStatistics()!.Value;
         using var x = Cuda.Value.CreateUninitializedTensorInBackendMemory(ShorokooTensorElementType.Float, [4 * mebibyte]);
         var feeds = new Dictionary<string, IShorokooTensorValue> { ["x"] = x };
         IShorokooTensorValue Kept(IShorokooSession session) => session.Run(feeds, ["y"], RunSettings.Default)[0];
+        PyTorchBackendCoverageTests.ReleaseWhatEarlierTestsLeft();
         var after = free.ReadArenaStatistics()!.Value;
 
         Assert.Equal(-1, before.LimitBytes);

@@ -2279,10 +2279,13 @@ namespace Shorokoo.Runtime
             // CompiledGraph.Run. This path pays for a whole model build and a session on top.
             RunSettings.CancellationToken.ThrowIfCancellationRequested();
             var model = buildModel();
+            // Asked of the graph as built: the weights Carried declares supplied are listed among
+            // its inputs, and do not make a graph that takes none any less one computed once.
+            var fullyConstant = IsFullyConstant(model.Graph);
             var (copied, borrowed) = Carried(model, "run");
             try
             {
-                return RunModel(model, originalInputNames, inputs,
+                return RunModel(model, originalInputNames, inputs, fullyConstant,
                     [.. copied.Select(c => c.Initializer), .. borrowed.Select(b => b.Initializer)]);
             }
             finally
@@ -2295,7 +2298,7 @@ namespace Shorokoo.Runtime
         }
 
         private NamedModelParam[] RunModel(
-            ModelProto model, string[] originalInputNames, NamedModelParam[] inputs,
+            ModelProto model, string[] originalInputNames, NamedModelParam[] inputs, bool fullyConstant,
             IReadOnlyList<SuppliedInitializer> supplied)
         {
             var memoryStream = new MemoryStream();
@@ -2333,7 +2336,7 @@ namespace Shorokoo.Runtime
                     deviceMemory = deviceMemory with { LimitBytes = feeds.AdmitFresh(limit, plan) };
                 }
                 var optimization = SessionOptimization(
-                    HasOptionalOps(model.Graph) || IsFullyConstant(model.Graph), trainingStep: false);
+                    HasOptionalOps(model.Graph) || fullyConstant, trainingStep: false);
                 // Built for one run: placing that run's values would build two more sessions over
                 // the model for it, the graph the runtime runs and the one that places.
                 session = BuildSession(backend, modelData, optimization, deviceMemory, supplied: supplied, placing: false);

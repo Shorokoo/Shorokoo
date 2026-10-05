@@ -246,9 +246,8 @@ public class FastProcessorsCoverageTests
 
     /// <summary>An inner loop's scan output cannot be read after the enclosing loop: that loop
     /// produces a whole stacked tensor per iteration and has no value to return for it when it
-    /// runs zero times. Refused where the shape the user wrote is still nameable, on both
-    /// orderings — one used to leave an un-lowered #LoopScanVariable# in the emitted graph, the
-    /// other to fail an assertion while the module graph was being built.</summary>
+    /// runs zero times. Refused where the shape the user wrote is still nameable, whether the scan
+    /// is taken before or after the update.</summary>
     [Fact]
     public void TestScanningInsideANestedLoopIsRefusedAfterTheEnclosingLoop()
     {

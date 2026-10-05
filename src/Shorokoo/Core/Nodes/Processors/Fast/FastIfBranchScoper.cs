@@ -429,10 +429,17 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             var mine = ReachedBlocks(ifClose, BranchAttr(isThen), ifIdx, blockOfNode, ctx);
             var other = ReachedBlocks(ifClose, BranchAttr(!isThen), ifIdx, blockOfNode, ctx);
 
+            // A block a nested IF has claimed sits in the branch too, inside that IF.
+            bool InBranch(int b)
+            {
+                for (int x = b; claim.TryGetValue(x, out var cl); x = cl.IfIdx)
+                    if (cl == (ifIdx, isThen)) return true;
+                return false;
+            }
+
             var kept = new HashSet<int>();
             foreach (var b in mine)
-                if (!other.Contains(b) && IsMovable(blocks[b], ctx)
-                    && (!claim.TryGetValue(b, out var cl) || cl == (ifIdx, isThen)))
+                if (!other.Contains(b) && IsMovable(blocks[b], ctx) && (!claim.ContainsKey(b) || InBranch(b)))
                     kept.Add(b);
 
             bool SameSide(int b) => blocks[b].IsIf && b > ifIdx && ConditionOf(blocks[b].Nodes[0]) == condition;
@@ -464,7 +471,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                             if (c == ifOpen.Key) goto drop;
                             if (ifBlock.Keys.Contains(c)) continue;
                             if (!blockOfNode.TryGetValue(c, out var cb)) goto drop;
-                            if (kept.Contains(cb) || ReadOnlyWhenTaken(producer, c, cb)) continue;
+                            if (kept.Contains(cb) || InBranch(cb) || ReadOnlyWhenTaken(producer, c, cb)) continue;
                             goto drop;
                         }
                     }
@@ -486,7 +493,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                             var readers = new List<FastNodeKey>();
                             foreach (var c in consumers)
                                 if (!ifBlock.Keys.Contains(c) && blockOfNode.TryGetValue(c, out var cb)
-                                    && !kept.Contains(cb) && Reads(ctx.NodeByKey[c], value))
+                                    && !kept.Contains(cb) && !InBranch(cb) && Reads(ctx.NodeByKey[c], value))
                                     readers.Add(c);
                             if (readers.Count > 0)
                                 exports.Add(new Export(ifOpen, ifClose, isThen, value, readers));
@@ -535,6 +542,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             bool applied = false;
             foreach (var export in exports)
             {
+                // Two IFs, one nested in the other's branch, may both hand out one value; the first
+                // to rewire its readers settles it, and the next scoping round carries it on out.
+                if (!export.Readers.Any(r => Reads(nodeByKey[r], export.Value))) continue;
                 if (Placeholder(tensorInfo, export.Value) is not TensorAttribute placeholder) continue;
 
                 var constant = FastInternalOp.Constant(placeholder);

@@ -843,7 +843,12 @@ runs on for `ComputeContext.Host`, `ToHost()` and a load into host memory.
 A graph's literals are
 [`TensorAttribute`s](core-types.md#two-kinds-of-concrete-tensor-tensordata-and-tensorattribute),
 immutable and without lifetime. One past `Array.MaxLength` bytes keeps its elements in host memory
-of the backend `ComputeContext.Default` runs on, released when the attribute is garbage-collected.
+of a backend — of the one that made the tensor it was moved from, where that tensor was a host
+tensor owning its runtime value whole, and of the one `ComputeContext.Default` runs on, where it was
+copied in (see [the two conversions](core-types.md#the-two-conversions-and-which-one-spends-its-source))
+— released when the attribute is garbage-collected. A run or a compile hands its session a
+`Constant`'s value that large as it hands it such a weight, in a subgraph too; any other
+tensor-valued node attribute that large is refused with `NotSupportedException`, naming the node.
 
 ### Moving data between contexts
 

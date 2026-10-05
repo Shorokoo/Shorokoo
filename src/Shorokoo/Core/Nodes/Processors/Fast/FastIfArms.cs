@@ -17,6 +17,57 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     }
 
     /// <summary>
+    /// When a value is needed: in one of <see cref="Terms"/>, each the arms that all have to be
+    /// taken. Never empty and never holding an empty term — a value needed whatever runs has no guard.
+    /// </summary>
+    internal sealed class IfGuard
+    {
+        private const int MaxTerms = 16;
+
+        public List<HashSet<IfArm>> Terms { get; }
+
+        private IfGuard(List<HashSet<IfArm>> terms) => Terms = terms;
+
+        /// <summary>The guard the given terms make, simplified; null when they hold whatever runs —
+        /// or are too many to follow, where a value is left as needed always.</summary>
+        public static IfGuard? Of(List<HashSet<IfArm>> terms)
+        {
+            var kept = new List<HashSet<IfArm>>();
+            foreach (var term in terms)
+                if (!kept.Any(k => k.SetEquals(term))) kept.Add([.. term]);
+            bool changed = true;
+            while (changed)
+            {
+                changed = false;
+                if (kept.Any(t => t.Count == 0)) return null;
+                // A term holding all of another is needed only when that one is.
+                kept.RemoveAll(t => kept.Any(o => !ReferenceEquals(o, t) && o.Count < t.Count && o.IsSubsetOf(t)));
+                // Two terms alike but for the two arms of one IfElse need neither arm.
+                for (int a = 0; a < kept.Count && !changed; a++)
+                    for (int b = a + 1; b < kept.Count && !changed; b++)
+                    {
+                        if (kept[a].Count != kept[b].Count) continue;
+                        var onlyA = kept[a].Except(kept[b]).ToList();
+                        var onlyB = kept[b].Except(kept[a]).ToList();
+                        if (onlyA.Count != 1 || onlyB.Count != 1 || !onlyA[0].IfClose.Equals(onlyB[0].IfClose)) continue;
+                        kept[a].Remove(onlyA[0]);
+                        kept.RemoveAt(b);
+                        kept.RemoveAll(t => !ReferenceEquals(t, kept[a]) && t.SetEquals(kept[a]));
+                        changed = true;
+                    }
+            }
+            return kept.Count > MaxTerms ? null : new IfGuard(kept);
+        }
+
+        /// <summary>The guard's only term, when it has just one; else null.</summary>
+        public HashSet<IfArm>? SingleTerm => Terms.Count == 1 ? Terms[0] : null;
+
+        public bool SameAs(IfGuard? other)
+            => other is not null && other.Terms.Count == Terms.Count
+               && Terms.All(t => other.Terms.Any(o => o.SetEquals(t)));
+    }
+
+    /// <summary>
     /// Which <c>IfElse</c> arms each node belongs to.
     ///
     /// <para>A branch expression is an ordinary C# argument, so its nodes are traced
@@ -27,11 +78,12 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// <para>A node both arms reach runs whatever the condition says and is nobody's arm; so is a
     /// node something outside the branch reads, and all it is computed from, and so are the inputs
     /// and parameters a branch merely reads. A <c>WITH_STATE_DEPS</c> naming a value only to keep
-    /// it does not read it: a call made in an arm is named that way from outside the branch. That exclusion is what makes a value
-    /// heading for one a value <em>leaving</em> the arm — the property both callers turn on, one
-    /// to thread a state update through the branch that decides it
-    /// (<see cref="FastChainStateUpdatesAcrossCallSites"/>), the other to stop a gradient from an
-    /// arm that did not run (<see cref="AutoGrad.FastProcessAutoGradProcessor"/>).</para>
+    /// it does not read it: a call made in an arm is named that way from outside the branch. That
+    /// exclusion is what makes a value heading for one a value <em>leaving</em> the arm, which is
+    /// what threads a state update through the branch that decides it
+    /// (<see cref="FastChainStateUpdatesAcrossCallSites"/>). Where a gradient has to stop is a
+    /// different question, answered by <see cref="GradientGuards"/> for
+    /// <see cref="AutoGrad.FastProcessAutoGradProcessor"/>.</para>
     ///
     /// <para>A node reached from nested <c>IfElse</c>s belongs to one arm of each, so the result is
     /// a list; a caller that cannot reason about nesting checks for more than one.</para>
@@ -42,11 +94,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         public static string BranchAttribute(bool isThen)
             => isThen ? OnnxOpAttributeNames.AttrThenBranch : OnnxOpAttributeNames.AttrElseBranch;
 
-        /// <param name="graph">The graph to classify.</param>
-        /// <param name="gradientReadsOnly">Count only the reads a gradient flows through: a
-        /// condition, a comparison or an index reads a value without differentiating it, so for
-        /// where an arm's gradient has to stop such a read leaves the value in the arm.</param>
-        public static Dictionary<FastNodeKey, List<IfArm>> Classify(InternalComputationGraph graph, bool gradientReadsOnly = false)
+        public static Dictionary<FastNodeKey, List<IfArm>> Classify(InternalComputationGraph graph)
         {
             if (graph is null) throw new ArgumentNullException(nameof(graph));
 
@@ -63,7 +111,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     foreach (var ok in outs)
                         if (ok is not null && !ok.Value.IsEmpty) producerOf[ok.Value] = node;
 
-            var readersOf = ReadersOf(graph, producerOf, gradientReadsOnly);
+            var readersOf = ReadersOf(graph, producerOf);
             var closeOf = new Dictionary<FastNodeKey, FastNodeKey>();
             foreach (var node in graph.Nodes)
                 if (node.OpCode == OpCodes.IF_CLOSE && node.GraphOpenNodeKey is FastNodeKey openNode)
@@ -118,11 +166,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         }
 
         /// <summary>The nodes reading each node's outputs, graph outputs included, leaving out the
-        /// state dependencies a <c>WITH_STATE_DEPS</c> names only to keep them — and, where asked,
-        /// every read no gradient flows back through: by an op whose output is a boolean, an index
-        /// or a shape, by a node nothing the loss depends on reads, or by a graph output.</summary>
+        /// state dependencies a <c>WITH_STATE_DEPS</c> names only to keep them.</summary>
         private static Dictionary<FastNodeKey, List<FastNodeKey?>> ReadersOf(
-            InternalComputationGraph graph, Dictionary<FastTensorKey, FastNode> producerOf, bool gradientReadsOnly)
+            InternalComputationGraph graph, Dictionary<FastTensorKey, FastNode> producerOf)
         {
             var readersOf = new Dictionary<FastNodeKey, List<FastNodeKey?>>();
             void Read(FastTensorKey? key, FastNodeKey? reader)
@@ -132,41 +178,13 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 list.Add(reader);
             }
 
-            // A node passes a gradient back to what it reads when a gradient reaches it: it is the
-            // AUTO_GRAD differentiating the loss, or a node that passes one reads it. The graph's
-            // other outputs — the state a step carries out, say — take no gradient, so reading a
-            // value for them leaves it in its arm. Readers come after what they read, so one walk
-            // from the back settles every node.
-            HashSet<FastNodeKey>? passesGradient = null;
-            if (gradientReadsOnly)
-            {
-                passesGradient = [];
-                var reachesAGradient = new HashSet<FastTensorKey>();
-                for (int n = graph.Nodes.Count - 1; n >= 0; n--)
-                {
-                    var node = graph.Nodes[n];
-                    if (ReadsWithoutGradient.Contains(node.OpCode)) continue;
-                    if (node.OpCode != InternalOpCodes.AUTO_GRAD
-                        && !node.FullOutputs.Values.Any(outs => outs.Any(o => o is FastTensorKey k && reachesAGradient.Contains(k))))
-                        continue;
-                    passesGradient.Add(node.Key);
-                    foreach (var (_, ins) in node.FullInputs)
-                        foreach (var ik in ins)
-                            if (ik is FastTensorKey k) reachesAGradient.Add(k);
-                }
-            }
-
             foreach (var node in graph.Nodes)
-            {
-                if (passesGradient is not null && !passesGradient.Contains(node.Key)) continue;
                 foreach (var (_, ins) in node.FullInputs)
                     for (int i = 0; i < ins.Count; i++)
                         if (i == 0 || node.OpCode != InternalOpCodes.WITH_STATE_DEPS)
                             Read(ins[i], node.Key);
-            }
-            if (!gradientReadsOnly)
-                foreach (var output in graph.Outputs)
-                    Read(output, null);
+            foreach (var output in graph.Outputs)
+                Read(output, null);
             return readersOf;
         }
 
@@ -204,6 +222,61 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                                 && InBranch(producer.Key) && readOutside.Add(producer.Key))
                                 worklist.Push(producer.Key);
             return readOutside;
+        }
+
+        /// <summary>
+        /// When a gradient on its way to <paramref name="autoGrad"/>'s parameters reaches each node:
+        /// the arms that have to run for one to, as an OR of ANDs. A node every path from the loss
+        /// reaches without an untaken arm in the way is left out.
+        ///
+        /// <para>Only the reads a gradient flows back through count. A condition, a comparison or
+        /// an index reads a value without differentiating it, and neither the graph's other
+        /// outputs nor another <c>AUTO_GRAD</c>'s loss send this one anything. A value two
+        /// <c>IfElse</c>s read in one arm each takes a gradient when either runs, which no single
+        /// list of arms says; and an input or parameter takes whatever reaches it.</para>
+        /// </summary>
+        public static Dictionary<FastNodeKey, IfGuard> GradientGuards(InternalComputationGraph graph, FastNode autoGrad)
+        {
+            var guards = new Dictionary<FastNodeKey, IfGuard>();
+            if (!graph.Nodes.Any(n => n.OpCode == OpCodes.IF_CLOSE)) return guards;
+
+            var nodeByKey = FastProcessorHelper.BuildNodeByKey(graph);
+            var producerOf = new Dictionary<FastTensorKey, FastNode>();
+            foreach (var node in graph.Nodes)
+                foreach (var (_, outs) in node.FullOutputs)
+                    foreach (var ok in outs)
+                        if (ok is not null && !ok.Value.IsEmpty) producerOf[ok.Value] = node;
+
+            // Readers come after what they read, so one walk from the back settles every node.
+            var terms = new Dictionary<FastNodeKey, List<HashSet<IfArm>>> { [autoGrad.Key] = [[]] };
+            for (int n = graph.Nodes.IndexOf(autoGrad); n >= 0; n--)
+            {
+                var node = graph.Nodes[n];
+                if (!terms.TryGetValue(node.Key, out var reaching) || ReadsWithoutGradient.Contains(node.OpCode)) continue;
+                var guard = IfGuard.Of(reaching);
+                if (guard is null || IsNobodysArm(node)) terms[node.Key] = reaching = [[]];
+                else { guards[node.Key] = guard; terms[node.Key] = reaching = guard.Terms; }
+
+                IfArm? ArmOf(string group)
+                    => node.OpCode == OpCodes.IF_CLOSE && (group == BranchAttribute(true) || group == BranchAttribute(false))
+                       && node.GraphOpenNodeKey is FastNodeKey openKey && nodeByKey.TryGetValue(openKey, out var open)
+                       && open.Inputs.Count > 0 && open.Inputs[0] is FastTensorKey condition
+                        ? new IfArm(node.Key, condition, group == BranchAttribute(true)) : null;
+
+                foreach (var (group, ins) in node.FullInputs)
+                {
+                    var arm = ArmOf(group);
+                    for (int i = 0; i < ins.Count; i++)
+                    {
+                        if (node.OpCode == InternalOpCodes.WITH_STATE_DEPS && i > 0) continue;
+                        if (ins[i] is not FastTensorKey k || !producerOf.TryGetValue(k, out var producer)) continue;
+                        if (!terms.TryGetValue(producer.Key, out var into)) terms[producer.Key] = into = [];
+                        foreach (var term in reaching)
+                            into.Add(arm is IfArm a ? [.. term, a] : term);
+                    }
+                }
+            }
+            return guards;
         }
 
         /// <summary>Ops whose outputs are booleans, indices or shapes, through which no gradient

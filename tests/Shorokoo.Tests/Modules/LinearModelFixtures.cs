@@ -1699,6 +1699,34 @@ public partial class RootedGainReadByAConditionAndOneArmModel
     }
 }
 
+/// <summary>A gain under a square root that an arm of each of two <c>IfElse</c>s reads, on the signs
+/// of the input's largest and smallest elements.</summary>
+[Module]
+public partial class RootedGainReadByTwoIfElsesOnTheInputsSignModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var w = Ones.Init([Scalar(2L)]);
+        var q = (t * w).Sqrt();
+        return (t.Reduce(ReduceKind.Max, keepDims: false).Scalar() > Scalar(0f)).IfElse(q, t * w)
+             + (t.Reduce(ReduceKind.Min, keepDims: false).Scalar() > Scalar(0f)).IfElse(q * Scalar(2f), t * w);
+    }
+}
+
+/// <summary>A gain under a square root that an arm of each of two <c>IfElse</c>s reads, on the input's
+/// largest element exceeding 0 and 3.</summary>
+[Module]
+public partial class RootedGainReadByTwoIfElsesOnTheInputsSizeModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var w = Ones.Init([Scalar(2L)]);
+        var q = (t * w).Sqrt();
+        var max = t.Reduce(ReduceKind.Max, keepDims: false).Scalar();
+        return (max > Scalar(0f)).IfElse(q, t * w) + (max > Scalar(3f)).IfElse(q * Scalar(2f), t * w);
+    }
+}
+
 /// <summary>A gain under a square root that one <c>IfElse</c> arm returns and a running statistic
 /// averages, whichever arm runs.</summary>
 [Module]

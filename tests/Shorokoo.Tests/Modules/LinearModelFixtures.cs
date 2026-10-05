@@ -2593,6 +2593,32 @@ public partial class DropoutSquaredInOneIfArmModel
     }
 }
 
+/// <summary>An always-on Dropout squared in the else arm of an <c>IfElse</c> on an input
+/// condition.</summary>
+[Module]
+public partial class DropoutSquaredInTheElseArmModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t, Scalar<bit> cond)
+    {
+        var y = t * Ones.Init([Scalar(8L)]);
+        var dropped = Shorokoo.Modules.Layers.Dropout.Call(Scalar(0.5f), Scalar(true), y);
+        return cond.IfElse(y, dropped * dropped);
+    }
+}
+
+/// <summary>An always-on Dropout read in one arm of an <c>IfElse</c> and after the branch, so it
+/// draws whichever arm is taken.</summary>
+[Module]
+public partial class DropoutReadInOneIfArmAndAfterTheBranchModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t, Scalar<bit> cond)
+    {
+        var y = t * Ones.Init([Scalar(8L)]);
+        var dropped = Shorokoo.Modules.Layers.Dropout.Call(Scalar(0.5f), Scalar(true), y);
+        return cond.IfElse(dropped * dropped, y) + dropped;
+    }
+}
+
 /// <summary>A gain kept where it is not negative, by a comparison cast to a mask, in one arm of an
 /// <c>IfElse</c> on an input condition.</summary>
 [Module]

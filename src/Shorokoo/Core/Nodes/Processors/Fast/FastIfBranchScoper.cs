@@ -25,7 +25,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// everything the other branch's outputs are computed from, and then loses any member with a
     /// consumer outside the cone — a value read after the <c>IF</c>, by the other branch, by an
     /// unrelated scope, or by the <c>IF_OPEN</c> itself (the condition). Model inputs, parameter
-    /// data and producers of graph outputs never move. What survives is exactly the set whose
+    /// data and producers of graph outputs never move, and nor does a state update not yet
+    /// threaded through the branch that decides it. What survives is exactly the set whose
     /// results nothing outside the branch can observe, so moving it changes only whether it
     /// runs.</para>
     ///
@@ -151,7 +152,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     if (InternalOpCodes.IsModelInputOp(n.OpCode) ||
                         InternalOpCodes.IsGraphOutputOp(n.OpCode) ||
                         n.OpCode == InternalOpCodes.MODEL_PARAM_DATA ||
-                        n.OpCode == InternalOpCodes.MODEL_PARAM)
+                        n.OpCode == InternalOpCodes.MODEL_PARAM ||
+                        IsUnthreadedStateUpdate(n))
                         Pinned.Add(n.Key);
                 }
 
@@ -167,6 +169,20 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                             }
             }
         }
+
+        /// <summary>
+        /// Whether <paramref name="node"/> is a state update that
+        /// <see cref="FastChainStateUpdatesAcrossCallSites"/> has not yet looked at. That pass
+        /// threads a branch's updates out through its <c>IF_CLOSE</c>, so the scope after the
+        /// branch gets whichever arm's update ran. It can only do that for an update at the
+        /// branch's own scope. An update this pass moved inside first would stay there, with
+        /// nothing outside the branch to read it from. So such an update stays where it was
+        /// traced, and what it is computed from stays with it. Once threaded, the branch reads
+        /// the update and a later run moves it inside like any other branch value.
+        /// </summary>
+        private static bool IsUnthreadedStateUpdate(FastNode node)
+            => node.OpCode == InternalOpCodes.STATE_UPDATE_LINK
+               && node.Attributes.GetBoolVal(OnnxOpAttributeNames.ShrkAttrStateOrdered) is null;
 
         /// <summary>
         /// One unit of movement at a given nesting level: a single node, or a whole

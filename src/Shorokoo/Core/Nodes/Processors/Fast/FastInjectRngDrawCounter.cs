@@ -15,7 +15,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// model-global execution counter — a framework-owned int64 state scalar
     /// (<c>RngExecutionCounter</c>, initialized 0, advanced +1 per execution via the
     /// ordinary StateUpdate machinery) — wired as the substreamIndex input of every
-    /// <c>SHRK_RANDOM_*</c> feed that has none. Runs at concretization, right after module
+    /// <c>SHRK_RANDOM_*</c> feed that has none. The update is a stateful call like any other, made
+    /// where its feeds are: when every feed sits in one arm of an <c>IfElse</c>, the counter
+    /// advances on the executions that take that arm and carries through unchanged on the others,
+    /// so each draw still gets a fresh substream (see
+    /// <see cref="FastChainStateUpdatesAcrossCallSites"/>). Runs at concretization, right after module
     /// inlining, so the counter is a normal state parameter from then on: the training rig
     /// threads it through the checkpoint (masks vary per step, resumed runs draw exactly
     /// what the uninterrupted run would), while one-shot inference bakes it at 0

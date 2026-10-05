@@ -123,7 +123,9 @@ not the algorithm (it fails loudly; rebuild from the architecture).
 **The execution counter.** Per-execution variation comes from one model-global counter,
 `RngExecutionCounter` (ordinary model state: an int64 scalar starting at 0, +1 per
 execution), which concretization wires into every feed. Each execution draws from its
-own substream; stream keys are unaffected. Modules never touch it:
+own substream; stream keys are unaffected. When every feed sits in one arm of an
+`IfElse`, the counter advances only on executions that take that arm; on the others
+nothing draws, and the counter keeps its value. Modules never touch it:
 `Globals.RandomUniform` is all a consumer writes. Under the training rig the counter
 is saved in the checkpoint, so Dropout masks differ per step and a run resumed at step
 N draws what the uninterrupted run would. In one-shot inference it is fixed at 0, so

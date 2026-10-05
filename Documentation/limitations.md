@@ -376,8 +376,12 @@ does the part of the backward pass that differentiates it: an operation that
 would *fail* there (not merely return a non-finite number) off its branch must
 stay off the differentiated path.
 
-A `Dropout` inside an `IfElse` arm cannot be trained: building a training rig
-for such a model fails.
+A random draw in an arm, such as a `Dropout` mask, trains like the rest of the
+arm. The backward pass reads the mask the forward pass drew; it does not draw
+again. The execution counter that gives each step fresh masks (see
+[rng-configuration.md](rng-configuration.md)) advances only on the steps that
+take the arm. On the other steps it carries through unchanged. A draw that is
+also read outside the arm runs on every step, and so does its counter.
 
 ### Gradient (activation) checkpointing
 

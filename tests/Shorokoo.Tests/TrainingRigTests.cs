@@ -2834,16 +2834,30 @@ public class TrainingRigTrainingLoopCoverageTests
 
     private static (float Loss, float[] Params) LossAndTrainedParams(ComputationGraph modelGraph, bool cond, params float[] xs)
     {
-        object[] values = [.. xs.Select(v => (object)v)];
-        var x = TensorData(DType.Float32, [(long)xs.Length], values);
-        var c = TensorData(DType.Bool, [], cond);
-        var rig = TrainingRig.FromScratch(modelGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
-            [new TensorDataModelParam("t", ModelParamType.InputParam, x),
-             new TensorDataModelParam("cond", ModelParamType.InputParam, c)], 0.1f);
-        var step = rig.TrainStep(rig.CreateInitialCheckpoint(), rig.InputDef.FromOrderedData(x, c),
-            rig.TargetDef.FromOrderedData(TensorData([(long)xs.Length], new float[xs.Length])));
+        var (rig, step) = OneConditionalStep(modelGraph, cond, cond, xs);
         return (step.Loss!.Value, NNLibraryTrainingFixtures.Floats(
             step.TrainableParams.Fields[rig.TrainableParamStructDef.Fields[0].Name]));
+    }
+
+    private static (TrainingRig Rig, TrainingCheckpoint Step) OneConditionalStep(
+        ComputationGraph modelGraph, bool builtAt, bool cond, params float[] xs)
+    {
+        object[] values = [.. xs.Select(v => (object)v)];
+        var x = TensorData(DType.Float32, [(long)xs.Length], values);
+        var rig = TrainingRig.FromScratch(modelGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            [new TensorDataModelParam("t", ModelParamType.InputParam, x),
+             new TensorDataModelParam("cond", ModelParamType.InputParam, TensorData(DType.Bool, [], builtAt))], 0.1f);
+        return (rig, rig.TrainStep(rig.CreateInitialCheckpoint(),
+            rig.InputDef.FromOrderedData(x, TensorData(DType.Bool, [], cond)),
+            rig.TargetDef.FromOrderedData(TensorData([(long)xs.Length], new float[xs.Length]))));
+    }
+
+    private static (float[] Params, long DrawCounter) DropoutStep(ComputationGraph modelGraph, bool builtAt, bool cond)
+    {
+        var (rig, step) = OneConditionalStep(modelGraph, builtAt, cond, 1f, 1f, 1f, 1f, 1f, 1f, 1f, 1f);
+        return ([.. NNLibraryTrainingFixtures.Floats(step.TrainableParams.Fields[rig.TrainableParamStructDef.Fields[0].Name])
+                    .Select(v => MathF.Round(v, 4))],
+                ((TensorData<int64>)step.ModelState.Fields.Single(f => f.Key.Contains("RngExecutionCounter")).Value).AccessMemory()[0]);
     }
 
     // The arm that did not run contributes exactly zero, whether or not its own derivative is a
@@ -2882,6 +2896,32 @@ public class TrainingRigTrainingLoopCoverageTests
         Assert.Equal(2.0 * kept, loss, 1e-4);
         Assert.Equal(8 - kept, weights.Count(w => w == 1f));
     }
+
+    [Fact]
+    public void TestADropoutInAnIfElseElseArmTrainsOnTheMaskItsForwardDrew()
+    {
+        var (loss, weights) = LossAndTrainedParams(DropoutSquaredInTheElseArmModel.ComputationGraph, false, 1f, 1f, 1f, 1f, 1f, 1f, 1f, 1f);
+        int kept = weights.Count(w => Math.Abs(w - 0.2f) < 1e-5f);
+        Assert.Equal(2.0 * kept, loss, 1e-4);
+        Assert.Equal(8 - kept, weights.Count(w => w == 1f));
+    }
+
+    [Fact]
+    public void TestADropoutInAnIfElseArmTrainsAsTheOtherArmOnAStepThatDoesNotTakeIt()
+    {
+        Assert.Equal(Enumerable.Repeat(0.975f, 8), DropoutStep(DropoutSquaredInOneIfArmModel.ComputationGraph, true, false).Params);
+        Assert.Equal(Enumerable.Repeat(0.975f, 8), DropoutStep(DropoutSquaredInTheElseArmModel.ComputationGraph, false, true).Params);
+    }
+
+    [Fact]
+    public void TestADropoutInAnIfElseArmAdvancesTheDrawCounterOnlyWhenItsArmRuns()
+        => Assert.Equal([1L, 0L, 0L, 1L, 1L, 1L],
+            [DropoutStep(DropoutSquaredInOneIfArmModel.ComputationGraph, true, true).DrawCounter,
+             DropoutStep(DropoutSquaredInOneIfArmModel.ComputationGraph, true, false).DrawCounter,
+             DropoutStep(DropoutSquaredInTheElseArmModel.ComputationGraph, false, true).DrawCounter,
+             DropoutStep(DropoutSquaredInTheElseArmModel.ComputationGraph, false, false).DrawCounter,
+             DropoutStep(DropoutReadInOneIfArmAndAfterTheBranchModel.ComputationGraph, true, true).DrawCounter,
+             DropoutStep(DropoutReadInOneIfArmAndAfterTheBranchModel.ComputationGraph, true, false).DrawCounter]);
 
     private static TrainingRig OptionalBiasRig(OptionalTensorData bias, TensorData x)
         => TrainingRig.FromScratch(NullableTrainableBiasLayer.ComputationGraph,

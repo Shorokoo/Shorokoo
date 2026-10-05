@@ -245,13 +245,14 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
         /// <summary>
         /// Zeroes a gradient on its way out of an <c>IfElse</c> arm that did not run.
         ///
-        /// <para>An arm's forward is computed whether or not the condition picks it, and the arm
-        /// that did not run is handed a zero incoming gradient — so its contribution is
-        /// mathematically zero and arithmetic usually delivers that. Not always: an arm guarding a
-        /// computation that is invalid off its own path (<c>sqrt</c> of what is negative there,
-        /// a division by what is zero there) has a non-finite derivative, and NaN times zero is
-        /// NaN, not zero. That NaN then lands in the parameter's gradient and destroys the weight
-        /// on the very step the arm was not taken (Shorokoo/Shorokoo#313).</para>
+        /// <para>The backward of an arm is emitted at module scope, over the forward flattened out
+        /// of its branches, so the arm that did not run is still handed an incoming gradient: a
+        /// zero. Its contribution is then mathematically zero, but arithmetic does not always
+        /// deliver that: an arm guarding a computation that is invalid off its own path
+        /// (<c>sqrt</c> of what is negative there, a division by what is zero there) has a
+        /// non-finite derivative, and NaN times zero is NaN, not zero. That NaN would land in the
+        /// parameter's gradient and destroy the weight on the very step the arm was not taken
+        /// (Shorokoo/Shorokoo#313).</para>
         ///
         /// <para>Selecting is not arithmetic: an <c>If</c> hands back the branch it picks and never
         /// reads the other, so the zero it returns is a zero. The gate goes where the gradient
@@ -264,6 +265,25 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
         /// <see cref="AutoDiffEngine.AccumulateGradients"/> drops the other contribution when it
         /// accumulates onto an absent optional rather than leaving it alone
         /// (Shorokoo/Shorokoo#314).</para>
+        ///
+        /// <para>A gradient leaving one run of nested arms is gated once per arm it crosses, each
+        /// gate an <c>If</c> on that arm's own condition with the gradient on the arm's side, and
+        /// its zero takes its shape from the tensor the gradient is for, not from the gradient.
+        /// The gate's taken branch is then the backward's only reader, and the simplify after this
+        /// pass scopes the backward into it: it runs only when the arm ran, as the arm's forward
+        /// does. A zero shaped off the gradient would read that backward from the other branch and
+        /// keep all of it at module scope, where it runs on every step and fails on what is valid
+        /// only on the arm's own path — a <c>Gather</c>'s indices scattered back into a tensor
+        /// they do not fit (Shorokoo/Shorokoo#492). An optional's value may be absent where the
+        /// arm did not run, so its zero still reads the gradient.</para>
+        ///
+        /// <para>The arm's forward values that this backward reads stay in the arm too: read only
+        /// from the gate's taken branch, on the arm's own condition, they are handed out of the
+        /// arm's <c>If</c> to it (<see cref="Fast.FastIfBranchScoper"/>).</para>
+        ///
+        /// <para>A gradient whose node runs under several runs of arms is gated once, on whether
+        /// any of them ran. No one branch holds such a backward, so it stays at module scope and
+        /// its zero reads the gradient.</para>
         /// </summary>
         private static Variable GateOnLeavingAnArm(
             Variable grad,
@@ -272,7 +292,8 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
             Dictionary<FastNodeKey, IfGuard> armOf,
             Dictionary<FastTensorKey, Scalar<bit>> armConditions,
             Dictionary<Variable, FastTensorKey> freshInputBacking,
-            Dictionary<FastTensorKey, FastNode> producerByOutput)
+            Dictionary<FastTensorKey, FastNode> producerByOutput,
+            Dictionary<FastTensorKey, FastTensorInfo> tensorInfo)
         {
             if (!armOf.TryGetValue(node.Key, out var guard)) return grad;
 
@@ -280,7 +301,7 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
                 && armOf.TryGetValue(producer.Key, out var found) ? found : null;
             if (guard.SameAs(destinationGuard)) return grad;
 
-            Scalar<bit> Condition(IfArm arm)
+            Scalar<bit> ConditionOf(IfArm arm)
             {
                 if (!armConditions.TryGetValue(arm.Condition, out var cond))
                 {
@@ -288,7 +309,7 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
                     freshInputBacking[fresh] = arm.Condition;
                     armConditions[arm.Condition] = cond = fresh.ToValue<Scalar<bit>>();
                 }
-                return arm.IsThen ? cond : !cond;
+                return cond;
             }
 
             // Where both are one run of arms, the gradient crosses out of only those the
@@ -298,22 +319,56 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
                 : guard.Terms.Select(t => t.ToList()).ToList();
             if (terms.Count == 1 && terms[0].Count == 0) return grad;
 
-            Scalar<bit>? runs = null;
-            foreach (var term in terms)
-            {
-                Scalar<bit>? all = null;
-                foreach (var arm in term)
-                    all = all is null ? Condition(arm) : all.Value & Condition(arm);
-                runs = runs is null ? all : runs.Value | all!.Value;
-            }
-
             var isOptional = grad.Structure() == DataStructure.Optional;
             var gated = isOptional ? OnnxOp.OptionalGetElement(grad) : grad;
-            // Zeros of the gradient's own shape, at the dtype every gradient here carries (see
-            // the loss seed above). Sub(g, g) would carry the NaN through.
-            var zeros = OnnxOp.ConstantOfShape(
-                OnnxOp.Shape(gated), Globals.TensorData(DType.Float32, [1L], 0f).MoveToAttribute(), gated.Rank);
-            gated = Ops.IfElse(runs!.Value, gated, zeros);
+
+            Variable shapeOf = gated;
+            if (terms.Count == 1 && !isOptional && tensorInfo.TryGetValue(destination, out var info)
+                && info.Structure == DataStructure.Tensor)
+            {
+                var forward = InternalOp.RuntimeInput(
+                    info.DType != DType.Invalid ? info.DType : DType.Float32, rank: info.Rank ?? gated.Rank);
+                freshInputBacking[forward] = destination;
+                shapeOf = forward;
+            }
+
+            // Zeros of the gradient's shape and dtype, and of the rank of what that shape is read
+            // off. A gradient is float32 as the loss seeds it, but a Cast hands its operand's dtype
+            // back, so one reaching a comparison is boolean, and both sides of a gate carry one
+            // dtype. Sub(g, g) would carry the NaN through.
+            var rank = shapeOf.Rank;
+            var zeroDType = gated.Type.ToNonGenericType();
+            int zeroBits = TensorData.StorageBits(zeroDType);
+            TensorData Zero() => zeroBits == 0
+                ? Globals.TensorData(DType.Float32, [1L], 0f)
+                : TensorData.CreateFromRawBytes(new Shape([1L]), zeroDType, new byte[(zeroBits + 7) / 8]);
+            Variable Zeros() => OnnxOp.ConstantOfShape(OnnxOp.Shape(shapeOf), Zero().MoveToAttribute(), rank);
+
+            if (terms.Count == 1)
+            {
+                // One run of arms: a gate per arm, each on that arm's own condition and with the
+                // gradient on that arm's side.
+                foreach (var arm in terms[0])
+                    gated = arm.IsThen
+                        ? Ops.IfElse(ConditionOf(arm), gated, Zeros())
+                        : Ops.IfElse(ConditionOf(arm), Zeros(), gated);
+            }
+            else
+            {
+                Scalar<bit>? runs = null;
+                foreach (var term in terms)
+                {
+                    Scalar<bit>? all = null;
+                    foreach (var arm in term)
+                    {
+                        var taken = arm.IsThen ? ConditionOf(arm) : !ConditionOf(arm);
+                        all = all is null ? taken : all.Value & taken;
+                    }
+                    runs = runs is null ? all : runs.Value | all!.Value;
+                }
+                gated = Ops.IfElse(runs!.Value, gated, Zeros());
+            }
+
             return isOptional ? OnnxOp.Optional(gated, DataStructure.Tensor, gated.Type) : gated;
         }
 
@@ -555,7 +610,7 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
 
                 // Gradient ops already return graph nodes.
                 var grad = GateOnLeavingAnArm(
-                    inputGrads[i]!, node, k, armOf, armConditions, freshInputBacking, producerByOutput);
+                    inputGrads[i]!, node, k, armOf, armConditions, freshInputBacking, producerByOutput, tensorInfo);
 
                 if (gradByKey.TryGetValue(k, out var existing))
                     gradByKey[k] = AutoDiffEngine.AccumulateGradients(existing, grad);

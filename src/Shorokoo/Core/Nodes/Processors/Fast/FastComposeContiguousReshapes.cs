@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using Shorokoo.Core.Factory;
 using Shorokoo.Core.Graph;
 using Shorokoo.Core.Nodes.NodeDefinitions;
 using Shorokoo.Graph;
@@ -18,8 +19,12 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     ///
     /// <para>The static reshape then reads the chain's root directly, so it does not wait on
     /// reshapes whose shapes are computed at run time — GroupNorm's shape-restoring reshape, which
-    /// feeds from <c>Shape(x)</c>, say — and a chain step nothing else reads drops out of the
-    /// model with the rest of the dead nodes.</para>
+    /// feeds from <c>Shape(x)</c>, say — and a chain step nothing else reads any more is removed
+    /// here, with whatever only it read. Left in the graph, such a step inside an <c>IF</c> branch,
+    /// or the nodes computing its shape, read a branch value and feed nothing, so scoping finds
+    /// nothing that holds them in the branch and hoists them, with what they read, to the
+    /// enclosing scope, where they run whether or not the branch is taken and fail on what is
+    /// valid only on the branch's own path.</para>
     ///
     /// <para>The walk deliberately stops at anything but RESHAPE/SQUEEZE/UNSQUEEZE — in
     /// particular at IDENTITY, which <see cref="FastAddIdentityForOuterScopeValues"/> has already
@@ -44,6 +49,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 if (n.OpCode is OpCodes.LOOP_OPEN or OpCodes.IF_OPEN) openStack.Push(n.Key);
             }
 
+            var bypassed = new HashSet<FastNodeKey>();
             foreach (var node in graph.Nodes)
             {
                 if (node.OpCode != OpCodes.RESHAPE) continue;
@@ -72,12 +78,63 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     if (!producer.FullInputs.TryGetValue("", out var producerInputs)
                         || producerInputs.Count < 1
                         || producerInputs[0] is not { } upstream) break;
+                    bypassed.Add(producer.Key);
                     root = upstream;
                 }
 
                 if (root != dataKey) inputs[0] = root;
             }
+
+            RemoveUnread(graph, bypassed);
         }
+
+        /// <summary>
+        /// Removes the bypassed chain steps nothing reads any more, and in turn whatever only the
+        /// removed nodes read — a step's run-time shape, say, and all that computes it — so nothing
+        /// composition leaves unread is hoisted out of a branch. The sweep starts from what
+        /// composition bypassed and follows only what removing it leaves unread: a node unread
+        /// before this pass ran stays, since other passes leave some deliberately, and so do the
+        /// nodes that carry structure or state rather than a value (<see cref="IsRemovable"/>).
+        /// </summary>
+        private static void RemoveUnread(InternalComputationGraph graph, HashSet<FastNodeKey> bypassed)
+        {
+            var candidates = bypassed;
+            while (candidates.Count > 0)
+            {
+                var read = new HashSet<FastNodeKey>();
+                foreach (var node in graph.Nodes)
+                    foreach (var slot in node.FullInputs.Values)
+                        foreach (var key in slot)
+                            if (key is { IsEmpty: false } k) read.Add(k.FastNodeKey);
+                foreach (var key in graph.Inputs)
+                    if (!key.IsEmpty) read.Add(key.FastNodeKey);
+                foreach (var key in graph.Outputs)
+                    if (!key.IsEmpty) read.Add(key.FastNodeKey);
+
+                var removed = graph.Nodes.Where(n => candidates.Contains(n.Key) && !read.Contains(n.Key) && IsRemovable(n)).ToList();
+                if (removed.Count == 0) return;
+                var gone = removed.Select(n => n.Key).ToHashSet();
+                graph.Nodes.RemoveAll(n => gone.Contains(n.Key));
+
+                candidates = [];
+                foreach (var node in removed)
+                    foreach (var slot in node.FullInputs.Values)
+                        foreach (var key in slot)
+                            if (key is { IsEmpty: false } k) candidates.Add(k.FastNodeKey);
+            }
+        }
+
+        /// <summary>Whether an unread node may go: not a scope's open or close, a loop's own
+        /// variable, a graph input or output, a parameter, or a state link or marker, which the
+        /// .srk dialect keeps.</summary>
+        private static bool IsRemovable(FastNode node)
+            => !FastOpsetResolver.IsOpenOpCode(node.OpCode)
+               && !FastOpsetResolver.IsCloseOpCode(node.OpCode)
+               && !InternalOpCodes.IsModelInputOp(node.OpCode)
+               && !InternalOpCodes.IsGraphOutputOp(node.OpCode)
+               && node.OpCode is not (InternalOpCodes.MODEL_PARAM or InternalOpCodes.MODEL_PARAM_DATA
+                   or InternalOpCodes.STATE_UPDATE_LINK or InternalOpCodes.WITH_STATE_DEPS
+                   or OpCodes.LOOP_FAKE_INPUT or OpCodes.LOOP_SCAN_VARIABLE or OpCodes.LOOP_INDEX_VARIABLE);
 
         /// <summary>Whether the shape input is a CONSTANT whose value is a 1-D int64 tensor with
         /// no <c>0</c> entries and at most one <c>-1</c> — the target-shape form whose meaning is

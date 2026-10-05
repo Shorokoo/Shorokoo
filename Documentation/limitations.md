@@ -363,13 +363,27 @@ separate inputs, or builds the sequence from them itself.
 
 ### Conditional execution in a training graph
 
-In a training graph, forward values the backward pass reads are hoisted out of
-`IfElse` branches and computed on every step, whichever branch is selected.
-Gradients are unaffected: the arm that did not run contributes a *selected* zero,
-so a non-finite derivative there (`sqrt` of a negative, division by zero) cannot
-poison the weights. The costs are the extra work, and an operation that would
-*fail* (not merely return a non-finite number) off its branch must stay off the
-differentiated path.
+In a training graph, an `IfElse` arm runs, forward and backward, only on the
+steps that take it, as it does in inference: the forward values its backward
+reads are computed in the arm, and its backward runs behind the arm's own
+condition. The arm that did not run contributes a *selected* zero to the
+gradient, so a non-finite derivative there (`sqrt` of a negative, division by
+zero) cannot poison the weights.
+
+A value read by arms of `IfElse`s on different conditions, or both by an arm
+and outside it, belongs to no single arm. It runs on every step, as in inference, and so
+does the part of the backward pass that differentiates it: an operation that
+would *fail* there (not merely return a non-finite number) off its branch must
+stay off the differentiated path.
+
+A random draw in an arm, such as a `Dropout` mask, trains like the rest of the
+arm. The backward pass reads the mask the forward pass drew; it does not draw
+again. The execution counter that gives each step fresh masks (see
+[rng-configuration.md](rng-configuration.md)) advances only on the steps that
+take the arm. On the other steps it carries through unchanged. A draw in an arm
+of an `IfElse` nested in another's arm is the same: it, and its counter, run only
+on the steps whose conditions select every arm around it. A draw that is also read
+outside the arm runs on every step, and so does its counter.
 
 ### Gradient (activation) checkpointing
 

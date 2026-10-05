@@ -3806,6 +3806,13 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             var candidateIds = candidateModelIdInfos.Select(x => x.SpecificModelId).ToImmutableArray();
             var liveModelIds = FastListAllSpecificModelIdsUsed.Process(
                 graph, inputHints ?? [], candidateIds).ToHashSet();
+            // The RNG execution counter is the feeds' bookkeeping, not a parameter a branch owns.
+            // A feed in an arm the samples do not take still draws whenever the arm runs, so it
+            // still needs a counter that advances.
+            foreach (var info in candidateModelIdInfos)
+                if (FastInjectRngDrawCounter.IsExecutionCounter(
+                        paramIdentifierTemplates.GetSpecificIdentifierTemplate(info.SpecificModelId)))
+                    liveModelIds.Add(info.SpecificModelId);
             var liveModelIdInfos = candidateModelIdInfos
                 .Where(x => liveModelIds.Contains(x.SpecificModelId))
                 .ToImmutableArray();

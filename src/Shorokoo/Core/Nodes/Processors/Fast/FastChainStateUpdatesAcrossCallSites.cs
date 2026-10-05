@@ -39,7 +39,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// the <c>IF_CLOSE</c> as one more output pair, and a link at the branch's own scope takes
     /// whichever arm ran (Shorokoo/Shorokoo#308). An arm that does not call the model hands the
     /// incoming value straight back, so a call in one arm alone updates the state only when that
-    /// arm runs.</para>
+    /// arm runs. An IfElse nested in an arm of another is threaded the same way, from the value the
+    /// parameter holds in the enclosing arm, and the link that takes whichever of its arms ran is
+    /// the enclosing arm's value from there on; so a call in nested arms updates the state only
+    /// when every condition around it selects it.</para>
     ///
     /// <para><b>Calls in a loop body.</b> A body is one call site however many trips it runs: every
     /// trip starts from the value the parameter held entering the loop, the calls within a trip
@@ -72,9 +75,13 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     internal static class FastChainStateUpdatesAcrossCallSites
     {
         /// <summary>One call site of a state parameter: its link, the marker that closes it, the
-        /// arm it belongs to (null at module scope) and the rolled loops whose bodies it is in,
-        /// outermost first.</summary>
-        private readonly record struct CallSite(FastNode Link, FastNode Marker, IfArm? Arm, List<FastNode> Loops);
+        /// arms it belongs to and the rolled loops whose bodies it is in, each outermost
+        /// first.</summary>
+        private readonly record struct CallSite(FastNode Link, FastNode Marker, List<IfArm> Arms, List<FastNode> Loops)
+        {
+            /// <summary>The innermost arm the call is in, or null at module scope.</summary>
+            public IfArm? Arm => Arms.Count > 0 ? Arms[^1] : null;
+        }
 
         /// <param name="graph">The graph, rewritten in place.</param>
         /// <param name="onlyLoopsUnrolledSince">Order only the parameters none of whose links this
@@ -252,7 +259,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
         /// <summary>
         /// This parameter's call sites in node order, or null when the shape is one this pass does
-        /// not order: a call in an IfElse inside a rolled loop's body.
+        /// not order: a call in an IfElse inside a rolled loop's body, or in nested IfElses inside
+        /// a loop of either kind.
         /// </summary>
         private static List<CallSite>? CallSitesOf(
             InternalComputationGraph graph,
@@ -283,23 +291,39 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     if (arms.Count == 1 && (!nodeByKey.TryGetValue(arms[0].IfClose, out var armClose)
                                             || enclosingScope[armClose.Key] is not null))
                         return null;
-                    sites.Add(new CallSite(link, marker, arms.Count == 1 ? arms[0] : null, loops));
+                    sites.Add(new CallSite(link, marker, [.. arms], loops));
                     continue;
                 }
 
-                if (arms.Count == 0) { sites.Add(new CallSite(link, marker, null, [])); continue; }
-                if (arms.Count > 1)
-                    throw new InvalidOperationException(
-                        "FastChainStateUpdatesAcrossCallSites: a state update sits inside nested IfElse "
-                        + "branches, so which of them decides whether it happened takes reasoning this "
-                        + "pass does not do. Chaining it as an ordinary call would apply an update the "
-                        + "condition did not select. Call the model once outside the branches, or give "
-                        + "each branch its own model.");
-                if (!nodeByKey.TryGetValue(arms[0].IfClose, out var close)) return null;
-                if (enclosingScope[close.Key] is not null) return null;   // the IfElse is inside a loop
-                sites.Add(new CallSite(link, marker, arms[0], []));
+                if (arms.Count == 0) { sites.Add(new CallSite(link, marker, [], [])); continue; }
+                if (arms.Count > 1 && TripsOf(link).Count > 0) return null;
+                if (NestingOrder(arms, armsOfNode) is not List<IfArm> nesting) return null;
+
+                // Each IfElse sits at module scope or in the arms around it: none is inside a loop.
+                var opens = new HashSet<FastNodeKey>();
+                foreach (var arm in nesting)
+                {
+                    if (!nodeByKey.TryGetValue(arm.IfClose, out var close)) return null;
+                    if (enclosingScope[close.Key] is FastNodeKey s && !opens.Contains(s)) return null;
+                    if (close.GraphOpenNodeKey is FastNodeKey open) opens.Add(open);
+                }
+                sites.Add(new CallSite(link, marker, nesting, []));
             }
             return sites;
+        }
+
+        /// <summary>
+        /// The arms a call is in, outermost first: each one's <c>IF_CLOSE</c> sits in all the arms
+        /// before it. Null when they do not nest that way.
+        /// </summary>
+        private static List<IfArm>? NestingOrder(List<IfArm> arms, Dictionary<FastNodeKey, List<IfArm>> armsOfNode)
+        {
+            int Depth(IfArm arm)
+                => armsOfNode.TryGetValue(arm.IfClose, out var around) ? arms.Count(around.Contains) : 0;
+            var nesting = arms.OrderBy(Depth).ToList();
+            for (int d = 0; d < nesting.Count; d++)
+                if (Depth(nesting[d]) != d) return null;
+            return nesting;
         }
 
         /// <summary>
@@ -322,8 +346,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             var loops = new Dictionary<long, UnrolledLoop>();
             var armValue = new Dictionary<IfArm, FastTensorKey>();
             var armsOfClose = new Dictionary<FastNodeKey, FastTensorKey>();   // the value entering each branch
-            FastNodeKey? pendingClose = null;                                 // a branch still being read
+            var open = new List<IfArm>();      // the branches still being read, outermost first, each on the side last read
             int previousMarker = -1;
+
+            FastTensorKey ValueIn(IfArm arm)
+                => armValue.TryGetValue(arm, out var held) ? held : armsOfClose[arm.IfClose];
 
             for (int i = 0; i < sites.Count; i++)
             {
@@ -342,21 +369,25 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 FastTensorKey start;
                 if (site.Arm is IfArm arm)
                 {
-                    pendingClose = arm.IfClose;
-                    if (!armsOfClose.ContainsKey(arm.IfClose))
+                    // The branches already being read stay open, on this call's side; the ones nested
+                    // in them begin from the value the arm around them holds.
+                    int shared = 0;
+                    for (; shared < open.Count && shared < site.Arms.Count && open[shared].IfClose == site.Arms[shared].IfClose; shared++)
+                        open[shared] = site.Arms[shared];
+                    bool begun = shared < site.Arms.Count;
+                    for (int d = shared; d < site.Arms.Count; d++)
                     {
-                        // A branch begins where the trip it is in begins.
-                        current = Enter(current);
-                        armsOfClose[arm.IfClose] = start = current;
+                        // An outermost branch begins where the trip it is in begins.
+                        armsOfClose[site.Arms[d].IfClose] = d == 0 ? current = Enter(current) : ValueIn(site.Arms[d - 1]);
+                        open.Add(site.Arms[d]);
                     }
-                    else
-                        start = Enter(armValue.TryGetValue(arm, out var held) ? held : armsOfClose[arm.IfClose]);
+                    start = begun ? armsOfClose[arm.IfClose] : Enter(ValueIn(arm));
                 }
                 else
                 {
                     // A call no branch chooses between, made after one a branch does, would have to
                     // take its turn before a value that only exists at the IF_CLOSE following it.
-                    if (pendingClose is not null)
+                    if (open.Count > 0)
                         throw new InvalidOperationException(
                             "FastChainStateUpdatesAcrossCallSites: a call this IfElse does not choose "
                             + "between is made after one it does, so the parameter would have to carry "
@@ -402,17 +433,25 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 else current = after;
                 if (stay > 0) continue;
 
-                // Close out a branch once its last call site is behind us.
-                bool lastOfThisClose = site.Arm is IfArm a
-                    && (i + 1 == sites.Count || sites[i + 1].Arm?.IfClose != a.IfClose);
-                if (!lastOfThisClose) continue;
-
-                var closing = (IfArm)site.Arm!;
-                var ifClose = nodeByKey[closing.IfClose];
-                current = CloseBranch(graph, ifClose, closing.Condition, armsOfClose[ifClose.Key],
-                                      armValue, positionOf, insertions);
-                scopeLinks.Add(current);
-                pendingClose = null;
+                // Close out each branch whose last call site is behind us, innermost first: what it
+                // selects is the value of the arm around it, or the parameter's past the outermost.
+                var nextArms = i + 1 == sites.Count ? [] : sites[i + 1].Arms;
+                int keep = 0;
+                while (keep < open.Count && keep < nextArms.Count && open[keep].IfClose == nextArms[keep].IfClose) keep++;
+                while (open.Count > keep)
+                {
+                    var closing = open[^1];
+                    open.RemoveAt(open.Count - 1);
+                    var ifClose = nodeByKey[closing.IfClose];
+                    var selected = CloseBranch(graph, ifClose, closing.Condition, armsOfClose[ifClose.Key],
+                                               armValue, positionOf, insertions);
+                    if (open.Count > 0) armValue[open[^1]] = selected;
+                    else
+                    {
+                        current = selected;
+                        scopeLinks.Add(current);
+                    }
+                }
             }
         }
 

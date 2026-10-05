@@ -1655,6 +1655,35 @@ public partial class StatefulCallInADiscardedIfElseNestedInAnotherModel
     }
 }
 
+/// <summary><see cref="StatefulCallInADiscardedIfElseNestedInAnotherModel"/> with both arms around
+/// the call taken.</summary>
+[Module]
+public partial class StatefulCallInADiscardedIfElseNestedInATakenArmOfAnotherModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var m = StatefulGainSubModel.Model();
+        var inner = (t.Reduce(ReduceKind.Max, keepDims: false).Scalar() > Scalar(0f)).IfElse(m.Call(t), t * Scalar(3f));
+        _ = (t.Reduce(ReduceKind.Max, keepDims: false).Scalar() > Scalar(1f)).IfElse(inner, t * Scalar(5f));
+        return t * Scalar(2f);
+    }
+}
+
+/// <summary>A stateful call in a taken arm of a discarded <c>IfElse</c>, and again in a taken arm of
+/// an <c>IfElse</c> nested in that arm.</summary>
+[Module]
+public partial class StatefulCalledInAnArmAndInAnIfElseNestedInItModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var m = StatefulGainSubModel.Model();
+        var a = m.Call(t);
+        var inner = (t.Reduce(ReduceKind.Max, keepDims: false).Scalar() > Scalar(0f)).IfElse(m.Call(a), t * Scalar(3f));
+        _ = (t.Reduce(ReduceKind.Max, keepDims: false).Scalar() > Scalar(1f)).IfElse(inner + a, t * Scalar(5f));
+        return t * Scalar(2f);
+    }
+}
+
 /// <summary>A stateful call on a loop's first trip only, in a loop whose continue condition is read
 /// at run time.</summary>
 [Module]
@@ -2485,4 +2514,251 @@ public partial class SameStridedAveragePoolModel
 {
     public static Tensor<float32> Inline(Tensor<float32> input)
         => (Tensor<float32>)OnnxOp.AveragePool(OnnxOp.Relu(input * InitScalarWeight.Init(Vector(1L))), AutoPad.SameLower, null, null, null, [2L, 1L], null, [3L, 2L]);
+}
+
+/// <summary><see cref="GainGatheredInAnUntakenIfElseArmModel"/> with the gathering arm on the else
+/// side.</summary>
+[Module]
+public partial class GainGatheredInAnUntakenElseArmModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var y = t * Ones.Init([Scalar(2L)]);
+        var picked = (Tensor<float32>)OnnxOp.Gather(y, Vector(5L, 5L), axis: 0);
+        return (t.Reduce(ReduceKind.Max, keepDims: false).Scalar() <= Scalar(100f)).IfElse(y, picked);
+    }
+}
+
+/// <summary>A gain gathered at a valid index, in the <c>IfElse</c> arm the input takes.</summary>
+[Module]
+public partial class GainGatheredInATakenIfElseArmModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var y = t * Ones.Init([Scalar(2L)]);
+        var picked = (Tensor<float32>)OnnxOp.Gather(y, Vector(1L, 1L), axis: 0);
+        return (t.Reduce(ReduceKind.Max, keepDims: false).Scalar() > Scalar(1f)).IfElse(picked, y);
+    }
+}
+
+/// <summary>A gain gathered at indices valid only for longer inputs, in the taken arm of an
+/// <c>IfElse</c> nested in the untaken arm of another.</summary>
+[Module]
+public partial class GainGatheredInANestedUntakenIfElseArmModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var y = t * Ones.Init([Scalar(2L)]);
+        var max = t.Reduce(ReduceKind.Max, keepDims: false).Scalar();
+        var picked = (Tensor<float32>)OnnxOp.Gather(y, Vector(5L, 5L), axis: 0);
+        return (max > Scalar(100f)).IfElse((max > Scalar(1f)).IfElse(picked, y * Scalar(3f)), y);
+    }
+}
+
+/// <summary>A gain gathered at indices valid only for longer inputs and then squared, in an
+/// <c>IfElse</c> arm those inputs alone take, so the square's backward reads the gathered
+/// value.</summary>
+[Module]
+public partial class GainGatheredAndSquaredInAnUntakenIfElseArmModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var y = t * Ones.Init([Scalar(2L)]);
+        var picked = (Tensor<float32>)OnnxOp.Gather(y, Vector(5L, 5L), axis: 0);
+        return (t.Reduce(ReduceKind.Max, keepDims: false).Scalar() > Scalar(100f)).IfElse(picked * picked, y);
+    }
+}
+
+/// <summary><see cref="GainGatheredAndSquaredInAnUntakenIfElseArmModel"/> with the gathering arm
+/// on the else side.</summary>
+[Module]
+public partial class GainGatheredAndSquaredInAnUntakenElseArmModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var y = t * Ones.Init([Scalar(2L)]);
+        var picked = (Tensor<float32>)OnnxOp.Gather(y, Vector(5L, 5L), axis: 0);
+        return (t.Reduce(ReduceKind.Max, keepDims: false).Scalar() <= Scalar(100f)).IfElse(y, picked * picked);
+    }
+}
+
+/// <summary>A gain gathered at indices valid only for longer inputs and then squared, in the taken
+/// arm of an <c>IfElse</c> nested in the untaken arm of another.</summary>
+[Module]
+public partial class GainGatheredAndSquaredInANestedUntakenIfElseArmModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var y = t * Ones.Init([Scalar(2L)]);
+        var max = t.Reduce(ReduceKind.Max, keepDims: false).Scalar();
+        var picked = (Tensor<float32>)OnnxOp.Gather(y, Vector(5L, 5L), axis: 0);
+        return (max > Scalar(100f)).IfElse((max > Scalar(1f)).IfElse(picked * picked, y * Scalar(3f)), y);
+    }
+}
+
+/// <summary>A gain gathered at a valid index and squared in one arm of an <c>IfElse</c> on an
+/// input condition, so the arm's backward reads the gathered value.</summary>
+[Module]
+public partial class GatherSquaredInOneIfArmModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t, Scalar<bit> cond)
+    {
+        var y = t * Ones.Init([Scalar(2L)]);
+        var picked = (Tensor<float32>)OnnxOp.Gather(y, Vector(1L, 1L), axis: 0);
+        return cond.IfElse(picked * picked, y);
+    }
+}
+
+/// <summary>An always-on Dropout squared in one arm of an <c>IfElse</c> on an input condition, so
+/// the arm's backward reads the mask and the output the forward drew.</summary>
+[Module]
+public partial class DropoutSquaredInOneIfArmModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t, Scalar<bit> cond)
+    {
+        var y = t * Ones.Init([Scalar(8L)]);
+        var dropped = Shorokoo.Modules.Layers.Dropout.Call(Scalar(0.5f), Scalar(true), y);
+        return cond.IfElse(dropped * dropped, y);
+    }
+}
+
+/// <summary>An always-on Dropout squared in the else arm of an <c>IfElse</c> on an input
+/// condition.</summary>
+[Module]
+public partial class DropoutSquaredInTheElseArmModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t, Scalar<bit> cond)
+    {
+        var y = t * Ones.Init([Scalar(8L)]);
+        var dropped = Shorokoo.Modules.Layers.Dropout.Call(Scalar(0.5f), Scalar(true), y);
+        return cond.IfElse(y, dropped * dropped);
+    }
+}
+
+/// <summary>An always-on Dropout read in one arm of an <c>IfElse</c> and after the branch, so it
+/// draws whichever arm is taken.</summary>
+[Module]
+public partial class DropoutReadInOneIfArmAndAfterTheBranchModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t, Scalar<bit> cond)
+    {
+        var y = t * Ones.Init([Scalar(8L)]);
+        var dropped = Shorokoo.Modules.Layers.Dropout.Call(Scalar(0.5f), Scalar(true), y);
+        return cond.IfElse(dropped * dropped, y) + dropped;
+    }
+}
+
+/// <summary>A gain kept where it is not negative, by a comparison cast to a mask, in one arm of an
+/// <c>IfElse</c> on an input condition.</summary>
+[Module]
+public partial class ComparisonMaskInOneIfArmModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t, Scalar<bit> cond)
+    {
+        var y = t * Ones.Init([Scalar(2L)]);
+        return cond.IfElse(y * (y >= Scalar(0f)).Cast<float32>(), y);
+    }
+}
+
+/// <summary>A value gathered at indices valid only for longer inputs and reshaped twice, in an
+/// <c>IfElse</c> arm those inputs alone take.</summary>
+[Module]
+public partial class GatheredAndReshapedTwiceInAnUntakenIfElseArmModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var picked = (Tensor<float32>)OnnxOp.Gather(t, Vector(5L, 5L), axis: 0);
+        var r = (Tensor<float32>)OnnxOp.Reshape((Tensor<float32>)OnnxOp.Reshape(picked, Vector(2L, 1L), allowZero: false), Vector(2L), allowZero: false);
+        return (t.Reduce(ReduceKind.Max, keepDims: false).Scalar() > Scalar(100f)).IfElse(r, t);
+    }
+}
+
+/// <summary>A value of one <c>IfElse</c> arm reshaped twice in the same arm of a second
+/// <c>IfElse</c> on the same condition.</summary>
+[Module]
+public partial class ValueReshapedTwiceInASecondIfElseOnTheSameConditionModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t, Scalar<bit> cond)
+    {
+        var a = t * t + Scalar(1f);
+        return cond.IfElse(a, t) + cond.IfElse((Tensor<float32>)OnnxOp.Reshape((Tensor<float32>)OnnxOp.Reshape(a, Vector(2L, 1L), allowZero: false), Vector(2L), allowZero: false), t);
+    }
+}
+
+/// <summary>A gain gathered at indices valid only for longer inputs, in the untaken arm of an
+/// <c>IfElse</c>, and read by both arms of an <c>IfElse</c> nested in it on another
+/// condition.</summary>
+[Module]
+public partial class GainGatheredInAnUntakenArmAndReadByBothArmsOfANestedIfElseModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var y = t * Ones.Init([Scalar(2L)]);
+        var max = t.Reduce(ReduceKind.Max, keepDims: false).Scalar();
+        var picked = (Tensor<float32>)OnnxOp.Gather(y, Vector(5L, 5L), axis: 0);
+        return (max > Scalar(100f)).IfElse((max > Scalar(1f)).IfElse(picked * Scalar(2f), picked * Scalar(3f)), y);
+    }
+}
+
+/// <summary>A value of one <c>IfElse</c>'s then arm read again in the then arm of a second
+/// <c>IfElse</c> on the same condition.</summary>
+[Module]
+public partial class SharedValueInTwoIfElsesOnTheSameConditionModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t, Scalar<bit> c)
+    {
+        var a = t * t + Scalar(1f);
+        return c.IfElse(a, t) + c.IfElse(a * Scalar(2f), t);
+    }
+}
+
+/// <summary><see cref="SharedValueInTwoIfElsesOnTheSameConditionModel"/> with the shared value on
+/// the else side.</summary>
+[Module]
+public partial class SharedElseValueInTwoIfElsesOnTheSameConditionModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t, Scalar<bit> c)
+    {
+        var a = t * t + Scalar(1f);
+        return c.IfElse(t, a) + c.IfElse(t, a * Scalar(2f));
+    }
+}
+
+/// <summary>An always-on Dropout in the then arm of an <c>IfElse</c> nested in the then arm of
+/// another, both on input conditions.</summary>
+[Module]
+public partial class DropoutInANestedIfElseArmModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t, Scalar<bit> cond, Scalar<bit> c2)
+    {
+        var dropped = Shorokoo.Modules.Layers.Dropout.Call(Scalar(0.5f), Scalar(true), t);
+        return cond.IfElse(c2.IfElse(dropped * Scalar(0f), t * Scalar(3f)), t);
+    }
+}
+
+/// <summary>An always-on Dropout squared in the then arm of an <c>IfElse</c> nested in the then
+/// arm of another, both on input conditions.</summary>
+[Module]
+public partial class DropoutSquaredInANestedIfElseArmModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t, Scalar<bit> cond, Scalar<bit> c2)
+    {
+        var y = t * Ones.Init([Scalar(8L)]);
+        var dropped = Shorokoo.Modules.Layers.Dropout.Call(Scalar(0.5f), Scalar(true), y);
+        return cond.IfElse(c2.IfElse(dropped * dropped, y), y);
+    }
+}
+
+/// <summary>A value reshaped twice, first to a shape computed from a value gathered at an index
+/// valid only for longer inputs, in an <c>IfElse</c> arm those inputs alone take.</summary>
+[Module]
+public partial class ReshapedTwiceToAShapeGatheredInAnUntakenIfElseArmModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var bad = ((Tensor<float32>)OnnxOp.Abs(OnnxOp.Sign((Tensor<float32>)OnnxOp.Gather(t, Vector(5L), axis: 0)))).Cast<int64>();
+        var shape = (Vector<int64>)OnnxOp.Sub((Vector<int64>)OnnxOp.Add(Vector(2L, 1L), bad), bad);
+        var r = (Tensor<float32>)OnnxOp.Reshape((Tensor<float32>)OnnxOp.Reshape(t, shape, allowZero: false), Vector(2L), allowZero: false);
+        return (t.Reduce(ReduceKind.Max, keepDims: false).Scalar() > Scalar(100f)).IfElse(r, t);
+    }
 }

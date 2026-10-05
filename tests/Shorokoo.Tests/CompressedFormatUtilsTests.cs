@@ -59,6 +59,17 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
         }
     }
 
+    [Fact]
+    public void TestATensorNoMemoryIsNamedForIsPassedOverAndTheTensorsAfterItAreReadAtTheirOffsets()
+    {
+        var path = SparseSafeTensors(P("subset.safetensors"),
+            ("a", 0, 2, [1f, 2f]), ("b", 8, 3, [3f, 4f, 5f]), ("z", 20, 0, []), ("c", 20, 2, [6f, 7f]));
+        var loaded = SafeTensorLoader.LoadSafeTensors(path, (name, _) => name is "b" or "z" ? null : ComputeContext.Host);
+
+        Assert.Equal(["a", "c"], loaded.Select(t => t.Name));
+        Assert.Equal((float[])[1f, 2f, 6f, 7f], loaded.SelectMany(t => t.Data.As<float32>().CopyMemory<float>()).ToArray());
+    }
+
     // A SafeTensors file of float tensors at the data offsets given, each starting with the values
     // given; every other byte is a hole that holds no disk space.
     private static string SparseSafeTensors(string path, params (string Name, long Offset, long Elements, float[] Head)[] tensors)

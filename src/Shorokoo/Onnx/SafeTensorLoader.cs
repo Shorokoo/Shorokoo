@@ -80,9 +80,10 @@ namespace Shorokoo.Onnx
         /// <see cref="LoadSafeTensors(string)"/>, putting each tensor where
         /// <paramref name="placement"/> names for it: the file is read once, forward, each tensor's
         /// bytes going straight into the memory it lives in — so host memory holds one bounded
-        /// buffer for a tensor loaded onto a device, never the file (Shorokoo/Shorokoo#436).
+        /// buffer for a tensor loaded onto a device, never the file (Shorokoo/Shorokoo#436). A tensor
+        /// <paramref name="placement"/> names no memory for is passed over and not returned.
         /// </summary>
-        internal static List<SafeTensor> LoadSafeTensors(string filePath, Func<string, long, ComputeContext> placement)
+        internal static List<SafeTensor> LoadSafeTensors(string filePath, Func<string, long, ComputeContext?> placement)
         {
             if (!File.Exists(filePath))
                 throw new FileNotFoundException($"SafeTensor file not found: {filePath}");
@@ -279,7 +280,9 @@ namespace Shorokoo.Onnx
         /// context's device memory, which they reach through one bounded buffer rather than a host
         /// copy of the tensor (Shorokoo/Shorokoo#436). Tensors come back in the order their bytes
         /// are laid out, which is the order they were written — not the order the JSON header lists
-        /// them in. Nothing past the last tensor's bytes is read.
+        /// them in. Nothing past the last tensor's bytes is read. A tensor
+        /// <paramref name="placement"/> names no memory for (null) is passed over: its bytes are read
+        /// past, never into memory, and it is not returned.
         ///
         /// <para><paramref name="available"/> is the payload's length, known up front, and lets a
         /// truncated file (interrupted download/copy, disk full, …) be refused before a byte of data
@@ -289,7 +292,7 @@ namespace Shorokoo.Onnx
         /// deleted.</para>
         /// </summary>
         internal static List<SafeTensor> ReadSafeTensors(
-            Stream source, long available, Func<string, long, ComputeContext> placement, string origin)
+            Stream source, long available, Func<string, long, ComputeContext?> placement, string origin)
         {
             var lengthField = new byte[8];
             int got = source.ReadAtLeast(lengthField, 8, throwOnEndOfStream: false);
@@ -350,25 +353,33 @@ namespace Shorokoo.Onnx
                 long position = 0;
                 foreach (var entry in entries.OrderBy(e => e.Start))
                 {
+                    var onto = placement(entry.Name, entry.Elements);
                     // Occupying no bytes, a zero-byte tensor overlaps nothing wherever its offsets
                     // fall -- inside another tensor's range, or at a start a longer tensor shares --
                     // and reading it consumes nothing, so the position stays where it is.
                     if (entry.Start == entry.End)
                     {
-                        tensors.Add(new SafeTensor(entry.Name,
-                            placement(entry.Name, entry.Elements).ReadTensor(new Shape(entry.Shape), entry.DType, source),
-                            entry.DTypeName, entry.Shape, entry.Metadata));
+                        if (onto is not null)
+                            tensors.Add(new SafeTensor(entry.Name,
+                                onto.ReadTensor(new Shape(entry.Shape), entry.DType, source),
+                                entry.DTypeName, entry.Shape, entry.Metadata));
                         continue;
                     }
                     if (entry.Start < position)
                         throw new InvalidOperationException(
                             $"Tensor '{entry.Name}' has data_offsets [{entry.Start}, {entry.End}), which overlap " +
                             "the bytes of the tensor before it; SafeTensors tensors do not share bytes.");
+                    if (onto is null)
+                    {
+                        Skip(source, entry.End - position, entry.Name, origin);
+                        position = entry.End;
+                        continue;
+                    }
                     Skip(source, entry.Start - position, entry.Name, origin);
                     TensorData data;
                     try
                     {
-                        data = placement(entry.Name, entry.Elements).ReadTensor(new Shape(entry.Shape), entry.DType, source);
+                        data = onto.ReadTensor(new Shape(entry.Shape), entry.DType, source);
                     }
                     catch (EndOfStreamException e)
                     {

@@ -744,16 +744,21 @@ namespace Shorokoo
             bool Want(CheckpointComponents c) => components is null || (components.Value & c) != 0;
             // The state sections are read straight into the memory the rig trains in -- on a card,
             // through one bounded buffer, never whole in host memory (Shorokoo/Shorokoo#436). The
-            // marker, the counters and the history are read on the host, where they are read back,
-            // and so is a section the rig fills from its own values: nothing is put on a card that
-            // the checkpoint does not hold.
+            // marker, the counters and the history are read on the host, where they are read back.
+            // A state section the rig fills from its own values is passed over, its bytes read into
+            // no memory at all: nothing reads it, and nothing is put anywhere that the checkpoint
+            // does not hold.
             bool Kept(CheckpointComponents c) => Want(c) || rigForDefaults is null;
-            var tensors = SafeTensorLoader.LoadSafeTensors(filePath, (name, _) =>
-                (name.StartsWith(TrainableSection + "/", StringComparison.Ordinal)
-                 || name.StartsWith(ModelStateSection + "/", StringComparison.Ordinal)) && Kept(CheckpointComponents.InferenceState)
-                || name.StartsWith(OptimizerStateSection + "/", StringComparison.Ordinal) && Kept(CheckpointComponents.OptimizerState)
-                    ? destination
-                    : ComputeContext.Host);
+            ComputeContext? Placement(string name)
+            {
+                if (name.StartsWith(TrainableSection + "/", StringComparison.Ordinal)
+                    || name.StartsWith(ModelStateSection + "/", StringComparison.Ordinal))
+                    return Kept(CheckpointComponents.InferenceState) ? destination : null;
+                if (name.StartsWith(OptimizerStateSection + "/", StringComparison.Ordinal))
+                    return Kept(CheckpointComponents.OptimizerState) ? destination : null;
+                return ComputeContext.Host;
+            }
+            var tensors = SafeTensorLoader.LoadSafeTensors(filePath, (name, _) => Placement(name));
             try
             {
                 var read = ReadFlat(filePath, tensors, trainableParamDef, modelStateDef, optimizerStateDef,

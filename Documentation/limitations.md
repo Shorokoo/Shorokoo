@@ -363,13 +363,21 @@ separate inputs, or builds the sequence from them itself.
 
 ### Conditional execution in a training graph
 
-In a training graph, forward values the backward pass reads are hoisted out of
-`IfElse` branches and computed on every step, whichever branch is selected.
-Gradients are unaffected: the arm that did not run contributes a *selected* zero,
-so a non-finite derivative there (`sqrt` of a negative, division by zero) cannot
-poison the weights. The costs are the extra work, and an operation that would
-*fail* (not merely return a non-finite number) off its branch must stay off the
-differentiated path.
+In a training graph, an `IfElse` arm runs, forward and backward, only on the
+steps that take it, as it does in inference: the forward values its backward
+reads are computed in the arm, and its backward runs behind the arm's own
+condition. The arm that did not run contributes a *selected* zero to the
+gradient, so a non-finite derivative there (`sqrt` of a negative, division by
+zero) cannot poison the weights.
+
+A value read by arms of `IfElse`s on different conditions, or both by an arm
+and outside it, belongs to no single arm. It runs on every step, as in inference, and so
+does the part of the backward pass that differentiates it: an operation that
+would *fail* there (not merely return a non-finite number) off its branch must
+stay off the differentiated path.
+
+A `Dropout` inside an `IfElse` arm cannot be trained: building a training rig
+for such a model fails.
 
 ### Gradient (activation) checkpointing
 

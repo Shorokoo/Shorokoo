@@ -339,7 +339,9 @@ PipelineState? state = info.Skpt!.GetUserData<PipelineState>();  // default when
 - An entry whose bytes contradict its declared compression fails loudly on load.
 - A Zstd entry's frame header declares its decompressed size, which bounds the
   tensors the entry may claim before any is allocated; a frame that declares none is
-  refused. A `.zsafetensor` file is held to the same rule.
+  refused. An entry written in several frames — by `pzstd`, say — is read whole, bounded
+  by the sizes its frames declare between them. A `.zsafetensor` file is held to the same
+  rule.
 
 ## Named weight sets (default + ema)
 

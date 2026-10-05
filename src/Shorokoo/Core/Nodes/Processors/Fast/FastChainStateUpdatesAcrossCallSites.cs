@@ -120,7 +120,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 if (onlyLoopsUnrolledSince && (links.Any(IsOrdered) || links.All(l => TripsOf(l).Count == 0)))
                     continue;
                 var sites = CallSitesOf(graph, links, enclosingScope, armsOfNode, nodeByKey);
-                if (sites is null) continue;                        // shape this pass does not order
+                if (sites is null)                                  // shape this pass does not order
+                {
+                    foreach (var link in links) MarkUnordered(link);
+                    continue;
+                }
                 if (sites.Count < 2 && sites.All(s => s.Arm is null && s.Loops.Count == 0
                                                       && TripsOf(s.Link).All(t => t.Ran is null && t.Trip == t.Count - 1)))
                 {
@@ -164,9 +168,29 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                         }
         }
 
+        private static InvalidOperationException SkipsACallOnARuntimeTrip()
+            => new("FastChainStateUpdatesAcrossCallSites: a loop whose continue condition is read at "
+                   + "run time makes a stateful call on some trips but not on others, so its update "
+                   + "depends on which trip ran last, which this pass does not follow. Make the call on "
+                   + "every trip, or give the loop a condition known when the graph is built.");
+
         /// <summary>Whether this pass has ordered the link already.</summary>
         internal static bool IsOrdered(FastNode link)
             => link.Attributes.GetBoolVal(OnnxOpAttributeNames.ShrkAttrStateOrdered) == true;
+
+        /// <summary>
+        /// Marks a link of a parameter this pass could not order, keeping the trips it names for a
+        /// later run to order it by once its loops are unrolled. Running such a graph with its state
+        /// is refused (see <see cref="FastLowerStateUpdateNodes"/>).
+        /// </summary>
+        private static void MarkUnordered(FastNode link)
+            => link.Attributes = OnnxCSharpAttributes.FromCSharpVals(
+                new Dictionary<string, object?>
+                {
+                    [OnnxOpAttributeNames.ShrkAttrStateOrdered] = false,
+                    [OnnxOpAttributeNames.ShrkAttrLoopTrips] = link.Attributes.GetLongsVal(OnnxOpAttributeNames.ShrkAttrLoopTrips),
+                },
+                Definitions.NodeDefinitions[InternalOpCodes.STATE_UPDATE_LINK].AttributeDefs);
 
         /// <summary>A link this pass has ordered: marked so, and naming no trips any more.</summary>
         private static OnnxCSharpAttributes OrderedLinkAttributes()
@@ -309,12 +333,24 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 // The value the call starts from: the arm's own where a branch chooses it, the
                 // parameter's running value where none does — either one started over where the
                 // call begins a new trip of an unrolled loop.
+                int firstRolledEntered = loopEntries.Count < site.Loops.Count
+                    ? positionOf[site.Loops[loopEntries.Count].Key] : int.MaxValue;
+                int enterBefore = Math.Min(positionOf[site.Marker.Key], firstRolledEntered);
+                FastTensorKey Enter(FastTensorKey from)
+                    => EnterTrips(graph, param, trips, loops, from, previousMarker + 1, enterBefore, nodeByKey, insertions);
+
                 FastTensorKey start;
                 if (site.Arm is IfArm arm)
                 {
-                    if (!armsOfClose.ContainsKey(arm.IfClose)) armsOfClose[arm.IfClose] = current;
                     pendingClose = arm.IfClose;
-                    start = armValue.TryGetValue(arm, out var held) ? held : armsOfClose[arm.IfClose];
+                    if (!armsOfClose.ContainsKey(arm.IfClose))
+                    {
+                        // A branch begins where the trip it is in begins.
+                        current = Enter(current);
+                        armsOfClose[arm.IfClose] = start = current;
+                    }
+                    else
+                        start = Enter(armValue.TryGetValue(arm, out var held) ? held : armsOfClose[arm.IfClose]);
                 }
                 else
                 {
@@ -326,12 +362,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                             + "between is made after one it does, so the parameter would have to carry "
                             + "the branch's answer before the branch produces it. Make the calls the "
                             + "branch does not choose between before the ones it does.");
-                    start = current;
+                    start = Enter(current);
                 }
-                int firstRolledEntered = loopEntries.Count < site.Loops.Count
-                    ? positionOf[site.Loops[loopEntries.Count].Key] : int.MaxValue;
-                start = EnterTrips(graph, param, trips, loops, start, previousMarker + 1,
-                                   Math.Min(positionOf[site.Marker.Key], firstRolledEntered), nodeByKey, insertions);
                 while (loopEntries.Count < site.Loops.Count) loopEntries.Add(start);
                 rewrites.Add((previousMarker + 1, positionOf[site.Marker.Key], param, start));
                 GateOnTripsRan(site.Link, trips, start, positionOf, insertions);
@@ -352,13 +384,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     {
                         loops.Remove(id);
                         if (left.Trip == left.Count - 1) continue;
-                        if (left.MayNotRun)
-                            throw new InvalidOperationException(
-                                "FastChainStateUpdatesAcrossCallSites: a loop whose continue condition is "
-                                + "read at run time makes a stateful call on some trips but not on its last, "
-                                + "so its update depends on which trip ran last, which this pass does not "
-                                + "follow. Make the call on every trip, or give the loop a condition known "
-                                + "when the graph is built.");
+                        if (left.MayNotRun) throw SkipsACallOnARuntimeTrip();
                         after = HandBack(after, left.Entry, leftAt + 1, insertions);
                         if (atModuleScope) scopeLinks.Add(after);
                     }
@@ -441,6 +467,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
             if (restart is { } r)
             {
+                // A trip that may not run and makes no call between two that do would have to
+                // decide where the next one starts from, and no flag says whether it ran.
+                if (r.Ran is not null && r.Trip > loops[r.Loop].Trip + 1)
+                    throw SkipsACallOnARuntimeTrip();
                 foreach (var nested in loops.Where(kv => kv.Value.Order > restartOrder).Select(kv => kv.Key).ToList())
                     loops.Remove(nested);
                 var entry = loops[r.Loop].Entry;

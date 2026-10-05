@@ -2716,6 +2716,17 @@ public class TrainingRigTrainingLoopCoverageTests
     }
 
     [Fact]
+    public void TestEachTripStartsFromTheStepsStateWhenItsFirstCallIsInARunTimeArm()
+        => Assert.Equal([0f, 1f],
+            [.. StateFieldsAfterOneStep(StatefulCallInAnArmOnlyTheFirstTripTakesAtRunTimeModel.ComputationGraph),
+             .. StateFieldsAfterOneStep(StatefulCallInARunTimeArmAndAfterItInALoopModel.ComputationGraph)]);
+
+    [Fact]
+    public void TestALoopWithARuntimeConditionThatSkipsTheCallOnAMiddleTripIsRefused()
+        => Assert.Contains("continue condition", Assert.Throws<InvalidOperationException>(
+            () => StateFieldsAfterOneStep(InputAccumulatingSkippingAMiddleTripOfALoopThatStopsThereModel.ComputationGraph)).Message);
+
+    [Fact]
     public void TestALoopWithARuntimeConditionWhoseLaterTripsMakeNoCallIsRefused()
         => Assert.Contains("continue condition", Assert.Throws<InvalidOperationException>(
             () => StateFieldsAfterOneStep(StatefulCallOnTheFirstTripOfALoopWithARuntimeConditionModel.ComputationGraph)).Message);

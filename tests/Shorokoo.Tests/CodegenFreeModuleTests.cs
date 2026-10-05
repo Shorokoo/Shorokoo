@@ -468,6 +468,11 @@ public class CodegenFreeModuleTests
     }
 
     [Fact]
+    public void TestAStatefulCallInAnIfElseInARolledLoopIsRefusedWhateverFollowsIt()
+        => Assert.Contains("IfElse", Assert.Throws<InvalidOperationException>(
+            () => StateAfterOneExecution(StatefulCallInAnIfElseInARolledLoopAndAfterItModel.ComputationGraph)).Message);
+
+    [Fact]
     public void TestARolledStatefulLoopInAnUntakenIfElseArmRunsAndMakesNoUpdate()
     {
         var input = TensorData([2L], 1f, 2f);

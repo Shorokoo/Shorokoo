@@ -1669,6 +1669,80 @@ public partial class RootedGainReadByAnArmAndARunningStatisticModel
     }
 }
 
+/// <summary>A stateful call in an <c>IfElse</c> arm a loop's first trip alone takes, on a condition
+/// read at run time.</summary>
+[Module]
+public partial class StatefulCallInAnArmOnlyTheFirstTripTakesAtRunTimeModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var m = StatefulGainSubModel.Model();
+        var x = t;
+        foreach (var ctx in LoopAPI.Iterate(Scalar(3L)))
+        {
+            x = (x.Reduce(ReduceKind.Max, keepDims: false).Scalar() < Scalar(2.5f)).IfElse(m.Call(x) * Scalar(2f), x * Scalar(3f));
+            ctx.ContinueWhile(Scalar(true));
+        }
+        return x;
+    }
+}
+
+/// <summary><see cref="StatefulCallInAnArmOnlyTheFirstTripTakesAtRunTimeModel"/> over two trips with
+/// one more call after the branch in each.</summary>
+[Module]
+public partial class StatefulCallInARunTimeArmAndAfterItInALoopModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var m = StatefulGainSubModel.Model();
+        var x = t;
+        foreach (var ctx in LoopAPI.Iterate(Scalar(2L)))
+        {
+            x = (x.Reduce(ReduceKind.Max, keepDims: false).Scalar() < Scalar(2.5f)).IfElse(m.Call(x), x * Scalar(3f));
+            x = m.Call(x);
+            ctx.ContinueWhile(Scalar(true));
+        }
+        return x;
+    }
+}
+
+/// <summary><see cref="InputAccumulatingSubModel"/> called on a loop's first and last trips but not
+/// its middle one, in a loop whose continue condition stops it after the middle trip.</summary>
+[Module]
+public partial class InputAccumulatingSkippingAMiddleTripOfALoopThatStopsThereModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var m = InputAccumulatingSubModel.Model();
+        var x = t;
+        foreach (var ctx in LoopAPI.Iterate(Scalar(3L)))
+        {
+            var fromMiddle = ctx.IterationIndex - Scalar(1L);
+            x = (fromMiddle * fromMiddle > Scalar(0L)).IfElse(m.Call(x), x * Scalar(3f));
+            ctx.ContinueWhile(x.Reduce(ReduceKind.Max, keepDims: false).Scalar() < Scalar(5f));
+        }
+        return x;
+    }
+}
+
+/// <summary>A stateful call in an <c>IfElse</c> in the body of a loop whose trip count is read off an
+/// input's shape, and another after the loop.</summary>
+[Module]
+public partial class StatefulCallInAnIfElseInARolledLoopAndAfterItModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var m = StatefulGainSubModel.Model();
+        var x = t;
+        foreach (var ctx in LoopAPI.Iterate(t.ShapeTensor()[0]))
+        {
+            x = (ctx.IterationIndex > Scalar(0L)).IfElse(m.Call(x), x);
+            ctx.ContinueWhile(Scalar(true));
+        }
+        return m.Call(x);
+    }
+}
+
 /// <summary>A gained vector divided by its norm where the norm is not zero.</summary>
 [Module]
 public partial class SafelyNormalizedGainModel

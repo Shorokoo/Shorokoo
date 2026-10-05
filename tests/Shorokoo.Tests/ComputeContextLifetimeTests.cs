@@ -207,6 +207,7 @@ public class ComputeContextLifetimeCoverageTests
             () => backend.CreateTensorFromRawBytes(ShorokooTensorElementType.Float, raw, [4L]),
             () => backend.CreateTensorInBackendMemory(ShorokooTensorElementType.Float, raw, [4L]),
             () => backend.CreateUninitializedTensorInBackendMemory(ShorokooTensorElementType.Float, [4L]),
+            () => backend.CreateUninitializedHostTensor(ShorokooTensorElementType.Float, [4L]),
             () => backend.CreateStringTensor(["a", "b"], [2L]),
             () => backend.CreateSequence([]),
         ];

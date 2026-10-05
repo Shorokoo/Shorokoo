@@ -1127,6 +1127,12 @@ namespace Shorokoo.Runtime
         /// What a load puts a tensor on the device with (Shorokoo/Shorokoo#436). Attached, budgeted
         /// and refused as a <see cref="TensorData.CopyTo"/> onto this context is; throws
         /// <see cref="EndOfStreamException"/> where the stream ends first.
+        ///
+        /// <para>On <see cref="Host"/>, a tensor one managed array holds is read into the
+        /// framework's own host memory. A larger one is read, through the same bounded buffer, into
+        /// host memory of the backend <see cref="Default"/> runs on
+        /// (<see cref="IShorokooBackend.CreateUninitializedHostTensor"/>) — where a run on that
+        /// context reads it as it stands — since no managed array holds it.</para>
         /// </summary>
         internal TensorData ReadTensor(Shape shape, DType dtype, Stream source)
         {
@@ -1134,6 +1140,7 @@ namespace Shorokoo.Runtime
             var bytes = FlatByteCount(shape, dtype);
             if (_isHost)
             {
+                if (bytes > Array.MaxLength) return ReadIntoHostMemoryOf(Default.ResolvedBackend, shape, dtype, bytes, source);
                 var contents = new byte[bytes];
                 source.ReadExactly(contents);
                 return TensorData.NewHostTensor(shape, dtype, contents);
@@ -1144,6 +1151,18 @@ namespace Shorokoo.Runtime
                 shape, dtype, StagedUpload.Read(
                     backend, (ShorokooTensorElementType)(int)dtype, (long[])shape, bytes, source), backend));
         }
+
+        /// <summary>
+        /// A tensor of <paramref name="shape"/> and <paramref name="dtype"/> in host memory of
+        /// <paramref name="backend"/>'s runtime, holding the next <paramref name="bytes"/> bytes of
+        /// <paramref name="source"/>, read into it through one bounded buffer a piece at a time
+        /// (<see cref="StagedUpload.ReadIntoHostMemory"/>): of any size, and never whole in a managed
+        /// array. Attached to no context, as every host tensor is.
+        /// </summary>
+        internal static TensorData ReadIntoHostMemoryOf(
+            IShorokooBackend backend, Shape shape, DType dtype, long bytes, Stream source)
+            => TensorData.Create(shape, dtype, StagedUpload.ReadIntoHostMemory(
+                backend, (ShorokooTensorElementType)(int)dtype, (long[])shape, bytes, source), backend);
 
         /// <summary>The bytes a flat buffer of this shape and dtype takes, refusing — alike on
         /// every context, before any budget is asked — a dtype or shape that has none.</summary>

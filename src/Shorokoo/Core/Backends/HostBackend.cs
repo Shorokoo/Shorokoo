@@ -103,6 +103,13 @@ public sealed class HostBackend : IShorokooBackend
         ShorokooTensorElementType elementType, long[] shape)
         => throw NoValues();
 
+    /// <summary>Always throws, for the reason the others do; overridden for the reason the member
+    /// above is.</summary>
+    /// <exception cref="NotSupportedException">Always.</exception>
+    public IShorokooTensorValue CreateUninitializedHostTensor(
+        ShorokooTensorElementType elementType, long[] shape)
+        => throw NoValues();
+
     // One refusal, because there is one reason. A tensor of the framework's own host memory is
     // managed bytes and nothing else; the runtime value is built when a backend is fed it, by
     // that backend, and there is no sense in which this one could build a value another runtime

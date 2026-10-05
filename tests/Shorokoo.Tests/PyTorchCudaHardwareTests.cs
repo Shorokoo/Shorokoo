@@ -423,7 +423,7 @@ public class PyTorchCudaHardwareTests
         return bytes;
     }
 
-    private sealed class CountingStream(long count) : Stream
+    internal sealed class CountingStream(long count) : Stream
     {
         private long _position;
         private bool _wrong;

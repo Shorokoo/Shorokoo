@@ -390,10 +390,14 @@ public class CoreUtilsCoverageTests
                 using var copied = backend.CreateTensorInBackendMemory(
                     elementType, new byte[Elements(shape) * sizeof(double)], shape);
                 using var fresh = backend.CreateUninitializedTensorInBackendMemory(elementType, shape);
+                using var host = backend.CreateUninitializedHostTensor(elementType, shape);
                 Assert.Equal(copied.ElementType, fresh.ElementType);
                 Assert.Equal(copied.Shape, fresh.Shape);
                 Assert.Equal(
                     copied.GetTensorDataAsSpan<byte>().Length, fresh.GetTensorDataAsSpan<byte>().Length);
+                Assert.Equal((copied.ElementType, copied.GetTensorDataAsSpan<byte>().Length, true),
+                    (host.ElementType, host.GetTensorDataAsSpan<byte>().Length, host.IsHostAccessible));
+                Assert.Equal(copied.Shape, host.Shape);
             }
 
         Assert.Equal(
@@ -412,6 +416,10 @@ public class CoreUtilsCoverageTests
         Assert.Throws<NotSupportedException>(() => backend.CreateUninitializedTensorInBackendMemory(
             ShorokooTensorElementType.Complex64, [2L]));
         Assert.Throws<ArgumentNullException>(() => backend.CreateUninitializedTensorInBackendMemory(
+            ShorokooTensorElementType.Float, null!));
+        Assert.Throws<NotSupportedException>(() => backend.CreateUninitializedHostTensor(
+            ShorokooTensorElementType.String, [2L]));
+        Assert.Throws<ArgumentNullException>(() => backend.CreateUninitializedHostTensor(
             ShorokooTensorElementType.Float, null!));
     }
 
@@ -444,6 +452,10 @@ public class CoreUtilsCoverageTests
             tensor.Delete();
         }
     }
+
+    [Fact]
+    public void TestAHostTensorPastTwoGibibytesIsReadIntoOnnxRuntimesHostMemoryByThePiece()
+        => PyTorchBackendCoverageTests.AssertAHostTensorPastTwoGibibytesIsReadByThePiece(DefaultBackend.Instance);
 
     [Fact]
     public void TestAHostTensorPastFourGibibytesIsMeasuredWholeAndNeverReadThroughATruncatedSpan()
@@ -504,6 +516,8 @@ public class CoreUtilsCoverageTests
         Assert.Equal(new byte[5], Zeroed<byte>(defaulting, ShorokooTensorElementType.UInt8, [5L]));
         Assert.Equal(new short[4], Zeroed<short>(defaulting, ShorokooTensorElementType.Int16, [2L, 2L]));
         Assert.Equal(new double[2], Zeroed<double>(defaulting, ShorokooTensorElementType.Double, [2L]));
+        Assert.Equal(new float[6], Zeroed<float>(defaulting, ShorokooTensorElementType.Float, [2L, 3L], host: true));
+        Assert.Equal(new long[3], Zeroed<long>(defaulting, ShorokooTensorElementType.Int64, [3L], host: true));
 
         Assert.Contains("CreateStringTensor", Assert.Throws<NotSupportedException>(
             () => defaulting.CreateUninitializedTensorInBackendMemory(
@@ -535,10 +549,12 @@ public class CoreUtilsCoverageTests
     }
 
     private static T[] Zeroed<T>(
-        IShorokooBackend backend, ShorokooTensorElementType elementType, long[] shape)
+        IShorokooBackend backend, ShorokooTensorElementType elementType, long[] shape, bool host = false)
         where T : unmanaged
     {
-        using var value = backend.CreateUninitializedTensorInBackendMemory(elementType, shape);
+        using var value = host
+            ? backend.CreateUninitializedHostTensor(elementType, shape)
+            : backend.CreateUninitializedTensorInBackendMemory(elementType, shape);
         Assert.Equal(elementType, value.ElementType);
         Assert.Equal(shape, value.Shape);
         return [.. value.GetTensorDataAsSpan<T>()];

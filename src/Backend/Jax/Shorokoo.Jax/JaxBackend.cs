@@ -233,6 +233,16 @@ public abstract class JaxBackend : IShorokooBackend
     /// array is never uninitialized.</summary>
     public IShorokooTensorValue CreateUninitializedTensorInBackendMemory(
         ShorokooTensorElementType elementType, long[] shape)
+        => Uninitialized(elementType, shape, DeviceName);
+
+    /// <summary>A tensor in host memory whatever this backend's device, of any size, whose contents
+    /// are unspecified: a numpy array of zeros, so no managed array of its contents is ever
+    /// made.</summary>
+    public IShorokooTensorValue CreateUninitializedHostTensor(
+        ShorokooTensorElementType elementType, long[] shape)
+        => Uninitialized(elementType, shape, "cpu");
+
+    private IShorokooTensorValue Uninitialized(ShorokooTensorElementType elementType, long[] shape, string device)
     {
         ArgumentNullException.ThrowIfNull(shape);
         RefuseStrings(elementType);
@@ -241,7 +251,7 @@ public abstract class JaxBackend : IShorokooBackend
         using (PythonRuntime.Gil())
         {
             using var dims = Shape(shape);
-            var tensor = PyCall.Invoke(runtime.Empty, (int)elementType, dims, DeviceName);
+            var tensor = PyCall.Invoke(runtime.Empty, (int)elementType, dims, device);
             return JaxTensorValue.Wrap(runtime, tensor);
         }
     }

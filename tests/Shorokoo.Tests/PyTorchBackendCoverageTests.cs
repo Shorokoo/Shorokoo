@@ -1786,6 +1786,10 @@ public class PyTorchBackendCoverageTests
         AssertAHostValuePastTwoGibibytesIsCopiedByThePiece(Torch, large, 4 * Elements);
     }
 
+    [Fact]
+    public void TestAHostTensorPastTwoGibibytesIsReadIntoTorchsHostMemoryByThePiece()
+        => AssertAHostTensorPastTwoGibibytesIsReadByThePiece(Torch);
+
     internal static PyTuple HostFloats(long address, long elements)
     {
         PyObject[] dims = [elements.ToPython()];
@@ -1821,6 +1825,28 @@ public class PyTorchBackendCoverageTests
         tensor.Delete();
         Assert.Equal(StagedReadBack.StagingBytes, saved.First.Length);
         Assert.Equal(piece, saved.First[5..9]);
+    }
+
+    /// <summary>
+    /// Tensors read into <paramref name="backend"/>'s host memory a piece at a time, none larger
+    /// than <see cref="StagedReadBack.StagingBytes"/>: one of three pieces, read whole and written
+    /// back as it was read, and one past 2 GiB, read as far as a stream holding only those pieces
+    /// goes.
+    /// </summary>
+    internal static void AssertAHostTensorPastTwoGibibytesIsReadByThePiece(IShorokooBackend backend)
+    {
+        const long Small = StagedReadBack.StagingBytes / 2 + 3, Large = (1L << 29) + 2;
+        var (source, saved, cut) = (new PyTorchCudaHardwareTests.CountingStream(Small),
+            new PyTorchCudaHardwareTests.CountingStream(Small), new PyTorchCudaHardwareTests.CountingStream(Small));
+        var tensor = ComputeContext.ReadIntoHostMemoryOf(backend, new Shape([Small]), DType.Int32, 4 * Small, source);
+        var (host, allocator) = (tensor.IsHostResident, tensor.AllocatingBackend);
+        try { tensor.WriteContentTo(saved); }
+        finally { tensor.Delete(); }
+
+        Assert.IsType<EndOfStreamException>(Record.Exception(
+            () => ComputeContext.ReadIntoHostMemoryOf(backend, new Shape([Large]), DType.Int32, 4 * Large, cut)));
+        Assert.Equal((true, backend, true), (host, allocator, saved.Counted));
+        Assert.Equal((StagedReadBack.StagingBytes, StagedReadBack.StagingBytes, 4 * Small), (source.Largest, cut.Largest, cut.Position));
     }
 
     /// <summary>Keeps what the first write hands it, and stops the writer there.</summary>

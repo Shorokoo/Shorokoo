@@ -255,6 +255,15 @@ public abstract class TorchBackend : IShorokooBackend
     /// <summary>An uninitialized tensor on this backend's device.</summary>
     public IShorokooTensorValue CreateUninitializedTensorInBackendMemory(
         ShorokooTensorElementType elementType, long[] shape)
+        => Uninitialized(elementType, shape, DeviceName);
+
+    /// <summary>An uninitialized tensor in host memory, whatever this backend's device, of any
+    /// size: torch allocates it, so no managed array of its contents is ever made.</summary>
+    public IShorokooTensorValue CreateUninitializedHostTensor(
+        ShorokooTensorElementType elementType, long[] shape)
+        => Uninitialized(elementType, shape, "cpu");
+
+    private IShorokooTensorValue Uninitialized(ShorokooTensorElementType elementType, long[] shape, string device)
     {
         ArgumentNullException.ThrowIfNull(shape);
         PythonElementTypes.ByteLength(elementType, shape);
@@ -262,7 +271,7 @@ public abstract class TorchBackend : IShorokooBackend
         using (PythonRuntime.Gil())
         {
             using var dims = Shape(shape);
-            var tensor = PyCall.Invoke(runtime.Empty, (int)elementType, dims, DeviceName);
+            var tensor = PyCall.Invoke(runtime.Empty, (int)elementType, dims, device);
             return TorchTensorValue.Wrap(runtime, tensor, elementType);
         }
     }

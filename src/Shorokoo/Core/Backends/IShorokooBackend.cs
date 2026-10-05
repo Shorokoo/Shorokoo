@@ -26,8 +26,9 @@ namespace Shorokoo.Core.Backends;
 //   defaults serve a backend whose memory the host reads; a backend that computes in memory of its
 //   own overrides every one of them.
 // - Values in its runtime's host memory: CreateTensor and CreateTensorFromRawBytes for tensors,
-//   CreateStringTensor for strings and CreateSequence for sequences -- the run memory of strings
-//   and sequences unless the backend answers otherwise.
+//   CreateUninitializedHostTensor for one a later move fills, CreateStringTensor for strings and
+//   CreateSequence for sequences -- the run memory of strings and sequences unless the backend
+//   answers otherwise.
 // - Release, the one path by which memory it allocated goes back.
 public interface IShorokooBackend
 {
@@ -426,5 +427,21 @@ public interface IShorokooBackend
         ShorokooTensorElementType elementType,
         long[] shape)
         => CreateTensorInBackendMemory(
+            elementType, new byte[TensorElementLayout.ByteCount(elementType, shape)], shape);
+
+    // The same tensor as CreateTensorFromRawBytes builds -- same element type, same shape, in host
+    // memory of this backend's runtime whatever device it computes on -- with nothing put into it:
+    // the host counterpart of the member above, for a producer that fills a host tensor a piece at
+    // a time through TryCopyHostToTensorRange. It is what a tensor too large for any managed array
+    // is read into host memory with (ComputeContext.Host's ReadTensor), so a backend's override
+    // allocates a tensor of any size and never goes through a managed array of its contents.
+    //
+    // The default fills it from a zeroed buffer through CreateTensorFromRawBytes, which holds no
+    // more than one managed array does; it is here because this interface is an ABI. A backend
+    // whose host tensors can be larger overrides it.
+    IShorokooTensorValue CreateUninitializedHostTensor(
+        ShorokooTensorElementType elementType,
+        long[] shape)
+        => CreateTensorFromRawBytes(
             elementType, new byte[TensorElementLayout.ByteCount(elementType, shape)], shape);
 }

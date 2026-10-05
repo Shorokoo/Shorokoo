@@ -491,6 +491,10 @@ public static class IsolatedBackend
             ShorokooTensorElementType elementType, long[] shape)
             => _inner.CreateUninitializedTensorInBackendMemory(elementType, shape);
 
+        public IShorokooTensorValue CreateUninitializedHostTensor(
+            ShorokooTensorElementType elementType, long[] shape)
+            => _inner.CreateUninitializedHostTensor(elementType, shape);
+
         public IShorokooTensorValue CreateSequence(IReadOnlyList<IShorokooTensorValue> values)
             => _inner.CreateSequence(values);
 

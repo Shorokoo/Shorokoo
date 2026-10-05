@@ -58,6 +58,10 @@ public class JaxBackendCoverageTests
     }
 
     [Fact]
+    public void TestAHostTensorPastTwoGibibytesIsReadIntoJaxsHostMemoryByThePiece()
+        => AssertAHostTensorPastTwoGibibytesIsReadByThePiece(Jax);
+
+    [Fact]
     public void TestTypedTensorsSpansAndUninitializedTensorsAreTheTensorsTheySayTheyAre()
     {
         using var floats = Jax.CreateTensor([1f, 2f, 3f, 4f], [2, 2]);

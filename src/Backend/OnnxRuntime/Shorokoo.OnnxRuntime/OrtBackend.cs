@@ -1261,6 +1261,26 @@ public abstract class OrtBackend : IShorokooBackend
     }
 
     /// <summary>
+    /// A tensor of <paramref name="elementType"/> and <paramref name="shape"/> in host memory,
+    /// whatever device this backend computes on, with nothing written into it: the buffer
+    /// <see cref="CreateTensorFromRawBytes"/> copies into, from Shorokoo's host allocator, of any
+    /// size. What a tensor too large for a managed array is read into host memory with, a piece at a
+    /// time through <see cref="TryCopyHostToTensorRange"/>.
+    /// </summary>
+    /// <exception cref="ArgumentNullException"><paramref name="shape"/> is null.</exception>
+    /// <exception cref="NotSupportedException">The element type has no fixed byte stride.</exception>
+    public IShorokooTensorValue CreateUninitializedHostTensor(
+        ShorokooTensorElementType elementType,
+        long[] shape)
+    {
+        ArgumentNullException.ThrowIfNull(shape);
+        return new OrtTensorValue(OrtValue.CreateAllocatedTensorValue(
+            RuntimeAllocator.ForHost().Managed,
+            FixedStrideElementType(elementType, nameof(CreateUninitializedHostTensor)),
+            shape));
+    }
+
+    /// <summary>
     /// The ORT element type <paramref name="elementType"/> is laid down as, refusing the ones a
     /// flat byte buffer cannot express. <paramref name="operation"/> names the caller, so a
     /// refusal says which byte-wise constructor was asked.

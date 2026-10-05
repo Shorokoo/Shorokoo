@@ -585,6 +585,11 @@ public class CoreUtilsCoverageTests
         Assert.Equal(expected, OnnxEngine.Eval(shape).CopyMemory<long>());
         Assert.Equal(expected, ComputeContext.Default.Compile(new InternalComputationGraph([], [shape]))
             .Execute()[0].ToTensorData().CopyMemory<long>());
+        var open = OnnxOp.IfOpen(Scalar(true));
+        var branch = OnnxOp.IfClose([OnnxOp.Shape(OnnxOp.Constant(attribute))], [OnnxOp.Shape(OnnxOp.Constant(TensorData([1L], 0L).MoveToAttribute()))], open)[0];
+        Assert.Equal(expected, OnnxEngine.Eval(branch).CopyMemory<long>());
+        Assert.Contains("ConstantOfShape", Assert.Throws<NotSupportedException>(
+            () => OnnxEngine.Eval(OnnxOp.ConstantOfShape(OnnxOp.Shape(Scalar(1f)), attribute))).Message);
     }
 
     /// <summary>An attribute over a host tensor of 2 GiB + 8 bytes, moved into it as it stands with

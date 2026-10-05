@@ -37,6 +37,12 @@ public static partial class CudaLibraries
     /// them then rather than on the first CUDA run, or before a backend of your own loads them: for a
     /// session built on ONNX Runtime directly, before anything of its CUDA provider, since setting an
     /// <c>OrtCUDAProviderOptions</c>' options already loads the provider, and cuBLAS with it.
+    ///
+    /// <para>What the process already holds under the pinned files' names is checked first. A copy
+    /// that is the cache's own file, under any name — a provisioned PyTorch environment's links to
+    /// it among them — is known at a glance; any other copy is read whole and held to the pin's
+    /// SHA-256, which for a PyTorch environment named rather than provisioned, its copies not links
+    /// into the cache, reads up to a gigabyte, once per process.</para>
     /// </summary>
     /// <exception cref="InvalidOperationException">A pinned library is in neither the cache nor a copy
     /// that matches it exactly, and its wheel could not be fetched; the message names the library,
@@ -145,8 +151,11 @@ public static partial class CudaLibraries
             {
                 IntPtr map;
                 if (((delegate* unmanaged<IntPtr, int, IntPtr*, int>)info)(handle, RtldDiLinkMap, &map) != 0) return null;
-                // A link_map's second field is the file's name, as it was found.
-                return Marshal.PtrToStringUTF8(Marshal.ReadIntPtr(map, IntPtr.Size)) is { Length: > 0 } path ? path : null;
+                // A link_map's second field is the file's name, as it was found; its third, the
+                // address of the object's dynamic section, which lies in the object's mapping.
+                return Marshal.PtrToStringUTF8(Marshal.ReadIntPtr(map, IntPtr.Size)) is { Length: > 0 } found
+                    ? LoadedPath(found, (ulong)Marshal.ReadIntPtr(map, 2 * IntPtr.Size), () => File.ReadAllText("/proc/self/maps"))
+                    : null;
             }
             finally
             {
@@ -157,6 +166,28 @@ public static partial class CudaLibraries
         {
             Marshal.FreeCoTaskMem(utf8);
         }
+    }
+
+    /// <summary>The file of a library the loader holds under <paramref name="name"/>, the name it was
+    /// found as, an address in whose mapping is <paramref name="address"/>, among the process's
+    /// mappings <paramref name="maps"/> lists (<c>/proc/self/maps</c>'s lines): the name itself where
+    /// it is a full path, and otherwise the file mapped at the address, as the kernel names it in
+    /// full. A relative name names the file only against the directory that was current when the
+    /// loader found it, which need not be current now.</summary>
+    internal static string LoadedPath(string name, ulong address, Func<string> maps)
+    {
+        if (name.StartsWith('/')) return name;
+        foreach (var line in maps().Split('\n'))
+        {
+            // start-end perms offset dev inode path
+            var fields = line.Split(' ', 6, StringSplitOptions.RemoveEmptyEntries);
+            if (fields.Length == 6 && fields[0].Split('-') is [var from, var to]
+                && ulong.TryParse(from, System.Globalization.NumberStyles.HexNumber, null, out var start)
+                && ulong.TryParse(to, System.Globalization.NumberStyles.HexNumber, null, out var end)
+                && start <= address && address < end)
+                return fields[5].Trim();
+        }
+        return name;
     }
 
     private const int RtldLazy = 0x1;
@@ -185,50 +216,48 @@ public static partial class CudaLibraries
     /// <summary>
     /// The pinned libraries the folder <paramref name="directory"/> holds the environment's copies of —
     /// in it, or each in a folder of its own under it, as NVIDIA's wheels install them — that this
-    /// process already holds another release of, each named with that copy's folder and version, or
-    /// null when it holds none: what makes a framework that loads that folder's libraries fail to load
-    /// them. What the process holds is every module it has loaded on Windows, and on Linux the file
-    /// each pinned name binds to, as its loader has it; the list of mapped files names the file a
-    /// library's name links to, under a name of its own.
+    /// process already holds another copy of under the same name, each named with that copy's folder
+    /// and version, or null when it holds none: what makes a framework that loads that folder's
+    /// libraries fail to load them. The copy held under a name is the one the process's loader binds
+    /// that name to (<see cref="HeldUnder"/>), whatever file name it has: on Linux a library's real
+    /// file is often its versioned name, which the soname links to. Never throws, so it can decide
+    /// how a failure is reported without becoming another: a copy or a folder that cannot be read
+    /// is left out.
     /// </summary>
     internal static string? Conflict(string directory)
-    {
-        if (CudaLibraryPins.Current is not { } pins) return null;
-        var pinned = PinnedFileNames(pins).ToList();
-        return Conflict(directory, pinned, OperatingSystem.IsWindows() ? LoadedModules() : [.. pinned.Select(HeldUnder).OfType<string>()]);
-    }
+        => CudaLibraryPins.Current is { } pins ? Conflict(directory, PinnedFileNames(pins), HeldUnder) : null;
 
     private static IEnumerable<string> PinnedFileNames(CudaLibraryPins pins)
         => pins.Libraries.SelectMany(pin => pin.Files).Select(file => file.FileName);
 
-    /// <summary>The file of every module this process has loaded.</summary>
-    private static List<string> LoadedModules()
+    /// <summary>The same, with <paramref name="heldUnder"/> naming the copy the process holds under
+    /// each of the names <paramref name="pinned"/> lists, or null where it holds none.</summary>
+    internal static string? Conflict(string directory, IEnumerable<string> pinned, Func<string, string?> heldUnder)
     {
-        using var process = Process.GetCurrentProcess();
-        var loaded = new List<string>();
-        foreach (ProcessModule module in process.Modules)
-            using (module)
-                loaded.Add(module.FileName);
-        return loaded;
+        var held = new List<string>();
+        foreach (var name in pinned)
+        {
+            try
+            {
+                if (heldUnder(name) is { } copy && OwnCopy(directory, name) is { } own
+                    // A copy of the very same file, under another path, binds as well as the folder's own.
+                    && !SameContents(copy, own))
+                    held.Add(Describe(copy));
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or EntryPointNotFoundException)
+            {
+            }
+        }
+        return held.Count == 0 ? null : string.Join("; ", held);
     }
 
-    /// <summary>The same, for the files <paramref name="loaded"/> lists as the ones the process
-    /// holds and the file names <paramref name="pinned"/> lists as the pinned ones.</summary>
-    internal static string? Conflict(string directory, IEnumerable<string> pinned, IEnumerable<string> loaded)
+    /// <summary>The copy of the library <paramref name="name"/> the folder <paramref name="directory"/>
+    /// holds, in it or in a folder under it; null where it holds none.</summary>
+    private static string? OwnCopy(string directory, string name)
     {
         if (!Directory.Exists(directory)) return null;
-        var names = pinned.ToHashSet(StringComparer.OrdinalIgnoreCase);
-        string? Own(string name) => File.Exists(Path.Combine(directory, name))
-            ? Path.Combine(directory, name)
-            : Directory.EnumerateFiles(directory, name, SearchOption.AllDirectories).FirstOrDefault();
-        var held = loaded
-            .Where(path => names.Contains(Path.GetFileName(path)))
-            .Select(path => (Held: path, Own: Own(Path.GetFileName(path))))
-            // A copy of the very same file, under another path, binds as well as the folder's own.
-            .Where(copy => copy.Own is not null && !SameContents(copy.Held, copy.Own))
-            .Select(copy => Describe(copy.Held))
-            .ToList();
-        return held.Count == 0 ? null : string.Join("; ", held);
+        var own = Path.Combine(directory, name);
+        return File.Exists(own) ? own : Directory.EnumerateFiles(directory, name, SearchOption.AllDirectories).FirstOrDefault();
     }
 
     /// <summary>A library file as a message names it: its name, its version where it states one, and
@@ -240,7 +269,7 @@ public static partial class CudaLibraries
         {
             version = FileVersionInfo.GetVersionInfo(path).FileVersion;
         }
-        catch (FileNotFoundException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             version = null;
         }

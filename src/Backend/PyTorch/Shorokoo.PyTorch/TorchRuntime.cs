@@ -146,7 +146,16 @@ internal sealed class TorchRuntime
     /// </summary>
     internal static PythonEnvironmentFailure? ImportFailure(string exceptionType, Func<string?> conflict, out string? held)
     {
-        held = exceptionType == "ModuleNotFoundError" ? null : conflict();
+        // Asked from inside the filter of the import's own failure, where anything it threw would
+        // only let that failure out unnamed: a check that cannot run names no conflict.
+        try
+        {
+            held = exceptionType == "ModuleNotFoundError" ? null : conflict();
+        }
+        catch (Exception)
+        {
+            held = null;
+        }
         if (held is not null) return PythonEnvironmentFailure.CudaLibraryConflict;
         return exceptionType is "ModuleNotFoundError" or "ImportError" ? PythonEnvironmentFailure.MissingPackage : null;
     }

@@ -351,11 +351,12 @@ public class OnnxExternalDataTests
 
     /// <summary>A model whose messages nest <paramref name="depth"/> deep, each the one field of
     /// the message around it: keyed by <paramref name="outer"/>, then by <paramref name="cycle"/>
-    /// over and over.</summary>
-    internal static byte[] Nested(byte[] outer, byte[] cycle, int depth)
+    /// over and over, the innermost holding <paramref name="innermost"/>.</summary>
+    internal static byte[] Nested(byte[] outer, byte[] cycle, int depth, byte[]? innermost = null)
     {
         static int VarintLength(long value) { int n = 1; for (; value >= 0x80; value >>= 7) n++; return n; }
         var lengths = new long[depth + 1];
+        lengths[depth] = innermost?.Length ?? 0;
         for (int i = depth - 1; i >= 0; i--)
             lengths[i] = 1 + VarintLength(lengths[i + 1]) + lengths[i + 1];
         var bytes = new List<byte>();
@@ -366,7 +367,7 @@ public class OnnxExternalDataTests
             for (; length >= 0x80; length >>= 7) bytes.Add((byte)(length | 0x80));
             bytes.Add((byte)length);
         }
-        return [.. bytes];
+        return [.. bytes, .. innermost ?? []];
     }
 
     [Fact]
@@ -378,15 +379,81 @@ public class OnnxExternalDataTests
             string Written(string name, byte[] bytes) { var path = Path.Combine(dir, name); File.WriteAllBytes(path, bytes); return path; }
             ModelProto Scan(string path) { using var file = OnnxStreamingScan.Open(path); return OnnxStreamingScan.ReadModel(file); }
 
-            Assert.NotNull(Scan(Written("deepest.onnx", Nested(graph, subgraphs, 99))).Graph);
-            Assert.Throws<ProtoBuf.ProtoException>(() => Scan(Written("deeper.onnx", Nested(graph, subgraphs, 100))));
+            Assert.NotNull(Scan(Written("deepest.onnx", Nested(graph, subgraphs, 100))).Graph);
+            Assert.NotNull(Whole(Nested(graph, subgraphs, 100)).Graph);
+            Assert.Throws<ProtoBuf.ProtoException>(() => Scan(Written("deeper.onnx", Nested(graph, subgraphs, 101))));
+            Assert.Throws<ProtoBuf.ProtoException>(() => Whole(Nested(graph, subgraphs, 101)));
+            var weightAtTheDeepest = Nested(graph, subgraphs, 99, [0x2A, .. Varint(Tensor.Length), .. Tensor]);
+            Assert.NotNull(Whole(weightAtTheDeepest).Graph);
+            Assert.NotNull(Scan(Written("weight-at-the-deepest.onnx", weightAtTheDeepest)).Graph);
             foreach (var (name, bytes) in (ValueTuple<string, byte[]>[])[("subgraphs.onnx", Nested(graph, subgraphs, 100_000)), ("types.onnx", Nested(input, sequences, 100_000))])
             {
                 var path = Written(name, bytes);
                 Assert.Contains(path, Assert.Throws<InvalidDataException>(() => Persistence.ImportOnnx(path)).Message);
                 Assert.Throws<ProtoBuf.ProtoException>(() => OnnxModelImporter.FromOnnxModel(path));
                 Assert.Throws<ProtoBuf.ProtoException>(() => OnnxModelImporter.FromOnnxModel(bytes));
+                Assert.Equal(0, SideBySideBackendHardwareTests.InAChildProcess([], "deep-model-routes", path));
             }
+        });
+    }
+
+    /// <summary>What the child process of <see cref="TestAModelNestedDeeperThanProtobufReadsIsRefusedWhereverItIsRead"/>
+    /// runs: the model at <paramref name="path"/> handed to every route that parses a model's bytes
+    /// outside the importer; 0 where each refuses it as a malformed protobuf.</summary>
+    internal static int DeepModelRoutes(string path)
+    {
+        var bytes = File.ReadAllBytes(path);
+        Action[] routes =
+        [
+            () => Shorokoo.Core.Backends.OutputAliasProof.Prove(bytes, []),
+            () => new Shorokoo.PyTorch.Cpu.TorchCpuBackend().CreateSession(bytes, default, default, Shorokoo.Core.Backends.DeviceMemorySettings.Default).Dispose(),
+            () => new Shorokoo.Jax.Cpu.JaxCpuBackend().CreateSession(bytes, default, default, Shorokoo.Core.Backends.DeviceMemorySettings.Default).Dispose(),
+        ];
+        foreach (var route in routes)
+        {
+            try
+            {
+                route();
+                return 1;
+            }
+            catch (ProtoBuf.ProtoException)
+            {
+            }
+        }
+        return 0;
+    }
+
+    private static ModelProto Whole(byte[] bytes)
+    {
+        using var stream = new MemoryStream(bytes, writable: false);
+        return OnnxProtobuf.ReadModel(stream);
+    }
+
+    private static byte[] Varint(long value)
+    {
+        var bytes = new List<byte>();
+        for (; value >= 0x80; value >>= 7) bytes.Add((byte)(value | 0x80));
+        bytes.Add((byte)value);
+        return [.. bytes];
+    }
+
+    /// <summary>A float tensor of 256 elements, as an attribute's <c>t</c> holds it: 1 KiB of
+    /// <c>raw_data</c>, which the scan references in place.</summary>
+    private static readonly byte[] Tensor = [0x08, 0x80, 0x02, 0x10, 0x01, 0x4A, .. Varint(1024), .. new byte[1024]];
+
+    [Fact]
+    public void TestAModelWithAGroupItsParseSkipsIsScannedAsItIsParsed()
+    {
+        WithTempDir(dir =>
+        {
+            byte[] group = [.. Varint(100 << 3 | 3), 0x08, 0x01, .. Varint(101 << 3 | 3), .. Varint(101 << 3 | 4), .. Varint(100 << 3 | 4)];
+            byte[] initializer = [.. Tensor, .. group, 0x42, 0x01, (byte)'w'];
+            byte[] graphBody = [.. group, 0x2A, .. Varint(initializer.Length), .. initializer];
+            byte[] bytes = [0x3A, .. Varint(graphBody.Length), .. graphBody, .. group];
+            var path = Path.Combine(dir, "group.onnx");
+            File.WriteAllBytes(path, bytes);
+            using var file = OnnxStreamingScan.Open(path);
+            Assert.Equal(Whole(bytes).Graph.Initializers[0].Name, OnnxStreamingScan.ReadModel(file).Graph.Initializers[0].Name);
         });
     }
 

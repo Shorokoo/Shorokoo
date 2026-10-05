@@ -285,7 +285,7 @@ namespace Shorokoo.Onnx
         /// truncated file (interrupted download/copy, disk full, …) be refused before a byte of data
         /// is read, with a <see cref="ModelException"/> naming the declared and actual sizes: no
         /// header claiming more than the payload holds is believed. A decompressing stream passes the
-        /// size its frame header declares. On any failure the tensors already read are
+        /// size its frames declare. On any failure the tensors already read are
         /// deleted.</para>
         /// </summary>
         internal static List<SafeTensor> ReadSafeTensors(

@@ -75,7 +75,7 @@ namespace Shorokoo.Core.Utils
         /// <summary>
         /// The tensors of a compressed SafeTensors file, decoded as they are read: neither the file
         /// nor its decompressed payload is ever whole in memory, only the tensors themselves
-        /// (Shorokoo/Shorokoo#436). The size the frame header must declare for the payload bounds what
+        /// (Shorokoo/Shorokoo#436). The size its frames must declare for the payload bounds what
         /// its header may claim, so a tensor the payload cannot hold is refused before it is
         /// allocated; a failure of the decoder itself is the file failing to decompress, and is
         /// refused as that rather than as whatever the reader was reading when it happened.
@@ -86,12 +86,11 @@ namespace Shorokoo.Core.Utils
                 throw new FileNotFoundException($"Compressed file not found: {filePath}");
             using var file = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read,
                 bufferSize: 1 << 16, FileOptions.SequentialScan);
-            var head = new byte[ZstdFrameHeaderMaxBytes];
-            int got = file.ReadAtLeast(head, head.Length, throwOnEndOfStream: false);
-            long declared = DeclaredZstdContentSize(head.AsSpan(0, got), reason => new InvalidDataException(
+            long declared = DeclaredZstdContentSize(file, reason => new InvalidDataException(
                 $"'{filePath}': {reason} — the file is corrupt or not a compressed SafeTensors file."));
+            file.Position = 0;
             using var decoded = new DecodingReadStream(
-                new DecompressionStream(new PrefixedReadStream(head, got, file)),
+                new DecompressionStream(file, leaveOpen: true),
                 e => new InvalidDataException(
                     $"'{filePath}': failed to Zstd-decompress the file — it is corrupt or truncated. ({e.Message})", e));
             return SafeTensorLoader.ReadSafeTensors(decoded, declared, (_, _) => ComputeContext.Host, filePath);
@@ -675,28 +674,82 @@ namespace Shorokoo.Core.Utils
         internal const int ZstdFrameHeaderMaxBytes = 18;
 
         /// <summary>
-        /// The decompressed size the Zstd frame starting <paramref name="frameStart"/> declares in
-        /// its header: what bounds a streamed payload's header before a byte of it is believed.
-        /// Every frame Shorokoo writes declares it (<see cref="WriteZstdFrame"/>), so bytes that do
-        /// not start a Zstd frame declaring it are refused, with the exception
-        /// <paramref name="malformed"/> makes of the reason: ones that start no Zstd frame, end
-        /// inside its header, or start one that declares no size.
+        /// The decompressed size the Zstd frames of <paramref name="frames"/>, from where it stands to
+        /// its end, declare between them: what bounds a streamed payload's header before a byte of it
+        /// is believed. Every frame Shorokoo writes declares its size (<see cref="WriteZstdFrame"/>),
+        /// and a tool that writes a payload in several frames — pzstd, say — declares each one's, so
+        /// bytes that are not Zstd frames each declaring its size are refused, with the exception
+        /// <paramref name="malformed"/> makes of the reason. A skippable frame holds no payload and
+        /// adds nothing.
+        ///
+        /// <para>Each frame is walked by its header and its blocks' headers, three bytes a block, the
+        /// blocks themselves sought past where the stream can seek and read past where it cannot: no
+        /// byte is decompressed, and a file is read through at most once.</para>
         /// </summary>
-        internal static unsafe long DeclaredZstdContentSize(
-            ReadOnlySpan<byte> frameStart, Func<string, Exception> malformed)
+        internal static long DeclaredZstdContentSize(Stream frames, Func<string, Exception> malformed)
         {
-            // A skippable frame is not one, and answers 0 below, which is not the size of anything
-            // that follows it.
-            if (!SkptFileFormat.LooksLikeZstdFrame(frameStart)) throw malformed("its bytes are not a Zstd frame");
-            ulong size;
-            fixed (byte* p = frameStart)
-                size = ZstdSharp.Unsafe.Methods.ZSTD_getFrameContentSize(p, (nuint)frameStart.Length);
-            // ZSTD_CONTENTSIZE_UNKNOWN is the largest value, and ZSTD_CONTENTSIZE_ERROR the next.
-            if (size == ulong.MaxValue)
-                throw malformed("its Zstd frame declares no decompressed size, which every frame written here declares");
-            if (size == ulong.MaxValue - 1 || size > long.MaxValue)
-                throw malformed("its Zstd frame header is malformed or cut short");
-            return (long)size;
+            Span<byte> field = stackalloc byte[8];
+            void Read(Span<byte> bytes)
+            {
+                if (frames.ReadAtLeast(bytes, bytes.Length, throwOnEndOfStream: false) < bytes.Length)
+                    throw malformed("its Zstd frames are cut short");
+            }
+            void Pass(long count)
+            {
+                if (frames.CanSeek)
+                {
+                    if (count > frames.Length - frames.Position) throw malformed("its Zstd frames are cut short");
+                    frames.Seek(count, SeekOrigin.Current);
+                    return;
+                }
+                var discard = new byte[(int)Math.Min(count, 1 << 16)];
+                for (long left = count; left > 0; left -= discard.Length)
+                    Read(discard.AsSpan(0, (int)Math.Min(left, discard.Length)));
+            }
+
+            long total = 0;
+            for (int read = 0; ; read++)
+            {
+                int got = frames.ReadAtLeast(field[..4], 4, throwOnEndOfStream: false);
+                if (got == 0 && read > 0) return total;
+                if (got < 4) throw malformed(read == 0 ? "its bytes are not a Zstd frame" : "its Zstd frames are cut short");
+                uint magic = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(field);
+                if ((magic & 0xFFFFFFF0) == 0x184D2A50)
+                {
+                    Read(field[..4]);
+                    Pass(System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(field));
+                    read--;
+                    continue;
+                }
+                if (magic != 0xFD2FB528)
+                    throw malformed(read == 0 ? "its bytes are not a Zstd frame" : "it holds bytes after its Zstd frames that are not one");
+
+                Read(field[..1]);
+                int descriptor = field[0];
+                if ((descriptor & 0x08) != 0) throw malformed("a Zstd frame header of it is malformed");
+                bool singleSegment = (descriptor & 0x20) != 0;
+                Pass((singleSegment ? 0 : 1) + (descriptor & 3) switch { 0 => 0, 1 => 1, 2 => 2, _ => 4 });
+                int sizeBytes = (descriptor >> 6) switch { 0 => singleSegment ? 1 : 0, 1 => 2, 2 => 4, _ => 8 };
+                if (sizeBytes == 0)
+                    throw malformed("a Zstd frame of it declares no decompressed size, which every frame written here declares");
+                field.Clear();
+                Read(field[..sizeBytes]);
+                ulong size = System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(field) + (sizeBytes == 2 ? 256UL : 0);
+                if (size > (ulong)(long.MaxValue - total))
+                    throw malformed("its Zstd frames declare more bytes than a payload holds");
+                total += (long)size;
+
+                while (true)
+                {
+                    Read(field[..3]);
+                    int header = field[0] | field[1] << 8 | field[2] << 16;
+                    int type = header >> 1 & 3;
+                    if (type == 3) throw malformed("a Zstd block of it is of a reserved type");
+                    Pass(type == 1 ? 1 : header >> 3);
+                    if ((header & 1) != 0) break;
+                }
+                if ((descriptor & 0x04) != 0) Pass(4);
+            }
         }
 
         /// <summary>

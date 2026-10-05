@@ -182,7 +182,7 @@ public abstract class OrtBackend : IShorokooBackend
                 DeviceMemorySettings.Default, DiagnosticSettings.Default, directory, 0, [], precision));
             ModelProto run;
             using (var written = File.OpenRead(Path.Combine(directory, OptimizedModelFile)))
-                run = ProtoBuf.Serializer.Deserialize<ModelProto>(written);
+                run = Shorokoo.Onnx.OnnxProtobuf.ReadModel(written);
             return run.Graph is { } graph
                 ? OrtRunMemory.Peak(graph, inputs, OutputAliasProof.Prove(graph, outputAliases), onHost: _cudaDeviceId is null)
                 : null;
@@ -477,7 +477,7 @@ public abstract class OrtBackend : IShorokooBackend
             return null;
         ModelProto parsed;
         using (var stream = new MemoryStream(model, writable: false))
-            parsed = ProtoBuf.Serializer.Deserialize<ModelProto>(stream);
+            parsed = Shorokoo.Onnx.OnnxProtobuf.ReadModel(stream);
         var supplied = suppliedInitializers.Select(s => s.Name).ToHashSet(StringComparer.Ordinal);
         // Its initializers, and the tensors of its Constant nodes, which ONNX Runtime makes
         // initializers of the nodes' outputs as it loads the model.
@@ -870,7 +870,7 @@ public abstract class OrtBackend : IShorokooBackend
         {
             ModelProto model;
             using (var stream = File.OpenRead(Path.Combine(directory, OptimizedModelFile)))
-                model = ProtoBuf.Serializer.Deserialize<ModelProto>(stream);
+                model = Shorokoo.Onnx.OnnxProtobuf.ReadModel(stream);
             if (model.Graph is not { } graph) return ([], long.MaxValue, null);
             var stated = new Dictionary<string, TypeProto?>(StringComparer.Ordinal);
             foreach (var output in graph.Outputs) stated.TryAdd(output.Name, output.Type);

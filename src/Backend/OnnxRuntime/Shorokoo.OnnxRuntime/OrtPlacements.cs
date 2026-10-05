@@ -910,7 +910,7 @@ internal sealed class OrtPlacements : IDisposable
         /// <summary>Keeps <paramref name="model"/> in a file of its own, claimed.</summary>
         internal void KeepModel(byte[] model)
         {
-            _ = Sweep.Value;
+            ProcessSweep.Start();
             Model = Path.Combine(Path.GetTempPath(), ModelFilePrefix + Guid.NewGuid().ToString("N") + ".onnx");
             File.WriteAllBytes(Model, model);
             _modelClaim = new FileStream(Model, FileMode.Open, FileAccess.Read, FileShare.Read);
@@ -920,7 +920,7 @@ internal sealed class OrtPlacements : IDisposable
         /// cannot be made, as a folder nothing else could take over a sweep is.</summary>
         internal void KeepRuns(string directory)
         {
-            _ = Sweep.Value;
+            ProcessSweep.Start();
             Runs = directory;
             try
             {
@@ -944,9 +944,27 @@ internal sealed class OrtPlacements : IDisposable
             Runs = null;
         }
 
-        // The sweep of what ended processes left, made once in the background as this process first
-        // keeps files.
-        private static readonly Lazy<Task> Sweep = new(() => Task.Run(SweepStale));
+    }
+
+    /// <summary>The sweep of what ended processes left (<see cref="SweepStale"/>), made once in the
+    /// background as this process first keeps files.</summary>
+    private static readonly StaleSweep ProcessSweep = new(SweepStale);
+
+    /// <summary>For a test: the sweep this thread's placements start as they first keep files, in place
+    /// of the process's own; null on every thread but one a test sets it on.</summary>
+    [ThreadStatic]
+    internal static StaleSweep? SweepOnThisThread;
+
+    /// <summary>A sweep made once, in the background, the first time it is started.</summary>
+    internal sealed class StaleSweep(Action sweep)
+    {
+        private readonly Lazy<Task> _task = new(() => Task.Run(sweep));
+
+        /// <summary>Starts the sweep where it has not been, answering it.</summary>
+        internal Task Start() => _task.Value;
+
+        /// <summary>Whether the sweep has been started.</summary>
+        internal bool Started => _task.IsValueCreated;
     }
 
     private const string ModelFilePrefix = "shorokoo-model-";

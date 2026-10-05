@@ -148,17 +148,17 @@ namespace Shorokoo
         {
             var (tensors, scheme) = LoadValidatedImport(
                 concreteArchitecture, filePath, namingScheme, (_, _) => ComputeContext.Host);
-            // Bind through the standard path — the same ModelParamList / ToConcreteModel binding
-            // the checkpoint machinery uses; the validation guarantees nothing is silently dropped.
-            // The binding copies each value into the graph, so what was read is this import's alone
-            // and goes as it returns, bound or refused: a tensor past what a managed array holds is
-            // native memory the collector does not see.
+            // Bind through the standard binding the checkpoint machinery uses; the validation
+            // guarantees nothing is silently dropped. What was read is this import's alone, so each
+            // tensor is moved into its parameter's attribute rather than copied -- a weight past what
+            // a managed array holds is taken over where it was read -- and whatever is not bound by
+            // the time this returns goes with it: such a tensor is native memory the collector does
+            // not see.
             try
             {
-                var weights = new ModelParamList(
-                    tensors.Select(t => new KeyValuePair<string, TensorData>(t.Name, t.Data)),
-                    ModelParamType.TrainableParam);
-                return concreteArchitecture.ToConcreteModel(weights, scheme);
+                var slots = tensors.Select(t => new KeyValuePair<string, TensorAttribute>(t.Name, t.Data.MoveToAttribute())).ToList();
+                return new ComputationGraph(
+                    concreteArchitecture.ToInternal().ToConcreteModelDescribed(slots, scheme), GraphKind.ConcreteModel);
             }
             finally
             {

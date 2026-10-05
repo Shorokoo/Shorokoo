@@ -721,9 +721,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                         x.HasValues != y.HasValues)
                         return false;
                     if (!x.HasValues) return true;
-                    return x.DType == DType.Utf8
-                        ? x.Values.SequenceEqual(y.Values)
-                        : x.Bytes.SequenceEqual(y.Bytes);
+                    return x.SameElements(y);
                 }
                 default:
                     return false;

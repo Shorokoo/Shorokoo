@@ -38,7 +38,7 @@ internal static class TensorDataConverter
     public static RuntimeTensor ToRuntimeTensor(TensorAttribute data, int maxElements, Variable? reference = null)
         => ToRuntimeTensor(
             data.DType, data.Shape, maxElements,
-            static a => a.HasValues ? a.BytesArray : null, data, reference);
+            static a => a.HasValues && !a.PastOneArray ? a.BytesArray : null, data, reference);
 
     private static RuntimeTensor ToRuntimeTensor<TSource>(
         DType dtype, Shape shape, int maxElements, Func<TSource, byte[]?> rawBytes, TSource source,

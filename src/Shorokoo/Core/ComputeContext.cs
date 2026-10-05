@@ -82,8 +82,19 @@ namespace Shorokoo.Runtime
         private static readonly RunIdentity WeightReader =
             new(() => "the session of a compiled graph, which reads it as a weight until the graph is disposed");
 
+        // The weights this graph's session reads where a graph attribute holds them -- one past what
+        // a managed array holds, which no model's bytes carry -- which every session it is built on
+        // is handed, a rebuilt one included. The attributes are the model's, not the graph's: the
+        // graph only keeps them reachable, and so their memory where it is, for as long as it lives.
+        private readonly IReadOnlyList<(SuppliedInitializer Initializer, TensorAttribute Attribute)> _borrowed;
+
         /// <summary>The tensors this graph's session is handed as initializers, each once.</summary>
         internal IEnumerable<TensorData> SuppliedTensors => _supplied.Select(s => s.Tensor).Distinct();
+
+        /// <summary>Every initializer this graph's sessions are handed as a value: the weights it
+        /// owns and the ones graph attributes hold.</summary>
+        private SuppliedInitializer[] HandedInitializers
+            => [.. _supplied.Select(s => s.Initializer), .. _borrowed.Select(b => b.Initializer)];
 
         /// <summary>The context that compiled this graph, whose books its runs' outputs go on (test
         /// hook).</summary>
@@ -101,9 +112,11 @@ namespace Shorokoo.Runtime
             string? description = null,
             byte[]? model = null,
             IReadOnlyList<OutputAlias>? outputAliases = null,
-            IReadOnlyList<(SuppliedInitializer Initializer, TensorData Tensor)>? supplied = null)
+            IReadOnlyList<(SuppliedInitializer Initializer, TensorData Tensor)>? supplied = null,
+            IReadOnlyList<(SuppliedInitializer Initializer, TensorAttribute Attribute)>? borrowed = null)
         {
             _supplied = supplied ?? [];
+            _borrowed = borrowed ?? [];
             _owner = owner;
             var locked = new List<TensorData>();
             try
@@ -486,7 +499,7 @@ namespace Shorokoo.Runtime
                 + "limit cannot come down to what its context's device-memory budget now allows.");
             var deviceMemory = _built.DeviceMemory with { LimitBytes = arenaLimit };
             var session = _owner.BuildSession(
-                _backend, model, Optimization, deviceMemory, _outputAliases, supplied: [.. _supplied.Select(s => s.Initializer)]);
+                _backend, model, Optimization, deviceMemory, _outputAliases, supplied: HandedInitializers);
             var fresh = new BuiltSession(session, deviceMemory);
             BuiltSession old;
             lock (_sessionGate)
@@ -1862,6 +1875,32 @@ namespace Shorokoo.Runtime
             RefuseHostContext("compile");
             var model = buildModel();
             var supplied = Supplied(model, suppliedByIdentifier);
+            var (copied, borrowed) = Carried(model, "compile");
+            supplied.AddRange(copied);
+            try
+            {
+                return CompileModel(model, originalInputNames, trainingStep, description, aliasCandidates,
+                    profile, intraOpThreads, buildWithoutWorkarounds, supplied, borrowed);
+            }
+            catch
+            {
+                foreach (var (_, copy) in copied) copy.Delete();
+                throw;
+            }
+        }
+
+        private CompiledGraph CompileModel(
+            ModelProto model,
+            string[] originalInputNames,
+            bool trainingStep,
+            string? description,
+            IReadOnlyList<(int Output, int Input)>? aliasCandidates,
+            ShorokooGraphOptimization? profile,
+            int intraOpThreads,
+            Func<ModelProto>? buildWithoutWorkarounds,
+            List<(SuppliedInitializer Initializer, TensorData Tensor)> supplied,
+            List<(SuppliedInitializer Initializer, TensorAttribute Attribute)> borrowed)
+        {
             var outputAliases = MarkedAliases(model.Graph, aliasCandidates);
             if (buildWithoutWorkarounds is not null && outputAliases.Count < (aliasCandidates?.Count ?? 0)
                 && MarkedAliases(buildWithoutWorkarounds().Graph, aliasCandidates) is { } asWritten
@@ -1894,7 +1933,7 @@ namespace Shorokoo.Runtime
                     kept = modelData;
                 }
                 session = BuildSession(backend, modelData, optimization, deviceMemory, outputAliases, intraOpThreads,
-                    [.. supplied.Select(s => s.Initializer)]);
+                    [.. supplied.Select(s => s.Initializer), .. borrowed.Select(b => b.Initializer)]);
             }
             finally
             {
@@ -1905,7 +1944,7 @@ namespace Shorokoo.Runtime
 
             var graph = new CompiledGraph(
                 session, backend, onnxInputNameByOriginal, originalInputNames, optimization,
-                deviceMemory, RunSettings, this, description, kept, outputAliases, supplied);
+                deviceMemory, RunSettings, this, description, kept, outputAliases, supplied, borrowed);
             // Enrolled under the same gate a disposal takes, so a compile racing a disposal either
             // lands before it and is released with everything else, or finds the context gone.
             lock (_gate)
@@ -1940,6 +1979,58 @@ namespace Shorokoo.Runtime
                 supplied.Add((new SuppliedInitializer(initializer.Name, ((IOnnxData)tensor).Value), tensor));
             }
             return supplied;
+        }
+
+        /// <summary>
+        /// Declares in <paramref name="model"/> each initializer whose elements are carried beside it
+        /// rather than in it — a graph attribute past what one managed array holds
+        /// (<see cref="TensorProto.Carried"/>), which no model's bytes can hold — as one its session
+        /// is handed as a value (<see cref="SuppliedInitializer"/>). Where this context's runs can
+        /// read the attribute's host memory as it stands, the session reads it there, borrowed;
+        /// otherwise it is copied into this context's memory, a piece at a time, and the copy is the
+        /// caller's to own. On failure every copy made is deleted.
+        /// </summary>
+        /// <exception cref="NotSupportedException">This context's backend takes every initializer
+        /// inside the model's bytes, where protobuf's 2 GiB ceiling leaves no room for such a
+        /// weight.</exception>
+        private (List<(SuppliedInitializer Initializer, TensorData Tensor)> Copied,
+            List<(SuppliedInitializer Initializer, TensorAttribute Attribute)> Borrowed) Carried(
+            ModelProto model, string operation)
+        {
+            List<(SuppliedInitializer, TensorData)> copied = [];
+            List<(SuppliedInitializer, TensorAttribute)> borrowed = [];
+            if (model.Graph is not { } graph) return (copied, borrowed);
+            var backend = ResolvedBackend;
+            try
+            {
+                foreach (var initializer in graph.Initializers)
+                {
+                    if (initializer.Carried is not { Held: { } held } attribute
+                        || initializer.data_location == TensorProto.DataLocation.External)
+                        continue;
+                    if (!backend.SuppliesInitializers)
+                        throw new NotSupportedException(
+                            $"Cannot {operation} on {backend.Description}: weight '{initializer.Name}' "
+                            + $"({attribute}) holds {attribute.ByteLength} bytes, and this backend takes "
+                            + "every weight inside the model's bytes, which protobuf caps at 2 GiB. "
+                            + "Run a model with a weight this large on an ONNX Runtime compute context, "
+                            + "which hands its session the weight where it is.");
+                    FastOnnxProtoFactory.DeclareSupplied(graph, initializer);
+                    if (CanAddress(held))
+                    {
+                        borrowed.Add((new SuppliedInitializer(initializer.Name, ((IOnnxData)held).Value), attribute));
+                        continue;
+                    }
+                    var copy = held.CopyTo(this);
+                    copied.Add((new SuppliedInitializer(initializer.Name, ((IOnnxData)copy).Value), copy));
+                }
+            }
+            catch
+            {
+                foreach (var (_, copy) in copied) copy.Delete();
+                throw;
+            }
+            return (copied, borrowed);
         }
 
         private static string[] ResolveOriginalInputNames(InternalComputationGraph graph)
@@ -2110,7 +2201,25 @@ namespace Shorokoo.Runtime
             // CompiledGraph.Run. This path pays for a whole model build and a session on top.
             RunSettings.CancellationToken.ThrowIfCancellationRequested();
             var model = buildModel();
+            var (copied, borrowed) = Carried(model, "run");
+            try
+            {
+                return RunModel(model, originalInputNames, inputs,
+                    [.. copied.Select(c => c.Initializer), .. borrowed.Select(b => b.Initializer)]);
+            }
+            finally
+            {
+                // The session that read them is gone by now: the copies go with it, and the
+                // attributes it read where they are stay reachable until it is.
+                foreach (var (_, copy) in copied) copy.Delete();
+                GC.KeepAlive(borrowed);
+            }
+        }
 
+        private NamedModelParam[] RunModel(
+            ModelProto model, string[] originalInputNames, NamedModelParam[] inputs,
+            IReadOnlyList<SuppliedInitializer> supplied)
+        {
             var memoryStream = new MemoryStream();
             ProtoBuf.Serializer.Serialize(memoryStream, model);
             var modelData = memoryStream.ToArray();
@@ -2149,7 +2258,7 @@ namespace Shorokoo.Runtime
                     HasOptionalOps(model.Graph) || IsFullyConstant(model.Graph), trainingStep: false);
                 // Built for one run: placing that run's values would build two more sessions over
                 // the model for it, the graph the runtime runs and the one that places.
-                session = BuildSession(backend, modelData, optimization, deviceMemory, placing: false);
+                session = BuildSession(backend, modelData, optimization, deviceMemory, supplied: supplied, placing: false);
                 outputNames.Value = [.. session.OutputNames];
                 var onnxInputNameByOriginal = SessionNamesOf(originalInputNames, session);
                 string SessionNameOf(string name)

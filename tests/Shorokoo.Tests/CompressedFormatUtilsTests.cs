@@ -92,10 +92,10 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
     }
 
     [Fact]
-    public void TestAnImportRefusingATensorPastWhatAnAttributeHoldsCopiesNothingAndReleasesItBeforeItReturns()
-        => Utils.OwnProcess.Run(typeof(CompressedFormatUtilsCoverageTests), nameof(AnImportRefusingATensorPastWhatAnAttributeHoldsCopiesNothingAndReleasesItBeforeItReturns));
+    public void TestAnImportOfATensorPastTwoGibibytesBindsItWhereItWasReadAndExportsItByThePiece()
+        => Utils.OwnProcess.Run(typeof(CompressedFormatUtilsCoverageTests), nameof(AnImportOfATensorPastTwoGibibytesBindsItWhereItWasReadAndExportsItByThePiece));
 
-    internal static void AnImportRefusingATensorPastWhatAnAttributeHoldsCopiesNothingAndReleasesItBeforeItReturns()
+    internal static void AnImportOfATensorPastTwoGibibytesBindsItWhereItWasReadAndExportsItByThePiece()
     {
         var dir = Directory.CreateTempSubdirectory("ShorokooLargeImport_").FullName;
         try
@@ -110,14 +110,35 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
             var host = Core.Backends.CachingAllocator.ForHost().Placements;
             var before = host.InUse;
 
-            Assert.Throws<NotSupportedException>(() => Persistence.ImportSafeTensors(arch, path));
-            Assert.Equal((before, true, true), (host.InUse, host.MaxInUse - before >= 4 * 32769L * 16384L,
-                host.MaxInUse - before < 8 * 32769L * 16384L));
+            var model = Persistence.ImportSafeTensors(arch, path);
+            var externalized = OnnxModelExporter.ExternalizedInitializers(
+                FastOnnxModelBuilder.BuildOnnxModel(model), new OnnxExternalDataOptions());
+            var side = new FirstPiecesStream(2);
+            Assert.Same(FirstPiecesStream.Stopped, Record.Exception(
+                () => OnnxModelExporter.WriteExternalData(side, externalized, "large.onnx.data", new OnnxExternalDataOptions())));
+
+            Assert.Contains(externalized, t => t.Carried is { PastOneArray: true });
+            Assert.True(side.Writes.Max() <= Core.Backends.StagedReadBack.StagingBytes);
+            Assert.Equal((true, true), (host.InUse - before > int.MaxValue, host.MaxInUse - before < 8 * 32769L * 16384L));
+            GC.KeepAlive(model);
         }
         finally
         {
             Directory.Delete(dir, recursive: true);
         }
+    }
+
+    // Counts the writes made to it, and stops the writer once it has seen as many as it was told.
+    private sealed class FirstPiecesStream(int count) : MemoryStream
+    {
+        internal static readonly IOException Stopped = new("Stopped after the first writes.");
+        public List<int> Writes { get; } = [];
+        public override void Write(ReadOnlySpan<byte> buffer)
+        {
+            Writes.Add(buffer.Length);
+            if (Writes.Count == count) throw Stopped;
+        }
+        public override void Write(byte[] buffer, int offset, int count) => Write(buffer.AsSpan(offset, count));
     }
 
     private const long LargeElements = (1L << 29) + 2;

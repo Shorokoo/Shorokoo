@@ -217,8 +217,7 @@ internal sealed class WorkaroundSite
             }
             if (mine.DType != theirs.DType || !mine.Shape.Equals(theirs.Shape)) return false;
             if (!read.Values || ReferenceEquals(mine, theirs)) continue;
-            if (mine.DType == DType.Utf8 ? !mine.Values.SequenceEqual(theirs.Values, StringComparer.Ordinal)
-                : !mine.Bytes.SequenceEqual(theirs.Bytes))
+            if (!mine.SameElements(theirs))
                 return false;
         }
         return true;

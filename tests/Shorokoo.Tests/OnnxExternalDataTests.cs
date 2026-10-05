@@ -622,6 +622,46 @@ public class OnnxExternalDataTests
     }
 
     [Fact]
+    public void TestAWeightPastTwoGibibytesGoesToTheSideFileByThePieceStraightFromItsAttribute()
+    {
+        var (attribute, _) = CoreUtilsCoverageTests.AttributePastTwoGibibytes((0, [1, 2, 3, 4]));
+        var large = OnnxIRFactory.CreateTensor([attribute.ByteLength], "w", DType.UInt8, null, false, attribute);
+        var proto = BuildAddModel(Init("a", FloatElem, [500], new byte[2000]), large);
+        var externalized = OnnxModelExporter.ExternalizedInitializers(proto, new OnnxExternalDataOptions());
+        var side = new HeadStream(4096);
+
+        Assert.Equal(["a", "w"], externalized.Select(t => t.Name));
+        Assert.IsType<IOException>(Record.Exception(
+            () => OnnxModelExporter.WriteExternalData(side, externalized, "m.onnx.data", new OnnxExternalDataOptions())));
+        Assert.Equal([2000, 2096, Core.Backends.StagedReadBack.StagingBytes], side.Writes);
+        Assert.Equal((byte[])[1, 2, 3, 4], side.ToArray()[4096..4100]);
+        Assert.Equal(ErrorCodes.XD007, SelfContainedSaveRefusal(proto));
+        Assert.Throws<NotSupportedException>(() => ProtoBuf.Serializer.Serialize(Stream.Null, proto));
+    }
+
+    private static string SelfContainedSaveRefusal(ModelProto proto)
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"large_{Guid.NewGuid():N}.onnx");
+        var refusal = Assert.Throws<ModelException>(() => OnnxModelExporter.Save(proto, path));
+        Assert.False(File.Exists(path));
+        return refusal.ErrorCode;
+    }
+
+    // Keeps what is written to it, recording each write's length, and stops the writer with an
+    // IOException once more than its limit has been written.
+    private sealed class HeadStream(long limit) : MemoryStream
+    {
+        public List<int> Writes { get; } = [];
+        public override void Write(ReadOnlySpan<byte> buffer)
+        {
+            Writes.Add(buffer.Length);
+            base.Write(buffer.ToArray(), 0, buffer.Length);
+            if (Length > limit) throw new IOException("Stopped past the head.");
+        }
+        public override void Write(byte[] buffer, int offset, int count) => Write(buffer.AsSpan(offset, count));
+    }
+
+    [Fact]
     public void TestSaveWithExternalDataRequiresConcreteModel()
     {
         var moduleGraph = Shorokoo.Tests.Modules.ScalarMultiplyModel.ComputationGraph;

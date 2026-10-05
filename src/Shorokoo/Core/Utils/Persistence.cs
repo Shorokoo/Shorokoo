@@ -1384,10 +1384,14 @@ namespace Shorokoo
         }
 
         /// <summary>The same key for a graph literal — an attribute's bytes hash to what a load
-        /// would bind, so the two forms dedup against each other.</summary>
+        /// would bind, so the two forms dedup against each other. Hashed a piece at a time, so an
+        /// attribute past one managed array is never read whole.</summary>
         private static string ContentKey(TensorAttribute data)
-            => $"{data.DType}|{string.Join(",", data.Shape.Dims)}|"
-               + SkptFileFormat.Sha256Hex(data.Bytes);
+        {
+            using var elements = data.OpenRead();
+            return $"{data.DType}|{string.Join(",", data.Shape.Dims)}|"
+                   + Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(elements)).ToLowerInvariant();
+        }
 
         /// <summary>
         /// The model's weight parameters: every MODEL_PARAM_DATA node except the RNG identity

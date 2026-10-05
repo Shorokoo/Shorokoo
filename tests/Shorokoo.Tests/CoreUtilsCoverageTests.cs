@@ -524,9 +524,9 @@ public class CoreUtilsCoverageTests
         Assert.True(counted.Length > Bytes);
         Assert.Throws<ArgumentException>(
             () => backend.CreateTensorFromRawBytes(ShorokooTensorElementType.Float, new byte[16], [Elements]));
-        Assert.Throws<NotSupportedException>(() => tensor.MoveToAttribute());
-        Assert.False(tensor.IsDisposed);
-        tensor.Delete();
+        var attribute = tensor.MoveToAttribute();
+        Assert.Equal((Bytes, true, true), (attribute.ByteLength, attribute.PastOneArray, tensor.IsDisposed));
+        Assert.Same(value, ((IOnnxData)attribute.Held!).Value);
         GC.KeepAlive(head);
     }
 
@@ -546,6 +546,70 @@ public class CoreUtilsCoverageTests
         public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
         public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
         public override void SetLength(long value) => throw new NotSupportedException();
+    }
+
+    [Fact]
+    public void TestAHostTensorPastTwoGibibytesMovesIntoAnAttributeAsItStandsWhichWritesItByThePiece()
+    {
+        var (attribute, value) = AttributePastTwoGibibytes((5, [1, 2, 3, 4]));
+        var saved = new FirstWriteStream();
+        var record = new SafeTensor("w", attribute, "U8", [attribute.ByteLength]);
+        var proto = Core.Factory.IR.OnnxIRFactory.CreateTensor([attribute.ByteLength], "w", DType.UInt8, null, false, attribute);
+
+        Assert.Same(FirstWriteStream.Stopped, Record.Exception(() => record.WriteTo(saved)));
+        Assert.Equal(StagedReadBack.StagingBytes, saved.First.Length);
+        Assert.Equal((byte[])[1, 2, 3, 4], saved.First[5..9]);
+        Assert.Equal(((1L << 31) + 8, record.ByteLength, true), (attribute.ByteLength, attribute.ByteLength, attribute.PastOneArray));
+        Assert.Same(value, ((IOnnxData)attribute.Held!).Value);
+        Assert.Same(attribute, proto.Carried);
+        Assert.Null(proto.RawData);
+        Assert.Throws<NotSupportedException>(() => attribute.Bytes.Length);
+        Assert.Throws<NotSupportedException>(() => ProtoBuf.Serializer.Serialize(Stream.Null, proto));
+        Assert.True(attribute.SameElements(attribute.WithDType(DType.UInt8)));
+    }
+
+    /// <summary>An attribute over a host tensor of 2 GiB + 8 bytes, moved into it as it stands with
+    /// <paramref name="writes"/> made at their offsets, and the value it holds.</summary>
+    internal static (TensorAttribute Attribute, IShorokooTensorValue Value) AttributePastTwoGibibytes(
+        params (long Offset, byte[] Bytes)[] writes)
+    {
+        const long Length = (1L << 31) + 8;
+        var backend = DefaultBackend.Instance;
+        var value = backend.CreateUninitializedTensorInBackendMemory(ShorokooTensorElementType.UInt8, [Length]);
+        foreach (var (offset, bytes) in writes)
+            Assert.True(backend.TryCopyHostToTensorRange(value, offset, bytes));
+        var tensor = TensorData.Create(new Shape([Length]), DType.UInt8, value, backend);
+        var attribute = tensor.MoveToAttribute();
+        Assert.True(tensor.IsDisposed);
+        return (attribute, value);
+    }
+
+    [Fact]
+    public void TestAWeightPastTwoGibibytesBindsIntoAConcreteModelWhoseSessionsReadItWhereItIs()
+        => Utils.OwnProcess.Run(typeof(CoreUtilsCoverageTests), nameof(AWeightPastTwoGibibytesBindsIntoAConcreteModelWhoseSessionsReadItWhereItIs));
+
+    internal static void AWeightPastTwoGibibytesBindsIntoAConcreteModelWhoseSessionsReadItWhereItIs()
+    {
+        const long Length = (1L << 29) + 2;
+        var backend = DefaultBackend.Instance;
+        var value = backend.CreateUninitializedTensorInBackendMemory(ShorokooTensorElementType.Float, [Length]);
+        Assert.True(backend.TryCopyHostToTensorRange(value, 0, MemoryMarshal.AsBytes<float>([1f, 2f, 3f, 4f])));
+        var weight = TensorData.Create(new Shape([Length]), DType.Float32, value, backend);
+        var (input, length) = (TensorData([4L], 10f, 20f, 30f, 40f), TensorData(DType.Int64, [], Length));
+        var architecture = LargeWeightHead.ComputationGraph.ToConcreteArchitecture([length, input]);
+        var name = ModuleParamSetNamingScheme.CreateShorokooNamingScheme(architecture.GetConcreteModelParamInfos())
+            .ToName(architecture.GetConcreteModelParamInfos().ParamInfos.Single(p => p.Shape.Dims is [Length]))!;
+        var model = architecture.ToConcreteModel(new ModelParamList([(name, weight)], ModelParamType.TrainableParam));
+        using var context = new ComputeContext();
+        using var compiled = context.Compile(model);
+        float[] expected = [11f, 22f, 33f, 44f];
+
+        Assert.False(weight.IsDisposed);
+        Assert.Contains(model.ToInternal().Nodes, n => n.GetTensorAttribute() is { PastOneArray: true });
+        Assert.Equal(expected, compiled.Execute(length.Shared(), input.Shared())[0].ToTensorData().As<float32>().CopyMemory<float>());
+        Assert.Equal(expected, context.Execute(model, length.Shared(), input.Shared())[0].ToTensorData().As<float32>().CopyMemory<float>());
+        Assert.Empty(compiled.SuppliedTensors);
+        weight.Delete();
     }
 
     // Keeps what the first write hands it, and stops the writer there.

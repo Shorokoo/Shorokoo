@@ -662,7 +662,7 @@ public static class " + modelName + @"
             // Strings are checked first: their elements are variable-length and have no flat
             // bytes to measure, and there is no raw-data form to fall back to, so a string
             // constant is always written as literals, whatever its size.
-            if (tensorDataAttribute.DType != DType.Utf8 && tensorDataAttribute.Bytes.Length > 500)
+            if (tensorDataAttribute.DType != DType.Utf8 && tensorDataAttribute.ByteLength > 500)
                 return null;
 
             string dataParams;

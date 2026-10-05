@@ -250,14 +250,17 @@ namespace Shorokoo
         /// <summary>
         /// This tensor's elements as a <see cref="TensorAttribute"/> — a tensor in a graph's
         /// description rather than a runtime value. The tensor is <b>moved</b>: it dies — every
-        /// access afterwards throws, saying it was moved — and its memory is released, so binding a
-        /// 165 M-parameter checkpoint into a graph costs no second set of bytes.
+        /// access afterwards throws, saying it was moved — and its memory is released or taken over,
+        /// so binding a 165 M-parameter checkpoint into a graph costs no second set of bytes.
         ///
         /// <para>Where the tensor holds its own array — one built from a C# array — the attribute
-        /// takes that array and nothing is copied. Anything else is copied out into the attribute on
-        /// the way: a runtime value's buffer, read back through the backend that made it where it is
-        /// not host memory, or a string tensor's elements. The memory the copy came from is released
-        /// either way.</para>
+        /// takes that array and nothing is copied. Of any size: a tensor of more bytes than one
+        /// managed array holds is kept by the attribute in host memory, and one already there, in
+        /// memory of its own rather than a range of a block it shares, is taken over as it stands.
+        /// Anything else is copied out into the attribute on the way: a runtime value's buffer, read
+        /// back through the backend that made it where it is not host memory — a piece at a time
+        /// past one array — or a string tensor's elements. The memory the copy came from is
+        /// released either way.</para>
         ///
         /// <para>An attribute is immutable and shared by every graph that captured it, so there is
         /// no way back that does not copy: <see cref="TensorAttribute.CopyToTensorData()"/> is
@@ -268,38 +271,22 @@ namespace Shorokoo
         /// device memory whose producer was not recorded
         /// (<see cref="Create(Shape, DType, IShorokooTensorValue)"/>), so nothing can read it
         /// back.</exception>
-        /// <exception cref="NotSupportedException">This tensor holds more bytes than one managed
-        /// array does, which is where an attribute keeps its elements. The tensor is left as it
-        /// was.</exception>
         public TensorAttribute MoveToAttribute()
         {
             ThrowIfDisposed();
-            // Refused before anything is copied or taken, so the tensor is still whole: the same
-            // tensor can still be fed to a run, and an ONNX Runtime context loads a model's weights
-            // into its own memory without making them attributes at all.
-            RefuseIfNoAttributeHolds();
 
             // What cannot be taken without a copy is copied first, while the tensor is still alive:
             // the copy is the step that can fail -- a device buffer read back without the runtime
             // that made it, say -- and a failure then leaves a tensor that is still whole rather than
             // one that died with its contents lost. The generic placeholder's storage dtype is read
             // now for the same reason: afterwards there is no value left to ask.
+            var storageDType = StorageDType();
+            if (PastOneArray) return MoveToHeldAttribute(storageDType);
             var strings = DType.IsSameElementTypeAs(DType.Utf8) ? Reading(CopyContentStrings) : null;
             var own = strings is null ? OwnBytes : null;
             var copied = strings is null && own is null ? Reading(CopyContentBytes) : null;
-            var storageDType = StorageDType();
 
-            switch (TryTake(TensorDeath.MovedToAttribute))
-            {
-                case TakeOutcome.Taken:
-                    break;
-                case TakeOutcome.Dead:
-                    ThrowIfDisposed();
-                    break;
-                default:
-                    throw ReadByARun(nameof(MoveToAttribute));
-            }
-
+            TakeForAttribute();
             try
             {
                 return strings is not null
@@ -316,17 +303,63 @@ namespace Shorokoo
         }
 
         /// <summary>
+        /// <see cref="MoveToAttribute"/> of a tensor past one managed array: an attribute holding its
+        /// elements in host memory. A value of the tensor's own in host memory is taken over — the
+        /// tensor dies and the attribute's tensor names the same memory — and anything else, in a
+        /// device's memory or a range of a shared block, is copied into host memory first, a piece
+        /// at a time, and released once the copy is made.
+        /// </summary>
+        private TensorAttribute MoveToHeldAttribute(DType? storageDType)
+        {
+            if (IsHostResident && Block is null && this is IOnnxData onnx)
+            {
+                var value = onnx.Value;
+                TakeForAttribute();
+                // The memory is not released: the attribute's tensor owns it from here, and releases
+                // it through the same backend once the attribute is collected.
+                _life.HandedToBackend();
+                return TensorAttribute.OverHeld(Shape, DType,
+                    Create(Shape, storageDType ?? DType, value, AllocatingBackend), storageDType);
+            }
+
+            var copy = CopyToHostMemory(ComputeContext.Host);
+            try
+            {
+                TakeForAttribute();
+            }
+            catch
+            {
+                copy.Delete();
+                throw;
+            }
+            ReleaseTaken();
+            return TensorAttribute.OverHeld(Shape, DType, copy, storageDType);
+        }
+
+        /// <summary>Takes this tensor for a move into an attribute, or refuses as
+        /// <see cref="MoveToAttribute"/> says.</summary>
+        private void TakeForAttribute()
+        {
+            switch (TryTake(TensorDeath.MovedToAttribute))
+            {
+                case TakeOutcome.Taken:
+                    return;
+                case TakeOutcome.Dead:
+                    ThrowIfDisposed();
+                    return;
+                default:
+                    throw ReadByARun(nameof(MoveToAttribute));
+            }
+        }
+
+        /// <summary>
         /// A <see cref="TensorAttribute"/> holding a copy of this tensor's elements, this tensor left
         /// as it is: <see cref="MoveToAttribute"/> of a copy in host memory — what binding a value the
-        /// caller goes on holding takes — refused as <see cref="MoveToAttribute"/> refuses, before
-        /// anything is copied.
+        /// caller goes on holding takes.
         /// </summary>
-        /// <exception cref="NotSupportedException">This tensor holds more bytes than one managed
-        /// array does.</exception>
         internal TensorAttribute CopyToAttribute()
         {
             ThrowIfDisposed();
-            RefuseIfNoAttributeHolds();
             var copy = CopyTo(ComputeContext.Host);
             try
             {
@@ -337,20 +370,6 @@ namespace Shorokoo
                 copy.Delete();
                 throw;
             }
-        }
-
-        /// <summary>Refuses a tensor of more bytes than one managed array holds, which is where an
-        /// attribute keeps its elements.</summary>
-        private void RefuseIfNoAttributeHolds()
-        {
-            if (PastOneArray)
-                throw new NotSupportedException(
-                    $"{Describe()} holds {ByteCount} bytes, more than a graph attribute "
-                    + $"holds: an attribute keeps its elements in one managed array, of at most "
-                    + $"{Array.MaxLength} bytes. A tensor this large is fed to a run as a tensor; to load "
-                    + "a model with a weight this large, load it onto an ONNX Runtime compute context "
-                    + "(ComputeContext.LoadCompiled, ImportCompiledOnnx), which reads its weights into "
-                    + "the context's memory.");
         }
 
         /// <summary>
@@ -453,6 +472,17 @@ namespace Shorokoo
         /// <summary>Whether this tensor's contents are more bytes than one managed array holds, so
         /// that a copy of them is read a piece at a time rather than made from one array.</summary>
         private bool PastOneArray => ByteCount > Array.MaxLength;
+
+        /// <summary>
+        /// This tensor's contents as a stream read forward, a piece at a time out of wherever they
+        /// are. Takes no reader lock: for a tensor nothing can end while the stream is read — one a
+        /// <see cref="TensorAttribute"/> holds, which nothing else names.
+        /// </summary>
+        internal Stream OpenContentStream()
+        {
+            ThrowIfDisposed();
+            return new ContentStream(this);
+        }
 
         /// <summary>
         /// This tensor's contents as a stream read forward, each read copying the next piece out of

@@ -348,7 +348,8 @@ namespace Shorokoo.Core.Factory.IR
         /// <summary>
         /// The <see cref="TensorProto"/> for <paramref name="values"/>, or -- when they are null --
         /// a dtype-and-shape-true tensor carrying no payload, which is what a weights-stripped
-        /// model definition writes.
+        /// model definition writes. Elements past one managed array are not copied into the proto
+        /// at all but carried beside it (<see cref="TensorProto.Carried"/>).
         ///
         /// <para>Strings take the other field. ONNX forbids <c>raw_data</c> for STRING and gives
         /// string elements <c>string_data</c> instead, one UTF-8 blob apiece, so which field is
@@ -372,6 +373,11 @@ namespace Shorokoo.Core.Factory.IR
                         values.Values[i] ?? throw new InvalidOperationException(
                             $"Element {i} of string tensor '{name}' is null. A string tensor's "
                             + "elements are its storage, and ONNX has no null element to write.")));
+            else if (values.PastOneArray)
+                // No byte[] holds it, and no protobuf message could: carried beside the message,
+                // for the exporter to write into a side file and a compute context to hand its
+                // session as it is.
+                tensor.Carried = values;
             else
                 tensor.RawData = values.Bytes.ToArray();
             tensor.data_type = type.ProtoTypeNum;

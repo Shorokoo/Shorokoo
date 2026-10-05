@@ -329,9 +329,11 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
             }
 
             // Zeros of the gradient's shape, at the dtype every gradient here carries (see the loss
-            // seed above). Sub(g, g) would carry the NaN through.
+            // seed above), and of the rank of what that shape is read off. Sub(g, g) would carry
+            // the NaN through.
+            var rank = shapeOf.Rank;
             Variable Zeros() => OnnxOp.ConstantOfShape(
-                OnnxOp.Shape(shapeOf), Globals.TensorData(DType.Float32, [1L], 0f).MoveToAttribute(), gated.Rank);
+                OnnxOp.Shape(shapeOf), Globals.TensorData(DType.Float32, [1L], 0f).MoveToAttribute(), rank);
 
             if (terms.Count == 1)
             {

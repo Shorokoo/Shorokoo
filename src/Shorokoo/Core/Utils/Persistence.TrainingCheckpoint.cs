@@ -108,10 +108,19 @@ namespace Shorokoo
         internal static long? ModelEntryMaxBytesInjection;
 
         /// <summary>The <c>.srk</c> container of <paramref name="graph"/> as the <c>.skpt</c>
-        /// model entry at <paramref name="entryPath"/>.</summary>
+        /// model entry at <paramref name="entryPath"/>. A model entry is read whole, so one past
+        /// what an array holds is refused, with <see cref="NotSupportedException"/> naming the
+        /// entry, before anything of the checkpoint is written.</summary>
         internal static byte[] SkptModelEntry(InternalComputationGraph graph, GraphKind stage, string entryPath)
-            => CompressedFormatUtils.SaveFastGraphToBinary(graph, stage, compressed: true,
-                CompressedFormatUtils.DefaultCompressionLevel, ModelEntryMaxBytesInjection ?? Array.MaxLength);
+        {
+            long maxBytes = ModelEntryMaxBytesInjection ?? Array.MaxLength;
+            return CompressedFormatUtils.SaveFastGraphToBinary(graph, stage, compressed: true,
+                CompressedFormatUtils.DefaultCompressionLevel, maxBytes, what => new NotSupportedException(
+                    $"The checkpoint's model entry '{entryPath}' would hold the graph's .srk container, and {char.ToLowerInvariant(what[0])}{what[1..]} " +
+                    $"more than the {maxBytes:N0} bytes one array holds. A .skpt model entry is read whole, so it holds at " +
+                    "most that: the graph besides the weights the checkpoint stores in its data entries — its " +
+                    "structure and the constants it holds — has to be smaller."));
+        }
 
         /// <summary>
         /// One safetensors data entry of a <c>.skpt</c>, as it is stored. Uncompressed, it is

@@ -553,7 +553,10 @@ Rules:
   else, so a smaller archive carries none; any Zip64-capable zip reader opens it. The directory form has no limit of its own.
 - The entries read whole — `config.json`, the model definitions under `models/`, and
   `data/user-data.json` — hold at most `Array.MaxLength` bytes (just under 2 GiB) each; a
-  larger one is refused with `InvalidDataException` when read.
+  larger one is refused with `InvalidDataException` when read. A model definition holds the
+  graph without the weights the data entries store, and a save whose model definition would
+  be larger is refused with `NotSupportedException` naming the entry, before anything is
+  written.
 - The flat safetensors training format carries no rig constituents: rebuild the rig from
   the same graphs, then `rig.LoadCheckpoint`.
 - Precompiled artifacts are not supported.

@@ -208,12 +208,14 @@ namespace Shorokoo.Core.Utils
         /// <see cref="SaveFastGraphToBinary(InternalComputationGraph, GraphKind?, bool, int)"/>
         /// refusing a container of more than <paramref name="maxBytes"/> bytes: up front, before
         /// any of it is written, when the uncompressed payload alone exceeds it, else as soon as
-        /// the container being written does.
+        /// the container being written does. The refusal is <paramref name="tooLarge"/>'s of what
+        /// exceeds the limit, when given.
         /// </summary>
         internal static byte[] SaveFastGraphToBinary(
-            InternalComputationGraph graph, GraphKind? stage, bool compressed, int compressionLevel, long maxBytes)
+            InternalComputationGraph graph, GraphKind? stage, bool compressed, int compressionLevel, long maxBytes,
+            Func<string, NotSupportedException>? tooLarge = null)
         {
-            NotSupportedException TooLarge(string what) => new(
+            NotSupportedException TooLarge(string what) => tooLarge?.Invoke(what) ?? new(
                 $"{what} more than the {maxBytes:N0} bytes one array holds, so SaveFastGraphToBinary cannot " +
                 "return this graph's .srk container. Save it with CompressedFormatUtils.SaveFastGraphToFile, " +
                 "which streams a container of any size to the file.");

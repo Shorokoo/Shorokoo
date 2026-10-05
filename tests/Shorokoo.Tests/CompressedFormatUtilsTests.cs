@@ -929,8 +929,11 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
     [Fact]
     public void TestAnSrkFileIsSavedAndLoadedWithoutEverBeingHeldWhole()
     {
-        var model = FCLayer.ComputationGraph.ToConcreteArchitecture(
-            [TensorData(DType.Int64, [], 1024L), TensorDataWithSmallVals(DType.Float32, [1L, 1024L])]).ToConcreteModel();
+        var arch = FCLayer.ComputationGraph.ToConcreteArchitecture(
+            [TensorData(DType.Int64, [], 1024L), TensorDataWithSmallVals(DType.Float32, [1L, 1024L])]);
+        var random = new Random(11);
+        var model = arch.ToConcreteModel(new ModelParamList([.. arch.GetConcreteModelParamInfos().ParamInfos.Select(p => Tuple.Create(p.ToShorokooIdString(),
+            (TensorData)TensorData(p.Shape.Dims, [.. Enumerable.Range(0, (int)p.Shape.Count).Select(_ => random.NextSingle())])))], ModelParamType.TrainableParam));
         const long Weight = 4L * 1024 * 1024;
         foreach (var compressed in (bool[])[false, true])
         {
@@ -941,7 +944,7 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
             var loaded = CompressedFormatUtils.LoadFastGraphFromFile(path);
             long loadedAt = GC.GetAllocatedBytesForCurrentThread();
 
-            Assert.Equal((true, true), (saved - before < 2 * Weight, loadedAt - saved < 3 * Weight));
+            Assert.Equal((true, true, true), (saved - before < 2 * Weight, loadedAt - saved < 2 * Weight, new FileInfo(path).Length > Weight));
             Assert.Equal(WeightBytesByParam(model), WeightBytesByParam(loaded));
         }
     }

@@ -349,9 +349,9 @@ namespace Shorokoo
 
         /// <summary>
         /// A fresh tensor holding this one's contents in <paramref name="target"/>'s memory, attached
-        /// to it. Goes through host bytes, which is the only route a backend-independent copy has: a
+        /// to it. Goes through host memory, which is the only route a backend-independent copy has: a
         /// value belongs to the runtime that made it, so the target has to be handed contents rather
-        /// than a pointer.
+        /// than a pointer — in one array where one holds them, and a piece at a time otherwise.
         ///
         /// <para>The target allocates them itself, through
         /// <see cref="IShorokooBackend.CreateTensorInBackendMemory"/> rather than
@@ -359,7 +359,8 @@ namespace Shorokoo
         /// instead of in host memory wearing its name. That is the difference between a tensor that
         /// is on the card and one an execution provider has to copy there on every run. A target
         /// whose memory is the host's gets the framework's own managed memory, which every host
-        /// backend reads.</para>
+        /// backend reads, where one array holds the copy, and host memory of its own backend
+        /// otherwise.</para>
         ///
         /// <para>Where the target's memory is under its device-memory budget, the copy is refused
         /// before anything is allocated when the budget cannot take it alongside what is attached to

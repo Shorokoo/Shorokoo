@@ -784,8 +784,9 @@ namespace Shorokoo.Runtime
         ///
         /// <para>Its backend can read any host memory, whichever runtime allocated it, so
         /// <c>To(ComputeContext.Host)</c> hands a host-readable tensor back as it is and copies
-        /// anything else into the framework's own managed memory — which is what
-        /// <see cref="TensorData.ToHost"/> does. It cannot be disposed: <see cref="Dispose"/> does
+        /// anything else into host memory — the framework's own managed memory where one array holds
+        /// the tensor, and host memory of the backend <see cref="Default"/> runs on otherwise — which
+        /// is what <see cref="TensorData.ToHost"/> does. It cannot be disposed: <see cref="Dispose"/> does
         /// nothing and <see cref="IsDisposed"/> is always false.</para>
         /// </summary>
         public static ComputeContext Host { get; } = new(HostBackend.Instance, isHost: true);

@@ -639,6 +639,16 @@ public class OnnxExternalDataTests
         Assert.Throws<NotSupportedException>(() => ProtoBuf.Serializer.Serialize(Stream.Null, proto));
     }
 
+    [Fact]
+    public void TestAWeightJustPastOneArrayIsRefusedSelfContainedAsOverTheCeiling()
+    {
+        var (attribute, _) = CoreUtilsCoverageTests.HeldAttribute(Array.MaxLength + 1L);
+        var proto = BuildAddModel(OnnxIRFactory.CreateTensor([attribute.ByteLength], "w", DType.UInt8, null, false, attribute));
+
+        Assert.True(attribute.ByteLength < OnnxModelExporter.MaxSelfContainedTensorBytes);
+        Assert.Equal(ErrorCodes.XD007, SelfContainedSaveRefusal(proto));
+    }
+
     private static string SelfContainedSaveRefusal(ModelProto proto)
     {
         var path = Path.Combine(Path.GetTempPath(), $"large_{Guid.NewGuid():N}.onnx");

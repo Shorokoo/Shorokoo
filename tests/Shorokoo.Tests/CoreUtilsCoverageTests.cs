@@ -579,13 +579,17 @@ public class CoreUtilsCoverageTests
     /// <paramref name="writes"/> made at their offsets, and the value it holds.</summary>
     internal static (TensorAttribute Attribute, IShorokooTensorValue Value) AttributePastTwoGibibytes(
         params (long Offset, byte[] Bytes)[] writes)
+        => HeldAttribute((1L << 31) + 8, writes);
+
+    /// <summary><see cref="AttributePastTwoGibibytes"/> of <paramref name="length"/> bytes.</summary>
+    internal static (TensorAttribute Attribute, IShorokooTensorValue Value) HeldAttribute(
+        long length, params (long Offset, byte[] Bytes)[] writes)
     {
-        const long Length = (1L << 31) + 8;
         var backend = DefaultBackend.Instance;
-        var value = backend.CreateUninitializedTensorInBackendMemory(ShorokooTensorElementType.UInt8, [Length]);
+        var value = backend.CreateUninitializedTensorInBackendMemory(ShorokooTensorElementType.UInt8, [length]);
         foreach (var (offset, bytes) in writes)
             Assert.True(backend.TryCopyHostToTensorRange(value, offset, bytes));
-        var tensor = TensorData.Create(new Shape([Length]), DType.UInt8, value, backend);
+        var tensor = TensorData.Create(new Shape([length]), DType.UInt8, value, backend);
         var attribute = tensor.MoveToAttribute();
         Assert.True(tensor.IsDisposed);
         return (attribute, value);

@@ -101,8 +101,9 @@ namespace Shorokoo.Onnx
 
         /// <summary>
         /// Walks every <see cref="TensorProto"/> reachable from the model: graph
-        /// initializers, sparse initializers, tensor-valued node attributes, and all of
-        /// those recursively through subgraph attributes and function bodies.
+        /// initializers, sparse initializers, tensor- and sparse-tensor-valued node
+        /// attributes, and all of those recursively through subgraph attributes and
+        /// function bodies.
         /// </summary>
         internal static IEnumerable<TensorProto> EnumerateAllTensors(ModelProto model)
         {
@@ -122,10 +123,8 @@ namespace Shorokoo.Onnx
                 yield return init;
 
             foreach (var sparse in graph.SparseInitializers)
-            {
-                if (sparse.Values is not null) yield return sparse.Values;
-                if (sparse.Indices is not null) yield return sparse.Indices;
-            }
+                foreach (var t in EnumerateSparseTensors(sparse))
+                    yield return t;
 
             foreach (var node in graph.Nodes)
                 foreach (var t in EnumerateNodeTensors(node))
@@ -140,6 +139,12 @@ namespace Shorokoo.Onnx
                     yield return attr.T;
                 foreach (var t in attr.Tensors)
                     yield return t;
+                if (attr.SparseTensor is not null)
+                    foreach (var t in EnumerateSparseTensors(attr.SparseTensor))
+                        yield return t;
+                foreach (var sparse in attr.SparseTensors)
+                    foreach (var t in EnumerateSparseTensors(sparse))
+                        yield return t;
                 if (attr.G is not null)
                     foreach (var t in EnumerateGraphTensors(attr.G))
                         yield return t;
@@ -147,6 +152,12 @@ namespace Shorokoo.Onnx
                     foreach (var t in EnumerateGraphTensors(g))
                         yield return t;
             }
+        }
+
+        private static IEnumerable<TensorProto> EnumerateSparseTensors(SparseTensorProto sparse)
+        {
+            if (sparse.Values is not null) yield return sparse.Values;
+            if (sparse.Indices is not null) yield return sparse.Indices;
         }
 
         private static void MaterializeExternalTensor(

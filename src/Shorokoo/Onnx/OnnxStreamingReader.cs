@@ -23,8 +23,8 @@ namespace Shorokoo.Onnx
     /// <para>So each weight is held once, where the model keeps it, and nothing holds the model
     /// whole: what remains besides the payloads set aside is held once more while protobuf-net
     /// parses it. Tensors are found where the writer streams them (graph initializers, sparse
-    /// initializers, the tensors of node attributes, through nested graphs and function bodies). A
-    /// <c>raw_data</c> past what one array holds is read where its tensor's <c>dims</c> and
+    /// initializers, the tensors and sparse tensors of node attributes, through nested graphs and
+    /// function bodies). A <c>raw_data</c> past what one array holds is read where its tensor's <c>dims</c> and
     /// <c>data_type</c> come first and account for exactly its bytes, as every writer of a
     /// <c>.srk</c> payload lays a tensor out; any other is refused as malformed.</para>
     /// </summary>

@@ -21,9 +21,9 @@ namespace Shorokoo.Onnx
     ///
     /// <para>Payloads are found where the importer reads tensors (as
     /// <see cref="OnnxExternalData.EnumerateAllTensors"/> walks them): graph initializers, sparse
-    /// initializers, the tensors of node attributes, through nested graphs and function bodies.
-    /// Each payload is written from where it lives, by the piece its source writes, so no buffer
-    /// ever holds more than one message besides its payloads.</para>
+    /// initializers, the tensors and sparse tensors of node attributes, through nested graphs and
+    /// function bodies. Each payload is written from where it lives, by the piece its source
+    /// writes, so no buffer ever holds more than one message besides its payloads.</para>
     /// </summary>
     internal sealed class OnnxStreamingWriter
     {

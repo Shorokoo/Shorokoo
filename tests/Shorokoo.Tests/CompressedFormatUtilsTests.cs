@@ -1959,6 +1959,13 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
         }
         Assert.Contains("SHA-256", Assert.Throws<InvalidDataException>(() => Persistence.PackSkpt(extracted, packed)).Message);
         Assert.Equal(packedSha256, SkptFileFormat.Sha256Hex(File.ReadAllBytes(packed)));
+
+        var (tamperedZip, tamperedDir) = (P("tampered.skpt"), P("tampered-dir.skpt"));
+        var zip = File.ReadAllBytes(packed);
+        zip[zip.AsSpan().IndexOf(padding) + padding.Length - 1] ^= 0xFF;
+        File.WriteAllBytes(tamperedZip, zip);
+        Assert.Contains("SHA-256", Assert.Throws<InvalidDataException>(() => Persistence.ExtractSkpt(tamperedZip, tamperedDir)).Message);
+        Assert.False(Directory.Exists(tamperedDir));
     }
 
     /// <summary>Writes through to a file, leaving a hole that holds no disk space wherever a write

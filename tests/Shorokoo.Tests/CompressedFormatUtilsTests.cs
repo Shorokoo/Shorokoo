@@ -702,8 +702,11 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
         var attribute = new AttributeProto { Name = "a", Type = AttributeProto.AttributeType.Tensor, T = T(4096), G = G(T(2048), T(8)) };
         attribute.Tensors.AddRange([T(1500), T(3)]);
         attribute.Graphs.Add(G(T(200_000)));
+        var sparse = new AttributeProto { Name = "s", Type = AttributeProto.AttributeType.SparseTensor,
+            SparseTensor = new SparseTensorProto { Values = T(2000), Indices = T(1200), Dims = [2000] } };
+        sparse.SparseTensors.Add(new SparseTensorProto { Values = T(3000), Indices = T(16), Dims = [3000] });
         var node = new NodeProto { Name = "n", OpType = "Constant" };
-        node.Attributes.Add(attribute);
+        node.Attributes.AddRange([attribute, sparse]);
         var graph = G(T(1024), T(1023), new TensorProto { Name = "s", data_type = (int)TensorProto.DataType.String, StringDatas = { new byte[5000] } });
         graph.Nodes.Add(node);
         graph.SparseInitializers.Add(new SparseTensorProto { Values = T(1 << 16), Indices = T(1100), Dims = [1 << 16] });

@@ -2748,3 +2748,17 @@ public partial class DropoutSquaredInANestedIfElseArmModel
         return cond.IfElse(c2.IfElse(dropped * dropped, y), y);
     }
 }
+
+/// <summary>A value reshaped twice, first to a shape computed from a value gathered at an index
+/// valid only for longer inputs, in an <c>IfElse</c> arm those inputs alone take.</summary>
+[Module]
+public partial class ReshapedTwiceToAShapeGatheredInAnUntakenIfElseArmModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var bad = ((Tensor<float32>)OnnxOp.Abs(OnnxOp.Sign((Tensor<float32>)OnnxOp.Gather(t, Vector(5L), axis: 0)))).Cast<int64>();
+        var shape = (Vector<int64>)OnnxOp.Sub((Vector<int64>)OnnxOp.Add(Vector(2L, 1L), bad), bad);
+        var r = (Tensor<float32>)OnnxOp.Reshape((Tensor<float32>)OnnxOp.Reshape(t, shape, allowZero: false), Vector(2L), allowZero: false);
+        return (t.Reduce(ReduceKind.Max, keepDims: false).Scalar() > Scalar(100f)).IfElse(r, t);
+    }
+}

@@ -169,6 +169,7 @@ public class FastProcessorsCoverageTests
         Assert.True(AutoTest.AdvancedTestGraph<GatheredAndReshapedTwiceInAnUntakenIfElseArmModel>([], [t], expected: [1.0, 2.0]));
         Assert.True(AutoTest.AdvancedTestGraph<GainGatheredInAnUntakenArmAndReadByBothArmsOfANestedIfElseModel>([], [t], expected: [1.0, 2.0]));
         Assert.True(AutoTest.AdvancedTestGraph<DropoutInANestedIfElseArmModel>([], [t, Flag(false), Flag(true)], expected: [1.0, 2.0]));
+        Assert.True(AutoTest.AdvancedTestGraph<ReshapedTwiceToAShapeGatheredInAnUntakenIfElseArmModel>([], [t], expected: [1.0, 2.0]));
     }
 
     private static bool GateBlocks(string opCode)

@@ -380,8 +380,10 @@ A random draw in an arm, such as a `Dropout` mask, trains like the rest of the
 arm. The backward pass reads the mask the forward pass drew; it does not draw
 again. The execution counter that gives each step fresh masks (see
 [rng-configuration.md](rng-configuration.md)) advances only on the steps that
-take the arm. On the other steps it carries through unchanged. A draw that is
-also read outside the arm runs on every step, and so does its counter.
+take the arm. On the other steps it carries through unchanged. A draw in an arm
+of an `IfElse` nested in another's arm is the same: it, and its counter, run only
+on the steps whose conditions select every arm around it. A draw that is also read
+outside the arm runs on every step, and so does its counter.
 
 ### Gradient (activation) checkpointing
 

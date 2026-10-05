@@ -1655,6 +1655,35 @@ public partial class StatefulCallInADiscardedIfElseNestedInAnotherModel
     }
 }
 
+/// <summary><see cref="StatefulCallInADiscardedIfElseNestedInAnotherModel"/> with both arms around
+/// the call taken.</summary>
+[Module]
+public partial class StatefulCallInADiscardedIfElseNestedInATakenArmOfAnotherModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var m = StatefulGainSubModel.Model();
+        var inner = (t.Reduce(ReduceKind.Max, keepDims: false).Scalar() > Scalar(0f)).IfElse(m.Call(t), t * Scalar(3f));
+        _ = (t.Reduce(ReduceKind.Max, keepDims: false).Scalar() > Scalar(1f)).IfElse(inner, t * Scalar(5f));
+        return t * Scalar(2f);
+    }
+}
+
+/// <summary>A stateful call in a taken arm of a discarded <c>IfElse</c>, and again in a taken arm of
+/// an <c>IfElse</c> nested in that arm.</summary>
+[Module]
+public partial class StatefulCalledInAnArmAndInAnIfElseNestedInItModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var m = StatefulGainSubModel.Model();
+        var a = m.Call(t);
+        var inner = (t.Reduce(ReduceKind.Max, keepDims: false).Scalar() > Scalar(0f)).IfElse(m.Call(a), t * Scalar(3f));
+        _ = (t.Reduce(ReduceKind.Max, keepDims: false).Scalar() > Scalar(1f)).IfElse(inner + a, t * Scalar(5f));
+        return t * Scalar(2f);
+    }
+}
+
 /// <summary>A stateful call on a loop's first trip only, in a loop whose continue condition is read
 /// at run time.</summary>
 [Module]
@@ -2704,5 +2733,18 @@ public partial class DropoutInANestedIfElseArmModel
     {
         var dropped = Shorokoo.Modules.Layers.Dropout.Call(Scalar(0.5f), Scalar(true), t);
         return cond.IfElse(c2.IfElse(dropped * Scalar(0f), t * Scalar(3f)), t);
+    }
+}
+
+/// <summary>An always-on Dropout squared in the then arm of an <c>IfElse</c> nested in the then
+/// arm of another, both on input conditions.</summary>
+[Module]
+public partial class DropoutSquaredInANestedIfElseArmModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t, Scalar<bit> cond, Scalar<bit> c2)
+    {
+        var y = t * Ones.Init([Scalar(8L)]);
+        var dropped = Shorokoo.Modules.Layers.Dropout.Call(Scalar(0.5f), Scalar(true), y);
+        return cond.IfElse(c2.IfElse(dropped * dropped, y), y);
     }
 }

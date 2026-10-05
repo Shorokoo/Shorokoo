@@ -458,6 +458,40 @@ public class CoreUtilsCoverageTests
         => PyTorchBackendCoverageTests.AssertAHostTensorPastTwoGibibytesIsReadByThePiece(DefaultBackend.Instance);
 
     [Fact]
+    public void TestAHostTensorPastTwoGibibytesIsCopiedIntoHostMemoryByThePiece()
+        => AssertAHostTensorPastTwoGibibytesIsCopiedByThePiece(t => t.CopyTo(ComputeContext.Host));
+
+    /// <summary>
+    /// A host tensor of 2 GiB + 8 bytes, its first and last four bytes set, copied by
+    /// <paramref name="copy"/> into a tensor of its own in host memory as long as it, holding them
+    /// where they were.
+    /// </summary>
+    internal static void AssertAHostTensorPastTwoGibibytesIsCopiedByThePiece(Func<TensorData, TensorData> copy)
+    {
+        const long Length = (1L << 31) + 8;
+        var backend = DefaultBackend.Instance;
+        var value = backend.CreateUninitializedTensorInBackendMemory(ShorokooTensorElementType.UInt8, [Length]);
+        var tensor = TensorData.Create(new Shape([Length]), DType.UInt8, value, backend);
+        var ends = new byte[8];
+        TensorData? copied = null;
+        try
+        {
+            Assert.True(backend.TryCopyHostToTensorRange(value, 0, [1, 2, 3, 4]));
+            Assert.True(backend.TryCopyHostToTensorRange(value, Length - 4, [5, 6, 7, 8]));
+            copied = copy(tensor);
+            Assert.NotSame(tensor, copied);
+            Assert.Equal((Length, true), (copied.ContentByteLength, copied.IsHostResident));
+            Assert.True(copied.TryCopyRows([0, (int)(Length / 4 - 1)], 4, ends));
+        }
+        finally
+        {
+            tensor.Delete();
+            copied?.Delete();
+        }
+        Assert.Equal((byte[])[1, 2, 3, 4, 5, 6, 7, 8], ends);
+    }
+
+    [Fact]
     public void TestAHostTensorPastFourGibibytesIsMeasuredWholeAndNeverReadThroughATruncatedSpan()
         => Utils.OwnProcess.Run(typeof(CoreUtilsCoverageTests), nameof(AHostTensorPastFourGibibytesIsMeasuredWholeAndNeverReadThroughATruncatedSpan));
 

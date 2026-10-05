@@ -1790,6 +1790,13 @@ public class PyTorchBackendCoverageTests
     public void TestAHostTensorPastTwoGibibytesIsReadIntoTorchsHostMemoryByThePiece()
         => AssertAHostTensorPastTwoGibibytesIsReadByThePiece(Torch);
 
+    [Fact]
+    public void TestAHostTensorPastTwoGibibytesOfAnotherRuntimeIsCopiedOntoATorchContextByThePiece()
+    {
+        using var context = new ComputeContext(Torch);
+        CoreUtilsCoverageTests.AssertAHostTensorPastTwoGibibytesIsCopiedByThePiece(t => t.To(context));
+    }
+
     internal static PyTuple HostFloats(long address, long elements)
     {
         PyObject[] dims = [elements.ToPython()];

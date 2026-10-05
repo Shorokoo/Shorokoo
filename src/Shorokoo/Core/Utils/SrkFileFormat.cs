@@ -588,7 +588,7 @@ namespace Shorokoo.Core.Utils
         {
             if (data is null) throw new ArgumentNullException(nameof(data));
             using var container = new MemoryStream(data, writable: false);
-            var (header, payload) = OpenPayload(container, origin ?? InMemoryOrigin);
+            var (header, payload, _) = OpenPayload(container, origin ?? InMemoryOrigin);
             using (payload)
             {
                 if (ReferenceEquals(payload, container))
@@ -610,9 +610,12 @@ namespace Shorokoo.Core.Utils
         /// stream is read. Nothing reads the payload whole: a container of any size opens. The
         /// returned stream is <paramref name="container"/> itself, positioned at the payload, when
         /// the payload is not compressed, else a decoder reading from it whose failure is the
-        /// payload failing to decompress, refused naming <paramref name="origin"/>.
+        /// payload failing to decompress, refused naming <paramref name="origin"/>. With it comes
+        /// the most bytes the payload can hold, which bounds every length its fields declare: the
+        /// bytes past the header, or what its Zstd frames decompress to at most
+        /// (<see cref="CompressedFormatUtils.ZstdContentSizeBound"/>).
         /// </summary>
-        internal static (SrkHeader Header, Stream Payload) OpenPayload(Stream container, string origin)
+        internal static (SrkHeader Header, Stream Payload, long MaxLength) OpenPayload(Stream container, string origin)
         {
             long start = container.Position;
             var prefix = new byte[MagicLength + HeaderLengthFieldSize];
@@ -658,15 +661,26 @@ namespace Shorokoo.Core.Utils
             container.Position = payloadStart;
             return header.Compression switch
             {
-                CompressionNone => (header, container),
+                CompressionNone => (header, container, container.Length - payloadStart),
                 CompressionZstd => (header, new DecodingReadStream(
                     new ZstdSharp.DecompressionStream(container, leaveOpen: true),
                     e => new InvalidDataException(
-                        $"'{origin}': failed to Zstd-decompress the payload — the file is corrupt or truncated. ({e.Message})", e))),
+                        $"'{origin}': failed to Zstd-decompress the payload — the file is corrupt or truncated. ({e.Message})", e)),
+                    ZstdPayloadBound(container, payloadStart, origin)),
                 _ => throw new InvalidDataException(
                     $"'{origin}': .srk header declares unsupported compression " +
                     $"'{header.Compression}' (supported: '{CompressionNone}', '{CompressionZstd}')."),
             };
+        }
+
+        /// <summary>The most bytes the Zstd payload at <paramref name="payloadStart"/> decompresses
+        /// to, the container left positioned there.</summary>
+        private static long ZstdPayloadBound(Stream container, long payloadStart, string origin)
+        {
+            long bound = CompressedFormatUtils.ZstdContentSizeBound(container, reason => new InvalidDataException(
+                $"'{origin}': {reason} — the file is corrupt or truncated."));
+            container.Position = payloadStart;
+            return bound;
         }
 
         private static SrkHeader ReadHeaderCore(byte[] data, string origin, out int payloadOffset)

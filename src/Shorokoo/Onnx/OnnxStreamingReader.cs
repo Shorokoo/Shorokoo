@@ -80,19 +80,21 @@ namespace Shorokoo.Onnx
 
         /// <summary>
         /// The model <paramref name="source"/> holds from where it stands to its end, read forward
-        /// once. A truncated or malformed model throws <see cref="EndOfStreamException"/> or
+        /// once: at most <paramref name="maxLength"/> bytes, which bounds every length a field of it
+        /// declares, so a field claiming more than the source can hold is refused before anything
+        /// is allocated for it. A truncated or malformed model throws <see cref="EndOfStreamException"/> or
         /// <see cref="ProtoBuf.ProtoException"/>, as parsing it whole does; a model holding more
         /// than one array besides its payloads, or a <c>raw_data</c> past one array that its
         /// tensor's layout does not account for, throws <see cref="InvalidDataException"/> naming
         /// <paramref name="origin"/>.
         /// </summary>
-        internal static ModelProto ReadModel(Stream source, string origin)
+        internal static ModelProto ReadModel(Stream source, long maxLength, string origin)
         {
             ArgumentNullException.ThrowIfNull(source);
             var reader = new OnnxStreamingReader(source, origin);
             try
             {
-                reader.Message(Kind.Model, long.MaxValue, 0, null);
+                reader.Message(Kind.Model, maxLength, 0, null);
                 var model = OnnxProtobuf.ReadModel(new MemoryStream(reader.Assemble(), writable: false));
                 reader.Restore(model);
                 return model;
@@ -124,7 +126,7 @@ namespace Shorokoo.Onnx
         };
 
         /// <summary>Reads the message of <paramref name="kind"/> running to <paramref name="end"/>
-        /// (the model's own runs to the end of the stream), <paramref name="depth"/> levels below
+        /// (the model's own runs to the end of the stream, at most there), <paramref name="depth"/> levels below
         /// the model, into the skeleton; <paramref name="layout"/> gathers a tensor's.</summary>
         private void Message(Kind kind, long end, int depth, Layout? layout)
         {

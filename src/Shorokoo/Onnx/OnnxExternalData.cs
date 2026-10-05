@@ -304,7 +304,8 @@ namespace Shorokoo.Onnx
 
         /// <summary>
         /// The byte count implied by the tensor's dtype and dims, or -1 when the dtype
-        /// has no fixed per-element width (e.g. String) so the count cannot be derived.
+        /// has no fixed per-element width (e.g. String), a dim is negative, or the count
+        /// does not fit a <see cref="long"/>, so no count can be derived.
         /// </summary>
         internal static long TryGetExpectedByteLength(TensorProto tensor)
         {
@@ -320,10 +321,20 @@ namespace Shorokoo.Onnx
             }
 
             long count = 1;
-            if (tensor.Dims is not null)
-                foreach (var d in tensor.Dims)
-                    count *= d;
-            return count * bits / 8;
+            try
+            {
+                if (tensor.Dims is not null)
+                    foreach (var d in tensor.Dims)
+                    {
+                        if (d < 0) return -1;
+                        count = checked(count * d);
+                    }
+                return checked(count * bits) / 8;
+            }
+            catch (OverflowException)
+            {
+                return -1;
+            }
         }
     }
 }

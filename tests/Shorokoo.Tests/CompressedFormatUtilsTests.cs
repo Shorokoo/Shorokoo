@@ -753,7 +753,7 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
     private static ModelProto ReadStreamed(byte[] serialized, long? heldPast)
     {
         OnnxStreamingReader.HeldPayloadThresholdInjection = heldPast;
-        try { return OnnxStreamingReader.ReadModel(new MemoryStream(serialized), "m"); }
+        try { return OnnxStreamingReader.ReadModel(new MemoryStream(serialized), serialized.Length, "m"); }
         finally { OnnxStreamingReader.HeldPayloadThresholdInjection = null; }
     }
 
@@ -814,10 +814,13 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
     {
         const long Declared = 64L << 20;
         static long[] Floats(params long[] dims) => dims;
-        AssertRefusedUnallocated(DeclaringRawData(Declared), compressed: false, heldPast: null);
-        AssertRefusedUnallocated(DeclaringRawData(Declared), compressed: true, heldPast: null);
-        AssertRefusedUnallocated(DeclaringRawData(Declared), compressed: false, heldPast: 1024);
-        AssertRefusedUnallocated(DeclaringRawData(Declared), compressed: true, heldPast: 1024);
+        var model = DeclaringRawData(Declared);
+        AssertRefusedUnallocated(model, zstd: false, heldPast: null);
+        AssertRefusedUnallocated(CompressedFormatUtils.Compress(model), zstd: true, heldPast: null);
+        AssertRefusedUnallocated(model, zstd: false, heldPast: 1024);
+        AssertRefusedUnallocated(CompressedFormatUtils.Compress(model), zstd: true, heldPast: 1024);
+        AssertRefusedUnallocated(RawZstdFrame(model, declared: null), zstd: true, heldPast: null);
+        AssertRefusedUnallocated(RawZstdFrame(model, declared: Declared * 2), zstd: true, heldPast: null);
         Assert.IsType<InvalidDataException>(Record.Exception(() => ReadStreamed(OneTensorModel(
             [0x08, .. Varint(unchecked((ulong)-1L)), 0x08, .. Varint(unchecked((ulong)-512L))], 2048), 1024)));
         Assert.Equal(-1, Onnx.OnnxExternalData.TryGetExpectedByteLength(new TensorProto { data_type = (int)TensorProto.DataType.Float, Dims = Floats((1L << 59) + 512) }));
@@ -832,11 +835,18 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
         return [0x08, 0x0A, .. Head(0x3A, graph.Length + tensor.Length + rawBytes), .. graph, .. tensor, .. new byte[16]];
     }
 
-    private static void AssertRefusedUnallocated(byte[] model, bool compressed, long? heldPast)
+    private static byte[] RawZstdFrame(byte[] content, long? declared)
     {
-        var payload = compressed ? CompressedFormatUtils.Compress(model) : model;
+        static byte[] Block(int size, int type, bool last) => [(byte)(size << 3 | type << 1 | (last ? 1 : 0)), (byte)(size >> 5), (byte)(size >> 13)];
+        byte[] head = declared is long size ? [0xC0, 0x70, .. BitConverter.GetBytes(size)] : [0x00, 0x70];
+        return [0x28, 0xB5, 0x2F, 0xFD, .. head, .. Block(content.Length, 0, false), .. content,
+            .. Block(1 << 17, 1, false), 0, .. Block(1 << 17, 1, false), 0, .. Block(1 << 17, 1, true), 0];
+    }
+
+    private static void AssertRefusedUnallocated(byte[] payload, bool zstd, long? heldPast)
+    {
         var container = BuildRawSrkContainer(
-            $"{{\"srkVersion\":1,\"stage\":\"concrete-model\",\"compression\":\"{(compressed ? "zstd" : "none")}\",\"payloadSha256\":\"{Sha256Hex(payload)}\"}}", payload);
+            $"{{\"srkVersion\":1,\"stage\":\"concrete-model\",\"compression\":\"{(zstd ? "zstd" : "none")}\",\"payloadSha256\":\"{Sha256Hex(payload)}\"}}", payload);
         OnnxStreamingReader.HeldPayloadThresholdInjection = heldPast;
         long before = GC.GetAllocatedBytesForCurrentThread();
         try { Assert.Throws<InvalidDataException>(() => CompressedFormatUtils.LoadFastGraphFromBinary(container)); }

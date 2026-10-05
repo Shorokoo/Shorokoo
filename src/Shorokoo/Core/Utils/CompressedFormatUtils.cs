@@ -342,7 +342,7 @@ namespace Shorokoo.Core.Utils
         internal static (InternalComputationGraph Graph, GraphKind Kind) LoadFastGraphCore(
             Stream container, string origin, GraphKind? requiredStage)
         {
-            var (header, payload) = SrkFileFormat.OpenPayload(container, origin);
+            var (header, payload, maxLength) = SrkFileFormat.OpenPayload(container, origin);
             using var _ = payload;
 
             if (requiredStage is not null)
@@ -359,7 +359,7 @@ namespace Shorokoo.Core.Utils
             try
             {
                 (graph, taggedKind) = OnnxModelImporter.FromModelProtoWithKindTag(
-                    OnnxStreamingReader.ReadModel(payload, origin));
+                    OnnxStreamingReader.ReadModel(payload, maxLength, origin));
             }
             catch (Exception e) when (e is ProtoBuf.ProtoException
                 or EndOfStreamException
@@ -456,9 +456,9 @@ namespace Shorokoo.Core.Utils
             if (!File.Exists(filePath))
                 throw new FileNotFoundException($"Architecture file not found: {filePath}");
             using var file = OpenSrkFile(filePath);
-            var (_, payload) = SrkFileFormat.OpenPayload(file, filePath);
+            var (_, payload, maxLength) = SrkFileFormat.OpenPayload(file, filePath);
             using (payload)
-                return OnnxStreamingReader.ReadModel(payload, filePath);
+                return OnnxStreamingReader.ReadModel(payload, maxLength, filePath);
         }
 
         /// <summary>
@@ -783,14 +783,30 @@ namespace Shorokoo.Core.Utils
         /// is believed. Every frame Shorokoo writes declares its size (<see cref="WriteZstdFrame(Stream, int, long, Action{Stream})"/>),
         /// and a tool that writes a payload in several frames — pzstd, say — declares each one's, so
         /// bytes that are not Zstd frames each declaring its size are refused, with the exception
-        /// <paramref name="malformed"/> makes of the reason. A skippable frame holds no payload and
-        /// adds nothing.
+        /// <paramref name="malformed"/> makes of the reason, as is a frame declaring more than its
+        /// blocks hold. A skippable frame holds no payload and adds nothing.
         ///
         /// <para>Each frame is walked by its header and its blocks' headers, three bytes a block, the
         /// blocks themselves sought past where the stream can seek and read past where it cannot: no
         /// byte is decompressed, and a file is read through at most once.</para>
         /// </summary>
         internal static long DeclaredZstdContentSize(Stream frames, Func<string, Exception> malformed)
+            => ZstdContentSize(frames, malformed, requireDeclared: true);
+
+        /// <summary>
+        /// The most bytes the Zstd frames of <paramref name="frames"/>, from where it stands to its
+        /// end, decompress to, walked as <see cref="DeclaredZstdContentSize"/> walks them: each
+        /// frame's declared size, or for a frame declaring none the most its blocks hold — a raw or
+        /// RLE block its stated size, a compressed one <see cref="ZstdMaxBlockBytes"/>. What a
+        /// streamed payload's fields declare is held to it before anything they claim is allocated.
+        /// </summary>
+        internal static long ZstdContentSizeBound(Stream frames, Func<string, Exception> malformed)
+            => ZstdContentSize(frames, malformed, requireDeclared: false);
+
+        /// <summary>The most bytes one Zstd block decompresses to.</summary>
+        internal const int ZstdMaxBlockBytes = 1 << 17;
+
+        private static long ZstdContentSize(Stream frames, Func<string, Exception> malformed, bool requireDeclared)
         {
             Span<byte> field = stackalloc byte[8];
             void Read(Span<byte> bytes)
@@ -834,15 +850,14 @@ namespace Shorokoo.Core.Utils
                 bool singleSegment = (descriptor & 0x20) != 0;
                 Pass((singleSegment ? 0 : 1) + (descriptor & 3) switch { 0 => 0, 1 => 1, 2 => 2, _ => 4 });
                 int sizeBytes = (descriptor >> 6) switch { 0 => singleSegment ? 1 : 0, 1 => 2, 2 => 4, _ => 8 };
-                if (sizeBytes == 0)
+                if (sizeBytes == 0 && requireDeclared)
                     throw malformed("a Zstd frame of it declares no decompressed size, which every frame written here declares");
                 field.Clear();
                 Read(field[..sizeBytes]);
-                ulong size = System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(field) + (sizeBytes == 2 ? 256UL : 0);
-                if (size > (ulong)(long.MaxValue - total))
-                    throw malformed("its Zstd frames declare more bytes than a payload holds");
-                total += (long)size;
+                ulong? declared = sizeBytes == 0 ? null
+                    : System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(field) + (sizeBytes == 2 ? 256UL : 0);
 
+                ulong held = 0;
                 while (true)
                 {
                     Read(field[..3]);
@@ -850,9 +865,17 @@ namespace Shorokoo.Core.Utils
                     int type = header >> 1 & 3;
                     if (type == 3) throw malformed("a Zstd block of it is of a reserved type");
                     Pass(type == 1 ? 1 : header >> 3);
+                    held += type == 2 ? ZstdMaxBlockBytes : (ulong)(header >> 3);
                     if ((header & 1) != 0) break;
                 }
                 if ((descriptor & 0x04) != 0) Pass(4);
+
+                if (declared > held)
+                    throw malformed("a Zstd frame of it declares more bytes than its blocks hold");
+                ulong size = declared ?? held;
+                if (size > (ulong)(long.MaxValue - total))
+                    throw malformed("its Zstd frames declare more bytes than a payload holds");
+                total += (long)size;
             }
         }
 

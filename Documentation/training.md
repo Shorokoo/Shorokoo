@@ -1181,8 +1181,8 @@ The `.skpt` save also streams each entry straight from the tensors' storage, wit
 the training state. An entry compressed with `WithZstdCompressedData` is compressed as it streams,
 afresh on each pass the writer makes over it, so it is never held whole either; its length is known
 only once it is compressed, so its tensors are read three times rather than two. An entry and an
-archive may be of any size: the single file writes Zip64 records where a size or offset reaches
-4 GiB or there are more than 65,535 entries. A load reads each data entry forward, a tensor at a
+archive may be of any size: the single file writes Zip64 records where a size or offset is
+4,294,967,295 bytes (4 GiB − 1) or more, or where there are 65,535 entries or more. A load reads each data entry forward, a tensor at a
 time, exactly as the flat load does.
 
 A checkpoint in device memory is saved from there: the flat and `.skpt` saves (file and directory

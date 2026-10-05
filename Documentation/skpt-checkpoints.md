@@ -548,9 +548,9 @@ Rules:
   an entry is written straight from the tensors' storage and read back a tensor at a time,
   and a tensor past what a managed array holds is read into host memory of a backend (see
   [training.md](training.md#what-a-save-costs)). The single file writes Zip64 records
-  where an entry's size or offset reaches 4 GiB or the archive holds more than 65,535
-  entries, and nowhere else, so a smaller archive carries none; any Zip64-capable zip
-  reader opens it. The directory form has no limit of its own.
+  where a size or offset — an entry's, or the central directory's — is 4,294,967,295 bytes
+  (4 GiB − 1) or more, or where the archive holds 65,535 entries or more, and nowhere
+  else, so a smaller archive carries none; any Zip64-capable zip reader opens it. The directory form has no limit of its own.
 - The entries read whole — `config.json`, the model definitions under `models/`, and
   `data/user-data.json` — hold at most `Array.MaxLength` bytes (just under 2 GiB) each; a
   larger one is refused with `InvalidDataException` when read.

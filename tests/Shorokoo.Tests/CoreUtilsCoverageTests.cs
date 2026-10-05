@@ -462,6 +462,10 @@ public class CoreUtilsCoverageTests
         => AssertAHostTensorPastTwoGibibytesIsCopiedByThePiece(t => t.CopyTo(ComputeContext.Host));
 
     [Fact]
+    public void TestAnAttributeOverAHostTensorPastTwoGibibytesOfAnUnrecordedProducerIsCopiedOutByThePiece()
+        => AssertAHostTensorPastTwoGibibytesIsCopiedByThePiece(t => t.MoveToAttribute().CopyToTensorData(), recorded: false);
+
+    [Fact]
     public void TestAHostTensorPastTwoGibibytesIsCopiedAsASequenceElementAndAcrossRuntimesByThePiece()
     {
         var backend = DefaultBackend.Instance;
@@ -475,12 +479,15 @@ public class CoreUtilsCoverageTests
     /// <paramref name="copy"/> into a tensor of its own in host memory as long as it, holding them
     /// where they were.
     /// </summary>
-    internal static void AssertAHostTensorPastTwoGibibytesIsCopiedByThePiece(Func<TensorData, TensorData> copy)
+    internal static void AssertAHostTensorPastTwoGibibytesIsCopiedByThePiece(
+        Func<TensorData, TensorData> copy, bool recorded = true)
     {
         const long Length = (1L << 31) + 8;
         var backend = DefaultBackend.Instance;
         var value = backend.CreateUninitializedTensorInBackendMemory(ShorokooTensorElementType.UInt8, [Length]);
-        var tensor = TensorData.Create(new Shape([Length]), DType.UInt8, value, backend);
+        var tensor = recorded
+            ? TensorData.Create(new Shape([Length]), DType.UInt8, value, backend)
+            : TensorData.Create(new Shape([Length]), DType.UInt8, value);
         var ends = new byte[8];
         TensorData? copied = null;
         try

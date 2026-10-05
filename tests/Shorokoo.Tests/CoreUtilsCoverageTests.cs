@@ -575,6 +575,18 @@ public class CoreUtilsCoverageTests
         Assert.True(attribute.SameElements(attribute.WithDType(DType.UInt8)));
     }
 
+    [Fact]
+    public void TestALiteralPastTwoGibibytesIsReadWhereItIsByARunAndByACompiledGraph()
+    {
+        var (attribute, _) = AttributePastTwoGibibytes();
+        var shape = OnnxOp.Shape(OnnxOp.Constant(attribute));
+        long[] expected = [attribute.ByteLength];
+
+        Assert.Equal(expected, OnnxEngine.Eval(shape).CopyMemory<long>());
+        Assert.Equal(expected, ComputeContext.Default.Compile(new InternalComputationGraph([], [shape]))
+            .Execute()[0].ToTensorData().CopyMemory<long>());
+    }
+
     /// <summary>An attribute over a host tensor of 2 GiB + 8 bytes, moved into it as it stands with
     /// <paramref name="writes"/> made at their offsets, and the value it holds.</summary>
     internal static (TensorAttribute Attribute, IShorokooTensorValue Value) AttributePastTwoGibibytes(

@@ -1858,6 +1858,29 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
     }
 
     [Fact]
+    public void TestSkptZipWritesZip64RecordsExactlyPastWhatTheClassicFieldsHold()
+    {
+        static byte[] Zip(int count, int size, (long, int)? threshold = null)
+        {
+            using var stream = new MemoryStream();
+            SkptFileFormat.Zip64ThresholdInjection = threshold;
+            try { SkptFileFormat.WriteStoredZip(stream, [.. Enumerable.Range(0, count).Select(i => new SkptFileFormat.ZipEntrySpec($"e{i}", new byte[size], Align: false))], DateTime.UtcNow); }
+            finally { SkptFileFormat.Zip64ThresholdInjection = null; }
+            return stream.ToArray();
+        }
+        static bool Zip64End(byte[] zip) => BitConverter.ToUInt32(zip, zip.Length - 42) == 0x07064b50;
+        static bool Zip64Sizes(byte[] zip) => BitConverter.ToUInt16(zip, 4) == 45;
+
+        Assert.Equal((0xFFFFFFFEL, 0xFFFE), SkptFileFormat.Zip64Limits);
+        Assert.False(Zip64End(Zip(65_534, 1)));
+        Assert.True(Zip64End(Zip(65_535, 1)));
+        Assert.False(Zip64Sizes(Zip(1, 100, (100, 0xFFFE))));
+        Assert.True(Zip64Sizes(Zip(1, 101, (100, 0xFFFE))));
+        Assert.False(Zip64End(Zip(3, 1, (1L << 20, 3))));
+        Assert.True(Zip64End(Zip(4, 1, (1L << 20, 3))));
+    }
+
+    [Fact]
     public void TestASkptEntryReadWholeIsRefusedPastWhatAnArrayHolds()
     {
         var dir = Directory.CreateDirectory(P("whole-read.skpt")).FullName;

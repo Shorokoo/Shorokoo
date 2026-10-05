@@ -777,6 +777,38 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
     }
 
     [Fact]
+    public void TestAStreamedReadParsesEveryEncodingOfAFieldAsParsingItWholeDoes()
+    {
+        byte[] floats = new byte[2048];
+        AssertReadAsParsed(OneTensorModel([0x0A, 0x03, 0x81, 0x00, 0x02], 8), null);
+        AssertReadAsParsed(OneTensorModel([0x0A, 0x04, 0x81, 0x80, 0x00, 0x02], 8), null);
+        AssertReadAsParsed(OneTensorModel([0x0A, 0x04, 0x81, 0x00, 0x80, 0x04], floats.Length), 1024);
+        AssertReadAsParsed(OneTensorModel([0x0A, 0x04, 0x81, 0x00, 0x80, 0x04], floats.Length), null);
+    }
+
+    private static byte[] OneTensorModel(byte[] fields, int rawBytes)
+    {
+        static byte[] Field(int key, byte[] body) => [.. Varint((ulong)key), .. Varint((ulong)body.Length), .. body];
+        byte[] tensor = [.. fields, 0x10, 0x01, 0x42, 0x01, (byte)'w', .. Field(0x4A, new byte[rawBytes])];
+        return [0x08, 0x0A, .. Field(0x3A, [.. Field(0x0A, "g"u8.ToArray()), .. Field(0x2A, tensor)])];
+    }
+
+    private static byte[] Varint(ulong value)
+    {
+        List<byte> bytes = [];
+        for (; value >= 0x80; value >>= 7) bytes.Add((byte)(value | 0x80));
+        bytes.Add((byte)value);
+        return [.. bytes];
+    }
+
+    private static void AssertReadAsParsed(byte[] model, long? heldPast)
+    {
+        using var streamed = new MemoryStream();
+        OnnxStreamingWriter.Prepare(ReadStreamed(model, heldPast)).WriteTo(streamed);
+        Assert.Equal(Serialized(Onnx.OnnxProtobuf.ReadModel(new MemoryStream(model))), streamed.ToArray());
+    }
+
+    [Fact]
     public void TestAnSrkFileReadsAWeightPastWhatAnArrayHoldsIntoHostMemoryInEitherForm()
     {
         var model = FCLayer.ComputationGraph.ToConcreteArchitecture(

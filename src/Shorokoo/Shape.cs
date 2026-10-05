@@ -56,7 +56,7 @@ namespace Shorokoo
             this.Count = 1;
 
             foreach (var dim in dims)
-                this.Count = checked(this.Count * dim);
+                this.Count *= dim;
         }
 
         /// <summary>Creates a shape with the given dimension sizes.</summary>

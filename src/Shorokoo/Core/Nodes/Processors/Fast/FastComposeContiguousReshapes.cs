@@ -18,8 +18,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     ///
     /// <para>The static reshape then reads the chain's root directly, so it does not wait on
     /// reshapes whose shapes are computed at run time — GroupNorm's shape-restoring reshape, which
-    /// feeds from <c>Shape(x)</c>, say — and a chain step nothing else reads drops out of the
-    /// model with the rest of the dead nodes.</para>
+    /// feeds from <c>Shape(x)</c>, say — and a chain step nothing else reads any more is removed
+    /// here. Left in the graph, such a step inside an <c>IF</c> branch reads a branch value and
+    /// feeds nothing, so scoping finds nothing that holds it in the branch and hoists it, with what
+    /// it reads, to the enclosing scope, where it runs whether or not the branch is taken and fails
+    /// on what is valid only on the branch's own path.</para>
     ///
     /// <para>The walk deliberately stops at anything but RESHAPE/SQUEEZE/UNSQUEEZE — in
     /// particular at IDENTITY, which <see cref="FastAddIdentityForOuterScopeValues"/> has already
@@ -44,6 +47,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 if (n.OpCode is OpCodes.LOOP_OPEN or OpCodes.IF_OPEN) openStack.Push(n.Key);
             }
 
+            var bypassed = new HashSet<FastNodeKey>();
             foreach (var node in graph.Nodes)
             {
                 if (node.OpCode != OpCodes.RESHAPE) continue;
@@ -72,10 +76,34 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     if (!producer.FullInputs.TryGetValue("", out var producerInputs)
                         || producerInputs.Count < 1
                         || producerInputs[0] is not { } upstream) break;
+                    bypassed.Add(producer.Key);
                     root = upstream;
                 }
 
                 if (root != dataKey) inputs[0] = root;
+            }
+
+            RemoveUnread(graph, bypassed);
+        }
+
+        /// <summary>Removes the bypassed chain steps nothing reads any more, and in turn the steps
+        /// only they read.</summary>
+        private static void RemoveUnread(InternalComputationGraph graph, HashSet<FastNodeKey> bypassed)
+        {
+            bool removed = true;
+            while (removed && bypassed.Count > 0)
+            {
+                var read = new HashSet<FastNodeKey>();
+                foreach (var node in graph.Nodes)
+                    foreach (var slot in node.FullInputs.Values)
+                        foreach (var key in slot)
+                            if (key is { IsEmpty: false } k) read.Add(k.FastNodeKey);
+                foreach (var key in graph.Inputs)
+                    if (!key.IsEmpty) read.Add(key.FastNodeKey);
+
+                var unread = bypassed.Where(k => !read.Contains(k)).ToHashSet();
+                removed = graph.Nodes.RemoveAll(n => unread.Contains(n.Key)) > 0;
+                bypassed.ExceptWith(unread);
             }
         }
 

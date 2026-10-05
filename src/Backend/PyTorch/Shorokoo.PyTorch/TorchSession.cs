@@ -34,8 +34,8 @@ namespace Shorokoo.PyTorch;
 /// <c>float32</c> precision, unless the session was built allowing TensorFloat-32. torch releases
 /// that lock inside each operator, so runs on cards that set the switches differently do not run at
 /// once: runs in one precision run beside one another, and a run in the other waits until they are
-/// done (<see cref="TorchPrecisionGate"/>). A run on the CPU reads neither switch and sets
-/// neither.</para>
+/// done (<see cref="TorchPrecisionGate"/>), or until its <see cref="RunSettings.CancellationToken"/>
+/// is cancelled. A run on the CPU reads neither switch and sets neither.</para>
 /// </summary>
 internal sealed class TorchSession : IShorokooSession
 {
@@ -380,7 +380,7 @@ internal sealed class TorchSession : IShorokooSession
                 ? DeviceRuns.GetOrAdd(_backend.CudaDeviceId, static _ => new ReaderWriterLockSlim(LockRecursionPolicy.SupportsRecursion))
                 : null;
             if (device is null) return Invoke(feeds, wanted, outputNames, targets, entry, writable, stop, runSettings, out aliasedInputs);
-            Float32Runs.Enter(_tensorFloat32);
+            Float32Runs.Enter(_tensorFloat32, token);
             try
             {
                 HoldingPrecision?.Invoke(this);

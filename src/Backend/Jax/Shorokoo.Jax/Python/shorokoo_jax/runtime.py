@@ -195,12 +195,23 @@ def from_host(address, nbytes, code, shape, device_name):
     return array
 
 
+# The bytes of the one host buffer the .NET side streams a save or a load through
+# (StagedReadBack.StagingBytes): an array no larger is moved whole, through host memory that size,
+# compiling nothing; only a larger one is moved by the piece, through the programs below.
+_STAGING_BYTES = 8 << 20
+
+
 def empty(code, shape, device_name):
-    """A tensor whose contents are unspecified: zeros, since a jax array is never uninitialized --
-    made on its device, never through host memory."""
+    """A tensor whose contents are unspecified: zeros, since a jax array is never uninitialized. An
+    array on a device no larger than the staging buffer is sent there from host zeros, compiling
+    nothing; a larger one is made on the device, never through host memory, at the cost of one
+    program per shape and type."""
+    dtype = jax_dtype(code)
     if device_name == "cpu":
-        return np.zeros(tuple(shape), dtype=jax_dtype(code))
-    return jnp.zeros(tuple(shape), dtype=jax_dtype(code), device=device_of(device_name))
+        return np.zeros(tuple(shape), dtype=dtype)
+    if int(np.prod(shape, dtype=np.int64)) * dtype.itemsize <= _STAGING_BYTES:
+        return jax.device_put(np.zeros(tuple(shape), dtype=dtype), device_of(device_name))
+    return jnp.zeros(tuple(shape), dtype=dtype, device=device_of(device_name))
 
 
 def host_copy(value):
@@ -211,12 +222,18 @@ def host_copy(value):
 
 # A device array's elements `first` to `first + size` as an array of their own, and the array with
 # those elements replaced, written over the array handed in (donated): XLA reshapes an array to a
-# flat one in place, so neither copies the rest of it.
+# flat one in place, so neither copies the rest of it. Each compiles a program per array shape and
+# type and per size: _piece is only asked for a power of two of elements (_fetch), so it keeps a
+# handful per array; _with_piece is asked for a load's pieces, which are of one size and the last.
 _piece = jax.jit(lambda array, first, size: jax.lax.dynamic_slice(array.reshape(-1), (first,), (size,)),
                  static_argnums=2)
 _with_piece = jax.jit(
     lambda array, piece, first: jax.lax.dynamic_update_slice(array.reshape(-1), piece, (first,)).reshape(array.shape),
     donate_argnums=0)
+
+# The fewest elements _fetch slices off a device array, so that pieces of every size under it share
+# one program.
+_LEAST_PIECE = 4096
 
 
 def _elements_of(array, byte_offset, count):
@@ -227,12 +244,27 @@ def _elements_of(array, byte_offset, count):
     return first, -(-(byte_offset + count) // itemsize) - first, byte_offset - first * itemsize
 
 
+def _fetch(array, first, size):
+    """Elements `first` to `first + size` of a device array, in host memory: the whole array copied
+    home where they are most of it -- which holds no copy of it on the device -- and otherwise a
+    slice holding them of a power of two of elements, and at least _LEAST_PIECE, so that the pieces
+    of a gather's many run lengths share a few programs and each holds at most twice its size on
+    the device."""
+    length = int(np.prod(array.shape, dtype=np.int64))
+    elements = max(1 << max(size - 1, 0).bit_length(), _LEAST_PIECE)
+    if elements >= length:
+        return np.asarray(array).reshape(-1)[first:first + size]
+    start = min(first, length - elements)
+    return np.asarray(_piece(array, np.int64(start), elements))[first - start:first - start + size]
+
+
 def copy_range_to_host(array, byte_offset, address, count):
     """Copies `count` bytes of a device array, `byte_offset` bytes in, to host `address`: the
-    elements covering them fetched home as an array of their own, without the rest of it."""
+    elements covering them fetched home (_fetch), without the rest of the array where they are
+    only part of it."""
     if count:
         first, size, skip = _elements_of(array, byte_offset, count)
-        piece = np.asarray(_piece(array, np.int64(first), size))
+        piece = np.ascontiguousarray(_fetch(array, first, size))
         ctypes.memmove(address, piece.ctypes.data + skip, count)
 
 
@@ -246,7 +278,7 @@ def copy_host_to_range(array, byte_offset, address, count):
     first, size, skip = _elements_of(array, byte_offset, count)
     itemsize = np.dtype(array.dtype).itemsize
     if skip or (skip + count) % itemsize:
-        piece = np.array(_piece(array, np.int64(first), size), copy=True)
+        piece = np.array(_fetch(array, first, size), copy=True)
     else:
         piece = np.empty(size, dtype=array.dtype)
     ctypes.memmove(piece.ctypes.data + skip, address, count)

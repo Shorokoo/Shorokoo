@@ -631,24 +631,28 @@ public class PyTorchBackendCoverageTests
         Assert.False(Overlap(false, true));
         Assert.False(JoinsPastAWaiter(true));
         Assert.False(JoinsPastAWaiter(false));
-        Assert.True(BothEnterOnceAWaiterIsInterrupted(true));
-        Assert.True(BothEnterOnceAWaiterIsInterrupted(false));
+        Assert.True(BothEnterOnceAWaiterGivesUp(true, interrupted: true));
+        Assert.True(BothEnterOnceAWaiterGivesUp(false, interrupted: true));
+        Assert.True(BothEnterOnceAWaiterGivesUp(true, interrupted: false));
+        Assert.True(BothEnterOnceAWaiterGivesUp(false, interrupted: false));
     }
 
     internal static readonly TimeSpan Patience = TimeSpan.FromSeconds(30);
 
-    private static bool BothEnterOnceAWaiterIsInterrupted(bool held)
+    private static bool BothEnterOnceAWaiterGivesUp(bool held, bool interrupted)
     {
         var gate = new TorchPrecisionGate();
+        using var stop = new CancellationTokenSource();
         gate.Enter(held);
         var waiter = new Thread(() =>
         {
-            try { EntersAndLeaves(gate, !held, wait: true); }
-            catch (ThreadInterruptedException) { }
+            try { gate.Enter(!held, stop.Token); gate.Exit(!held); }
+            catch (Exception ex) when (ex is ThreadInterruptedException or OperationCanceledException) { }
         });
         waiter.Start();
         Assert.True(SpinWait.SpinUntil(() => gate.Waiting(!held) == 1, Patience));
-        waiter.Interrupt();
+        if (interrupted) waiter.Interrupt();
+        else stop.Cancel();
         Assert.True(waiter.Join(Patience));
         gate.Exit(held);
         return EntersAndLeaves(gate, held) && EntersAndLeaves(gate, !held);
@@ -1248,8 +1252,6 @@ public class PyTorchBackendCoverageTests
         Assert.Equal("(True, [2.0, 2.0, 2.0, 2.0])", PlacedInto("L.matmul, torch.ones(4, 2), torch.ones(2)"));
     }
 
-    /// <summary>Whether <c>place_into</c> called with <paramref name="call"/> for a slot over a range
-    /// of four floats hands back that range, and what the range then holds.</summary>
     private static string PlacedInto(string call)
         => Evaluated("(lambda rt, t: __import__('contextvars').copy_context().run(lambda: (rt._placing.set(rt._Placing([t], [t], [(0, 0, 16, 1, [4], -1)], torch.device('cpu'), [])), "
                      + $"rt.place_into(0, False, {call}).data_ptr() == t.data_ptr(), t.tolist())[1:]))(__import__('shorokoo_torch.runtime', fromlist=['_']), torch.zeros(4))");
@@ -1265,10 +1267,6 @@ public class PyTorchBackendCoverageTests
         Assert.Equal([1f, 2f, 3f, 4f], ConsumedAfterARun(new ComputeContext(Torch) { OutputAliasing = false }));
     }
 
-    /// <summary>What the memory of the input a run of <c>Neg</c> consumed holds once the run is over:
-    /// a run of a session of the backend's own, stopped from placing where
-    /// <paramref name="stopPlacing"/>, or of one <paramref name="context"/> builds, built for a single
-    /// run where not <paramref name="placing"/>.</summary>
     private static float[] ConsumedAfterARun(ComputeContext? context, bool placing = true, bool stopPlacing = false)
     {
         var model = Serialize(GraphOn("x:float[4]", "O", Op("Neg", "x", "O")));
@@ -1775,9 +1773,6 @@ public class PyTorchBackendCoverageTests
         AssertAHostValuePastTwoGibibytesIsCopiedByThePiece(Torch, large, 4 * Elements);
     }
 
-    /// <summary>The description of a host float tensor of <paramref name="elements"/> elements at
-    /// <paramref name="address"/>, as a backend's runtime describes one. Called holding the
-    /// interpreter lock.</summary>
     internal static PyTuple HostFloats(long address, long elements)
     {
         PyObject[] dims = [elements.ToPython()];

@@ -1915,6 +1915,16 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
             manifest.SetLength(Array.MaxLength + 1L);
 
         Assert.Contains("read whole", Assert.Throws<InvalidDataException>(() => Persistence.Load(dir)).Message);
+
+        using var zip = new MemoryStream();
+        SkptFileFormat.WriteStoredZip(zip, [new(SkptFileFormat.ConfigEntryName, "{}"u8.ToArray(), Align: false)], DateTime.UtcNow);
+        var bytes = zip.ToArray();
+        int central = bytes.AsSpan().IndexOf((ReadOnlySpan<byte>)[0x50, 0x4b, 0x01, 0x02]);
+        BitConverter.TryWriteBytes(bytes.AsSpan(central + 20), (uint)Array.MaxLength + 1);
+        BitConverter.TryWriteBytes(bytes.AsSpan(central + 24), (uint)Array.MaxLength + 1);
+        var path = P("whole-read-zip.skpt");
+        File.WriteAllBytes(path, bytes);
+        Assert.Contains("read whole", Assert.Throws<InvalidDataException>(() => Persistence.Load(path)).Message);
     }
 
     [Fact]

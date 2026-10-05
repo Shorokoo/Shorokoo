@@ -373,12 +373,14 @@ public class PyTorchCudaHardwareTests
 
     internal static byte[] PieceWrittenIntoACardTensor(IShorokooBackend backend)
     {
-        using var value = backend.CreateTensorInBackendMemory(ShorokooTensorElementType.Float, new byte[16], [4]);
-        var read = new byte[6];
+        const int Bytes = StagedReadBack.StagingBytes + 16;
+        using var value = backend.CreateTensorInBackendMemory(ShorokooTensorElementType.Float, new byte[Bytes], [Bytes / 4]);
+        var (read, head) = (new byte[6], new byte[16]);
         Assert.True(backend.TryCopyHostToTensorRange(value, 5, [1, 2, 3, 4]));
         Assert.True(backend.TryCopyTensorRangeToHost(value, 3, read));
-        Assert.Throws<ArgumentOutOfRangeException>(() => backend.TryCopyTensorRangeToHost(value, 14, read));
-        return [.. read, .. backend.CopyTensorToHost(value)];
+        Assert.True(backend.TryCopyTensorRangeToHost(value, 0, head));
+        Assert.Throws<ArgumentOutOfRangeException>(() => backend.TryCopyTensorRangeToHost(value, Bytes - 2, read));
+        return [.. read, .. head];
     }
 
     private const long CountedPastTwoGibibytes = 5L << 27;

@@ -311,6 +311,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// condition is loop-invariant used to leave the graph in an order the pipeline
         /// rejects.</para>
         ///
+        /// <para>A state update stays put too, with every read of the state it updates: each pass
+        /// is one more call, and a lifted update would be made once however many passes ran.</para>
+        ///
         /// <para>Two further things stay put, both because loop-invariant by dataflow does not
         /// mean the same value every pass. A node inside an <c>IF</c> body runs only when its
         /// branch is taken, so lifting one out runs it unconditionally — and a branch may hold an
@@ -341,6 +344,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 "entry. This pass shrinks scopes; it does not fix invalid ones.");
 
             var loopDependent = BuildLoopDependentTensors(graph);
+            // A state update is a call's, and each pass of the loop makes the call again, whatever
+            // its inputs: lifted out, the update and the reads it composes with would run once.
+            var state = StateValues(graph);
 
             var result = new List<FastNode>(graph.Nodes.Count);
             // FastNodeKey of each active (not-yet-closed) LOOP_OPEN → its position in result.
@@ -388,6 +394,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
                 if (Shorokoo.Core.AutoDiffCheckpointing.Rematerializer.IsDeterministicOpCode(node.OpCode) &&
                     !HasLoopDependentInput(node, loopDependent) &&
+                    node.OpCode != InternalOpCodes.STATE_UPDATE_LINK &&
+                    !HasLoopDependentInput(node, state) &&
                     TryFindHoistPosition(openPositions, barrierPositions, out int hoistPos))
                 {
                     result.Insert(hoistPos, node);
@@ -434,6 +442,33 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             if (position != int.MaxValue) return true;
             position = -1;
             return false;
+        }
+
+        /// <summary>
+        /// The values module-owned state is read as: what each state update names as the state it
+        /// updates, and the Identity chains inlining wraps around it.
+        /// </summary>
+        internal static HashSet<FastTensorKey> StateValues(InternalComputationGraph graph)
+        {
+            var producer = new Dictionary<FastTensorKey, FastNode>();
+            foreach (var n in graph.Nodes)
+                foreach (var o in n.Outputs)
+                    if (o is FastTensorKey k) producer[k] = n;
+
+            var state = new HashSet<FastTensorKey>();
+            foreach (var n in graph.Nodes)
+            {
+                if (n.OpCode != InternalOpCodes.STATE_UPDATE_LINK || n.Inputs.Count == 0 || n.Inputs[0] is not FastTensorKey k)
+                    continue;
+                while (state.Add(k) && producer.TryGetValue(k, out var p) && p.OpCode == OpCodes.IDENTITY
+                       && p.Inputs.Count > 0 && p.Inputs[0] is FastTensorKey inner)
+                    k = inner;
+            }
+            foreach (var n in graph.Nodes)
+                if (n.OpCode == OpCodes.IDENTITY && n.Inputs.Count > 0 && n.Inputs[0] is FastTensorKey i && state.Contains(i)
+                    && n.Outputs.Count > 0 && n.Outputs[0] is FastTensorKey o)
+                    state.Add(o);
+            return state;
         }
 
         private static bool HasLoopDependentInput(FastNode node, HashSet<FastTensorKey> loopDependent)

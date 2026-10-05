@@ -41,19 +41,48 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// incoming value straight back, so a call in one arm alone updates the state only when that
     /// arm runs.</para>
     ///
+    /// <para><b>Calls in a loop body.</b> A body is one call site however many trips it runs: every
+    /// trip starts from the value the parameter held entering the loop, the calls within a trip
+    /// compose in order, and the update is the one the last trip that ran made. The loop is unrolled
+    /// by now, with each trip's reads of the parameter cloned in call order and each link naming its
+    /// trips (<see cref="OnnxOpAttributeNames.ShrkAttrLoopTrips"/>), so the calls thread like any
+    /// others except that a new trip starts over from the value entering its loop. Where whether a
+    /// trip runs is decided at run time, a trip that does not run starts from where the previous
+    /// one ended and its updates hand back what they read, so it changes nothing.</para>
+    ///
+    /// <para><b>Calls in a rolled loop's body.</b> A loop whose trip count is not known when this
+    /// runs is still standing, with the calls in its body once. The same rule applies: the first
+    /// call in the body reads the value entering the loop on every trip, the calls after it compose
+    /// in order, and the value the last of them produces is carried out of the loop as one more
+    /// loop variable, so the one after the <c>LOOP_CLOSE</c> is the last trip's, or the value
+    /// entering the loop when no trip runs. A link at the loop's own scope takes it, as for an
+    /// IfElse. A rolled loop nested in another is carried out of the inner one into the outer
+    /// one's body first, whose trips each start the inner loop over; an unrolled loop in a rolled
+    /// one's body, or a rolled one in an unrolled one's, orders by both rules. An IfElse whose arm
+    /// holds a rolled loop threads the loop's value into the arm; an IfElse in a rolled loop's body
+    /// is left unordered.</para>
+    ///
     /// <para>A branch expression is an ordinary argument, so its nodes are traced <em>before</em>
     /// the <c>IF_OPEN</c> that selects them and only move inside it at ONNX build time (see
     /// <see cref="FastIfBranchScoper"/>). Which arm a call belongs to is therefore read off what
     /// the <c>IF_CLOSE</c>'s branch inputs reach, not off where the call sits: a value both arms
-    /// read belongs to neither and is the parameter's ordinary, unconditional history.</para>
+    /// read, or one read outside the branch too, belongs to neither and is the parameter's
+    /// ordinary, unconditional history (see <see cref="FastIfArms"/>).</para>
     /// </summary>
     internal static class FastChainStateUpdatesAcrossCallSites
     {
-        /// <summary>One call site of a state parameter: its link, the marker that closes it, and
-        /// the arm it belongs to (null at module scope).</summary>
-        private readonly record struct CallSite(FastNode Link, FastNode Marker, IfArm? Arm);
+        /// <summary>One call site of a state parameter: its link, the marker that closes it, the
+        /// arm it belongs to (null at module scope) and the rolled loops whose bodies it is in,
+        /// outermost first.</summary>
+        private readonly record struct CallSite(FastNode Link, FastNode Marker, IfArm? Arm, List<FastNode> Loops);
 
-        public static void Process(InternalComputationGraph graph)
+        /// <param name="graph">The graph, rewritten in place.</param>
+        /// <param name="onlyLoopsUnrolledSince">Order only the parameters none of whose links this
+        /// pass has ordered (<see cref="OnnxOpAttributeNames.ShrkAttrStateOrdered"/>) and whose
+        /// unrolled loops' links name trips — those this pass left alone the last time it ran, and
+        /// which a later simplify has unrolled. A loop ordered while still rolled carries its state
+        /// out as a loop variable, which unrolling keeps as it is.</param>
+        public static void Process(InternalComputationGraph graph, bool onlyLoopsUnrolledSince = false)
         {
             if (graph is null) throw new ArgumentNullException(nameof(graph));
 
@@ -84,18 +113,46 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             // position taken here stays the one the node still has.
             var rewrites = new List<(int fromPos, int toPos, FastTensorKey param, FastTensorKey replacement)>();
             var insertions = new List<(int atPos, FastNode node)>();
-            var branchLinks = new List<FastTensorKey>();
+            var scopeLinks = new List<FastTensorKey>();
 
             foreach (var (paramNodeKey, links) in linksByParam)
             {
+                if (onlyLoopsUnrolledSince && (links.Any(IsOrdered) || links.All(l => TripsOf(l).Count == 0)))
+                    continue;
                 var sites = CallSitesOf(graph, links, enclosingScope, armsOfNode, nodeByKey);
-                if (sites is null) continue;                        // shape this pass does not order
-                if (sites.Count < 2 && sites.All(s => s.Arm is null)) continue;   // nothing to compose
+                if (sites is null)                                  // shape this pass does not order
+                {
+                    foreach (var link in links) MarkUnordered(link);
+                    continue;
+                }
+                if (sites.Count < 2 && sites.All(s => s.Arm is null && s.Loops.Count == 0
+                                                      && TripsOf(s.Link).All(t => t.Ran is null && t.Trip == t.Count - 1)))
+                {
+                    foreach (var link in links) link.Attributes = OrderedLinkAttributes();
+                    continue;                                       // nothing to compose
+                }
 
                 Thread(graph, new FastTensorKey(paramNodeKey, 0), sites, positionOf, nodeByKey,
-                       rewrites, insertions, branchLinks);
+                       rewrites, insertions, scopeLinks);
             }
 
+            ApplyRewrites(graph, rewrites, nodeByKey);
+
+            // From the back, so earlier positions stay put; of two at one position the one added
+            // first ends up first.
+            foreach (var (at, node, _) in insertions.Select((x, order) => (x.atPos, x.node, order))
+                                                    .OrderByDescending(x => x.atPos).ThenByDescending(x => x.order))
+                graph.Nodes.Insert(at, node);
+
+            RootScopeLinks(graph, scopeLinks);
+        }
+
+        /// <summary>Points every read of a parameter within each node range at its replacement.</summary>
+        private static void ApplyRewrites(
+            InternalComputationGraph graph,
+            List<(int fromPos, int toPos, FastTensorKey param, FastTensorKey replacement)> rewrites,
+            Dictionary<FastNodeKey, FastNode> nodeByKey)
+        {
             foreach (var (from, to, param, replacement) in rewrites)
                 for (int i = from; i <= to && i < graph.Nodes.Count; i++)
                     foreach (var (_, inputs) in graph.Nodes[i].FullInputs)
@@ -109,50 +166,52 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                                 && read.Equals(param))
                                 inputs[j] = replacement;
                         }
-
-            foreach (var (at, node) in insertions.OrderByDescending(x => x.atPos))
-                graph.Nodes.Insert(at, node);
-
-            RootBranchLinks(graph, branchLinks);
         }
 
+        private static InvalidOperationException SkipsACallOnARuntimeTrip()
+            => new("FastChainStateUpdatesAcrossCallSites: a loop whose continue condition is read at "
+                   + "run time makes a stateful call on some trips but not on others, so its update "
+                   + "depends on which trip ran last, which this pass does not follow. Make the call on "
+                   + "every trip, or give the loop a condition known when the graph is built.");
+
+        /// <summary>Whether this pass has ordered the link already.</summary>
+        internal static bool IsOrdered(FastNode link)
+            => link.Attributes.GetBoolVal(OnnxOpAttributeNames.ShrkAttrStateOrdered) == true;
+
         /// <summary>
-        /// Keeps the links an IfElse threading created reachable. Nothing reads the value a state
-        /// update produces — the state lowerings collect it — so a link nobody depends on is swept
-        /// as dead, taking the branch output it selects with it. The same <c>WITH_STATE_DEPS</c>
-        /// marker a module body puts on its outputs says so here.
+        /// Marks a link of a parameter this pass could not order, keeping the trips it names for a
+        /// later run to order it by once its loops are unrolled. Running such a graph with its state
+        /// is refused (see <see cref="FastLowerStateUpdateNodes"/>).
         /// </summary>
-        private static void RootBranchLinks(InternalComputationGraph graph, List<FastTensorKey> branchLinks)
+        private static void MarkUnordered(FastNode link)
+            => link.Attributes = OnnxCSharpAttributes.FromCSharpVals(
+                new Dictionary<string, object?>
+                {
+                    [OnnxOpAttributeNames.ShrkAttrStateOrdered] = false,
+                    [OnnxOpAttributeNames.ShrkAttrLoopTrips] = link.Attributes.GetLongsVal(OnnxOpAttributeNames.ShrkAttrLoopTrips),
+                },
+                Definitions.NodeDefinitions[InternalOpCodes.STATE_UPDATE_LINK].AttributeDefs);
+
+        /// <summary>A link this pass has ordered: marked so, and naming no trips any more.</summary>
+        private static OnnxCSharpAttributes OrderedLinkAttributes()
+            => OnnxCSharpAttributes.FromCSharpVals(
+                new Dictionary<string, object?> { [OnnxOpAttributeNames.ShrkAttrStateOrdered] = true },
+                Definitions.NodeDefinitions[InternalOpCodes.STATE_UPDATE_LINK].AttributeDefs);
+
+        /// <summary>The unrolled loop trips a link belongs to, outermost-unrolled last, each with the
+        /// flag saying whether it ran when that is decided at run time.</summary>
+        private static List<(long Loop, long Trip, long Count, long RolledDepth, FastTensorKey? Ran)> TripsOf(FastNode link)
         {
-            if (branchLinks.Count == 0 || graph.Outputs.Count == 0) return;
-
-            var key = FastNodeKey.New();
-            var output = new FastTensorKey(key, 0);
-            graph.InsertAtBodyEnd(new FastNode
-            {
-                Key = key,
-                OpCode = InternalOpCodes.WITH_STATE_DEPS,
-                Attributes = OnnxCSharpAttributes.FromCSharpVals(
-                    new Dictionary<string, object?>(),
-                    Definitions.NodeDefinitions[InternalOpCodes.WITH_STATE_DEPS].AttributeDefs),
-                FullInputs = { [""] = [graph.Outputs[0], .. branchLinks.Select(k => (FastTensorKey?)k)] },
-                FullOutputs = { [""] = [output] },
-            });
-            graph.RetargetOutput(0, output);
+            var trips = new List<(long, long, long, long, FastTensorKey?)>();
+            if (link.Attributes.GetLongsVal(OnnxOpAttributeNames.ShrkAttrLoopTrips) is not long[] vals) return trips;
+            for (int i = 0; i + 4 < vals.Length; i += 5)
+                trips.Add((vals[i], vals[i + 1], vals[i + 2], vals[i + 3], vals[i + 4] >= 0 ? link.Inputs[(int)vals[i + 4]] : null));
+            return trips;
         }
 
-        /// <summary>
-        /// This parameter's call sites in node order, or null when the shape is one this pass does
-        /// not order: a call inside a loop body, whose calls repeat rather than run in sequence —
-        /// and a rolled loop carrying state is refused where it matters, when the graph is prepared
-        /// for training.
-        /// </summary>
-        private static List<CallSite>? CallSitesOf(
-            InternalComputationGraph graph,
-            List<FastNode> links,
-            Dictionary<FastNodeKey, FastNodeKey?> enclosingScope,
-            Dictionary<FastNodeKey, List<IfArm>> armsOfNode,
-            Dictionary<FastNodeKey, FastNode> nodeByKey)
+        /// <summary>The <c>WITH_STATE_DEPS</c> that closes each link's call: the first to name it.</summary>
+        private static Dictionary<FastNodeKey, FastNode> MarkerByLink(
+            InternalComputationGraph graph, IEnumerable<FastNode> links)
         {
             var linkKeys = links.Select(l => l.Outputs[0]!.Value).ToHashSet();
             var markerByLink = new Dictionary<FastNodeKey, FastNode>();
@@ -163,15 +222,72 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     if (dep is FastTensorKey k && linkKeys.Contains(k) && !markerByLink.ContainsKey(k.FastNodeKey))
                         markerByLink[k.FastNodeKey] = node;
             }
+            return markerByLink;
+        }
+
+        /// <summary>
+        /// Keeps the links threading an IfElse or a rolled loop created reachable. Nothing reads the
+        /// value a state update produces — the state lowerings collect it — so a link nobody
+        /// depends on is swept as dead, taking the branch or loop output it takes with it. The same
+        /// <c>WITH_STATE_DEPS</c> marker a module body puts on its outputs says so here.
+        /// </summary>
+        private static void RootScopeLinks(InternalComputationGraph graph, List<FastTensorKey> scopeLinks)
+        {
+            if (scopeLinks.Count == 0 || graph.Outputs.Count == 0) return;
+
+            var key = FastNodeKey.New();
+            var output = new FastTensorKey(key, 0);
+            graph.InsertAtBodyEnd(new FastNode
+            {
+                Key = key,
+                OpCode = InternalOpCodes.WITH_STATE_DEPS,
+                Attributes = OnnxCSharpAttributes.FromCSharpVals(
+                    new Dictionary<string, object?>(),
+                    Definitions.NodeDefinitions[InternalOpCodes.WITH_STATE_DEPS].AttributeDefs),
+                FullInputs = { [""] = [graph.Outputs[0], .. scopeLinks.Select(k => (FastTensorKey?)k)] },
+                FullOutputs = { [""] = [output] },
+            });
+            graph.RetargetOutput(0, output);
+        }
+
+        /// <summary>
+        /// This parameter's call sites in node order, or null when the shape is one this pass does
+        /// not order: a call in an IfElse inside a rolled loop's body.
+        /// </summary>
+        private static List<CallSite>? CallSitesOf(
+            InternalComputationGraph graph,
+            List<FastNode> links,
+            Dictionary<FastNodeKey, FastNodeKey?> enclosingScope,
+            Dictionary<FastNodeKey, List<IfArm>> armsOfNode,
+            Dictionary<FastNodeKey, FastNode> nodeByKey)
+        {
+            var markerByLink = MarkerByLink(graph, links);
 
             var sites = new List<CallSite>(links.Count);
             foreach (var link in links)
             {
                 if (!markerByLink.TryGetValue(link.Key, out var marker)) return null;
-                if (enclosingScope[link.Key] is not null) return null;   // inside a loop body
-
                 var arms = armsOfNode.TryGetValue(link.Key, out var found) ? found : [];
-                if (arms.Count == 0) { sites.Add(new CallSite(link, marker, null)); continue; }
+
+                if (enclosingScope[link.Key] is FastNodeKey scope)
+                {
+                    if (enclosingScope[marker.Key] != scope || arms.Count > 1) return null;
+                    var loops = new List<FastNode>();
+                    for (FastNodeKey? s = scope; s is FastNodeKey open; s = enclosingScope[open])
+                    {
+                        if (!nodeByKey.TryGetValue(open, out var loop) || loop.OpCode != OpCodes.LOOP_OPEN) return null;
+                        loops.Insert(0, loop);
+                    }
+                    // An IfElse whose arm holds the whole loop orders like one holding a call; one
+                    // inside the loop's body is not ordered here.
+                    if (arms.Count == 1 && (!nodeByKey.TryGetValue(arms[0].IfClose, out var armClose)
+                                            || enclosingScope[armClose.Key] is not null))
+                        return null;
+                    sites.Add(new CallSite(link, marker, arms.Count == 1 ? arms[0] : null, loops));
+                    continue;
+                }
+
+                if (arms.Count == 0) { sites.Add(new CallSite(link, marker, null, [])); continue; }
                 if (arms.Count > 1)
                     throw new InvalidOperationException(
                         "FastChainStateUpdatesAcrossCallSites: a state update sits inside nested IfElse "
@@ -181,14 +297,15 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                         + "each branch its own model.");
                 if (!nodeByKey.TryGetValue(arms[0].IfClose, out var close)) return null;
                 if (enclosingScope[close.Key] is not null) return null;   // the IfElse is inside a loop
-                sites.Add(new CallSite(link, marker, arms[0]));
+                sites.Add(new CallSite(link, marker, arms[0], []));
             }
             return sites;
         }
 
         /// <summary>
         /// Walks the parameter's call sites in node order, giving each the value the parameter
-        /// holds when that call starts, and threading an IfElse's arms back together after it.
+        /// holds when that call starts, and threading an IfElse's arms back together after it and
+        /// a rolled loop's body out of it.
         /// </summary>
         private static void Thread(
             InternalComputationGraph graph,
@@ -198,9 +315,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             Dictionary<FastNodeKey, FastNode> nodeByKey,
             List<(int fromPos, int toPos, FastTensorKey param, FastTensorKey replacement)> rewrites,
             List<(int atPos, FastNode node)> insertions,
-            List<FastTensorKey> branchLinks)
+            List<FastTensorKey> scopeLinks)
         {
             var current = param;
+            var loopEntries = new List<FastTensorKey>();                      // the value entering each rolled loop open
+            var loops = new Dictionary<long, UnrolledLoop>();
             var armValue = new Dictionary<IfArm, FastTensorKey>();
             var armsOfClose = new Dictionary<FastNodeKey, FastTensorKey>();   // the value entering each branch
             FastNodeKey? pendingClose = null;                                 // a branch still being read
@@ -209,14 +328,29 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             for (int i = 0; i < sites.Count; i++)
             {
                 var site = sites[i];
+                var trips = TripsOf(site.Link);
 
+                // The value the call starts from: the arm's own where a branch chooses it, the
+                // parameter's running value where none does — either one started over where the
+                // call begins a new trip of an unrolled loop.
+                int firstRolledEntered = loopEntries.Count < site.Loops.Count
+                    ? positionOf[site.Loops[loopEntries.Count].Key] : int.MaxValue;
+                int enterBefore = Math.Min(positionOf[site.Marker.Key], firstRolledEntered);
+                FastTensorKey Enter(FastTensorKey from)
+                    => EnterTrips(graph, param, trips, loops, from, previousMarker + 1, enterBefore, nodeByKey, insertions);
+
+                FastTensorKey start;
                 if (site.Arm is IfArm arm)
                 {
-                    if (!armsOfClose.ContainsKey(arm.IfClose)) armsOfClose[arm.IfClose] = current;
                     pendingClose = arm.IfClose;
-                    var incoming = armValue.TryGetValue(arm, out var held) ? held : armsOfClose[arm.IfClose];
-                    rewrites.Add((previousMarker + 1, positionOf[site.Marker.Key], param, incoming));
-                    armValue[arm] = site.Link.Outputs[0]!.Value;
+                    if (!armsOfClose.ContainsKey(arm.IfClose))
+                    {
+                        // A branch begins where the trip it is in begins.
+                        current = Enter(current);
+                        armsOfClose[arm.IfClose] = start = current;
+                    }
+                    else
+                        start = Enter(armValue.TryGetValue(arm, out var held) ? held : armsOfClose[arm.IfClose]);
                 }
                 else
                 {
@@ -228,10 +362,45 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                             + "between is made after one it does, so the parameter would have to carry "
                             + "the branch's answer before the branch produces it. Make the calls the "
                             + "branch does not choose between before the ones it does.");
-                    rewrites.Add((previousMarker + 1, positionOf[site.Marker.Key], param, current));
-                    current = site.Link.Outputs[0]!.Value;
+                    start = Enter(current);
                 }
+                while (loopEntries.Count < site.Loops.Count) loopEntries.Add(start);
+                rewrites.Add((previousMarker + 1, positionOf[site.Marker.Key], param, start));
+                GateOnTripsRan(site.Link, trips, start, positionOf, insertions);
+                var after = site.Link.Outputs[0]!.Value;
                 previousMarker = positionOf[site.Marker.Key];
+
+                // Leave the loops the next call is not in, innermost first: the unrolled loops
+                // inside each rolled one before that one closes, then those around it. A loop's
+                // update is its last trip's, so an unrolled loop whose last trip made no call — an
+                // IfElse on the iteration folded it away — hands back the value entering it.
+                int stay = i + 1 == sites.Count ? 0 : SharedPrefix(site.Loops, sites[i + 1].Loops);
+                var nextLoops = i + 1 == sites.Count ? [] : TripsOf(sites[i + 1].Link).Select(t => t.Loop).ToHashSet();
+                var leaving = loops.Where(kv => !nextLoops.Contains(kv.Key)).OrderByDescending(kv => kv.Value.Order).ToList();
+                int leftAt = positionOf[site.Marker.Key];
+                void LeaveUnrolledLoopsDeeperThan(int depth, bool atModuleScope)
+                {
+                    foreach (var (id, left) in leaving.Where(kv => kv.Value.RolledDepth > depth && loops.ContainsKey(kv.Key)))
+                    {
+                        loops.Remove(id);
+                        if (left.Trip == left.Count - 1) continue;
+                        if (left.MayNotRun) throw SkipsACallOnARuntimeTrip();
+                        after = HandBack(after, left.Entry, leftAt + 1, insertions);
+                        if (atModuleScope) scopeLinks.Add(after);
+                    }
+                }
+                for (int l = site.Loops.Count - 1; l >= stay; l--)
+                {
+                    LeaveUnrolledLoopsDeeperThan(l, atModuleScope: false);
+                    after = CloseLoop(graph, site.Loops[l], loopEntries[l], after, positionOf, insertions);
+                    leftAt = Math.Max(leftAt, positionOf[ClosingOf(graph, site.Loops[l]).Key]);
+                    loopEntries.RemoveAt(l);
+                    if (l == 0 && site.Arm is null) scopeLinks.Add(after);
+                }
+                LeaveUnrolledLoopsDeeperThan(-1, atModuleScope: stay == 0 && site.Arm is null);
+                if (site.Arm is IfArm siteArm) armValue[siteArm] = after;
+                else current = after;
+                if (stay > 0) continue;
 
                 // Close out a branch once its last call site is behind us.
                 bool lastOfThisClose = site.Arm is IfArm a
@@ -242,9 +411,146 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 var ifClose = nodeByKey[closing.IfClose];
                 current = CloseBranch(graph, ifClose, closing.Condition, armsOfClose[ifClose.Key],
                                       armValue, positionOf, insertions);
-                branchLinks.Add(current);
+                scopeLinks.Add(current);
                 pendingClose = null;
             }
+        }
+
+        /// <summary>An unrolled loop the calls are in: the value entering it, the trip its latest call
+        /// is in, when it was entered relative to the others, its trip count, how many rolled loops
+        /// stand around it, and whether a trip of it may not run.</summary>
+        private readonly record struct UnrolledLoop(FastTensorKey Entry, long Trip, int Order, long Count, long RolledDepth, bool MayNotRun);
+
+        /// <summary><c>STATE_UPDATE_LINK(from, to)</c>: the parameter holds <paramref name="to"/> from
+        /// here on.</summary>
+        private static FastTensorKey HandBack(
+            FastTensorKey from, FastTensorKey to, int at, List<(int atPos, FastNode node)> insertions)
+        {
+            var key = FastNodeKey.New();
+            insertions.Add((at, new FastNode
+            {
+                Key = key,
+                OpCode = InternalOpCodes.STATE_UPDATE_LINK,
+                Attributes = OrderedLinkAttributes(),
+                FullInputs = { [""] = [from, to] },
+                FullOutputs = { [""] = [new FastTensorKey(key, 0)] },
+            }));
+            return new FastTensorKey(key, 0);
+        }
+
+        private static FastNode ClosingOf(InternalComputationGraph graph, FastNode loopOpen)
+            => graph.Nodes.Single(n => n.OpCode == OpCodes.LOOP_CLOSE && n.GraphOpenNodeKey == loopOpen.Key);
+
+        /// <summary>
+        /// The value a call site starts from, given the unrolled loop trips it belongs to. The first
+        /// call of a loop records what the parameter holds entering it; a call in a later trip of a
+        /// loop already entered starts that trip over from there — from the outermost such loop,
+        /// whose trip forgets the loops nested in it. Where the trip may not run, it starts from
+        /// where the previous trip ended instead when it does not: a link at the first read of the
+        /// range selects which.
+        /// </summary>
+        private static FastTensorKey EnterTrips(
+            InternalComputationGraph graph,
+            FastTensorKey param,
+            List<(long Loop, long Trip, long Count, long RolledDepth, FastTensorKey? Ran)> trips,
+            Dictionary<long, UnrolledLoop> loops,
+            FastTensorKey current,
+            int fromPos, int toPos,
+            Dictionary<FastNodeKey, FastNode> nodeByKey,
+            List<(int atPos, FastNode node)> insertions)
+        {
+            (long Loop, long Trip, long Count, long RolledDepth, FastTensorKey? Ran)? restart = null;
+            int restartOrder = int.MaxValue;
+            foreach (var t in trips)
+                if (loops.TryGetValue(t.Loop, out var l) && l.Trip != t.Trip && l.Order < restartOrder)
+                    (restart, restartOrder) = (t, l.Order);
+
+            if (restart is { } r)
+            {
+                // A trip that may not run and makes no call between two that do would have to
+                // decide where the next one starts from, and no flag says whether it ran.
+                if (r.Ran is not null && r.Trip > loops[r.Loop].Trip + 1)
+                    throw SkipsACallOnARuntimeTrip();
+                foreach (var nested in loops.Where(kv => kv.Value.Order > restartOrder).Select(kv => kv.Key).ToList())
+                    loops.Remove(nested);
+                var entry = loops[r.Loop].Entry;
+                loops[r.Loop] = loops[r.Loop] with { Trip = r.Trip };
+                current = r.Ran is FastTensorKey ran
+                    ? StartTripIfItRan(graph, param, ran, entry, current, fromPos, toPos, nodeByKey, insertions)
+                    : entry;
+            }
+
+            foreach (var t in trips)
+                if (!loops.ContainsKey(t.Loop))
+                    loops[t.Loop] = new UnrolledLoop(current, t.Trip, loops.Count == 0 ? 0 : loops.Values.Max(l => l.Order) + 1,
+                                                     t.Count, t.RolledDepth, t.Ran is not null);
+            return current;
+        }
+
+        /// <summary>
+        /// <c>STATE_UPDATE_LINK(previous, Where(ran, entry, previous))</c>, placed at the first read
+        /// of the parameter in the trip's first range: the value entering the loop when the trip
+        /// runs, the previous trip's when it does not.
+        /// </summary>
+        private static FastTensorKey StartTripIfItRan(
+            InternalComputationGraph graph, FastTensorKey param, FastTensorKey ran,
+            FastTensorKey entry, FastTensorKey previous, int fromPos, int toPos,
+            Dictionary<FastNodeKey, FastNode> nodeByKey, List<(int atPos, FastNode node)> insertions)
+        {
+            int at = toPos;
+            for (int i = fromPos; i <= toPos && i < graph.Nodes.Count; i++)
+                if (graph.Nodes[i].Inputs.Any(k => k is FastTensorKey key
+                        && ResolveThroughIdentities(key, nodeByKey) is FastTensorKey read && read.Equals(param)))
+                {
+                    at = i;
+                    break;
+                }
+
+            var selected = Where(ran, entry, previous, at, insertions);
+            var linkKey = FastNodeKey.New();
+            insertions.Add((at, new FastNode
+            {
+                Key = linkKey,
+                OpCode = InternalOpCodes.STATE_UPDATE_LINK,
+                Attributes = OrderedLinkAttributes(),
+                FullInputs = { [""] = [previous, selected] },
+                FullOutputs = { [""] = [new FastTensorKey(linkKey, 0)] },
+            }));
+            return new FastTensorKey(linkKey, 0);
+        }
+
+        /// <summary>
+        /// Makes a link's update hand back what it read on a trip that does not run — a trip the
+        /// continue condition skipped makes no update — and drops the trips the link named, now
+        /// that they are ordered.
+        /// </summary>
+        private static void GateOnTripsRan(
+            FastNode link, List<(long Loop, long Trip, long Count, long RolledDepth, FastTensorKey? Ran)> trips, FastTensorKey read,
+            Dictionary<FastNodeKey, int> positionOf, List<(int atPos, FastNode node)> insertions)
+        {
+            var updated = link.Inputs[1]!.Value;
+            foreach (var t in trips)
+                if (t.Ran is FastTensorKey ran)
+                    updated = Where(ran, updated, read, positionOf[link.Key], insertions);
+            link.FullInputs[""] = [link.Inputs[0], updated];
+            link.Attributes = OrderedLinkAttributes();
+        }
+
+        private static FastTensorKey Where(
+            FastTensorKey condition, FastTensorKey whenTrue, FastTensorKey whenFalse, int at,
+            List<(int atPos, FastNode node)> insertions)
+        {
+            var key = FastNodeKey.New();
+            insertions.Add((at, new FastNode
+            {
+                Key = key,
+                OpCode = OpCodes.WHERE,
+                Attributes = OnnxCSharpAttributes.FromCSharpVals(
+                    new Dictionary<string, object?>(), Definitions.NodeDefinitions[OpCodes.WHERE].AttributeDefs),
+                FullInputs = { [""] = [condition, whenTrue, whenFalse] },
+                FullOutputs = { [""] = [new FastTensorKey(key, 0)] },
+            }));
+            return new FastTensorKey(key, 0);
         }
 
         /// <summary>
@@ -297,13 +603,73 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             {
                 Key = linkKey,
                 OpCode = InternalOpCodes.STATE_UPDATE_LINK,
-                Attributes = OnnxCSharpAttributes.FromCSharpVals(
-                    new Dictionary<string, object?>(),
-                    Definitions.NodeDefinitions[InternalOpCodes.STATE_UPDATE_LINK].AttributeDefs),
+                Attributes = OrderedLinkAttributes(),
                 FullInputs = { [""] = [incoming, selected] },
                 FullOutputs = { [""] = [linkOutput] },
             }));
             return linkOutput;
+        }
+
+        /// <summary>
+        /// Carries a parameter out of a rolled loop: the value its body's last call produces becomes
+        /// one more loop variable, started from the value entering the loop, and a link after the
+        /// <c>LOOP_CLOSE</c> takes the value it ends with. The body never reads the variable — each
+        /// trip starts from the value entering the loop — so it is the last trip's value that comes
+        /// out, and the entering one when no trip runs.
+        /// </summary>
+        private static FastTensorKey CloseLoop(
+            InternalComputationGraph graph,
+            FastNode loopOpen,
+            FastTensorKey entering,
+            FastTensorKey bodyFinal,
+            Dictionary<FastNodeKey, int> positionOf,
+            List<(int atPos, FastNode node)> insertions)
+        {
+            var loopClose = graph.Nodes.Single(n => n.OpCode == OpCodes.LOOP_CLOSE && n.GraphOpenNodeKey == loopOpen.Key);
+
+            // LOOP_OPEN: [maxIter, cond, ...inits] -> [iterIndex, vestigialTrue, ...loopVars].
+            // LOOP_CLOSE: [cond, ...bodyOuts, ...scanInputs] -> [...finals, ...scans].
+            var openInputs = loopOpen.FullInputs[""];
+            int loopVars = Math.Max(0, openInputs.Count - 2);
+            var openOutputs = loopOpen.FullOutputs.Single().Value;
+            var closeInputs = loopClose.FullInputs.Single().Value;
+            var closeOutputs = loopClose.FullOutputs.Single().Value;
+
+            // The open lists a loop variable two slots after the close does.
+            int slot = Math.Max(FirstFreeOutputIndex(loopClose.Key, closeOutputs),
+                                FirstFreeOutputIndex(loopOpen.Key, openOutputs) - 2);
+            openInputs.Add(entering);
+            openOutputs.Add(new FastTensorKey(loopOpen.Key, slot + 2));
+            closeInputs.Insert(1 + loopVars, bodyFinal);
+            var final = new FastTensorKey(loopClose.Key, slot);
+            closeOutputs.Insert(loopVars, final);
+
+            var linkKey = FastNodeKey.New();
+            insertions.Add((positionOf[loopClose.Key] + 1, new FastNode
+            {
+                Key = linkKey,
+                OpCode = InternalOpCodes.STATE_UPDATE_LINK,
+                Attributes = OrderedLinkAttributes(),
+                FullInputs = { [""] = [entering, final] },
+                FullOutputs = { [""] = [new FastTensorKey(linkKey, 0)] },
+            }));
+            return new FastTensorKey(linkKey, 0);
+        }
+
+        private static int SharedPrefix(List<FastNode> a, List<FastNode> b)
+        {
+            int n = 0;
+            while (n < a.Count && n < b.Count && a[n] == b[n]) n++;
+            return n;
+        }
+
+        private static int FirstFreeOutputIndex(FastNodeKey nodeKey, List<FastTensorKey?> outputs)
+        {
+            int next = 0;
+            foreach (var o in outputs)
+                if (o is FastTensorKey k && !k.IsEmpty && k.FastNodeKey.Equals(nodeKey) && k.OutputIndex >= next)
+                    next = k.OutputIndex + 1;
+            return next;
         }
 
         /// <summary>The innermost open node enclosing each node, or null at module scope.</summary>

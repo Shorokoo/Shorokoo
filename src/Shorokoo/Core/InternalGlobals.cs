@@ -151,17 +151,86 @@ namespace Shorokoo.Core
         /// (Shorokoo/Shorokoo#310). Calling for the update alone is the one thing module-owned
         /// state is for, so the call is an effect and not only a value.
         ///
-        /// <para>Silently a no-op where there is no harvest to reach: outside a module build, and
-        /// inside a <c>LoopAPI.Iterate</c> body, where the value is a per-iteration node with no
-        /// post-loop translation of its own — the deferral <c>Globals.StateUpdate</c> gets there
-        /// has no counterpart for a whole call.</para>
+        /// <para>Inside a <c>LoopAPI.Iterate</c> body the call is recorded on the loop, once — on
+        /// the canonical pass, as <see cref="RegisterStateUpdate"/> records — and the loop hangs it
+        /// on a value it carries out (see <see cref="Looper.AddCallEffect"/>). Silently a no-op
+        /// outside a module build, where there is no harvest to reach.</para>
         /// </summary>
         internal static void RegisterCallEffect(Variable modelVariable, Variable?[] callOutputs)
         {
             if (modelVariable.ModuleFn?.CallIsAnEffect != true) return;
             if (GraphTrace.CallEffects is not List<Variable> effects) return;
-            if (GraphTrace.Loopers.InLoopBody) return;
-            if (callOutputs.NotNulls().FirstOrDefault() is Variable output) effects.Add(output);
+            if (callOutputs.NotNulls().FirstOrDefault() is not Variable output) return;
+
+            var loopers = GraphTrace.Loopers;
+            if (loopers.Active is { } active)
+            {
+                if (loopers.InCanonicalRecordingScope) active.looper.AddCallEffect(output);
+                return;
+            }
+            effects.Add(output);
+        }
+
+        /// <summary>
+        /// Records an <c>IfElse</c> built in a module body, so that the harvest can keep it where
+        /// its arms make a stateful call and nothing else keeps it (see
+        /// <see cref="IfElsesKeptForTheirArms"/>). Recorded in whichever scope
+        /// <see cref="RegisterCallEffect"/> records.
+        /// </summary>
+        internal static void RecordIfElse(Variable[] armValues, Variable ifOutput)
+        {
+            if (GraphTrace.IfElses is not { } ifElses) return;
+            var loopers = GraphTrace.Loopers;
+            if (loopers.Active is { } active)
+            {
+                if (loopers.InCanonicalRecordingScope) active.looper.AddIfElse(armValues, ifOutput);
+                return;
+            }
+            ifElses.Add((armValues, ifOutput));
+        }
+
+        /// <summary>
+        /// The outputs of the recorded <c>IfElse</c>s a scope has to keep for the stateful calls
+        /// their arms make. Which arm a call belongs to is read off what the <c>IF_CLOSE</c>'s
+        /// branch inputs reach, so a call whose result nothing but a discarded <c>IfElse</c> reads
+        /// would belong to no arm once that branch is swept away, and its update would apply
+        /// whichever arm ran. Such an <c>IfElse</c> is kept as one more effect of the scope: one
+        /// whose own output nothing in <paramref name="roots"/> reaches, and whose arms reach a
+        /// call effect nothing in <paramref name="roots"/> reaches either — through another such
+        /// <c>IfElse</c> too, which then nests in it as it would were both results used. Anything
+        /// the scope keeps anyway orders by the branches it is read in.
+        /// </summary>
+        internal static Variable[] IfElsesKeptForTheirArms(
+            IReadOnlyList<Variable> effects,
+            IReadOnlyList<(Variable[] Arms, Variable Output)> ifElses,
+            IEnumerable<Variable?> roots)
+        {
+            if (effects.Count == 0 || ifElses.Count == 0) return [];
+
+            // Nothing older than the oldest effect can reach one, so no walk goes further back.
+            long oldest = effects.Min(e => e.OwningNode.OrderingHintNumber);
+            HashSet<Node> Reach(IEnumerable<Node> from, Func<Node, bool> stop)
+            {
+                var seen = new HashSet<Node>();
+                var walk = new Stack<Node>(from);
+                while (walk.Count > 0)
+                {
+                    var node = walk.Pop();
+                    if (node.OrderingHintNumber < oldest || !seen.Add(node) || stop(node)) continue;
+                    foreach (var input in node.AllInputs)
+                        if (input is not null) walk.Push(input.OwningNode);
+                }
+                return seen;
+            }
+
+            var live = Reach(roots.NotNulls().Select(r => r.OwningNode), _ => false);
+            var dead = effects.Select(e => e.OwningNode).Where(n => !live.Contains(n)).ToHashSet();
+            if (dead.Count == 0) return [];
+
+            return [.. ifElses
+                .Where(b => !live.Contains(b.Output.OwningNode)
+                            && Reach(b.Arms.Select(a => a.OwningNode), dead.Contains).Overlaps(dead))
+                .Select(b => b.Output)];
         }
 
         /// <summary>

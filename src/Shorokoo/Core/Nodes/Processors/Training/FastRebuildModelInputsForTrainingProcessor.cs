@@ -202,7 +202,15 @@ namespace Shorokoo.Core.Nodes.Processors.Training
             foreach (var su in currentByField)
                 graph.AddOutput(su);
 
+            // A trainable parameter that only a discarded stateful call reads reaches nothing once
+            // the WITH_STATE_DEPS that kept the call is gone, but it is still a parameter of the
+            // step, whose gradient for it is zero. Its field reads only the parameter struct input,
+            // so it goes back at the start of the body.
+            var paramFieldNodeKeys = paramFieldKeys.Select(k => k.FastNodeKey).ToHashSet();
+            var paramFieldNodes = graph.Nodes.Where(n => paramFieldNodeKeys.Contains(n.Key)).ToList();
             FastProcessorHelper.RemoveUnreachableNodes(graph);
+            var kept = graph.Nodes.Select(n => n.Key).ToHashSet();
+            graph.InsertAtBodyStart(paramFieldNodes.Where(n => !kept.Contains(n.Key)));
 
             var rebuiltModelOutput = ResolveRemap(remap, modelOutputKey);
             var rebuiltParamFieldKeys = paramFieldKeys.Select(k => ResolveRemap(remap, k)).ToArray();

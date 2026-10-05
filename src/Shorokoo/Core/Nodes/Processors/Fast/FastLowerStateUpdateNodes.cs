@@ -51,6 +51,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 .Select(link => link.Outputs[0]
                     ?? throw new InvalidOperationException("STATE_UPDATE_LINK has no output."))
                 .ToList();
+            ThrowIfAFinalLinkIsInsideAScope(graph, newStateOutputs);
 
             foreach (var node in graph.Nodes)
             {
@@ -88,6 +89,32 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
             foreach (var key in newStateOutputs)
                 graph.AddOutput(key);
+        }
+
+        /// <summary>
+        /// A step's state has to come out at module scope, in the order its calls were made.
+        /// <see cref="FastChainStateUpdatesAcrossCallSites"/> orders every call it can, carrying the
+        /// state out of rolled loops, and marks the parameters it cannot order — a call in an
+        /// IfElse in a rolled loop's body — which then have no update to give.
+        /// </summary>
+        private static void ThrowIfAFinalLinkIsInsideAScope(InternalComputationGraph graph, List<FastTensorKey> finals)
+        {
+            var inside = new HashSet<FastNodeKey>();
+            int depth = 0;
+            foreach (var node in graph.Nodes)
+            {
+                if (node.IsCloseNode() && depth > 0) depth--;
+                if (depth > 0) inside.Add(node.Key);
+                if (node.IsOpenNode()) depth++;
+            }
+            if (finals.Any(k => inside.Contains(k.FastNodeKey))
+                || graph.Nodes.Any(n => n.OpCode == InternalOpCodes.STATE_UPDATE_LINK
+                                        && n.Attributes.GetBoolVal(OnnxOpAttributeNames.ShrkAttrStateOrdered) == false))
+                throw new InvalidOperationException(
+                    "This model updates its state in a call inside an IfElse in the body of a loop "
+                    + "whose trip count is not a compile-time constant, and the update cannot be "
+                    + "carried out of the loop from there. Call the model outside the IfElse, or give "
+                    + "the loop a literal or [Hyper] trip count.");
         }
 
         /// <summary>

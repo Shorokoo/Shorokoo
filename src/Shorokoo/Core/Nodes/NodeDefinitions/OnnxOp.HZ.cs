@@ -27,7 +27,11 @@ public static partial class OnnxOp
         => NodeBuilder.BuildNode(IF_OPEN, [condition], []);
 
     public static Variable[] IfClose(Variable[] thenBranch, Variable[] elseBranch, Node openNode)
-     => NodeBuilder.BuildNodeMultiOut(IF_CLOSE, [], [(AttrThenBranch, thenBranch), (AttrElseBranch, elseBranch)], openNode: openNode);
+    {
+        var outputs = NodeBuilder.BuildNodeMultiOut(IF_CLOSE, [], [(AttrThenBranch, thenBranch), (AttrElseBranch, elseBranch)], openNode: openNode);
+        InternalGlobals.RecordIfElse([.. thenBranch, .. elseBranch], outputs[0]);
+        return outputs;
+    }
 
     public static Variable LeakyRelu(Variable x, float? alpha = null)
         => NodeBuilder.BuildNodeSingleOut(LEAKY_RELU, [x], [(AttrAlpha, alpha)]);

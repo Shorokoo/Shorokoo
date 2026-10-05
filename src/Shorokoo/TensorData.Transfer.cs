@@ -267,9 +267,23 @@ namespace Shorokoo
         /// device memory whose producer was not recorded
         /// (<see cref="Create(Shape, DType, IShorokooTensorValue)"/>), so nothing can read it
         /// back.</exception>
+        /// <exception cref="NotSupportedException">This tensor holds more bytes than one managed
+        /// array does, which is where an attribute keeps its elements. The tensor is left as it
+        /// was.</exception>
         public TensorAttribute MoveToAttribute()
         {
             ThrowIfDisposed();
+            // Refused before anything is copied or taken, so the tensor is still whole: the same
+            // tensor can still be fed to a run, and an ONNX Runtime context loads a model's weights
+            // into its own memory without making them attributes at all.
+            if (!DType.IsSameElementTypeAs(DType.Utf8) && ContentByteLength > Array.MaxLength)
+                throw new NotSupportedException(
+                    $"{Describe()} holds {ContentByteLength} bytes, more than a graph attribute "
+                    + $"holds: an attribute keeps its elements in one managed array, of at most "
+                    + $"{Array.MaxLength} bytes. A tensor this large is fed to a run as a tensor; to load "
+                    + "a model with a weight this large, load it onto an ONNX Runtime compute context "
+                    + "(ComputeContext.LoadCompiled, ImportCompiledOnnx), which reads its weights into "
+                    + "the context's memory.");
 
             // What cannot be taken without a copy is copied first, while the tensor is still alive:
             // the copy is the step that can fail -- a device buffer read back without the runtime

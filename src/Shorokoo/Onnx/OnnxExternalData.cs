@@ -267,7 +267,18 @@ namespace Shorokoo.Onnx
                 }
                 else
                 {
-                    tensor.Loaded = ComputeContext.Host.ReadTensor(shape, dtype, fs).MoveToAttribute();
+                    // A tensor no attribute holds is refused by the move, which leaves it whole and
+                    // the read's memory with nobody else to release it.
+                    var read = ComputeContext.Host.ReadTensor(shape, dtype, fs);
+                    try
+                    {
+                        tensor.Loaded = read.MoveToAttribute();
+                    }
+                    catch
+                    {
+                        read.Delete();
+                        throw;
+                    }
                 }
             }
             tensor.ExternalDatas.Clear();

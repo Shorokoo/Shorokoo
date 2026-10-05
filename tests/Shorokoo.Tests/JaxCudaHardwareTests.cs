@@ -82,6 +82,87 @@ public class JaxCudaHardwareTests
         => Assert.Equal(PyTorchCudaHardwareTests.PieceWrittenAtFive, PyTorchCudaHardwareTests.PieceWrittenIntoACardTensor(Cuda.Value));
 
     [JaxCudaFact]
+    public void TestACardTensorReadWholeMakesNoCopyOfItOnTheCard()
+        => Assert.Equal((0L, 0f, 16777215f), ReadWhole(1 << 24));
+
+    [JaxCudaFact]
+    public void TestASmallCardTensorIsSavedLoadedReadAndGatheredCompilingNothing()
+        => Assert.Equal(0, Compiles(() => { foreach (var count in (int[])[3, 5, 7, 11]) RoundTrip(count); }));
+
+    [JaxCudaFact]
+    public void TestRowsGatheredFromALargeCardTensorCompileOneProgramPerPowerOfTwoOfTheirElements()
+        => Assert.Equal(3, Compiles(() => GatherRuns(16384, 1024, 12)));
+
+    private static (long Allocations, float First, float Last) ReadWhole(int count)
+    {
+        using var session = Cuda.Value.CreateSession(PyTorchBackendCoverageTests.Serialize(
+            ComputeContextLifetimeCoverageTests.GraphOf("x", "y", ComputeContextLifetimeCoverageTests.Op("Neg", "x", "y"))), default, default, DeviceMemorySettings.Default);
+        var tensor = OnCard(count, 1);
+        var before = session.ReadArenaStatistics()!.Value.AllocationCount;
+        var read = tensor.CopyMemory<float>();
+        var made = session.ReadArenaStatistics()!.Value.AllocationCount - before;
+        tensor.Delete();
+        return (made, read[0], read[^1]);
+    }
+
+    private static TensorData OnCard(int rows, int columns)
+    {
+        var values = new float[rows * columns];
+        for (int i = 0; i < values.Length; i++) values[i] = i;
+        return TensorData.Create(new Shape([rows, columns]), DType.Float32,
+            Cuda.Value.CreateTensorInBackendMemory(ShorokooTensorElementType.Float, [.. MemoryMarshal.AsBytes<float>(values)], [rows, columns]), Cuda.Value);
+    }
+
+    private static void RoundTrip(int count)
+    {
+        using var context = new ComputeContext(Cuda.Value);
+        var tensor = OnCard(count, 2);
+        var saved = new MemoryStream();
+        tensor.WriteContentTo(saved);
+        tensor.CopyMemory<float>();
+        tensor.TryCopyRows([1, 0], 8, new byte[16]);
+        tensor.Delete();
+        saved.Position = 0;
+        context.ReadTensor(new Shape([count, 2]), DType.Float32, saved).Delete();
+    }
+
+    private static void GatherRuns(int rows, int columns, int longest)
+    {
+        var tensor = OnCard(rows, columns);
+        for (int run = 1; run <= longest; run++)
+            tensor.TryCopyRows([.. Enumerable.Range(run * longest, run)], 4 * columns, new byte[4 * columns * run]);
+        tensor.Delete();
+    }
+
+    private static int Compiles(Action act)
+    {
+        Cuda.Value.Start();
+        int Count()
+        {
+            using (Shorokoo.PythonHost.PythonRuntime.Gil())
+            {
+                using var scope = Python.Runtime.Py.CreateScope();
+                scope.Exec("""
+                    import sys, types, jax
+                    if "shorokoo_compiles" not in sys.modules:
+                        counter = types.ModuleType("shorokoo_compiles")
+                        counter.count = 0
+                        def heard(event, duration, **kwargs):
+                            if event == "/jax/core/compile/backend_compile_duration":
+                                counter.count += 1
+                        jax.monitoring.register_event_duration_secs_listener(heard)
+                        sys.modules["shorokoo_compiles"] = counter
+                    count = sys.modules["shorokoo_compiles"].count
+                    """);
+                return scope.Get<int>("count");
+            }
+        }
+        var before = Count();
+        act();
+        return Count() - before;
+    }
+
+    [JaxCudaFact]
     public void TestTheCardsDriverIsEnoughToProbeAndStartTheBackend()
     {
         Assert.Equal(BackendRejection.None, BackendPackage.Probe(typeof(JaxCudaBackend).Assembly.Location).Reason);

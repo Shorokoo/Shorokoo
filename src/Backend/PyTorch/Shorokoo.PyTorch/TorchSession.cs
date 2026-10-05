@@ -34,8 +34,8 @@ namespace Shorokoo.PyTorch;
 /// <c>float32</c> precision, unless the session was built allowing TensorFloat-32. torch releases
 /// that lock inside each operator, so runs on cards that set the switches differently do not run at
 /// once: runs in one precision run beside one another, and a run in the other waits until they are
-/// done (<see cref="TorchPrecisionGate"/>). A run on the CPU reads neither switch and sets
-/// neither.</para>
+/// done (<see cref="TorchPrecisionGate"/>), or until its <see cref="RunSettings.CancellationToken"/>
+/// is cancelled. A run on the CPU reads neither switch and sets neither.</para>
 /// </summary>
 internal sealed class TorchSession : IShorokooSession
 {
@@ -70,7 +70,11 @@ internal sealed class TorchSession : IShorokooSession
     // torch's TensorFloat-32 switches are the whole process's, so runs on cards that set them
     // differently must not overlap, and runs that set them alike may. Taken before a device's lock,
     // by every run on a card and no other.
-    private static readonly TorchPrecisionGate Float32Runs = new();
+    internal static readonly TorchPrecisionGate Float32Runs = new();
+
+    /// <summary>Told of each run on a card once it holds <see cref="Float32Runs"/>, for a test to
+    /// read; null where nothing listens.</summary>
+    internal static Action<TorchSession>? HoldingPrecision;
 
     private TorchSession(
         TorchBackend backend, TorchRuntime runtime, TranslatedModel model, ShorokooLogSeverity logSeverity,
@@ -376,9 +380,10 @@ internal sealed class TorchSession : IShorokooSession
                 ? DeviceRuns.GetOrAdd(_backend.CudaDeviceId, static _ => new ReaderWriterLockSlim(LockRecursionPolicy.SupportsRecursion))
                 : null;
             if (device is null) return Invoke(feeds, wanted, outputNames, targets, entry, writable, stop, runSettings, out aliasedInputs);
-            Float32Runs.Enter(_tensorFloat32);
+            Float32Runs.Enter(_tensorFloat32, token);
             try
             {
+                HoldingPrecision?.Invoke(this);
                 var capped = _limitBytes is not null;
                 if (capped) device.EnterWriteLock();
                 else device.EnterReadLock();

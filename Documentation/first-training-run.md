@@ -190,9 +190,8 @@ None of these shows in a small first run. Each can end a long one.
 
 - **Checkpoint size.** A `.skpt` checkpoint and a flat safetensors file have no size limit of their
   own: the state is streamed through them, never held whole. See
-  [skpt-checkpoints.md](skpt-checkpoints.md#current-limits). A model graph holds each weight in one
-  managed array, which bounds a single weight; see
-  [Loading a saved model onto the device](inference.md#loading-a-saved-model-onto-the-device).
+  [skpt-checkpoints.md](skpt-checkpoints.md#current-limits). A model graph holds a weight of any
+  size; see [Loading a saved model onto the device](inference.md#loading-a-saved-model-onto-the-device).
 - **Save cost.** What a save allocates and how long it takes grow with the checkpoint:
   [What a save costs](training.md#what-a-save-costs).
 - **Out of memory.** A failed allocation arrives as `CR009` and says which pool ran out. On

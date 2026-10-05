@@ -334,7 +334,9 @@ namespace Shorokoo.Core.Factory.IR
         /// <summary>
         /// Refuses to serialize a tensor whose elements are carried beside the message and not
         /// declared external: the message would say nothing of them, and a reader would find the
-        /// tensor empty. Protobuf caps a message at 2 GiB, so such a tensor never fits in one.
+        /// tensor empty. protobuf-net builds a message whole in one buffer of at most 2 GiB, so
+        /// such a tensor never fits in one it builds; <see cref="Onnx.OnnxStreamingWriter"/> writes
+        /// it as the tensor's <c>raw_data</c>, streamed from the attribute.
         /// </summary>
         [ProtoBuf.ProtoBeforeSerialization]
         private void RefuseCarriedPayload()
@@ -342,12 +344,13 @@ namespace Shorokoo.Core.Factory.IR
             if (Carried is { HasValues: true } carried && RawData is null
                 && data_location != DataLocation.External)
                 throw new NotSupportedException(
-                    $"Tensor '{Name}' ({carried}) holds {carried.ByteLength} bytes, more than a "
-                    + "protobuf message holds (2 GiB), so it cannot be written inside an ONNX model. "
+                    $"Tensor '{Name}' ({carried}) holds {carried.ByteLength} bytes, more than protobuf-net "
+                    + "writes in one message (2 GiB), so it cannot be serialized inside this ONNX model. "
                     + "Export the model with external data (Persistence.ExportOnnx with "
-                    + "OnnxExternalDataOptions), which writes it to a side file, or save it as a "
+                    + "OnnxExternalDataOptions), which writes it to a side file; save it as a "
                     + "checkpoint (Persistence.Save, .skpt), which writes the weights apart from the "
-                    + "model.");
+                    + "model; or save the graph with CompressedFormatUtils.SaveFastGraphToFile (.srk), "
+                    + "which streams it into the file.");
         }
     }
 }

@@ -15,7 +15,9 @@ namespace Shorokoo.Onnx
     /// serializes the model besides those payloads; the model is then written from that, each
     /// placeholder replaced by the payload it stands for and every message holding one given the
     /// length it has with the payload in it. The bytes written are the bytes protobuf-net writes
-    /// for the model wherever it can write it at all.
+    /// for the model wherever it can write it at all. A tensor whose elements are carried beside
+    /// its message (<see cref="TensorProto.Carried"/>) — a weight past what one array holds — is
+    /// written with them as its <c>raw_data</c>, streamed from the attribute holding them.
     ///
     /// <para>Payloads are found where the importer reads tensors (as
     /// <see cref="OnnxExternalData.EnumerateAllTensors"/> walks them): graph initializers, sparse
@@ -80,19 +82,26 @@ namespace Shorokoo.Onnx
 
             var nonce = RandomNumberGenerator.GetBytes(NonceLength);
             var payloads = new List<Payload>();
-            var setAside = new List<(TensorProto Tensor, byte[] RawData)>();
+            var setAside = new List<(TensorProto Tensor, byte[]? RawData)>();
             var seen = new HashSet<TensorProto>(ReferenceEqualityComparer.Instance);
             try
             {
                 foreach (var tensor in OnnxExternalData.EnumerateAllTensors(model))
                 {
-                    if (tensor.RawData is not { Length: >= MinStreamedBytes } raw || !seen.Add(tensor))
+                    Payload payload;
+                    if (tensor.RawData is { Length: >= MinStreamedBytes } raw)
+                        payload = Payload.Of(raw);
+                    else if (CarriedPayload(tensor) is { } carried)
+                        payload = new Payload(carried.ByteLength, carried.WriteTo);
+                    else
+                        continue;
+                    if (!seen.Add(tensor))
                         continue;
                     var placeholder = new byte[PlaceholderLength];
                     nonce.CopyTo(placeholder, 0);
                     BitConverter.TryWriteBytes(placeholder.AsSpan(NonceLength), (long)payloads.Count);
-                    setAside.Add((tensor, raw));
-                    payloads.Add(Payload.Of(raw));
+                    setAside.Add((tensor, tensor.RawData));
+                    payloads.Add(payload);
                     tensor.RawData = placeholder;
                 }
 
@@ -110,9 +119,19 @@ namespace Shorokoo.Onnx
             finally
             {
                 foreach (var (tensor, raw) in setAside)
-                    tensor.RawData = raw;
+                    tensor.RawData = raw!;
             }
         }
+
+        /// <summary>The attribute a tensor carries beside its message in place of its
+        /// <c>raw_data</c> (<see cref="TensorProto.Carried"/>) — a weight past what one array
+        /// holds — whose elements are written as that <c>raw_data</c>, or null. One declared
+        /// external is the side file's, and strings have no flat layout.</summary>
+        private static TensorAttribute? CarriedPayload(TensorProto tensor)
+            => tensor is { RawData: null, Carried: { HasValues: true } carried }
+                && tensor.data_location != TensorProto.DataLocation.External
+                && !carried.DType.IsSameElementTypeAs(DType.Utf8)
+                ? carried : null;
 
         /// <summary>Writes the model to <paramref name="destination"/>: <see cref="Length"/> bytes,
         /// each payload streamed from where it lives.</summary>

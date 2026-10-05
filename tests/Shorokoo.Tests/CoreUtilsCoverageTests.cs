@@ -584,35 +584,6 @@ public class CoreUtilsCoverageTests
         return (attribute, value);
     }
 
-    [Fact]
-    public void TestAWeightPastTwoGibibytesBindsIntoAConcreteModelWhoseSessionsReadItWhereItIs()
-        => Utils.OwnProcess.Run(typeof(CoreUtilsCoverageTests), nameof(AWeightPastTwoGibibytesBindsIntoAConcreteModelWhoseSessionsReadItWhereItIs));
-
-    internal static void AWeightPastTwoGibibytesBindsIntoAConcreteModelWhoseSessionsReadItWhereItIs()
-    {
-        const long Length = (1L << 29) + 2;
-        var backend = DefaultBackend.Instance;
-        var value = backend.CreateUninitializedTensorInBackendMemory(ShorokooTensorElementType.Float, [Length]);
-        Assert.True(backend.TryCopyHostToTensorRange(value, 0, MemoryMarshal.AsBytes<float>([1f, 2f, 3f, 4f])));
-        var weight = TensorData.Create(new Shape([Length]), DType.Float32, value, backend);
-        var (input, length) = (TensorData([4L], 10f, 20f, 30f, 40f), TensorData(DType.Int64, [], Length));
-        var architecture = LargeWeightHead.ComputationGraph.ToConcreteArchitecture([length, input]);
-        var name = ModuleParamSetNamingScheme.CreateShorokooNamingScheme(architecture.GetConcreteModelParamInfos())
-            .ToName(architecture.GetConcreteModelParamInfos().ParamInfos.Single(p => p.Shape.Dims is [Length]))!;
-        var model = architecture.ToConcreteModel(new ModelParamList([(name, weight)], ModelParamType.TrainableParam));
-        using var context = new ComputeContext();
-        using var compiled = context.Compile(model);
-        float[] expected = [11f, 22f, 33f, 44f];
-
-        Assert.False(weight.IsDisposed);
-        Assert.Contains(model.ToInternal().Nodes, n => n.GetTensorAttribute() is { PastOneArray: true });
-        Assert.Equal(expected, compiled.Execute(length.Shared(), input.Shared())[0].ToTensorData().As<float32>().CopyMemory<float>());
-        Assert.Equal(expected, context.Execute(model, length.Shared(), input.Shared())[0].ToTensorData().As<float32>().CopyMemory<float>());
-        Assert.Empty(compiled.SuppliedTensors);
-        Assert.Throws<NotSupportedException>(() => CompressedFormatUtils.SaveFastGraphToBinary(model));
-        weight.Delete();
-    }
-
     // Keeps what the first write hands it, and stops the writer there.
     private sealed class FirstWriteStream : Stream
     {

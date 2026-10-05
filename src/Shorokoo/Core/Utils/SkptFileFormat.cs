@@ -915,8 +915,7 @@ namespace Shorokoo.Core.Utils
             private readonly IncrementalHash? _sha256;
             private readonly long _limit;
             private readonly Func<long, Exception> _overrun;
-            private readonly bool _crc32;
-            private uint _crc = 0xFFFFFFFFu;
+            private readonly System.IO.Hashing.Crc32? _crc32;
 
             public MeasuringStream(
                 Stream? destination, bool hash, long limit, Func<long, Exception> overrun, bool crc32 = true)
@@ -925,13 +924,13 @@ namespace Shorokoo.Core.Utils
                 _limit = limit;
                 _overrun = overrun;
                 if (hash) _sha256 = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-                _crc32 = hash && crc32;
+                if (hash && crc32) _crc32 = new System.IO.Hashing.Crc32();
             }
 
             public override long Length => _length;
             private long _length;
 
-            public uint Crc32 => _crc ^ 0xFFFFFFFFu;
+            public uint Crc32 => _crc32?.GetCurrentHashAsUInt32() ?? 0;
 
             public string Sha256Hex() => Convert.ToHexString(_sha256!.GetHashAndReset()).ToLowerInvariant();
 
@@ -942,7 +941,7 @@ namespace Shorokoo.Core.Utils
                 if (_sha256 is not null)
                 {
                     _sha256.AppendData(buffer);
-                    if (_crc32) _crc = Crc32Update(_crc, buffer);
+                    _crc32?.Append(buffer);
                 }
                 _destination?.Write(buffer);
             }
@@ -1179,46 +1178,9 @@ namespace Shorokoo.Core.Utils
             return (time, date);
         }
 
-        // Slicing-by-8 CRC-32 (the zip polynomial): eight table lookups per eight bytes rather
-        // than one per byte, since every byte of a checkpoint's state passes through it.
-        private static readonly uint[][] Crc32Tables = BuildCrc32Tables();
-
-        private static uint[][] BuildCrc32Tables()
-        {
-            var tables = new uint[8][];
-            for (int t = 0; t < 8; t++) tables[t] = new uint[256];
-            for (uint i = 0; i < 256; i++)
-            {
-                uint c = i;
-                for (int k = 0; k < 8; k++)
-                    c = (c & 1) != 0 ? 0xEDB88320u ^ (c >> 1) : c >> 1;
-                tables[0][i] = c;
-            }
-            for (int i = 0; i < 256; i++)
-                for (int t = 1; t < 8; t++)
-                    tables[t][i] = (tables[t - 1][i] >> 8) ^ tables[0][tables[t - 1][i] & 0xFF];
-            return tables;
-        }
-
-        private static uint Crc32(ReadOnlySpan<byte> data)
-            => Crc32Update(0xFFFFFFFFu, data) ^ 0xFFFFFFFFu;
-
-        private static uint Crc32Update(uint c, ReadOnlySpan<byte> data)
-        {
-            var t = Crc32Tables;
-            uint[] t0 = t[0], t1 = t[1], t2 = t[2], t3 = t[3], t4 = t[4], t5 = t[5], t6 = t[6], t7 = t[7];
-            int i = 0;
-            for (; i + 8 <= data.Length; i += 8)
-            {
-                uint lo = c ^ System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(data.Slice(i, 4));
-                uint hi = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(data.Slice(i + 4, 4));
-                c = t7[lo & 0xFF] ^ t6[(lo >> 8) & 0xFF] ^ t5[(lo >> 16) & 0xFF] ^ t4[lo >> 24]
-                  ^ t3[hi & 0xFF] ^ t2[(hi >> 8) & 0xFF] ^ t1[(hi >> 16) & 0xFF] ^ t0[hi >> 24];
-            }
-            for (; i < data.Length; i++)
-                c = t0[(c ^ data[i]) & 0xFF] ^ (c >> 8);
-            return c;
-        }
+        // The zip CRC-32 (System.IO.Hashing's, vectorized), since every byte of a checkpoint's
+        // state passes through it.
+        private static uint Crc32(ReadOnlySpan<byte> data) => System.IO.Hashing.Crc32.HashToUInt32(data);
 
         #endregion
     }

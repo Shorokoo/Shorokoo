@@ -348,8 +348,9 @@ var y = compiled.Execute(x);
   `Compile(Persistence.Load(...))`.
 - A graph holds a weight of any size. One of more bytes than one managed array holds
   (`Array.MaxLength`, just under 2 GiB) is kept in host memory of the backend
-  `ComputeContext.Default` runs on: `Persistence.Load`, `Persistence.ImportOnnx` and
-  `Persistence.ImportSafeTensors` bind it where they read it, without a copy. Compiling or running
+  `ComputeContext.Default` runs on: `Persistence.Load`, `Persistence.ImportOnnx`,
+  `Persistence.ImportSafeTensors` and `CompressedFormatUtils.LoadFastGraphFromFile` bind it where
+  they read it, without a copy. Compiling or running
   such a model on an ONNX Runtime context hands its session the weight where it is on the CPU, and
   a copy in the context's memory on CUDA, never through the model's bytes. PyTorch and JAX take
   every weight inside the model's bytes, which protobuf caps at 2 GiB, so compiling or running such

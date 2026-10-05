@@ -335,8 +335,9 @@ namespace Shorokoo.Core.Utils
         /// <summary>
         /// <see cref="LoadFastGraphCore(byte[], string, GraphKind?)"/> over the container
         /// <paramref name="container"/> holds from where it stands to its end, which must be
-        /// seekable: its payload is hashed in one read through it and parsed in a second
-        /// (<see cref="SrkFileFormat.OpenPayload"/>), never held whole.
+        /// seekable: its payload is hashed in one read through it (<see cref="SrkFileFormat.OpenPayload"/>)
+        /// and parsed in a second (<see cref="OnnxStreamingReader"/>), never held whole, each weight
+        /// read into storage of its own — past what one array holds, into host memory.
         /// </summary>
         internal static (InternalComputationGraph Graph, GraphKind Kind) LoadFastGraphCore(
             Stream container, string origin, GraphKind? requiredStage)
@@ -357,7 +358,8 @@ namespace Shorokoo.Core.Utils
             GraphKind? taggedKind;
             try
             {
-                (graph, taggedKind) = OnnxModelImporter.FromOnnxModelWithKindTag(payload);
+                (graph, taggedKind) = OnnxModelImporter.FromModelProtoWithKindTag(
+                    OnnxStreamingReader.ReadModel(payload, origin));
             }
             catch (Exception e) when (e is ProtoBuf.ProtoException
                 or EndOfStreamException
@@ -387,8 +389,8 @@ namespace Shorokoo.Core.Utils
         /// the extension is normalized to .zsrk/.srk purely as a hint for humans — the
         /// extension has no parsing significance; the header records the compression.
         /// The container is streamed to the file, each weight from where it lies, so a graph's
-        /// container has no size limit: its weights may total any size, each within what one
-        /// weight holds.
+        /// container has no size limit: its weights may be of any size, a weight past what one
+        /// array holds included, and may total any size.
         /// The write is atomic: the container is staged in a <c>.tmp-</c> sibling and committed
         /// by rename, so a failed or interrupted save leaves any previous file untouched.
         /// </summary>
@@ -430,7 +432,8 @@ namespace Shorokoo.Core.Utils
         /// container handling and the <paramref name="requiredStage"/> contract; errors
         /// name <paramref name="filename"/>. The file is read as a stream — once to verify
         /// its payload hash, once to parse the payload — and never held whole, so a file of
-        /// any size loads.
+        /// any size loads; a weight past what one array holds is read into host memory of the
+        /// backend <see cref="ComputeContext.Default"/> runs on.
         /// </summary>
         public static ComputationGraph LoadFastGraphFromFile(
             string filename, GraphKind? requiredStage = null)
@@ -455,7 +458,7 @@ namespace Shorokoo.Core.Utils
             using var file = OpenSrkFile(filePath);
             var (_, payload) = SrkFileFormat.OpenPayload(file, filePath);
             using (payload)
-                return OnnxProtobuf.ReadModel(payload);
+                return OnnxStreamingReader.ReadModel(payload, filePath);
         }
 
         /// <summary>

@@ -791,7 +791,7 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
     {
         static byte[] Field(int key, byte[] body) => [.. Varint((ulong)key), .. Varint((ulong)body.Length), .. body];
         byte[] tensor = [.. fields, 0x10, 0x01, 0x42, 0x01, (byte)'w', .. Field(0x4A, new byte[rawBytes])];
-        return [0x08, 0x0A, .. Field(0x3A, [.. Field(0x0A, "g"u8.ToArray()), .. Field(0x2A, tensor)])];
+        return [0x08, 0x0A, .. Field(0x3A, [.. Field(0x12, "g"u8.ToArray()), .. Field(0x2A, tensor)])];
     }
 
     private static byte[] Varint(ulong value)

@@ -1077,7 +1077,10 @@ release when the ONNX Runtime CUDA backend prepares the pinned one — any copy,
 pinned file is loaded by, that is not that file — is refused before anything is loaded: the
 backend's first session fails with an `InvalidOperationException` naming the copies held. Loading
 the pinned files beside them would not help, as what imports those names binds to the copies
-loaded first.
+loaded first. A copy held that is the cache's own file — a provisioned PyTorch environment's,
+linked to it — is recognised at a glance; any other is read whole and checked against the pin,
+which for a PyTorch environment you named, its copies not linked to the cache, reads up to a
+gigabyte once per process.
 
 The other NVIDIA libraries both stacks load — the CUDA runtime, cuFFT, nvrtc, nvJitLink — are
 each backend's own: the ONNX Runtime backend and Shorokoo's allocator on the card load them by

@@ -631,10 +631,29 @@ public class PyTorchBackendCoverageTests
         Assert.False(Overlap(false, true));
         Assert.False(JoinsPastAWaiter(true));
         Assert.False(JoinsPastAWaiter(false));
+        Assert.True(BothEnterOnceAWaiterIsInterrupted(true));
+        Assert.True(BothEnterOnceAWaiterIsInterrupted(false));
     }
 
-    /// <summary>Whether a run in <paramref name="second"/>'s precision enters while one in
-    /// <paramref name="first"/>'s holds the gate.</summary>
+    internal static readonly TimeSpan Patience = TimeSpan.FromSeconds(30);
+
+    private static bool BothEnterOnceAWaiterIsInterrupted(bool held)
+    {
+        var gate = new TorchPrecisionGate();
+        gate.Enter(held);
+        var waiter = new Thread(() =>
+        {
+            try { EntersAndLeaves(gate, !held, wait: true); }
+            catch (ThreadInterruptedException) { }
+        });
+        waiter.Start();
+        Assert.True(SpinWait.SpinUntil(() => gate.Waiting(!held) == 1, Patience));
+        waiter.Interrupt();
+        Assert.True(waiter.Join(Patience));
+        gate.Exit(held);
+        return EntersAndLeaves(gate, held) && EntersAndLeaves(gate, !held);
+    }
+
     private static bool Overlap(bool first, bool second)
     {
         var gate = new TorchPrecisionGate();
@@ -643,14 +662,12 @@ public class PyTorchBackendCoverageTests
         finally { gate.Exit(first); }
     }
 
-    /// <summary>Whether a run in <paramref name="held"/>'s precision joins one holding the gate
-    /// while a run in the other waits, which enters once the holder leaves.</summary>
     private static bool JoinsPastAWaiter(bool held)
     {
         var gate = new TorchPrecisionGate();
         gate.Enter(held);
         var waiter = Task.Run(() => EntersAndLeaves(gate, !held, wait: true));
-        SpinWait.SpinUntil(() => gate.Waiting(!held) == 1);
+        Assert.True(SpinWait.SpinUntil(() => gate.Waiting(!held) == 1, Patience));
         var joined = Task.Run(() => EntersAndLeaves(gate, held)).Result;
         gate.Exit(held);
         Assert.True(waiter.Result);
@@ -1578,13 +1595,19 @@ public class PyTorchBackendCoverageTests
 
     internal static (long Peak, T Result) CardPeak<T>(Func<T> run)
     {
+        long before;
         using (PythonRuntime.Gil())
         {
             using var scope = Py.CreateScope();
             scope.Exec("import torch\ntorch.cuda.synchronize()\ntorch.cuda.reset_peak_memory_stats()\nbefore = torch.cuda.memory_allocated()");
-            var result = run();
-            scope.Exec("torch.cuda.synchronize()\npeak = torch.cuda.max_memory_allocated() - before");
-            return (scope.Get<long>("peak"), result);
+            before = scope.Get<long>("before");
+        }
+        var result = run();
+        using (PythonRuntime.Gil())
+        {
+            using var scope = Py.CreateScope();
+            scope.Exec("import torch\ntorch.cuda.synchronize()\npeak = torch.cuda.max_memory_allocated()");
+            return (scope.Get<long>("peak") - before, result);
         }
     }
 
@@ -1782,6 +1805,9 @@ public class PyTorchBackendCoverageTests
         Assert.Throws<ArgumentOutOfRangeException>(() => backend.TryCopyTensorRangeToHost(large, bytes - 2, read));
 
         var tensor = TensorData.Create(new Shape([bytes / 4]), DType.Float32, large, backend);
+        var rows = new byte[8];
+        Assert.True(tensor.TryCopyRows([2, 1], 4, rows));
+        Assert.Equal([4, 0, 0, 0, 0, 1, 2, 3], rows);
         var saved = new FirstWriteStream();
         Assert.Same(FirstWriteStream.Stopped, Record.Exception(() => tensor.WriteContentTo(saved)));
         tensor.Delete();

@@ -73,6 +73,54 @@ public class PyTorchCudaHardwareTests
     }
 
     [TorchCudaFact]
+    public void TestTwoTensorFloat32RunsOnTheCardHoldTheirPrecisionAtOnce()
+    {
+        using var first = (TorchSession)TensorFloat32Session();
+        using var second = (TorchSession)TensorFloat32Session();
+        var arrived = 0;
+        var together = new System.Collections.Concurrent.ConcurrentBag<bool>();
+        void Holding(TorchSession session)
+        {
+            if (session != first && session != second) return;
+            Interlocked.Increment(ref arrived);
+            together.Add(SpinWait.SpinUntil(() => Volatile.Read(ref arrived) == 2, PyTorchBackendCoverageTests.Patience));
+        }
+        TorchSession.HoldingPrecision += Holding;
+        try { Task.WaitAll(Task.Run(() => NegRun(first, default)), Task.Run(() => NegRun(second, default))); }
+        finally { TorchSession.HoldingPrecision -= Holding; }
+        Assert.Equal([true, true], together);
+    }
+
+    [TorchCudaFact]
+    public void TestARunWaitingForItsPrecisionOnTheCardIsStoppedByItsToken()
+    {
+        using var session = TensorFloat32Session();
+        using var stop = new CancellationTokenSource();
+        Task run;
+        bool stoppedWhileWaiting;
+        TorchSession.Float32Runs.Enter(false);
+        try
+        {
+            run = Task.Run(() => NegRun(session, stop.Token));
+            Assert.True(SpinWait.SpinUntil(() => TorchSession.Float32Runs.Waiting(true) == 1, PyTorchBackendCoverageTests.Patience));
+            stop.Cancel();
+            stoppedWhileWaiting = ((IAsyncResult)run).AsyncWaitHandle.WaitOne(PyTorchBackendCoverageTests.Patience);
+        }
+        finally { TorchSession.Float32Runs.Exit(false); }
+        Assert.True(((IAsyncResult)run).AsyncWaitHandle.WaitOne(PyTorchBackendCoverageTests.Patience));
+        Assert.Equal((true, typeof(OperationCanceledException)), (stoppedWhileWaiting, run.Exception?.InnerException?.GetType()));
+    }
+
+    private static IShorokooSession TensorFloat32Session()
+        => Cuda.Value.CreateSession(NegModel(), default, default, DeviceMemorySettings.Default, DiagnosticSettings.Default, [], 0, [], SideBySideModel.AllowingTensorFloat32);
+
+    private static void NegRun(IShorokooSession session, CancellationToken token)
+    {
+        using var x = Cuda.Value.CreateTensorInBackendMemory(ShorokooTensorElementType.Float, [.. MemoryMarshal.AsBytes<float>([1f, -2f])], [2]);
+        session.Run(new Dictionary<string, IShorokooTensorValue> { ["x"] = x }, ["y"], new RunSettings { CancellationToken = token })[0].Dispose();
+    }
+
+    [TorchCudaFact]
     public void TestEveryOutputStaysOnTheCardAndAnInputInHostMemoryIsRefused()
     {
         using var session = Cuda.Value.CreateSession(NegModel(), default, default, DeviceMemorySettings.Default);

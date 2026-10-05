@@ -70,7 +70,11 @@ internal sealed class TorchSession : IShorokooSession
     // torch's TensorFloat-32 switches are the whole process's, so runs on cards that set them
     // differently must not overlap, and runs that set them alike may. Taken before a device's lock,
     // by every run on a card and no other.
-    private static readonly TorchPrecisionGate Float32Runs = new();
+    internal static readonly TorchPrecisionGate Float32Runs = new();
+
+    /// <summary>Told of each run on a card once it holds <see cref="Float32Runs"/>, for a test to
+    /// read; null where nothing listens.</summary>
+    internal static Action<TorchSession>? HoldingPrecision;
 
     private TorchSession(
         TorchBackend backend, TorchRuntime runtime, TranslatedModel model, ShorokooLogSeverity logSeverity,
@@ -379,6 +383,7 @@ internal sealed class TorchSession : IShorokooSession
             Float32Runs.Enter(_tensorFloat32);
             try
             {
+                HoldingPrecision?.Invoke(this);
                 var capped = _limitBytes is not null;
                 if (capped) device.EnterWriteLock();
                 else device.EnterReadLock();

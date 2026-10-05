@@ -108,8 +108,10 @@ namespace Shorokoo
 
         /// <summary>
         /// This tensor where the host can read it: the very same object when its memory is
-        /// host-readable already, and otherwise a new copy in the framework's own host memory,
-        /// attached to nothing. This tensor is untouched either way.
+        /// host-readable already, and otherwise a new copy in host memory, attached to nothing — in
+        /// the framework's own where one managed array holds its contents, and otherwise in host
+        /// memory of the backend <see cref="ComputeContext.Default"/> runs on, read into a piece at
+        /// a time. This tensor is untouched either way.
         ///
         /// <para>Reading a tensor's values needs no such copy: <see cref="AccessMemory{V}"/>,
         /// <see cref="CopyMemory{V}"/>, <see cref="ValueAt{V}"/> and the other reads copy them to
@@ -124,7 +126,7 @@ namespace Shorokoo
         public TensorData ToHost()
         {
             ThrowIfDisposed();
-            return IsHostResident ? this : CopyToManagedHost();
+            return IsHostResident ? this : CopyToHostMemory(ComputeContext.Host);
         }
 
         /// <summary>
@@ -235,8 +237,7 @@ namespace Shorokoo
         private TensorData BuildRunCopy(IShorokooBackend backend)
             => BuiltBy(backend, DType.IsSameElementTypeAs(DType.Utf8)
                 ? backend.CreateStringTensor(CopyContentStrings(), (long[])Shape)
-                : backend.CreateTensorInBackendMemory(
-                    (ShorokooTensorElementType)(int)DType, ContentBytesForCopy(), (long[])Shape));
+                : ContentsIn(backend));
 
         /// <summary>
         /// A tensor over <paramref name="value"/>, which <paramref name="backend"/> has just built as
@@ -276,9 +277,9 @@ namespace Shorokoo
             // Refused before anything is copied or taken, so the tensor is still whole: the same
             // tensor can still be fed to a run, and an ONNX Runtime context loads a model's weights
             // into its own memory without making them attributes at all.
-            if (!DType.IsSameElementTypeAs(DType.Utf8) && ContentByteLength > Array.MaxLength)
+            if (PastOneArray)
                 throw new NotSupportedException(
-                    $"{Describe()} holds {ContentByteLength} bytes, more than a graph attribute "
+                    $"{Describe()} holds {ByteCount} bytes, more than a graph attribute "
                     + $"holds: an attribute keeps its elements in one managed array, of at most "
                     + $"{Array.MaxLength} bytes. A tensor this large is fed to a run as a tensor; to load "
                     + "a model with a weight this large, load it onto an ONNX Runtime compute context "
@@ -367,34 +368,94 @@ namespace Shorokoo
         /// </summary>
         private TensorData CopyInto(ComputeContext target, string operation)
             => target.MemorySpace.IsHost
-                ? target.Attached(CopyToManagedHost())
+                ? target.Attached(CopyToHostMemory(target))
                 : target.Placed(BytesPlacedOnto(target, copying: true),
                     () => $"{operation}(context) of {Describe()}", () => CopyIntoBackendMemory(target));
 
-        /// <summary>A copy of this tensor in the framework's own host memory, attached to
-        /// nothing.</summary>
-        private TensorData CopyToManagedHost()
+        /// <summary>
+        /// A copy of this tensor in host memory, attached to nothing: the framework's own where one
+        /// managed array holds its contents, and otherwise host memory of <paramref name="target"/>'s
+        /// backend — of the one <see cref="ComputeContext.Default"/> runs on, for the framework's
+        /// own host memory as a target — which the contents are read into from this tensor a piece
+        /// at a time (<see cref="ComputeContext.ReadIntoHostMemoryOf"/>), never whole in a managed
+        /// array.
+        /// </summary>
+        private TensorData CopyToHostMemory(ComputeContext target)
+        {
             // Strings have no flat buffer to copy, so they take the route their own literals take:
             // the elements themselves, rebuilt on the other side. ONNX Runtime allocates every string
             // tensor on the host whatever its provider, so host memory is where a string tensor goes
             // whichever context it is for.
-            => DType.IsSameElementTypeAs(DType.Utf8)
-                ? NewHostStringTensor(Shape, [.. StringElements()])
-                : NewHostTensor(Shape, DType, HostBytes());
+            if (DType.IsSameElementTypeAs(DType.Utf8)) return NewHostStringTensor(Shape, [.. StringElements()]);
+            if (!PastOneArray) return NewHostTensor(Shape, DType, HostBytes());
+            var backend = target.ResolvedBackend is HostBackend ? ComputeContext.Default.ResolvedBackend : target.ResolvedBackend;
+            return Reading(() => ComputeContext.ReadIntoHostMemoryOf(backend, Shape, DType, ByteCount, new ContentStream(this)));
+        }
 
         private TensorData CopyIntoBackendMemory(ComputeContext target)
         {
             var backend = target.ResolvedBackend;
             // Where the target's runs read this dtype from the host -- a string, on any device --
-            // the copy is the framework's own host memory, which they read as they read any.
-            if (RunMemoryOf(backend, DType).Space.IsHost) return CopyToManagedHost();
+            // the copy is in host memory, which they read as they read any.
+            if (RunMemoryOf(backend, DType).Space.IsHost) return CopyToHostMemory(target);
 
-            // Straight from the contents, under a reader lock for the length of the copy: a managed
-            // tensor's own array, which the backend copies out of and keeps nothing of, rather than a
-            // host copy of it first. The same builder a run's copy takes, so the two carry the same
-            // dtype, and a value the wrapping fails on goes back to the backend.
-            return Reading(() => BuiltBy(backend, backend.CreateTensorInBackendMemory(
-                (ShorokooTensorElementType)(int)DType, ContentBytesForCopy(), (long[])Shape)));
+            // Straight from the contents, under a reader lock for the length of the copy. The same
+            // builder a run's copy takes, so the two carry the same dtype, and a value the wrapping
+            // fails on goes back to the backend.
+            return Reading(() => BuiltBy(backend, ContentsIn(backend)));
+        }
+
+        /// <summary>
+        /// A value of <paramref name="backend"/>, in its own memory, holding this tensor's contents:
+        /// built from one array of them where one holds them — a managed tensor's own, which the
+        /// backend copies out of and keeps nothing of — and otherwise read into a value the backend
+        /// allocates, from this tensor a piece at a time (<see cref="StagedUpload"/>). Without the
+        /// liveness check: the caller holds this tensor's lock, or has taken it.
+        /// </summary>
+        private IShorokooTensorValue ContentsIn(IShorokooBackend backend)
+            => PastOneArray
+                ? StagedUpload.Read(backend, (ShorokooTensorElementType)(int)DType, (long[])Shape, ByteCount, new ContentStream(this))
+                : backend.CreateTensorInBackendMemory(
+                    (ShorokooTensorElementType)(int)DType, ContentBytesForCopy(), (long[])Shape);
+
+        /// <summary>Whether this tensor's contents are more bytes than one managed array holds, so
+        /// that a copy of them is read a piece at a time rather than made from one array.</summary>
+        private bool PastOneArray => ByteCount > Array.MaxLength;
+
+        /// <summary>
+        /// This tensor's contents as a stream read forward, each read copying the next piece out of
+        /// wherever they are (<see cref="TryCopyContentRange"/>): what a copy too large for one
+        /// managed array is read from. Without the liveness check: whoever reads it holds the
+        /// tensor's lock, or has taken it.
+        /// </summary>
+        private sealed class ContentStream(TensorData tensor) : Stream
+        {
+            private readonly long _length = tensor.ByteCount;
+            private long _position;
+
+            public override int Read(Span<byte> buffer)
+            {
+                var count = (int)Math.Min(buffer.Length, _length - _position);
+                if (count == 0) return 0;
+                if (!tensor.TryCopyContentRange(_position, buffer[..count]))
+                    throw new InvalidOperationException(
+                        $"{tensor.AllocatingBackend.Description} cannot copy part of {tensor.Describe()} "
+                        + "out of its memory, and the tensor holds more bytes than one managed array does, "
+                        + "so it cannot be copied whole either.");
+                _position += count;
+                return count;
+            }
+
+            public override int Read(byte[] buffer, int offset, int count) => Read(buffer.AsSpan(offset, count));
+            public override bool CanRead => true;
+            public override bool CanSeek => false;
+            public override bool CanWrite => false;
+            public override long Length => _length;
+            public override long Position { get => _position; set => throw new NotSupportedException(); }
+            public override void Flush() { }
+            public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+            public override void SetLength(long value) => throw new NotSupportedException();
+            public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
         }
 
         /// <summary>

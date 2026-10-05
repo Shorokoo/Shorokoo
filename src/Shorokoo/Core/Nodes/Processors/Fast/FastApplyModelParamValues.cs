@@ -39,7 +39,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             // literal of its own rather than spending theirs. Per node, so a value whose parameter is
             // not in this graph is never copied.
             => Process(graph, paramValues.ContainsKey,
-                id => paramValues[id].CopyTo(Shorokoo.Runtime.ComputeContext.Host).MoveToAttribute());
+                id => paramValues[id].CopyToAttribute());
 
         /// <summary>
         /// The same against parameter <b>descriptions</b> rather than values: what a build binds when

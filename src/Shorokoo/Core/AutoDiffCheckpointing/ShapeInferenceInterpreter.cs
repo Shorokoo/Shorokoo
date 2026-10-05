@@ -575,7 +575,7 @@ internal class ShapeInferenceInterpreter
     {
         try
         {
-            return data.CopyTo(ComputeContext.Host).MoveToAttribute();
+            return data.CopyToAttribute();
         }
         catch (Exception) when (CatchShapeInferenceErrors())
         {

@@ -78,7 +78,7 @@ namespace Shorokoo.Graph
                 // The graph gets a literal of its own; only the copy is moved into it.
                 clonedNode.Attributes = clonedNode.Attributes.SetAttributes(
                     (OnnxOpAttributeNames.ShrkAttrTensorData,
-                     (object?)tensorDatas[s].CopyTo(Shorokoo.Runtime.ComputeContext.Host).MoveToAttribute()));
+                     (object?)tensorDatas[s].CopyToAttribute()));
             }
 
             return copy;

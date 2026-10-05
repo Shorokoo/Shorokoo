@@ -277,14 +277,7 @@ namespace Shorokoo
             // Refused before anything is copied or taken, so the tensor is still whole: the same
             // tensor can still be fed to a run, and an ONNX Runtime context loads a model's weights
             // into its own memory without making them attributes at all.
-            if (PastOneArray)
-                throw new NotSupportedException(
-                    $"{Describe()} holds {ByteCount} bytes, more than a graph attribute "
-                    + $"holds: an attribute keeps its elements in one managed array, of at most "
-                    + $"{Array.MaxLength} bytes. A tensor this large is fed to a run as a tensor; to load "
-                    + "a model with a weight this large, load it onto an ONNX Runtime compute context "
-                    + "(ComputeContext.LoadCompiled, ImportCompiledOnnx), which reads its weights into "
-                    + "the context's memory.");
+            RefuseIfNoAttributeHolds();
 
             // What cannot be taken without a copy is copied first, while the tensor is still alive:
             // the copy is the step that can fail -- a device buffer read back without the runtime
@@ -320,6 +313,44 @@ namespace Shorokoo
             {
                 ReleaseTaken();
             }
+        }
+
+        /// <summary>
+        /// A <see cref="TensorAttribute"/> holding a copy of this tensor's elements, this tensor left
+        /// as it is: <see cref="MoveToAttribute"/> of a copy in host memory — what binding a value the
+        /// caller goes on holding takes — refused as <see cref="MoveToAttribute"/> refuses, before
+        /// anything is copied.
+        /// </summary>
+        /// <exception cref="NotSupportedException">This tensor holds more bytes than one managed
+        /// array does.</exception>
+        internal TensorAttribute CopyToAttribute()
+        {
+            ThrowIfDisposed();
+            RefuseIfNoAttributeHolds();
+            var copy = CopyTo(ComputeContext.Host);
+            try
+            {
+                return copy.MoveToAttribute();
+            }
+            catch
+            {
+                copy.Delete();
+                throw;
+            }
+        }
+
+        /// <summary>Refuses a tensor of more bytes than one managed array holds, which is where an
+        /// attribute keeps its elements.</summary>
+        private void RefuseIfNoAttributeHolds()
+        {
+            if (PastOneArray)
+                throw new NotSupportedException(
+                    $"{Describe()} holds {ByteCount} bytes, more than a graph attribute "
+                    + $"holds: an attribute keeps its elements in one managed array, of at most "
+                    + $"{Array.MaxLength} bytes. A tensor this large is fed to a run as a tensor; to load "
+                    + "a model with a weight this large, load it onto an ONNX Runtime compute context "
+                    + "(ComputeContext.LoadCompiled, ImportCompiledOnnx), which reads its weights into "
+                    + "the context's memory.");
         }
 
         /// <summary>

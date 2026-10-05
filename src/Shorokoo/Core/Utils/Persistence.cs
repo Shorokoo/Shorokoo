@@ -474,21 +474,23 @@ namespace Shorokoo
             }
             catch
             {
+                // Everything read and not yet moved into the graph goes now, wherever it was read
+                // to: a weight on a device is not the collector's to free, and one in host memory
+                // past what a managed array holds is native memory the collector does not see.
                 foreach (var entry in tensorsByDataKey.Values)
                     foreach (var tensor in entry.Values)
-                        if (onto is not null && onto.Attaches(tensor)) tensor.Delete();
+                        if (!tensor.IsDisposed) tensor.Delete();
                 throw;
             }
 
             // A data entry is read whole, and one set's mapping may name only some of an entry's
             // tensors -- an additional set shares the default one's entry for the tensors it has
-            // in common with it -- so what was read onto the device for no parameter of this set
-            // has no one to hand it to, and goes now.
-            if (onto is null || supplied is null) return;
-            var handedOver = new HashSet<TensorData>(supplied.Values, ReferenceEqualityComparer.Instance);
+            // in common with it -- so what was read for no parameter of this set has no one to hand
+            // it to, and goes now. A tensor bound into the graph was moved, and is dead already.
+            var handedOver = new HashSet<TensorData>((IEnumerable<TensorData>?)supplied?.Values ?? [], ReferenceEqualityComparer.Instance);
             foreach (var entry in tensorsByDataKey.Values)
                 foreach (var tensor in entry.Values)
-                    if (onto.Attaches(tensor) && !handedOver.Contains(tensor)) tensor.Delete();
+                    if (!tensor.IsDisposed && !handedOver.Contains(tensor)) tensor.Delete();
         }
 
         private static void BindLoadedWeights(

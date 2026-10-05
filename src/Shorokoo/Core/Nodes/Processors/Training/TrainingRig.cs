@@ -1709,7 +1709,7 @@ namespace Shorokoo
                 s.Definition.Fields.Select(f => s.Fields[f.Name] is TensorData t
                     ? new KeyValuePair<string, TensorAttribute>(f.Name,
                         t.Shape.Count <= Shorokoo.Core.AutoDiffCheckpointing.ShapeInferenceInterpreter.MaxSmallTensorElements
-                            ? t.CopyTo(ComputeContext.Host).MoveToAttribute()
+                            ? t.CopyToAttribute()
                             : TensorAttribute.WithoutValues(t.Shape, t.DType))
                     : throw new NotSupportedException(
                         $"Field '{f.Name}' is a {s.Fields[f.Name].GetType().Name}; only plain tensors can "
@@ -2192,7 +2192,7 @@ namespace Shorokoo
                 // A copy: the rig keeps the seed value as the hyperparameter's own, and the graph
                 // keeps the literal.
                 var node = Shorokoo.Core.Nodes.Processors.Fast.FastInternalOp.Constant(
-                    _hyperparamInitialCounterValues[h]!.CopyTo(ComputeContext.Host).MoveToAttribute());
+                    _hyperparamInitialCounterValues[h]!.CopyToAttribute());
                 fastTraining.InsertAtBodyEnd(node);
                 headNodesInOrder.Add(node);
                 hyperparamKeys[h] = new FastTensorKey(node.Key, 0);

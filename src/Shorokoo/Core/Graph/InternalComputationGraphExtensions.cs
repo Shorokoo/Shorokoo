@@ -313,7 +313,7 @@ namespace Shorokoo.Graph
                     new Dictionary<string, object?>
                     {
                         // The caller's own values, which it keeps: the graph takes a copy.
-                        [OnnxOpAttributeNames.AttrValue] = td.CopyTo(Shorokoo.Runtime.ComputeContext.Host).MoveToAttribute(),
+                        [OnnxOpAttributeNames.AttrValue] = td.CopyToAttribute(),
                     },
                     constantAttrDefs);
                 node.IdentifierTemplate = null;

@@ -150,10 +150,20 @@ namespace Shorokoo
                 concreteArchitecture, filePath, namingScheme, (_, _) => ComputeContext.Host);
             // Bind through the standard path — the same ModelParamList / ToConcreteModel binding
             // the checkpoint machinery uses; the validation guarantees nothing is silently dropped.
-            var weights = new ModelParamList(
-                tensors.Select(t => new KeyValuePair<string, TensorData>(t.Name, t.Data)),
-                ModelParamType.TrainableParam);
-            return concreteArchitecture.ToConcreteModel(weights, scheme);
+            // The binding copies each value into the graph, so what was read is this import's alone
+            // and goes as it returns, bound or refused: a tensor past what a managed array holds is
+            // native memory the collector does not see.
+            try
+            {
+                var weights = new ModelParamList(
+                    tensors.Select(t => new KeyValuePair<string, TensorData>(t.Name, t.Data)),
+                    ModelParamType.TrainableParam);
+                return concreteArchitecture.ToConcreteModel(weights, scheme);
+            }
+            finally
+            {
+                foreach (var t in tensors) t.Data.Delete();
+            }
         }
 
         /// <summary>

@@ -476,6 +476,7 @@ public class SideBySideBackendHardwareTests
         ["onnxruntime-convolution"] => AConvolutionEndsInAResultOrAnException(),
         ["onnxruntime-convolution-after-another-cudnn", var other] => AConvolutionAfterAnotherCudnnIsRefusedNamingIt(other),
         ["cuda-wheel-download", var root, var url, var served] => SideBySideBackendCoverageTests.DownloadEndedWithItsProcess(root, url, served),
+        ["deep-model-routes", var path] => OnnxExternalDataTests.DeepModelRoutes(path),
         [Utils.OwnProcess.Case, var type, var method] => Utils.OwnProcess.Child(type, method),
         _ => 1,
     };

@@ -865,11 +865,13 @@ namespace Shorokoo
         /// <inheritdoc/>
         private protected override bool TryCopyContentRange(long byteOffset, Span<byte> destination)
         {
+            // A host value is read through the piece of its buffer it addresses, which reaches past
+            // 2 GiB as no span over the whole buffer does.
             if (backing.IsHostAccessible)
-                backing.GetTensorDataAsSpan<byte>().Slice(checked((int)byteOffset), destination.Length).CopyTo(destination);
+                backing.HostPiece(byteOffset, destination.Length).CopyTo(destination);
             else if (!AllocatingBackend.TryCopyTensorRangeToHost(backing, byteOffset, destination))
                 return false;
-            // Taking the span, or the pointer the backend copies from, is the value's last read
+            // Taking the piece, or the pointer the backend copies from, is the value's last read
             // (Shorokoo/Shorokoo#178).
             GC.KeepAlive(backing);
             return true;

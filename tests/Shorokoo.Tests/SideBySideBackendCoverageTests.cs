@@ -613,14 +613,20 @@ public class SideBySideBackendCoverageTests
         using var scratch = new CudaScratch();
         using var server = new StallingServer();
         var pin = scratch.Pin("cudnn", 13, ("cudnn64_9.dll", [4, 5])) with { Wheel = server.Url };
-        var clock = Stopwatch.StartNew();
-
-        Assert.Throws<InvalidOperationException>(() => CudaLibraryCache.Provision(pin, scratch.Root, [], TimeSpan.FromSeconds(2)));
-        Assert.True(clock.Elapsed < TimeSpan.FromSeconds(10));
-        clock.Restart();
-        Assert.IsType<TimeoutException>(Assert.Throws<InvalidOperationException>(
-            () => CudaLibraryCache.Fetch(pin, scratch.Root, new MemoryStream(), TimeSpan.FromMinutes(1), stall: TimeSpan.FromSeconds(1))).InnerException);
-        Assert.True(clock.Elapsed < TimeSpan.FromSeconds(10));
+        TimeSpan? handed = null;
+        CudaLibraryCache.FetchHanded = timeout => handed = timeout;
+        try
+        {
+            Assert.IsType<TimeoutException>(Assert.Throws<InvalidOperationException>(
+                () => CudaLibraryCache.Provision(pin, scratch.Root, [], TimeSpan.FromSeconds(2))).InnerException);
+            Assert.True(handed <= TimeSpan.FromSeconds(2));
+            Assert.StartsWith("No byte", Assert.IsType<TimeoutException>(Assert.Throws<InvalidOperationException>(
+                () => CudaLibraryCache.Fetch(pin, scratch.Root, new MemoryStream(), TimeSpan.FromMinutes(1), stall: TimeSpan.FromSeconds(1))).InnerException).Message);
+        }
+        finally
+        {
+            CudaLibraryCache.FetchHanded = null;
+        }
     }
 
     [Fact]
@@ -642,7 +648,22 @@ public class SideBySideBackendCoverageTests
         using var server = new StallingServer(served);
 
         Assert.Equal(0, SideBySideBackendHardwareTests.InAChildProcess([], "cuda-wheel-download", scratch.Root, server.Url.ToString(), served));
-        Assert.True(SpinWait.SpinUntil(() => Directory.GetFiles(scratch.Root, "*.wheel").Length == 0, TimeSpan.FromSeconds(5)));
+        Assert.All(Directory.GetFiles(scratch.Root, "*.wheel"), wheel => Assert.True(Gone(wheel)));
+    }
+
+    /// <summary>Whether the file at <paramref name="path"/> is gone or going: deleted, or marked for
+    /// deletion once another handle on it closes, which no open can get past.</summary>
+    private static bool Gone(string path)
+    {
+        try
+        {
+            File.OpenRead(path).Dispose();
+            return false;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return true;
+        }
     }
 
     /// <summary>What the child process of <see cref="TestADownloadEndedWithItsProcessLeavesNoWheelBehind"/>
@@ -790,11 +811,11 @@ public class SideBySideBackendCoverageTests
         var sameRelease = scratch.Folder(("cudnn64_9.dll", [1]));
         var otherRelease = scratch.Folder(("cudnn_graph64_9.dll", [9]), ("zlibwapi.dll", [8]));
         string[] pinned = ["cudnn64_9.dll", "cudnn_graph64_9.dll"];
-        string[] Loaded(params string[] folders) => [.. folders.SelectMany(folder => Directory.GetFiles(folder))];
+        Func<string, string?> HeldIn(params string[] folders) => name => folders.Select(folder => Path.Combine(folder, name)).FirstOrDefault(File.Exists);
 
-        Assert.Null(CudaLibraries.Conflict(torchLib, pinned, Loaded(torchLib, sameRelease)));
-        Assert.Equal($"cudnn_graph64_9.dll from '{otherRelease}'", CudaLibraries.Conflict(torchLib, pinned, Loaded(torchLib, sameRelease, otherRelease)));
-        Assert.Null(CudaLibraries.Conflict(Path.Combine(scratch.Root, "none"), pinned, Loaded(otherRelease)));
+        Assert.Null(CudaLibraries.Conflict(torchLib, pinned, HeldIn(torchLib, sameRelease)));
+        Assert.Equal($"cudnn_graph64_9.dll from '{otherRelease}'", CudaLibraries.Conflict(torchLib, pinned, HeldIn(sameRelease, otherRelease)));
+        Assert.Null(CudaLibraries.Conflict(Path.Combine(scratch.Root, "none"), pinned, HeldIn(otherRelease)));
 
         var pin = scratch.Pin("cudnn", 13, ("cudnn_graph64_9.dll", [2]), ("cudnn64_9.dll", [1]));
         var cache = CudaLibraryCache.Provision(pin, scratch.Root, [torchLib], TimeSpan.FromSeconds(30));
@@ -823,10 +844,45 @@ public class SideBySideBackendCoverageTests
         File.WriteAllBytes(Path.Combine(Directory.CreateDirectory(Path.Combine(nvidia, "cu13", "lib")).FullName, "libcublas.so.13"), [5]);
         var other = scratch.Folder(("libcudnn.so.9", [9]));
         string[] pinned = ["libcudnn.so.9", "libcublas.so.13"];
+        Func<string, string?> Holding(params string[] copies) => name => copies.FirstOrDefault(copy => Path.GetFileName(copy) == name);
 
         Assert.Equal(nvidia, opened.CudaLibraryDirectory);
-        Assert.Equal($"libcudnn.so.9 from '{other}'", CudaLibraries.Conflict(nvidia, pinned, [Path.Combine(other, "libcudnn.so.9"), Path.Combine(nvidia, "cu13", "lib", "libcublas.so.13")]));
-        Assert.Null(CudaLibraries.Conflict(nvidia, pinned, [Path.Combine(nvidia, "cudnn", "lib", "libcudnn.so.9")]));
+        Assert.Equal($"libcudnn.so.9 from '{other}'", CudaLibraries.Conflict(nvidia, pinned, Holding(Path.Combine(other, "libcudnn.so.9"), Path.Combine(nvidia, "cu13", "lib", "libcublas.so.13"))));
+        Assert.Null(CudaLibraries.Conflict(nvidia, pinned, Holding(Path.Combine(nvidia, "cudnn", "lib", "libcudnn.so.9"))));
+        var versioned = scratch.Folder(("libcublas.so.13.0.0.19", [6]));
+        Assert.Equal($"libcublas.so.13.0.0.19 from '{versioned}'", CudaLibraries.Conflict(nvidia, pinned, name => name == "libcublas.so.13" ? Path.Combine(versioned, "libcublas.so.13.0.0.19") : null));
+        Assert.Equal("/opt/cuda/lib/libcudnn.so.9", CudaLibraries.LoadedPath("lib/libcudnn.so.9", 0x7f0000001000,
+            () => "7f0000000000-7f0000002000 r-xp 00000000 08:01 12345    /opt/cuda/lib/libcudnn.so.9\n7f0000002000-7f0000003000 r--p 00002000 08:01 12345    /opt/cuda/lib/libcudnn.so.9\n"));
+        Assert.Equal("/usr/lib/libcudnn.so.9", CudaLibraries.LoadedPath("/usr/lib/libcudnn.so.9", 0, () => ""));
+    }
+
+    [Fact]
+    public void TestAFilesIdentityIsTheOneItsFileSystemGivesItInFull()
+    {
+        using var scratch = new CudaScratch();
+        var file = Path.Combine(scratch.Folder(("cudnn64_9.dll", [1])), "cudnn64_9.dll");
+        var stamp = CudaLibraryCache.StampOf(file)!.Value;
+
+        Assert.True(CudaLibraryCache.SameFile(file, file));
+        if (OperatingSystem.IsWindows()) Assert.Equal(FileIdOf(file), (stamp.Volume, (UInt128)stamp.Index));
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct FileIdInfo
+    {
+        public ulong VolumeSerialNumber, IdLow, IdHigh;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetFileInformationByHandleEx(Microsoft.Win32.SafeHandles.SafeFileHandle file, int infoClass, out FileIdInfo info, int size);
+
+    /// <summary>The volume and file IDs Windows gives the file at <paramref name="path"/> in full
+    /// (<c>FILE_ID_INFO</c>).</summary>
+    private static (ulong Volume, UInt128 Id) FileIdOf(string path)
+    {
+        using var handle = File.OpenHandle(path);
+        Assert.True(GetFileInformationByHandleEx(handle, 18, out var info, Marshal.SizeOf<FileIdInfo>()));
+        return (info.VolumeSerialNumber, ((UInt128)info.IdHigh << 64) | info.IdLow);
     }
 
     /// <summary>A folder of its own for one test's cache, its installed copies and the wheels its

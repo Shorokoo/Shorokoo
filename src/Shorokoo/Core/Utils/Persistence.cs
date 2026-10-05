@@ -617,7 +617,8 @@ namespace Shorokoo
             List<SafeTensor> read;
             try
             {
-                read = ReadDataEntryPayload(hashed, storedLength, dataEntry, dataKey, place, filePath);
+                read = ReadDataEntryPayload(hashed, storedLength, dataEntry, dataKey, place, filePath,
+                    () => container.OpenRequiredEntry(dataEntry.Entry, $"data entry '{dataKey}'", out _));
             }
             catch
             {
@@ -661,7 +662,7 @@ namespace Shorokoo
         /// </summary>
         private static List<SafeTensor> ReadDataEntryPayload(
             Stream stored, long storedLength, SkptDataEntry dataEntry, string dataKey,
-            Func<long, ComputeContext> destination, string filePath)
+            Func<long, ComputeContext> destination, string filePath, Func<Stream> reopen)
         {
             // Enough of the entry to hold a Zstd frame header, which is looked at before decoding.
             var head = new byte[CompressedFormatUtils.ZstdFrameHeaderMaxBytes];
@@ -684,16 +685,20 @@ namespace Shorokoo
                             $"'{filePath}': data entry '{dataKey}' ('{dataEntry.Entry}') declares compression " +
                             $"'{SkptFileFormat.CompressionZstd}' but its stored bytes are not a Zstd frame — " +
                             "the manifest and the stored entry disagree; the checkpoint is corrupt or was modified.");
-                    // The frame is decoded as the reader asks for bytes, so it fails wherever the reader
-                    // happens to be -- a truncated frame mid-tensor, say. A failure of the decoder
-                    // itself is the entry failing to decompress, and is refused as that, not as
-                    // whatever the reader was reading when it happened. The decompressed size the
-                    // frame header must declare bounds what the entry's own header may claim, so a
-                    // tensor the entry cannot hold is refused before it is allocated.
-                    long declared = CompressedFormatUtils.DeclaredZstdContentSize(head.AsSpan(0, got), reason =>
-                        new InvalidDataException(
-                            $"'{filePath}': data entry '{dataKey}' ('{dataEntry.Entry}'): {reason} — the " +
-                            "checkpoint is corrupt or was modified."));
+                    // The frames are decoded as the reader asks for bytes, so they fail wherever the
+                    // reader happens to be -- a truncated frame mid-tensor, say. A failure of the
+                    // decoder itself is the entry failing to decompress, and is refused as that, not as
+                    // whatever the reader was reading when it happened. The decompressed size each
+                    // frame header must declare bounds, summed, what the entry's own header may claim,
+                    // so a tensor the entry cannot hold is refused before it is allocated. The frames
+                    // are walked through an opening of the entry of their own, as the one read here is
+                    // read forward, once.
+                    long declared;
+                    using (var frames = reopen())
+                        declared = CompressedFormatUtils.DeclaredZstdContentSize(frames, reason =>
+                            new InvalidDataException(
+                                $"'{filePath}': data entry '{dataKey}' ('{dataEntry.Entry}'): {reason} — the " +
+                                "checkpoint is corrupt or was modified."));
                     using (var decoded = new DecodingReadStream(
                         new ZstdSharp.DecompressionStream(payload, leaveOpen: true),
                         e => new InvalidDataException(

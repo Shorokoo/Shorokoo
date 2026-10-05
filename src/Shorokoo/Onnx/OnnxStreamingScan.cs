@@ -38,7 +38,7 @@ namespace Shorokoo.Onnx
         /// its own costs more than the bytes it saves.</summary>
         internal const int MinReferencedBytes = 1024;
 
-        private const int WireVarint = 0, WireFixed64 = 1, WireLengthDelimited = 2, WireFixed32 = 5;
+        private const int WireVarint = 0, WireFixed64 = 1, WireLengthDelimited = 2, WireStartGroup = 3, WireEndGroup = 4, WireFixed32 = 5;
         private const int RawDataField = 9, FloatDataField = 4, DoubleDataField = 10;
         private const int ExternalDataField = 13, DataLocationField = 14;
         private const int FloatType = 1, StringType = 8, DoubleType = 11;
@@ -81,7 +81,7 @@ namespace Shorokoo.Onnx
         /// <summary>The model in <paramref name="file"/>, its large tensor payloads referenced in
         /// place rather than read. A truncated or malformed file throws
         /// <see cref="EndOfStreamException"/> or <see cref="ProtoBuf.ProtoException"/> — one nested
-        /// <see cref="OnnxProtobuf.MaxDepth"/> levels deep or more among them — as parsing it whole
+        /// more than <see cref="OnnxProtobuf.MaxDepth"/> levels deep among them — as parsing it whole
         /// does.</summary>
         internal static ModelProto ReadModel(FileStream file)
         {
@@ -139,7 +139,7 @@ namespace Shorokoo.Onnx
                     throw SparseInitializerRefusal($"'{_path}'");
                 if (wire != WireLengthDelimited || ChildOf(kind, field) is Kind.Opaque)
                 {
-                    size += CopyField(key, wire, end);
+                    size += CopyField(key, wire, end, depth);
                     continue;
                 }
                 long length = ReadLength(end);
@@ -155,17 +155,24 @@ namespace Shorokoo.Onnx
         /// nested deep enough would otherwise overflow the stack.</summary>
         private long Child(ulong key, Kind kind, long end, int depth)
         {
-            if (depth >= OnnxProtobuf.MaxDepth)
-                throw new ProtoBuf.ProtoException(
-                    $"'{_path}': the ONNX model nests a message {depth} levels deep at byte {_file.Position}; " +
-                    $"a model is read to a depth of {OnnxProtobuf.MaxDepth - 1}.");
+            RefuseBeyondTheDeepest(depth);
             int slot = _nextSize++;
             if (_output is null) _sizes.Add(0);
             long size = WriteVarint(key);
             if (_output is not null) size += WriteVarint((ulong)_sizes[slot]);
-            long body = kind == Kind.Tensor ? Tensor(end) : Message(kind, end, depth);
+            long body = kind == Kind.Tensor ? Tensor(end, depth) : Message(kind, end, depth);
             if (_output is null) size += WriteVarint((ulong)(_sizes[slot] = body));
             return size + body;
+        }
+
+        /// <summary>Refuses a message, or a group, <paramref name="depth"/> levels below the model
+        /// where it is deeper than a model is parsed (<see cref="OnnxProtobuf.MaxDepth"/>).</summary>
+        private void RefuseBeyondTheDeepest(int depth)
+        {
+            if (depth > OnnxProtobuf.MaxDepth)
+                throw new ProtoBuf.ProtoException(
+                    $"'{_path}': the ONNX model nests a message {depth} levels deep at byte {_file.Position}; " +
+                    $"a model is read to a depth of {OnnxProtobuf.MaxDepth}.");
         }
 
         /// <summary>
@@ -174,9 +181,10 @@ namespace Shorokoo.Onnx
         /// anywhere in the message, so it is walked once to read them and again to write it. What is
         /// kept so keeps its order, which matters for a payload written in pieces: a repeated field
         /// may be written partly packed and partly unpacked, and its elements are read in the order
-        /// its pieces stand.
+        /// its pieces stand. A tensor at the deepest level a model is parsed to keeps its payload
+        /// inline: the entries of a reference would sit a level deeper.
         /// </summary>
-        private long Tensor(long end)
+        private long Tensor(long end, int depth)
         {
             long start = _file.Position;
             int dataType = 0;
@@ -192,7 +200,7 @@ namespace Shorokoo.Onnx
                     payloads++;
                     if (wire != WireLengthDelimited)
                     {
-                        Skip(wire, end);
+                        Skip(field, wire, end, depth);
                         continue;
                     }
                     long length = ReadLength(end);
@@ -214,10 +222,10 @@ namespace Shorokoo.Onnx
                         dims.Add(unchecked((long)ReadVarint(packedEnd)));
                 }
                 else
-                    Skip(wire, end);
+                    Skip(field, wire, end, depth);
             }
 
-            bool referenced = payloads == 1 && !external && flat is { } only
+            bool referenced = payloads == 1 && !external && depth < OnnxProtobuf.MaxDepth && flat is { } only
                 && only.Length >= MinReferencedBytes
                 && (only.Field == RawDataField ? dataType != StringType
                     : only.Field == FloatDataField ? dataType == FloatType : dataType == DoubleType)
@@ -230,9 +238,9 @@ namespace Shorokoo.Onnx
             {
                 var (key, field, wire) = ReadKey(end);
                 if (referenced && field is RawDataField or FloatDataField or DoubleDataField)
-                    Skip(wire, end);
+                    Skip(field, wire, end, depth);
                 else
-                    size += CopyField(key, wire, end);
+                    size += CopyField(key, wire, end, depth);
             }
             if (!referenced) return size;
 
@@ -275,7 +283,9 @@ namespace Shorokoo.Onnx
             return (key, (int)(key >> 3), (int)(key & 7));
         }
 
-        private long CopyField(ulong key, int wire, long end)
+        /// <summary>Writes a field as it stands, <paramref name="depth"/> levels below the model in
+        /// the message that holds it: a group whole, through its end, nested one level deeper.</summary>
+        private long CopyField(ulong key, int wire, long end, int depth)
         {
             long size = WriteVarint(key);
             switch (wire)
@@ -291,13 +301,23 @@ namespace Shorokoo.Onnx
                 case WireLengthDelimited:
                     long length = ReadLength(end);
                     return size + WriteVarint((ulong)length) + Copy(length);
+                case WireStartGroup:
+                    RefuseBeyondTheDeepest(depth + 1);
+                    while (true)
+                    {
+                        var (inner, field, innerWire) = ReadKey(end);
+                        if (innerWire == WireEndGroup)
+                            return size + WriteVarint(EndOfGroup(key, field, inner));
+                        size += CopyField(inner, innerWire, end, depth + 1);
+                    }
                 default:
-                    throw new ProtoBuf.ProtoException($"Unsupported wire type {wire} at byte {_file.Position}.");
+                    throw new ProtoBuf.ProtoException($"Unexpected wire type {wire} at byte {_file.Position}.");
             }
         }
 
-        /// <summary>Reads past a field's value, writing nothing.</summary>
-        private void Skip(int wire, long end)
+        /// <summary>Reads past the value of field <paramref name="field"/>, writing nothing: a group
+        /// through its end, as protobuf skips a group it does not know.</summary>
+        private void Skip(int field, int wire, long end, int depth)
         {
             switch (wire)
             {
@@ -316,10 +336,28 @@ namespace Shorokoo.Onnx
                     long length = ReadLength(end);
                     _file.Seek(length, SeekOrigin.Current);
                     return;
+                case WireStartGroup:
+                    RefuseBeyondTheDeepest(depth + 1);
+                    while (true)
+                    {
+                        var (inner, innerField, innerWire) = ReadKey(end);
+                        if (innerWire == WireEndGroup)
+                        {
+                            EndOfGroup((ulong)field << 3 | WireStartGroup, innerField, inner);
+                            return;
+                        }
+                        Skip(innerField, innerWire, end, depth + 1);
+                    }
                 default:
-                    throw new ProtoBuf.ProtoException($"Unsupported wire type {wire} at byte {_file.Position}.");
+                    throw new ProtoBuf.ProtoException($"Unexpected wire type {wire} at byte {_file.Position}.");
             }
         }
+
+        /// <summary>The key <paramref name="end"/> that ends the group <paramref name="start"/>
+        /// opened, read as field <paramref name="field"/>; refused where it ends another.</summary>
+        private ulong EndOfGroup(ulong start, int field, ulong end)
+            => field == (int)(start >> 3) ? end
+                : throw new ProtoBuf.ProtoException($"A group of field {start >> 3} ends as field {field} at byte {_file.Position}.");
 
         private ulong ReadVarint(long end)
         {

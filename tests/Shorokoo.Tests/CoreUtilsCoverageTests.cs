@@ -1190,6 +1190,7 @@ public class CoreUtilsCoverageTests
         Assert.StartsWith("Failed to allocate", AnAllocationThatFailsInsideTheAllocatorIsRefusedWhateverTheFailureSays());
         Assert.True(AnArenaCarvesFromCommittedMemoryWhereverItLiesInAFreeStretch());
         Assert.IsType<InvalidOperationException>(ACardThatCannotBeWaitedForHandsBackNothingItsWorkMayStillRead());
+        Assert.Equal((IntPtr.Zero, 0, 2 * G), ARequestWhatALimitedAccountHasOutLeavesNoRoomForIsRefusedWithoutWaitingForTheCard());
         Assert.Equal((2 * G, 3, 0), TheCardIsWaitedForOutsideTheAllocatorsLockAndOnlyForWhatTheAskingCallLetGoOf());
         Assert.True(ReleasingWhatACardKeepsAnswersTheBytesItsMemoryShrankBy());
         Assert.Equal((0L, 4 * G, 4 * G), MemoryTheSystemWouldNotTakeBackStaysCountedAsCommitted());
@@ -1279,6 +1280,22 @@ public class CoreUtilsCoverageTests
         {
             var block = card.Allocator.Allocate(3 * FakeCard.GranuleBytes, out _);
             return Record.Exception(() => card.Allocator.ReleaseRange(block, FakeCard.GranuleBytes, 0, toTheEnd: true));
+        }
+    }
+
+    private static (IntPtr, int, long) ARequestWhatALimitedAccountHasOutLeavesNoRoomForIsRefusedWithoutWaitingForTheCard()
+    {
+        const long G = FakeCard.GranuleBytes;
+        var card = new FakeCard();
+        var account = card.Allocator.Open("probe");
+        account.Limit = 8 * G;
+        using (CachingAllocator.Charge(null, account))
+        {
+            var kept = card.Allocator.Allocate(6 * G, out _);
+            card.Allocator.Free(card.Allocator.Allocate(2 * G, out _));
+            var refused = (card.Allocator.Allocate(4 * G, out _), card.Waits, account.Held);
+            card.Allocator.Free(kept);
+            return refused;
         }
     }
 

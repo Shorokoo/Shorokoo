@@ -329,7 +329,8 @@ public abstract class JaxBackend : IShorokooBackend
     /// <paramref name="byteOffset"/> bytes in, to <paramref name="destination"/>: out of the piece of
     /// its buffer a host tensor addresses, and out of a device array by fetching the slice of it
     /// covering those bytes, so a save streams a device array of any size through one bounded
-    /// buffer. False for a value of another runtime's that the host cannot read.
+    /// buffer. False for a value of another runtime's that the host cannot read, and for a device
+    /// array no larger than that buffer (<see cref="ByPiece"/>).
     /// </summary>
     public unsafe bool TryCopyTensorRangeToHost(IShorokooTensorValue value, long byteOffset, Span<byte> destination)
     {
@@ -341,7 +342,7 @@ public abstract class JaxBackend : IShorokooBackend
             GC.KeepAlive(value);
             return true;
         }
-        if (value is not JaxTensorValue jax) return false;
+        if (ByPiece(value) is not { } jax) return false;
         IShorokooTensorValue.PieceWithin(byteOffset, destination.Length, PythonElementTypes.ByteLength(jax.ElementType, jax.Shape));
         var runtime = Runtime;
         using (PythonRuntime.Gil())
@@ -369,7 +370,7 @@ public abstract class JaxBackend : IShorokooBackend
             GC.KeepAlive(value);
             return true;
         }
-        if (value is not JaxTensorValue jax) return false;
+        if (ByPiece(value) is not { } jax) return false;
         IShorokooTensorValue.PieceWithin(byteOffset, source.Length, PythonElementTypes.ByteLength(jax.ElementType, jax.Shape));
         var runtime = Runtime;
         using (PythonRuntime.Gil())
@@ -377,6 +378,18 @@ public abstract class JaxBackend : IShorokooBackend
             jax.Hold(PyCall.Invoke(runtime.CopyHostToRange, jax.Value, byteOffset, (long)bytes, source.Length));
         return true;
     }
+
+    /// <summary>
+    /// <paramref name="value"/> where it is a device array of this runtime's larger than the one
+    /// buffer a save or a load streams through (<see cref="StagedReadBack.StagingBytes"/>), and so
+    /// copied by the piece. One no larger is declined, for its caller to copy it whole: that holds no
+    /// more host memory than one piece does, compiles no program, and a gather reads it once rather
+    /// than once per run of rows.
+    /// </summary>
+    private static JaxTensorValue? ByPiece(IShorokooTensorValue value)
+        => value is JaxTensorValue jax && PythonElementTypes.ByteLength(jax.ElementType, jax.Shape) > StagedReadBack.StagingBytes
+            ? jax
+            : null;
 
     internal static PyList Shape(long[] shape)
     {

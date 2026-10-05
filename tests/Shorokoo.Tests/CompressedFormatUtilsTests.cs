@@ -417,7 +417,7 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
         FromBinary([], "empty");
         FromBinary(bareZstd, "not a Shorokoo .srk container");
         FromBinary(BuildRawSrkContainer("{not json", payload), "header");
-        byte[] nested = OnnxExternalDataTests.Nested([0x3A], [0x0A, 0x2A, 0x32], 100);
+        byte[] nested = OnnxExternalDataTests.Nested([0x3A], [0x0A, 0x2A, 0x32], 101);
         FromFile("nested.srk", BuildRawSrkContainer(
             $"{{\"srkVersion\":1,\"stage\":\"concrete-architecture\",\"compression\":\"none\",\"payloadSha256\":\"{Sha256Hex(nested)}\"}}",
             nested), "not a readable Shorokoo graph file");
@@ -1616,13 +1616,13 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
         RewriteWith(plainEntries, unknown.ToJsonString());
         RefusedLoad("lz4", "unsupported compression");
 
-        // A corrupt Zstd frame with a matching sha256: integrity passes, decompression fails loud.
+        // A Zstd frame cut short with a matching sha256: integrity passes, and the frame is refused.
         var truncated = storedWeights.Take(storedWeights.Length / 2).ToArray();
         Assert.True(SkptFileFormat.LooksLikeZstdFrame(truncated));
         var corrupt = JsonNode.Parse(zstdEntries[SkptFileFormat.ConfigEntryName])!;
         corrupt["data"]!["weights"]!["sha256"] = SkptFileFormat.Sha256Hex(truncated);
         RewriteWith(zstdEntries, corrupt.ToJsonString(), truncated);
-        RefusedLoad(SkptFileFormat.WeightsEntryPath, "Zstd-decompress");
+        RefusedLoad(SkptFileFormat.WeightsEntryPath, "cut short");
     }
 
     [Fact]
@@ -1702,6 +1702,30 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
         var unsizedSafeTensors = P("unsized.zsafetensor");
         File.WriteAllBytes(unsizedSafeTensors, unsized);
         Assert.Contains(unsizedSafeTensors, Assert.Throws<InvalidDataException>(() => CompressedFormatUtils.LoadCompressedSafeTensors(unsizedSafeTensors)).Message);
+    }
+
+    [Fact]
+    public void TestAZstdPayloadWrittenInSeveralFramesIsReadWhole()
+    {
+        var (model, numOut, input) = BuildCompressibleSkptModel();
+        var path = P("zstd-frames.skpt");
+        var framedPath = P("zstd-frames-framed.skpt");
+        Persistence.From(model).WithModel().WithWeights().WithZstdCompressedData().Save(path);
+        var entries = ReadZipEntries(path);
+        var payload = CompressedFormatUtils.Decompress(entries[SkptFileFormat.WeightsEntryPath]);
+        byte[] framed = [.. CompressedFormatUtils.Compress(payload[..(payload.Length / 3)]), .. CompressedFormatUtils.Compress(payload[(payload.Length / 3)..])];
+        var config = JsonNode.Parse(entries[SkptFileFormat.ConfigEntryName])!;
+        config["data"]!["weights"]!["sha256"] = SkptFileFormat.Sha256Hex(framed);
+        RewriteSkpt(framedPath, [.. entries.Select(e => (e.Key,
+            e.Key == SkptFileFormat.ConfigEntryName ? System.Text.Encoding.UTF8.GetBytes(config.ToJsonString())
+            : e.Key == SkptFileFormat.WeightsEntryPath ? framed : e.Value))]);
+        var (wholeSafeTensors, framedSafeTensors) = (P("whole.zsafetensor"), P("framed.zsafetensor"));
+        File.WriteAllBytes(wholeSafeTensors, entries[SkptFileFormat.WeightsEntryPath]);
+        File.WriteAllBytes(framedSafeTensors, framed);
+
+        Assert.Equal(ExecuteToBytes(model, numOut, input), ExecuteToBytes(Persistence.Load(framedPath), numOut, input));
+        Assert.Equal(CompressedFormatUtils.LoadCompressedSafeTensors(wholeSafeTensors).Select(t => t.Name),
+            CompressedFormatUtils.LoadCompressedSafeTensors(framedSafeTensors).Select(t => t.Name));
     }
 
     /// <summary>Every file of a .skpt checkpoint directory keyed by its manifest-style relative

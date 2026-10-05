@@ -73,6 +73,54 @@ public class PyTorchCudaHardwareTests
     }
 
     [TorchCudaFact]
+    public void TestTwoTensorFloat32RunsOnTheCardHoldTheirPrecisionAtOnce()
+    {
+        using var first = (TorchSession)TensorFloat32Session();
+        using var second = (TorchSession)TensorFloat32Session();
+        var arrived = 0;
+        var together = new System.Collections.Concurrent.ConcurrentBag<bool>();
+        void Holding(TorchSession session)
+        {
+            if (session != first && session != second) return;
+            Interlocked.Increment(ref arrived);
+            together.Add(SpinWait.SpinUntil(() => Volatile.Read(ref arrived) == 2, PyTorchBackendCoverageTests.Patience));
+        }
+        TorchSession.HoldingPrecision += Holding;
+        try { Task.WaitAll(Task.Run(() => NegRun(first, default)), Task.Run(() => NegRun(second, default))); }
+        finally { TorchSession.HoldingPrecision -= Holding; }
+        Assert.Equal([true, true], together);
+    }
+
+    [TorchCudaFact]
+    public void TestARunWaitingForItsPrecisionOnTheCardIsStoppedByItsToken()
+    {
+        using var session = TensorFloat32Session();
+        using var stop = new CancellationTokenSource();
+        Task run;
+        bool stoppedWhileWaiting;
+        TorchSession.Float32Runs.Enter(false);
+        try
+        {
+            run = Task.Run(() => NegRun(session, stop.Token));
+            Assert.True(SpinWait.SpinUntil(() => TorchSession.Float32Runs.Waiting(true) == 1, PyTorchBackendCoverageTests.Patience));
+            stop.Cancel();
+            stoppedWhileWaiting = ((IAsyncResult)run).AsyncWaitHandle.WaitOne(PyTorchBackendCoverageTests.Patience);
+        }
+        finally { TorchSession.Float32Runs.Exit(false); }
+        Assert.True(((IAsyncResult)run).AsyncWaitHandle.WaitOne(PyTorchBackendCoverageTests.Patience));
+        Assert.Equal((true, typeof(OperationCanceledException)), (stoppedWhileWaiting, run.Exception?.InnerException?.GetType()));
+    }
+
+    private static IShorokooSession TensorFloat32Session()
+        => Cuda.Value.CreateSession(NegModel(), default, default, DeviceMemorySettings.Default, DiagnosticSettings.Default, [], 0, [], SideBySideModel.AllowingTensorFloat32);
+
+    private static void NegRun(IShorokooSession session, CancellationToken token)
+    {
+        using var x = Cuda.Value.CreateTensorInBackendMemory(ShorokooTensorElementType.Float, [.. MemoryMarshal.AsBytes<float>([1f, -2f])], [2]);
+        session.Run(new Dictionary<string, IShorokooTensorValue> { ["x"] = x }, ["y"], new RunSettings { CancellationToken = token })[0].Dispose();
+    }
+
+    [TorchCudaFact]
     public void TestEveryOutputStaysOnTheCardAndAnInputInHostMemoryIsRefused()
     {
         using var session = Cuda.Value.CreateSession(NegModel(), default, default, DeviceMemorySettings.Default);
@@ -268,9 +316,6 @@ public class PyTorchCudaHardwareTests
         Assert.Equal((515.5f, true), LeadingSum([1031, 512], 0));
     }
 
-    /// <summary>The first element of a sum over the leading axes <paramref name="axes"/> of a
-    /// <paramref name="shape"/> of 0.5s, and whether the run held under a mebibyte beyond what it
-    /// held as it started.</summary>
     private static (float First, bool Little) LeadingSum(long[] shape, params long[] axes)
     {
         var dims = string.Join(",", shape);
@@ -292,8 +337,6 @@ public class PyTorchCudaHardwareTests
         Assert.Equal(8f, SixteenBitSum(ShorokooTensorElementType.BFloat16));
     }
 
-    /// <summary>The sum over its rows of a column of 1024 sixteen-bit floats whose partial sums of
-    /// 32 rows each are no sixteen-bit float, and whose sum is 8.</summary>
     private static float SixteenBitSum(ShorokooTensorElementType type)
     {
         float[] values = [.. Enumerable.Range(0, 1024).Select(r => (r / 32, r % 32) switch
@@ -326,28 +369,22 @@ public class PyTorchCudaHardwareTests
     public void TestAPieceOfACardTensorIsWrittenAndReadAtAnyByteOffset()
         => Assert.Equal(PieceWrittenAtFive, PieceWrittenIntoACardTensor(Cuda.Value));
 
-    /// <summary>Six bytes read three bytes into four zero floats after 1, 2, 3, 4 were written five
-    /// bytes in, and then the whole of them.</summary>
     internal static readonly byte[] PieceWrittenAtFive = [0, 0, 1, 2, 3, 4, 0, 0, 0, 0, 0, 1, 2, 3, 4, 0, 0, 0, 0, 0, 0, 0];
 
-    /// <summary>What <see cref="PieceWrittenAtFive"/> describes, of a tensor on
-    /// <paramref name="backend"/>'s card, once a piece past its end is refused.</summary>
     internal static byte[] PieceWrittenIntoACardTensor(IShorokooBackend backend)
     {
-        using var value = backend.CreateTensorInBackendMemory(ShorokooTensorElementType.Float, new byte[16], [4]);
-        var read = new byte[6];
+        const int Bytes = StagedReadBack.StagingBytes + 16;
+        using var value = backend.CreateTensorInBackendMemory(ShorokooTensorElementType.Float, new byte[Bytes], [Bytes / 4]);
+        var (read, head) = (new byte[6], new byte[16]);
         Assert.True(backend.TryCopyHostToTensorRange(value, 5, [1, 2, 3, 4]));
         Assert.True(backend.TryCopyTensorRangeToHost(value, 3, read));
-        Assert.Throws<ArgumentOutOfRangeException>(() => backend.TryCopyTensorRangeToHost(value, 14, read));
-        return [.. read, .. backend.CopyTensorToHost(value)];
+        Assert.True(backend.TryCopyTensorRangeToHost(value, 0, head));
+        Assert.Throws<ArgumentOutOfRangeException>(() => backend.TryCopyTensorRangeToHost(value, Bytes - 2, read));
+        return [.. read, .. head];
     }
 
-    /// <summary>The int32s a tensor past 2 GiB holds: 0, 1, 2 and on.</summary>
     private const long CountedPastTwoGibibytes = 5L << 27;
 
-    /// <summary>The most bytes one write of a save of a card tensor of <paramref name="backend"/>
-    /// holding <see cref="CountedPastTwoGibibytes"/> int32s counting from 0 handed its stream, and
-    /// whether the stream was handed exactly those.</summary>
     internal static (int Largest, bool Counted) SavedPastTwoGibibytes(IShorokooBackend backend)
     {
         const long Half = CountedPastTwoGibibytes / 2;
@@ -365,10 +402,6 @@ public class PyTorchCudaHardwareTests
         return (saved.Largest, saved.Counted);
     }
 
-    /// <summary>The most bytes one read of a load onto <paramref name="backend"/>'s card of
-    /// <see cref="CountedPastTwoGibibytes"/> int32s counting from 0 asked its stream for, the most
-    /// one write of a save of what it loaded handed its own, and whether that save was handed exactly
-    /// those int32s.</summary>
     internal static (int Read, int Written, bool Counted) LoadedPastTwoGibibytes(IShorokooBackend backend)
     {
         using var context = new ComputeContext(backend);
@@ -388,9 +421,6 @@ public class PyTorchCudaHardwareTests
         return bytes;
     }
 
-    /// <summary>A stream of the int32s 0, 1, 2 and on, as many as it is made with: read, it hands
-    /// them out; written, it checks it is handed them, in order. It keeps the most bytes one call
-    /// asked for or handed it.</summary>
     private sealed class CountingStream(long count) : Stream
     {
         private long _position;

@@ -96,8 +96,10 @@ internal static partial class CudaLibraryCache
     }
 
     /// <summary>What the file system says of a file without its contents being opened: which file it
-    /// is — the same for every hard link to it — its size and when it was last written.</summary>
-    internal readonly record struct FileStamp(ulong Volume, ulong Index, long Size, DateTime LastWriteUtc);
+    /// is — the same for every hard link to it, and unique on its volume: on Windows the 128-bit ID
+    /// and 64-bit volume serial, since ReFS does not keep the 64-bit index unique — its size and when
+    /// it was last written.</summary>
+    internal readonly record struct FileStamp(ulong Volume, UInt128 Index, long Size, DateTime LastWriteUtc);
 
     /// <summary>The stamp of the file at <paramref name="path"/>, following links, or null where there
     /// is none. Read whatever share another handle on the file allows, a loaded library's
@@ -113,15 +115,20 @@ internal static partial class CudaLibraryCache
     /// <summary>Whether <paramref name="a"/> and <paramref name="b"/> are one file, under two names or
     /// one.</summary>
     internal static bool SameFile(string a, string b)
-        => StampOf(a) is { Index: not 0 } first && StampOf(b) is { } second
+        => StampOf(a) is { } first && first.Index != UInt128.Zero && StampOf(b) is { } second
            && (first.Volume, first.Index) == (second.Volume, second.Index);
 
-    private static FileStamp? WindowsStampOf(string path)
+    private static unsafe FileStamp? WindowsStampOf(string path)
     {
         // No access to the contents, so no share mode another handle holds refuses it.
         using var handle = CreateFile(ExtendedLength(path), 0, FileShareAll, IntPtr.Zero, OpenExisting, BackupSemantics, IntPtr.Zero);
         if (handle.IsInvalid || !GetFileInformationByHandle(handle, out var info)) return null;
-        return new FileStamp(info.VolumeSerial, ((ulong)info.IndexHigh << 32) | info.IndexLow,
+        // FILE_ID_INFO where the file system gives it; a volume without it gives the index whole.
+        FileIdInfo id;
+        var (volume, index) = GetFileInformationByHandleEx(handle, FileIdInfoClass, &id, (uint)sizeof(FileIdInfo))
+            ? (id.VolumeSerialNumber, (UInt128)id.IdHigh << 64 | id.IdLow)
+            : (info.VolumeSerial, (UInt128)((ulong)info.IndexHigh << 32 | info.IndexLow));
+        return new FileStamp(volume, index,
             ((long)info.SizeHigh << 32) | info.SizeLow, DateTime.FromFileTimeUtc(((long)info.WriteHigh << 32) | info.WriteLow));
     }
 
@@ -138,6 +145,7 @@ internal static partial class CudaLibraryCache
     private const uint FileShareAll = 7;
     private const uint OpenExisting = 3;
     private const uint BackupSemantics = 0x02000000;
+    private const int FileIdInfoClass = 18;
     private const int AtCurrentDirectory = -100;
     private const uint StatxBasicStats = 0x7ff;
 
@@ -146,6 +154,14 @@ internal static partial class CudaLibraryCache
     {
         public uint Attributes, CreationLow, CreationHigh, AccessLow, AccessHigh, WriteLow, WriteHigh;
         public uint VolumeSerial, SizeHigh, SizeLow, Links, IndexHigh, IndexLow;
+    }
+
+    /// <summary><c>FILE_ID_INFO</c>: the volume's 64-bit serial and the file's 128-bit ID, low
+    /// half first.</summary>
+    [StructLayout(LayoutKind.Sequential)]
+    private struct FileIdInfo
+    {
+        public ulong VolumeSerialNumber, IdLow, IdHigh;
     }
 
     [LibraryImport("kernel32.dll", EntryPoint = "CreateFileW", StringMarshalling = StringMarshalling.Utf16, SetLastError = true)]
@@ -157,6 +173,11 @@ internal static partial class CudaLibraryCache
     [return: MarshalAs(UnmanagedType.Bool)]
     private static partial bool GetFileInformationByHandle(
         Microsoft.Win32.SafeHandles.SafeFileHandle file, out ByHandleFileInformation information);
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static unsafe partial bool GetFileInformationByHandleEx(
+        Microsoft.Win32.SafeHandles.SafeFileHandle file, int informationClass, void* information, uint size);
 
     [LibraryImport("libc", EntryPoint = "statx", StringMarshalling = StringMarshalling.Utf8, SetLastError = true)]
     private static unsafe partial int Statx(int directory, string path, int flags, uint mask, byte* statx);
@@ -365,6 +386,11 @@ internal static partial class CudaLibraryCache
     /// <summary>How long a download may go with no byte of it arriving.</summary>
     internal static readonly TimeSpan DefaultStall = TimeSpan.FromMinutes(1);
 
+    /// <summary>What is told, on this thread, the time each download is given to arrive whole in; null
+    /// for nothing. A test's view of what a fill leaves its download.</summary>
+    [ThreadStatic]
+    internal static Action<TimeSpan>? FetchHanded;
+
     /// <summary>
     /// Writes the wheel of <paramref name="pin"/>, the cache folder <paramref name="directory"/> is
     /// filled from, into <paramref name="target"/>: from the network, or from the file the pin names.
@@ -378,6 +404,7 @@ internal static partial class CudaLibraryCache
     internal static void Fetch(CudaLibraryPin pin, string directory, Stream target, TimeSpan? timeout = null, TimeSpan? stall = null)
     {
         var (whole, quiet) = (timeout ?? DefaultTimeout, stall ?? DefaultStall);
+        FetchHanded?.Invoke(whole);
         using var deadline = new CancellationTokenSource(whole);
         using var waiting = CancellationTokenSource.CreateLinkedTokenSource(deadline.Token);
         Exception Failed(Exception cause) => Unavailable(pin, directory, cause is OperationCanceledException

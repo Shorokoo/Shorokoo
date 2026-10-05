@@ -2829,13 +2829,9 @@ public class TrainingRigTrainingLoopCoverageTests
     }
 
     private static float[] TrainedParams(ComputationGraph modelGraph, bool cond, params float[] xs)
-        => LossAndTrainedParams(modelGraph, cond, xs).Params;
-
-    private static (float Loss, float[] Params) LossAndTrainedParams(ComputationGraph modelGraph, bool cond, params float[] xs)
     {
         var (rig, step) = OneConditionalStep(modelGraph, cond, cond, xs);
-        return (step.Loss!.Value, NNLibraryTrainingFixtures.Floats(
-            step.TrainableParams.Fields[rig.TrainableParamStructDef.Fields[0].Name]));
+        return NNLibraryTrainingFixtures.Floats(step.TrainableParams.Fields[rig.TrainableParamStructDef.Fields[0].Name]);
     }
 
     private static (TrainingRig Rig, TrainingCheckpoint Step) OneConditionalStep(
@@ -2871,7 +2867,7 @@ public class TrainingRigTrainingLoopCoverageTests
         var (rig, step) = OneConditionalStep(modelGraph, conds, conds, [1f, 1f, 1f, 1f, 1f, 1f, 1f, 1f]);
         var weights = NNLibraryTrainingFixtures.Floats(step.TrainableParams.Fields[rig.TrainableParamStructDef.Fields[0].Name]);
         int kept = weights.Count(w => Math.Abs(w - 0.2f) < 1e-5f);
-        return Math.Abs(2.0 * kept - step.Loss!.Value) < 1e-4 && weights.Count(w => w == 1f) == 8 - kept;
+        return kept is > 0 and < 8 && Math.Abs(2.0 * kept - step.Loss!.Value) < 1e-4 && weights.Count(w => w == 1f) == 8 - kept;
     }
 
     // The arm that did not run contributes exactly zero, whether or not its own derivative is a
@@ -2905,19 +2901,9 @@ public class TrainingRigTrainingLoopCoverageTests
     [Fact]
     public void TestADropoutInAnIfElseArmTrainsOnTheMaskItsForwardDrew()
     {
-        var (loss, weights) = LossAndTrainedParams(DropoutSquaredInOneIfArmModel.ComputationGraph, true, 1f, 1f, 1f, 1f, 1f, 1f, 1f, 1f);
-        int kept = weights.Count(w => Math.Abs(w - 0.2f) < 1e-5f);
-        Assert.Equal(2.0 * kept, loss, 1e-4);
-        Assert.Equal(8 - kept, weights.Count(w => w == 1f));
-    }
-
-    [Fact]
-    public void TestADropoutInAnIfElseElseArmTrainsOnTheMaskItsForwardDrew()
-    {
-        var (loss, weights) = LossAndTrainedParams(DropoutSquaredInTheElseArmModel.ComputationGraph, false, 1f, 1f, 1f, 1f, 1f, 1f, 1f, 1f);
-        int kept = weights.Count(w => Math.Abs(w - 0.2f) < 1e-5f);
-        Assert.Equal(2.0 * kept, loss, 1e-4);
-        Assert.Equal(8 - kept, weights.Count(w => w == 1f));
+        Assert.True(TrainsOnTheMaskItsForwardDrew(DropoutSquaredInOneIfArmModel.ComputationGraph, true));
+        Assert.True(TrainsOnTheMaskItsForwardDrew(DropoutSquaredInTheElseArmModel.ComputationGraph, false));
+        Assert.True(TrainsOnTheMaskItsForwardDrew(DropoutSquaredInANestedIfElseArmModel.ComputationGraph, true, true));
     }
 
     [Fact]
@@ -2925,12 +2911,15 @@ public class TrainingRigTrainingLoopCoverageTests
     {
         Assert.Equal(Enumerable.Repeat(0.975f, 8), DropoutStep(DropoutSquaredInOneIfArmModel.ComputationGraph, true, false).Params);
         Assert.Equal(Enumerable.Repeat(0.975f, 8), DropoutStep(DropoutSquaredInTheElseArmModel.ComputationGraph, false, true).Params);
+        Assert.Equal(Enumerable.Repeat(0.975f, 8), DropoutStep(DropoutSquaredInANestedIfElseArmModel.ComputationGraph, [true, true], [true, false]).Params);
+        Assert.Equal(Enumerable.Repeat(0.975f, 8), DropoutStep(DropoutSquaredInANestedIfElseArmModel.ComputationGraph, [true, true], [false, true]).Params);
     }
 
     [Fact]
     public void TestADropoutInAnIfElseArmAdvancesTheDrawCounterOnlyWhenItsArmRuns()
-        => Assert.Equal([1L, 0L, 0L, 1L, 1L, 1L],
+        => Assert.Equal([1L, 1L, 0L, 0L, 1L, 1L, 1L],
             [DropoutStep(DropoutSquaredInOneIfArmModel.ComputationGraph, true, true).DrawCounter,
+             DropoutStep(DropoutSquaredInOneIfArmModel.ComputationGraph, false, true).DrawCounter,
              DropoutStep(DropoutSquaredInOneIfArmModel.ComputationGraph, true, false).DrawCounter,
              DropoutStep(DropoutSquaredInTheElseArmModel.ComputationGraph, false, true).DrawCounter,
              DropoutStep(DropoutSquaredInTheElseArmModel.ComputationGraph, false, false).DrawCounter,
@@ -2938,22 +2927,13 @@ public class TrainingRigTrainingLoopCoverageTests
              DropoutStep(DropoutReadInOneIfArmAndAfterTheBranchModel.ComputationGraph, true, false).DrawCounter]);
 
     [Fact]
-    public void TestADropoutInANestedIfElseArmTrainsOnTheMaskItsForwardDrewAndAdvancesTheCounterOnlyWhenBothConditionsTakeIt()
-    {
-        Assert.True(TrainsOnTheMaskItsForwardDrew(DropoutSquaredInANestedIfElseArmModel.ComputationGraph, true, true));
-        Assert.Equal(Enumerable.Repeat(0.975f, 8), DropoutStep(DropoutSquaredInANestedIfElseArmModel.ComputationGraph, [true, true], [true, false]).Params);
-        Assert.Equal(Enumerable.Repeat(0.975f, 8), DropoutStep(DropoutSquaredInANestedIfElseArmModel.ComputationGraph, [true, true], [false, true]).Params);
-        Assert.Equal([1L, 0L, 0L, 0L, 1L],
+    public void TestADropoutInANestedIfElseArmAdvancesTheDrawCounterOnlyWhenBothConditionsTakeIt()
+        => Assert.Equal([1L, 0L, 0L, 0L, 1L],
             [DropoutStep(DropoutSquaredInANestedIfElseArmModel.ComputationGraph, [true, true], [true, true]).DrawCounter,
              DropoutStep(DropoutSquaredInANestedIfElseArmModel.ComputationGraph, [true, true], [true, false]).DrawCounter,
              DropoutStep(DropoutSquaredInANestedIfElseArmModel.ComputationGraph, [true, true], [false, true]).DrawCounter,
              DropoutStep(DropoutSquaredInANestedIfElseArmModel.ComputationGraph, [true, true], [false, false]).DrawCounter,
              DropoutStep(DropoutSquaredInANestedIfElseArmModel.ComputationGraph, [false, false], [true, true]).DrawCounter]);
-    }
-
-    [Fact]
-    public void TestADropoutInAnIfElseArmAdvancesTheDrawCounterOfARigBuiltAtASampleNotTakingIt()
-        => Assert.Equal(1L, DropoutStep(DropoutSquaredInOneIfArmModel.ComputationGraph, false, true).DrawCounter);
 
     private static TrainingRig OptionalBiasRig(OptionalTensorData bias, TensorData x)
         => TrainingRig.FromScratch(NullableTrainableBiasLayer.ComputationGraph,

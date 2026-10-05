@@ -35,13 +35,23 @@ namespace Shorokoo.Core.Utils
 
         /// <summary>
         /// The bytes of one entry by its manifest (archive-relative, forward-slash) path, or
-        /// <c>null</c> when the checkpoint has no such entry. Fails loudly on an entry larger
-        /// than this .skpt version reads (2 GiB), and — in the directory form — on an entry path
-        /// that does not resolve inside the checkpoint root (absolute path or <c>..</c>
+        /// <c>null</c> when the checkpoint has no such entry — for the entries read whole: the
+        /// manifest, a model definition, the user data. Fails loudly on an entry larger than an
+        /// array holds (<see cref="MaxWholeEntryLength"/>), which a data entry never needs, as it
+        /// is read through <see cref="TryOpenEntry"/>; and — in the directory form — on an entry
+        /// path that does not resolve inside the checkpoint root (absolute path or <c>..</c>
         /// traversal), the same rule the ONNX external-data reader applies to its
         /// <c>location</c> field.
         /// </summary>
         internal abstract byte[]? TryReadEntry(string entryPath);
+
+        /// <summary>The largest entry <see cref="TryReadEntry"/> reads whole: the most bytes an
+        /// array holds.</summary>
+        internal static long MaxWholeEntryLength => Array.MaxLength;
+
+        private protected InvalidDataException TooLargeToReadWhole(string entryPath, long length)
+            => new($"'{CheckpointPath}': entry '{entryPath}' is {length} bytes; an entry read whole — the " +
+                   $"manifest, a model definition or the user data — holds at most {MaxWholeEntryLength} bytes.");
 
         /// <summary>Reads an entry the manifest requires, failing loudly (naming
         /// <paramref name="role"/>) when the checkpoint lacks it.</summary>
@@ -52,9 +62,9 @@ namespace Shorokoo.Core.Utils
 
         /// <summary>
         /// One entry as a forward stream over its stored bytes, with their length, or <c>null</c>
-        /// when the checkpoint has no such entry — how a data entry is read into the memory its
-        /// tensors live in without being held whole on the way. Refused alike with
-        /// <see cref="TryReadEntry"/>. The caller disposes the stream.
+        /// when the checkpoint has no such entry — how a data entry of any size is read into the
+        /// memory its tensors live in without being held whole on the way. An entry path is
+        /// refused alike with <see cref="TryReadEntry"/>. The caller disposes the stream.
         /// </summary>
         internal abstract Stream? TryOpenEntry(string entryPath, out long length);
 
@@ -129,14 +139,10 @@ namespace Shorokoo.Core.Utils
         {
             var entry = _archive.GetEntry(entryPath);
             if (entry is null) return null;
-            // entry.Length is the uncompressed size declared in the archive's directory; a
-            // corrupt or hostile file can declare up to ~4 GiB. Reject oversize entries with
-            // the loader's usual named error rather than letting the (int) cast below throw a
-            // context-free OverflowException. This .skpt version reads in-memory entries only.
-            if (entry.Length > int.MaxValue)
-                throw new InvalidDataException(
-                    $"'{CheckpointPath}': entry '{entry.FullName}' declares an uncompressed size of {entry.Length} " +
-                    "bytes, which exceeds the maximum this .skpt version reads.");
+            // entry.Length is the size declared in the archive's directory, which a corrupt or
+            // hostile file sets as it likes: it is refused with the loader's named error before
+            // anything that size is allocated.
+            if (entry.Length > MaxWholeEntryLength) throw TooLargeToReadWhole(entry.FullName, entry.Length);
             var bytes = GC.AllocateUninitializedArray<byte>((int)entry.Length);
             using var entryStream = entry.Open();
             try
@@ -157,10 +163,6 @@ namespace Shorokoo.Core.Utils
             length = 0;
             var entry = _archive.GetEntry(entryPath);
             if (entry is null) return null;
-            if (entry.Length > int.MaxValue)
-                throw new InvalidDataException(
-                    $"'{CheckpointPath}': entry '{entry.FullName}' declares an uncompressed size of {entry.Length} " +
-                    "bytes, which exceeds the maximum this .skpt version reads.");
             length = entry.Length;
             return entry.Open();
         }
@@ -193,10 +195,7 @@ namespace Shorokoo.Core.Utils
             var resolved = ResolveEntryPath(_rootFull, entryPath, CheckpointPath);
             if (!File.Exists(resolved)) return null;
             long length = new FileInfo(resolved).Length;
-            if (length > int.MaxValue)
-                throw new InvalidDataException(
-                    $"'{CheckpointPath}': entry '{entryPath}' is {length} bytes, which exceeds the " +
-                    "maximum this .skpt version reads.");
+            if (length > MaxWholeEntryLength) throw TooLargeToReadWhole(entryPath, length);
             return File.ReadAllBytes(resolved);
         }
 
@@ -207,13 +206,6 @@ namespace Shorokoo.Core.Utils
             if (!File.Exists(resolved)) return null;
             var stream = new FileStream(resolved, FileMode.Open, FileAccess.Read, FileShare.Read,
                 bufferSize: 1 << 16, FileOptions.SequentialScan);
-            if (stream.Length > int.MaxValue)
-            {
-                stream.Dispose();
-                throw new InvalidDataException(
-                    $"'{CheckpointPath}': entry '{entryPath}' is {stream.Length} bytes, which exceeds the " +
-                    "maximum this .skpt version reads.");
-            }
             length = stream.Length;
             return stream;
         }

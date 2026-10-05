@@ -1243,20 +1243,23 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
     }
 
     /// <summary>Walks the raw local file headers of a zip (no library involved), returning each
-    /// entry's name, compression method, absolute payload offset and stored size.</summary>
-    private static List<(string Name, ushort Method, long DataOffset, uint Size)> ParseLocalZipHeaders(byte[] zip)
+    /// entry's name, compression method, absolute payload offset, stored size, and whether that
+    /// size is held in a Zip64 extra field.</summary>
+    private static List<(string Name, ushort Method, long DataOffset, long Size, bool Zip64)> ParseLocalZipHeaders(byte[] zip)
     {
-        var headers = new List<(string, ushort, long, uint)>();
+        var headers = new List<(string, ushort, long, long, bool)>();
         int offset = 0;
         while (offset + 30 <= zip.Length && BitConverter.ToUInt32(zip, offset) == 0x04034b50)
         {
             ushort method = BitConverter.ToUInt16(zip, offset + 8);
-            uint size = BitConverter.ToUInt32(zip, offset + 18);
+            uint size32 = BitConverter.ToUInt32(zip, offset + 18);
             ushort nameLength = BitConverter.ToUInt16(zip, offset + 26);
             ushort extraLength = BitConverter.ToUInt16(zip, offset + 28);
             string name = System.Text.Encoding.ASCII.GetString(zip, offset + 30, nameLength);
+            bool zip64 = size32 == uint.MaxValue && BitConverter.ToUInt16(zip, offset + 30 + nameLength) == 1;
+            long size = zip64 ? BitConverter.ToInt64(zip, offset + 34 + nameLength) : size32;
             long dataOffset = offset + 30 + nameLength + extraLength;
-            headers.Add((name, method, dataOffset, size));
+            headers.Add((name, method, dataOffset, size, zip64));
             offset = (int)(dataOffset + size);
         }
         return headers;
@@ -1270,7 +1273,8 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
         Assert.Equal(0xCBF43926u, SkptFileFormat.EntryPayload.Of(digits).Crc32);
         Assert.Equal(0x04DA8651u, SkptFileFormat.EntryPayload.Produced(s => s.Write(ramp)).Crc32);
         Assert.Equal(SkptFileFormat.Sha256Hex(ramp), SkptFileFormat.EntryPayload.Produced(s => s.Write(ramp)).Sha256);
-        Assert.Equal(ramp, SkptFileFormat.EntryPayload.ProduceBytes(s => { s.Write(ramp, 0, 500); s.Write(ramp.AsSpan(500)); }));
+        Assert.Equal(0x04DA8651u, Copied(ramp, ramp.Length).Crc32);
+        Assert.Equal(SkptFileFormat.Sha256Hex(ramp), Copied(ramp, ramp.Length).Sha256);
 
         using var zip = new MemoryStream();
         SkptFileFormat.WriteStoredZip(zip,
@@ -1291,23 +1295,231 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
         var drifting = SkptFileFormat.EntryPayload.Produced(s => s.Write(ramp.AsSpan(0, 10 + runs++)));
         Assert.Throws<InvalidOperationException>(() =>
             SkptFileFormat.WriteStoredZip(Stream.Null, [new("c", drifting, Align: false)], DateTime.UtcNow));
-        Assert.Throws<InvalidOperationException>(() =>
-            SkptFileFormat.EntryPayload.ProduceBytes(s => s.Write(ramp.AsSpan(0, 10 + runs++))));
+        Assert.Throws<InvalidDataException>(() => Copied(ramp, ramp.Length + 1).Crc32);
+        Assert.Throws<InvalidDataException>(() => Copied(ramp, ramp.Length - 1).WriteTo(Stream.Null, "d"));
+        Assert.Throws<InvalidDataException>(() => Copied(ramp, ramp.Length, "0").WriteTo(Stream.Null, "e"));
+    }
+
+    private static SkptFileFormat.EntryPayload Copied(byte[] bytes, long length, string? sha256 = null)
+        => SkptFileFormat.EntryPayload.Copied(() => new MemoryStream(bytes), length, actual =>
+        {
+            if (actual != (sha256 ?? SkptFileFormat.Sha256Hex(bytes))) throw new InvalidDataException();
+        }, "copied");
+
+    [Fact]
+    public void TestATrainingSkptWhoseOptimizerStateEntryIsPastTwoGibibytesRoundTripsInBothForms()
+        => Utils.OwnProcess.Run(typeof(CompressedFormatUtilsCoverageTests),
+            nameof(ATrainingSkptWhoseOptimizerStateEntryIsPastTwoGibibytesRoundTripsInBothForms));
+
+    internal static void ATrainingSkptWhoseOptimizerStateEntryIsPastTwoGibibytesRoundTripsInBothForms()
+    {
+        var rig = TrainingRig.FromScratch(ScalarMultiplyModel.ComputationGraph,
+            Shorokoo.Modules.Losses.L2Loss.ComputationGraph, Shorokoo.Modules.Optimizers.AdamOptimizer.ComputationGraph,
+            [new TensorDataModelParam("input", ModelParamType.InputParam, TensorData([1L], [1f]))],
+            new Shorokoo.Modules.Optimizers.AdamOptimizerHyperparameters { LearningRate = 0.1f });
+        var initial = rig.CreateInitialCheckpoint();
+        var name = rig.OptimizerStateDef.Fields[0].Name;
+        var backend = Core.Backends.DefaultBackend.Instance;
+        var value = backend.CreateUninitializedTensorInBackendMemory(
+            Core.Backends.ShorokooTensorElementType.Float, [LargeElements]);
+        Assert.True(backend.TryCopyHostToTensorRange(value, 0, BitConverter.GetBytes(1f)));
+        Assert.True(backend.TryCopyHostToTensorRange(value, 4 * (LargeElements - 1), BitConverter.GetBytes(5f)));
+        var large = Shorokoo.TensorData.Create(new Shape([LargeElements]), DType.Float32, value, backend);
+        var checkpoint = new TrainingCheckpoint
+        {
+            TrainableParams = initial.TrainableParams,
+            ModelState = initial.ModelState,
+            OptimizerState = new TensorDataStruct(rig.OptimizerStateDef, rig.OptimizerStateDef.Fields.ToDictionary(
+                f => f.Name, f => f.Name == name ? large : initial.OptimizerState.Fields[f.Name])),
+            Rig = rig,
+        };
+
+        (long, float, float) LoadedEnds(string path)
+        {
+            var read = (TensorData)Persistence.LoadTrainingCheckpointFromSkpt(path, rig.TrainableParamStructDef,
+                rig.ModelStateDef, rig.OptimizerStateDef, null, null, ComputeContext.Host).OptimizerState.Fields[name];
+            var ends = new byte[8];
+            try
+            {
+                Assert.True(read.TryCopyRows([0, (int)(LargeElements - 1)], 4, ends));
+                return (read.ContentByteLength, BitConverter.ToSingle(ends, 0), BitConverter.ToSingle(ends, 4));
+            }
+            finally
+            {
+                read.Delete();
+            }
+        }
+
+        var dir = Directory.CreateTempSubdirectory("ShorokooLargeTrainingSkpt_").FullName;
+        try
+        {
+            var (zip, tree) = (Path.Combine(dir, "large.skpt"), Path.Combine(dir, "large-dir.skpt"));
+            SkptFileFormat.PayloadDestinationInjection = s => new HoleWritingStream(s);
+            try
+            {
+                Persistence.SaveTrainingCheckpointToSkpt(checkpoint, zip);
+                Persistence.ForTrainingCheckpoint(checkpoint).SaveAsDirectory(tree);
+            }
+            finally
+            {
+                SkptFileFormat.PayloadDestinationInjection = null;
+                large.Delete();
+            }
+
+            Assert.True(new FileInfo(Path.Combine(tree, SkptFileFormat.OptimizerStateEntryPath)).Length > 4 * LargeElements);
+            Assert.Equal((4 * LargeElements, 1f, 5f), LoadedEnds(zip));
+            Assert.Equal((4 * LargeElements, 1f, 5f), LoadedEnds(tree));
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
     }
 
     [Fact]
-    public void TestSkptEntryLargerAsStoredThanTheReaderReadsIsRefusedAtSaveAndOneLargerOnlyDecompressedIsNot()
+    public void TestSkptZipWritesZip64RecordsOnlyPastTheClassicFieldsAndEveryReaderOpensThem()
     {
-        byte[] mebibyte = new byte[1 << 20];
-        void TwoGibibytesAndOne(Stream s)
+        var (model, numOut, input) = BuildSkptModel();
+        var direct = ExecuteToBytes(model, numOut, input);
+        var rig = TrainingRig.FromScratch(ScalarMultiplyModel.ComputationGraph,
+            Shorokoo.Modules.Losses.L2Loss.ComputationGraph, Shorokoo.Modules.Optimizers.AdamOptimizer.ComputationGraph,
+            [new TensorDataModelParam("input", ModelParamType.InputParam, TensorData([1L], [1f]))],
+            new Shorokoo.Modules.Optimizers.AdamOptimizerHyperparameters { LearningRate = 0.1f });
+        var checkpoint = rig.CreateInitialCheckpoint();
+        var tree = P("zip64-source-dir.skpt");
+        Persistence.From(model).WithModel().WithWeights().SaveAsDirectory(tree);
+
+        string Saved(string name, (long, int)? threshold, Action<string> save)
         {
-            for (int i = 0; i <= 2048; i++) s.Write(mebibyte);
+            var path = P(name);
+            SkptFileFormat.Zip64ThresholdInjection = threshold;
+            try { save(path); }
+            finally { SkptFileFormat.Zip64ThresholdInjection = null; }
+            return path;
+        }
+        float[] Flat(TensorDataStruct state) => TrainingRigHelpers.FlattenStruct(state);
+        bool HasZip64End(string path)
+            => File.ReadAllBytes(path).AsSpan().IndexOf((ReadOnlySpan<byte>)[0x50, 0x4b, 0x06, 0x06]) >= 0;
+        void Model(string path) => Persistence.From(model).WithModel().WithWeights().Save(path);
+        void Training(string path) => Persistence.SaveTrainingCheckpointToSkpt(checkpoint, path);
+        void Packed(string path) => Persistence.PackSkpt(tree, path);
+        void Opens(string path)
+        {
+            var bytes = File.ReadAllBytes(path);
+            var weights = ParseLocalZipHeaders(bytes).First(h => h.Name.StartsWith("data/", StringComparison.Ordinal));
+            Assert.Equal(0, weights.DataOffset % SkptFileFormat.DataAlignment);
+            Assert.Equal(bytes.AsSpan((int)weights.DataOffset, (int)weights.Size).ToArray(), ReadZipEntries(path)[weights.Name]);
+            Assert.Equal(ArtifactKind.SkptCheckpoint, Persistence.Inspect(path).Kind);
         }
 
-        Assert.Throws<NotSupportedException>(() => SkptFileFormat.EntryPayload.Produced(TwoGibibytesAndOne));
-        Assert.Throws<NotSupportedException>(() => SkptFileFormat.EntryPayload.ProduceBytes(TwoGibibytesAndOne));
-        Assert.True(SkptFileFormat.EntryPayload.Produced(s => CompressedFormatUtils.WriteZstdFrame(s, 1, TwoGibibytesAndOne)).Length
-            < SkptFileFormat.EntryPayload.MaxEntryLength);
+        var plain = Saved("plain.skpt", null, Model);
+        Assert.False(HasZip64End(plain));
+        Assert.DoesNotContain(ParseLocalZipHeaders(File.ReadAllBytes(plain)), h => h.Zip64);
+        foreach (var threshold in ((long, int)[])[(0, 0), (200, 2)])
+        {
+            var inference = Saved($"z64-{threshold.Item1}.skpt", threshold, Model);
+            var training = Saved($"z64-training-{threshold.Item1}.skpt", threshold, Training);
+            var packed = Saved($"z64-packed-{threshold.Item1}.skpt", threshold, Packed);
+            Assert.True(HasZip64End(inference) && HasZip64End(training) && HasZip64End(packed));
+            Assert.Contains(ParseLocalZipHeaders(File.ReadAllBytes(inference)), h => h.Zip64);
+            Opens(inference);
+            Opens(training);
+            Opens(packed);
+            Assert.Equal(direct, ExecuteToBytes(Persistence.Load(inference), numOut, input));
+            Assert.Equal(direct, ExecuteToBytes(Persistence.Load(packed), numOut, input));
+            Assert.Equal(Flat(checkpoint.OptimizerState), Flat(rig.LoadCheckpointFromSkpt(training).OptimizerState));
+            Assert.Equal(Flat(checkpoint.TrainableParams), Flat(TrainingRig.Load(training).Checkpoint.TrainableParams));
+        }
+    }
+
+    [Fact]
+    public void TestSkptZipHoldsMoreEntriesThanTheClassicCountFieldCounts()
+    {
+        var path = P("many-entries.zip");
+        using (var file = File.Create(path))
+            SkptFileFormat.WriteStoredZip(file, [.. Enumerable.Range(0, 70_000).Select(i =>
+                new SkptFileFormat.ZipEntrySpec($"e{i}", [(byte)i], Align: i % 2 == 0))], DateTime.UtcNow);
+        using (var archive = ZipFile.OpenRead(path))
+            Assert.Equal(70_000, archive.Entries.Count);
+        using var container = SkptContainer.Open(path);
+        Assert.Equal((byte[])[69_999 % 256], container.TryReadEntry("e69999"));
+    }
+
+    [Fact]
+    public void TestASkptEntryReadWholeIsRefusedPastWhatAnArrayHolds()
+    {
+        var dir = Directory.CreateDirectory(P("whole-read.skpt")).FullName;
+        using (var manifest = new FileStream(Path.Combine(dir, SkptFileFormat.ConfigEntryName), FileMode.CreateNew))
+            manifest.SetLength(Array.MaxLength + 1L);
+
+        Assert.Contains("read whole", Assert.Throws<InvalidDataException>(() => Persistence.Load(dir)).Message);
+    }
+
+    [Fact]
+    public void TestPackAndExtractSkptCopyEachEntryThroughABoundedBufferAndRefuseOneThatFailsItsHash()
+    {
+        var (model, numOut, input) = BuildSkptModel();
+        var direct = ExecuteToBytes(model, numOut, input);
+        var source = P("bounded.skpt");
+        Persistence.From(model).WithModel().WithWeights().Save(source);
+        var entries = ReadZipEntries(source);
+        var padding = new byte[16 << 20];
+        new Random(7).NextBytes(padding);
+        const string PaddingEntry = "data/padding.safetensors";
+        var config = JsonNode.Parse(entries[SkptFileFormat.ConfigEntryName])!;
+        config["data"]!["padding"] = new JsonObject
+        {
+            ["entry"] = PaddingEntry,
+            ["format"] = SkptFileFormat.DataFormatSafeTensors,
+            ["sha256"] = SkptFileFormat.Sha256Hex(padding),
+        };
+        RewriteSkpt(source, [.. entries.Select(e => (e.Key, e.Key == SkptFileFormat.ConfigEntryName
+            ? System.Text.Encoding.UTF8.GetBytes(config.ToJsonString()) : e.Value)), (PaddingEntry, padding)]);
+        var (extracted, packed) = (P("bounded-dir.skpt"), P("bounded-packed.skpt"));
+        long Allocated(Action convert)
+        {
+            var before = GC.GetAllocatedBytesForCurrentThread();
+            convert();
+            return GC.GetAllocatedBytesForCurrentThread() - before;
+        }
+
+        Assert.True(Allocated(() => Persistence.ExtractSkpt(source, extracted)) < padding.Length / 4);
+        Assert.True(Allocated(() => Persistence.PackSkpt(extracted, packed)) < padding.Length / 4);
+        Assert.True(padding.AsSpan().SequenceEqual(File.ReadAllBytes(Path.Combine(extracted, PaddingEntry))));
+        Assert.True(padding.AsSpan().SequenceEqual(ReadZipEntries(packed)[PaddingEntry]));
+        Assert.Equal(direct, ExecuteToBytes(Persistence.Load(packed), numOut, input));
+
+        var packedSha256 = SkptFileFormat.Sha256Hex(File.ReadAllBytes(packed));
+        using (var tampered = new FileStream(Path.Combine(extracted, PaddingEntry), FileMode.Open, FileAccess.Write))
+        {
+            tampered.Position = padding.Length - 1;
+            tampered.WriteByte((byte)~padding[^1]);
+        }
+        Assert.Contains("SHA-256", Assert.Throws<InvalidDataException>(() => Persistence.PackSkpt(extracted, packed)).Message);
+        Assert.Equal(packedSha256, SkptFileFormat.Sha256Hex(File.ReadAllBytes(packed)));
+    }
+
+    /// <summary>Writes through to a file, leaving a hole that holds no disk space wherever a write
+    /// is all zeros.</summary>
+    internal sealed class HoleWritingStream(Stream file) : Stream
+    {
+        public override void Write(ReadOnlySpan<byte> buffer)
+        {
+            if (buffer.IndexOfAnyExcept((byte)0) >= 0) file.Write(buffer);
+            else file.Seek(buffer.Length, SeekOrigin.Current);
+            if (file.Position > file.Length) file.SetLength(file.Position);
+        }
+
+        public override void Write(byte[] buffer, int offset, int count) => Write(buffer.AsSpan(offset, count));
+        public override bool CanRead => false;
+        public override bool CanSeek => false;
+        public override bool CanWrite => true;
+        public override long Length => file.Length;
+        public override long Position { get => file.Position; set => throw new NotSupportedException(); }
+        public override void Flush() => file.Flush();
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
     }
 
     [Fact]

@@ -660,7 +660,7 @@ namespace Shorokoo
         /// naming the entry instead of feeding garbage to the safetensors parser. The Zstd-frame
         /// sniff cannot misfire on a genuine uncompressed payload: every supported data format is
         /// safetensors, whose first 8 bytes are a little-endian header length, and the Zstd magic in
-        /// bytes 0–3 would put that length beyond the 2 GiB entry cap enforced on read.
+        /// bytes 0–3 would put that length past the largest JSON header a safetensors reader takes.
         /// </summary>
         private static List<SafeTensor> ReadDataEntryPayload(
             Stream stored, long storedLength, SkptDataEntry dataEntry, string dataKey,
@@ -718,13 +718,15 @@ namespace Shorokoo
         }
 
         private static void VerifySha256(byte[] bytes, string? expected, string entryPath, string filePath)
-        {
-            if (string.IsNullOrEmpty(expected))
-                throw new InvalidDataException(
+            => VerifySha256(
+                SkptFileFormat.Sha256Hex(bytes), RequireSha256(expected, entryPath, filePath), entryPath, filePath);
+
+        private static string RequireSha256(string? expected, string entryPath, string filePath)
+            => string.IsNullOrEmpty(expected)
+                ? throw new InvalidDataException(
                     $"'{filePath}': the manifest records no sha256 for entry '{entryPath}' — " +
-                    "required by .skpt version 1.");
-            VerifySha256(SkptFileFormat.Sha256Hex(bytes), expected, entryPath, filePath);
-        }
+                    "required by .skpt version 1.")
+                : expected;
 
         private static void VerifySha256(string actual, string expected, string entryPath, string filePath)
         {

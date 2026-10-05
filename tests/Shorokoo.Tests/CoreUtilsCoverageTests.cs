@@ -519,14 +519,33 @@ public class CoreUtilsCoverageTests
         Assert.Equal((int)Elements, value.GetTensorDataAsSpan<float>().Length);
         Assert.Equal((int)Elements, value.GetTensorMutableDataAsSpan<float>().Length);
         Assert.Throws<OverflowException>(() => value.GetTensorDataAsSpan<byte>().Length);
-        Assert.Throws<NotSupportedException>(() => SkptFileFormat.EntryPayload.Produced(
-            s => SafeTensorLoader.SaveSafeTensorsToStream(s, [new SafeTensor("w", tensor, "F32", [Elements])])));
+        var counted = new LengthOnlyStream();
+        SafeTensorLoader.SaveSafeTensorsToStream(counted, [new SafeTensor("w", tensor, "F32", [Elements])]);
+        Assert.True(counted.Length > Bytes);
         Assert.Throws<ArgumentException>(
             () => backend.CreateTensorFromRawBytes(ShorokooTensorElementType.Float, new byte[16], [Elements]));
         Assert.Throws<NotSupportedException>(() => tensor.MoveToAttribute());
         Assert.False(tensor.IsDisposed);
         tensor.Delete();
         GC.KeepAlive(head);
+    }
+
+    // Counts what is written to it, and is told a payload's length rather than handed it.
+    private sealed class LengthOnlyStream : Stream, ILengthOnlyStream
+    {
+        private long _length;
+        public bool IsLengthOnly => true;
+        public void Advance(long count) => _length += count;
+        public override void Write(byte[] buffer, int offset, int count) => _length += count;
+        public override long Length => _length;
+        public override bool CanRead => false;
+        public override bool CanSeek => false;
+        public override bool CanWrite => true;
+        public override long Position { get => _length; set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
     }
 
     // Keeps what the first write hands it, and stops the writer there.

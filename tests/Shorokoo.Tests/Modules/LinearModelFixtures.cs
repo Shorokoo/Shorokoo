@@ -2694,3 +2694,15 @@ public partial class SharedElseValueInTwoIfElsesOnTheSameConditionModel
         return c.IfElse(t, a) + c.IfElse(t, a * Scalar(2f));
     }
 }
+
+/// <summary>An always-on Dropout in the then arm of an <c>IfElse</c> nested in the then arm of
+/// another, both on input conditions.</summary>
+[Module]
+public partial class DropoutInANestedIfElseArmModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t, Scalar<bit> cond, Scalar<bit> c2)
+    {
+        var dropped = Shorokoo.Modules.Layers.Dropout.Call(Scalar(0.5f), Scalar(true), t);
+        return cond.IfElse(c2.IfElse(dropped * Scalar(0f), t * Scalar(3f)), t);
+    }
+}

@@ -259,7 +259,8 @@ namespace Shorokoo.Core.Utils
                     IrVersion = model.IrVersion,
                     Opsets = [.. model.OpsetImports.Select(o => new KeyValuePair<string, long>(o.Domain, o.Version))],
                     // The model's weights are streamed into the payload from where they lie, so the
-                    // container is never held whole and has no size limit of its own.
+                    // container is never held whole; only the model besides each raw_data of at least
+                    // OnnxStreamingWriter.MinStreamedBytes is built in one array.
                     Writer = OnnxStreamingWriter.Prepare(model),
                 };
             }
@@ -389,8 +390,11 @@ namespace Shorokoo.Core.Utils
         /// the extension is normalized to .zsrk/.srk purely as a hint for humans — the
         /// extension has no parsing significance; the header records the compression.
         /// The container is streamed to the file, each weight from where it lies, so a graph's
-        /// container has no size limit: its weights may be of any size, a weight past what one
-        /// array holds included, and may total any size.
+        /// weights may be of any size, a weight past what one array holds included, and may total
+        /// any size. The model besides each tensor's <c>raw_data</c> of at least 1,024 bytes — its
+        /// structure, smaller <c>raw_data</c>, string tensors and typed data fields — is built in
+        /// one array, and a graph whose model besides those exceeds <see cref="Array.MaxLength"/>
+        /// bytes is refused with <see cref="NotSupportedException"/> before anything is written.
         /// The write is atomic: the container is staged in a <c>.tmp-</c> sibling and committed
         /// by rename, so a failed or interrupted save leaves any previous file untouched.
         /// </summary>

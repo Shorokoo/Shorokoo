@@ -217,8 +217,8 @@ namespace Shorokoo.Onnx
             long total = _skeleton.Length + _lengthBytes;
             if (total > Array.MaxLength)
                 throw new InvalidDataException(
-                    $"'{_origin}': the ONNX model holds {total:N0} bytes besides its tensors' raw_data, more than " +
-                    "one protobuf message is read into.");
+                    $"'{_origin}': the ONNX model holds {total:N0} bytes besides the raw_data of at least " +
+                    $"{MinSetAsideBytes:N0} bytes it sets aside, more than one protobuf message is read into.");
             var output = GC.AllocateUninitializedArray<byte>((int)total);
             var skeleton = _skeleton.GetBuffer();
             int from = 0, to = 0;
@@ -376,8 +376,8 @@ namespace Shorokoo.Onnx
         {
             if (_skeleton.Length + _lengthBytes + bytes.Length > Array.MaxLength)
                 throw new InvalidDataException(
-                    $"'{_origin}': the ONNX model holds more than {Array.MaxLength:N0} bytes besides its tensors' " +
-                    "raw_data, more than one protobuf message is read into.");
+                    $"'{_origin}': the ONNX model holds more than {Array.MaxLength:N0} bytes besides the raw_data " +
+                    $"of at least {MinSetAsideBytes:N0} bytes it sets aside, more than one protobuf message is read into.");
             _skeleton.Write(bytes);
         }
 

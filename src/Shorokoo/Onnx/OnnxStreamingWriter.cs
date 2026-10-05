@@ -108,9 +108,10 @@ namespace Shorokoo.Onnx
                 using var measured = ProtoBuf.Serializer.Measure(model);
                 if (measured.Length > ceiling)
                     throw new NotSupportedException(
-                        $"The ONNX model holds {measured.Length:N0} bytes besides its tensors' raw data, more than " +
-                        $"the {ceiling:N0} bytes one protobuf message is built in. Only a tensor's raw_data " +
-                        "is streamed: string tensors and typed data fields are held with the rest of the model.");
+                        $"The ONNX model holds {measured.Length:N0} bytes besides the raw_data it streams, more than " +
+                        $"the {ceiling:N0} bytes one protobuf message is built in. Only a tensor's raw_data of at least " +
+                        $"{MinStreamedBytes:N0} bytes is streamed: smaller raw_data, string tensors and typed data fields " +
+                        "are held with the rest of the model.");
                 var skeleton = new byte[measured.Length];
                 using (var buffer = new MemoryStream(skeleton))
                     measured.Serialize(buffer);

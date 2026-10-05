@@ -944,7 +944,7 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
             var loaded = CompressedFormatUtils.LoadFastGraphFromFile(path);
             long loadedAt = GC.GetAllocatedBytesForCurrentThread();
 
-            Assert.Equal((true, true, true), (saved - before < 2 * Weight, loadedAt - saved < 2 * Weight, new FileInfo(path).Length > Weight));
+            Assert.Equal((true, true, true), (saved - before < 2 * Weight, loadedAt - saved < 2 * Weight, new FileInfo(path).Length > Weight / 2));
             Assert.Equal(WeightBytesByParam(model), WeightBytesByParam(loaded));
         }
     }

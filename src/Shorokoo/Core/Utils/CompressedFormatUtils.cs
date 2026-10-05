@@ -361,8 +361,10 @@ namespace Shorokoo.Core.Utils
             GraphKind? taggedKind;
             try
             {
-                (graph, taggedKind) = OnnxModelImporter.FromModelProtoWithKindTag(
-                    OnnxStreamingReader.ReadModel(payload, maxLength, origin));
+                // The model is this load's own, so each weight's array becomes its tensor as it is.
+                var model = OnnxStreamingReader.ReadModel(payload, maxLength, origin);
+                OnnxStreamingReader.CarryRawData(model);
+                (graph, taggedKind) = OnnxModelImporter.FromModelProtoWithKindTag(model);
             }
             catch (Exception e) when (e is ProtoBuf.ProtoException
                 or EndOfStreamException

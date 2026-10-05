@@ -298,7 +298,7 @@ namespace Shorokoo.Onnx
 
         /// <summary>Whether a tensor of <paramref name="dtype"/> is a flat buffer of whole-byte
         /// elements, which is what <see cref="ComputeContext.ReadTensor"/> reads.</summary>
-        private static bool HasFlatBuffer(DType dtype)
+        internal static bool HasFlatBuffer(DType dtype)
             => !dtype.IsSameElementTypeAs(DType.Utf8) && dtype != DType.Complex64 && dtype != DType.Complex128
                 && dtype.EncodingBitCount >= 8;
 

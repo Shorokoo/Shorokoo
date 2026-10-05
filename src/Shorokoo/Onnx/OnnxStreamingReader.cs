@@ -241,6 +241,30 @@ namespace Shorokoo.Onnx
             return output;
         }
 
+        /// <summary>
+        /// Hands each tensor of <paramref name="model"/> whose <c>raw_data</c> of at least
+        /// <see cref="MinSetAsideBytes"/> is exactly its dims' worth of a flat data type that
+        /// <c>raw_data</c> as the attribute it carries (<see cref="TensorProto.Carried"/>), over
+        /// the array itself, so an import takes each weight where it lies rather than copying it.
+        /// Only for a model the caller owns outright, as <see cref="ReadModel"/> returns it:
+        /// nothing else may hold its arrays. Any other tensor keeps its <c>raw_data</c>, for the
+        /// import to read or refuse.
+        /// </summary>
+        internal static void CarryRawData(ModelProto model)
+        {
+            foreach (var tensor in OnnxExternalData.EnumerateAllTensors(model))
+            {
+                if (tensor is not { RawData: { Length: >= MinSetAsideBytes } raw, Carried: null }
+                    || tensor.data_location == TensorProto.DataLocation.External
+                    || OnnxExternalData.TryGetExpectedByteLength(tensor) != raw.Length
+                    || !OnnxExternalData.HasFlatBuffer((DType)tensor.data_type))
+                    continue;
+                Shape shape = tensor.Dims is { Length: > 0 } dims ? dims : (long[])[];
+                tensor.Carried = TensorData.NewHostTensor(shape, (DType)tensor.data_type, raw).MoveToAttribute();
+                tensor.RawData = null!;
+            }
+        }
+
         /// <summary>Gives each tensor holding a placeholder the payload it stands for.</summary>
         private void Restore(ModelProto model)
         {

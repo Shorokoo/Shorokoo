@@ -101,6 +101,18 @@ namespace Shorokoo
             return tensors;
         }
 
+        /// <summary>Test hook: the most bytes a <c>.skpt</c> model entry holds, in place of what one
+        /// array holds. Thread-scoped, so a value installed by one parallel test is invisible to
+        /// every other thread; still reset it in a <c>finally</c>.</summary>
+        [ThreadStatic]
+        internal static long? ModelEntryMaxBytesInjection;
+
+        /// <summary>The <c>.srk</c> container of <paramref name="graph"/> as the <c>.skpt</c>
+        /// model entry at <paramref name="entryPath"/>.</summary>
+        internal static byte[] SkptModelEntry(InternalComputationGraph graph, GraphKind stage, string entryPath)
+            => CompressedFormatUtils.SaveFastGraphToBinary(graph, stage, compressed: true,
+                CompressedFormatUtils.DefaultCompressionLevel, ModelEntryMaxBytesInjection ?? Array.MaxLength);
+
         /// <summary>
         /// One safetensors data entry of a <c>.skpt</c>, as it is stored. Uncompressed, it is
         /// produced straight out of the tensors' own storage as the archive is written, so writing
@@ -812,8 +824,8 @@ namespace Shorokoo
             // Serialize each training-state kind to safetensors (keyed by field name). The trainable
             // entry carries every trainable field (the authoritative source for reconstruction); the
             // model/optimizer state entries are written only when their struct is non-empty.
-            var modelBytes = CompressedFormatUtils.SaveFastGraphToBinary(
-                CheckpointBuilder.StripWeights(source, weightNodes), GraphKind.ConcreteModel, compressed: true);
+            var modelBytes = Persistence.SkptModelEntry(
+                CheckpointBuilder.StripWeights(source, weightNodes), GraphKind.ConcreteModel, SkptFileFormat.ModelEntryPath);
 
             var dataEntries = new Dictionary<string, SkptDataEntry>(StringComparer.Ordinal);
             var bodyEntries = new List<SkptFileFormat.ZipEntrySpec>
@@ -979,7 +991,7 @@ namespace Shorokoo
         {
             void AddModel(string key, string entryPath, ComputationGraph graph)
             {
-                var bytes = CompressedFormatUtils.SaveFastGraphToBinary(graph, compressed: true);
+                var bytes = Persistence.SkptModelEntry(graph.ToInternal(), graph.Kind, entryPath);
                 models[key] = new SkptModelEntry
                 {
                     Entry = entryPath,

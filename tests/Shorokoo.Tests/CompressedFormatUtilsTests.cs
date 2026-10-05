@@ -1881,6 +1881,32 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
     }
 
     [Fact]
+    public void TestASkptSaveRefusesAModelEntryPastWhatAnArrayHoldsNamingTheEntry()
+    {
+        var (model, _, _) = BuildSkptModel();
+        var checkpoint = TrainingRig.FromScratch(ScalarMultiplyModel.ComputationGraph,
+            Shorokoo.Modules.Losses.L2Loss.ComputationGraph, Shorokoo.Modules.Optimizers.AdamOptimizer.ComputationGraph,
+            [new TensorDataModelParam("input", ModelParamType.InputParam, TensorData([1L], [1f]))],
+            new Shorokoo.Modules.Optimizers.AdamOptimizerHyperparameters { LearningRate = 0.1f }).CreateInitialCheckpoint();
+        string Refusal(Action<string> save)
+        {
+            var path = P($"{Guid.NewGuid():N}.skpt");
+            Persistence.ModelEntryMaxBytesInjection = 64;
+            try { return Assert.Throws<NotSupportedException>(() => save(path)).Message; }
+            finally { Persistence.ModelEntryMaxBytesInjection = null; }
+        }
+
+        foreach (var message in (string[])[
+            Refusal(path => Persistence.From(model).WithModel().WithWeights().Save(path)),
+            Refusal(path => Persistence.From(model).WithModel().WithWeights().SaveAsDirectory(path)),
+            Refusal(path => Persistence.SaveTrainingCheckpointToSkpt(checkpoint, path))])
+        {
+            Assert.Contains(SkptFileFormat.ModelEntryPath, message);
+            Assert.DoesNotContain("SaveFastGraphToFile", message);
+        }
+    }
+
+    [Fact]
     public void TestASkptEntryReadWholeIsRefusedPastWhatAnArrayHolds()
     {
         var dir = Directory.CreateDirectory(P("whole-read.skpt")).FullName;

@@ -1207,8 +1207,8 @@ namespace Shorokoo
                 };
             }
 
-            var modelBytes = CompressedFormatUtils.SaveFastGraphToBinary(
-                StripWeights(source, weightNodes), GraphKind.ConcreteModel, compressed: true);
+            var modelBytes = Persistence.SkptModelEntry(
+                StripWeights(source, weightNodes), GraphKind.ConcreteModel, SkptFileFormat.ModelEntryPath);
 
             // Every safetensors data-tree entry is stored the same way (Persistence.SafeTensorsDataEntry):
             // STORED verbatim and aligned, produced straight from the tensors as the archive is

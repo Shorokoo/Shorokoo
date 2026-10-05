@@ -14,7 +14,9 @@ namespace Shorokoo.PyTorch;
 /// reading it again would take the interpreter lock for every question.</para>
 ///
 /// <para><b>The span accessors read the tensor's own memory.</b> A host tensor this wraps is always
-/// contiguous and owns its storage (the backend makes it so before wrapping it), and it lives for
+/// contiguous (the backend makes it so before wrapping it), and its bytes are its own: memory no
+/// other value names — a tensor of its own storage, or one a run placed in a range of a consumed
+/// tensor's memory, standing on that memory's block (<see cref="Range"/>) — and it lives for
 /// as long as this value holds its reference — so a span stays valid until the value is released,
 /// exactly as an ONNX Runtime value's does, and a caller keeps the value alive across its use of
 /// the span the same way. No lock is needed to read it: the memory is torch's, not the
@@ -28,11 +30,13 @@ public sealed class TorchTensorValue : IShorokooTensorValue
     private readonly long _byteCount;
     private readonly ShorokooTensorElementType _elementType;
     private readonly bool _isHost;
+    private readonly int _cudaDevice;
+    private HeldLease? _lease;
     private int _released;
 
     private TorchTensorValue(
         PyObject value, ShorokooOnnxValueType valueType, ShorokooTensorElementType elementType,
-        long[] shape, bool isHost, IntPtr address, long byteCount)
+        long[] shape, bool isHost, IntPtr address, long byteCount, int cudaDevice)
     {
         _value = value;
         ValueType = valueType;
@@ -41,6 +45,7 @@ public sealed class TorchTensorValue : IShorokooTensorValue
         _isHost = isHost;
         _address = address;
         _byteCount = byteCount;
+        _cudaDevice = cudaDevice;
     }
 
     /// <summary>
@@ -68,12 +73,13 @@ public sealed class TorchTensorValue : IShorokooTensorValue
         var isHost = Item<bool>(description, 3);
         var address = new IntPtr(Item<long>(description, 4));
         var byteCount = Item<long>(description, 5);
+        var cudaDevice = Item<int>(description, 6);
         return kind switch
         {
             0 => new TorchTensorValue(value, ShorokooOnnxValueType.Tensor, (ShorokooTensorElementType)code,
-                shape, isHost, address, byteCount),
+                shape, isHost, address, byteCount, cudaDevice),
             1 => new TorchTensorValue(value, ShorokooOnnxValueType.Sequence,
-                code == 0 ? emptySequenceElementType : (ShorokooTensorElementType)code, shape, true, IntPtr.Zero, 0),
+                code == 0 ? emptySequenceElementType : (ShorokooTensorElementType)code, shape, true, IntPtr.Zero, 0, -1),
             _ => throw new NotSupportedException(
                 "The PyTorch backend produced an absent optional value, which has no representation here yet."),
         };
@@ -85,6 +91,25 @@ public sealed class TorchTensorValue : IShorokooTensorValue
     {
         using var item = sequence[index];
         return item.As<T>();
+    }
+
+    /// <summary>Where a tensor's bytes start: on the host or on the card, as torch's data pointer
+    /// says; zero for a string tensor or a sequence.</summary>
+    internal IntPtr Address => _address;
+
+    /// <summary>Where this value stands on a block of memory other values stand on too, holding a
+    /// lease on it; null for a tensor of its own storage.</summary>
+    internal BlockRange? Range => _lease?.Range;
+
+    BlockRange? IShorokooTensorValue.Range => Range;
+
+    /// <summary>Makes this value one standing on <paramref name="range"/>, taking a lease on its
+    /// block, which disposing the value releases — or, where it is collected without, collecting it
+    /// (<see cref="HeldLease"/>).</summary>
+    internal void StandOn(BlockRange range)
+    {
+        range.Lease();
+        _lease = new HeldLease(range);
     }
 
     /// <summary>The Python object this wraps, refused once released: a released value's reference
@@ -109,6 +134,16 @@ public sealed class TorchTensorValue : IShorokooTensorValue
         {
             if (Volatile.Read(ref _released) != 0) throw Released();
             return _isHost;
+        }
+    }
+
+    /// <summary>The CUDA device this value's memory is on, or -1 for a value in host memory.</summary>
+    internal int CudaDevice
+    {
+        get
+        {
+            if (Volatile.Read(ref _released) != 0) throw Released();
+            return _cudaDevice;
         }
     }
 
@@ -140,6 +175,16 @@ public sealed class TorchTensorValue : IShorokooTensorValue
     {
         ThrowIfNotReadable<T>();
         return new Span<T>((void*)_address, checked((int)(_byteCount / sizeof(T))));
+    }
+
+    /// <summary>The <paramref name="count"/> bytes at <paramref name="byteOffset"/> into this
+    /// tensor's buffer, addressed from where the buffer starts, so a piece of a tensor longer than
+    /// any span is reached as one of a short tensor is.</summary>
+    unsafe Span<byte> IShorokooTensorValue.HostPiece(long byteOffset, int count)
+    {
+        ThrowIfNotReadable<byte>();
+        IShorokooTensorValue.PieceWithin(byteOffset, count, _byteCount);
+        return new Span<byte>((byte*)_address + byteOffset, count);
     }
 
     public IReadOnlyList<string> GetStringTensorData()
@@ -190,6 +235,7 @@ public sealed class TorchTensorValue : IShorokooTensorValue
     {
         if (Interlocked.Exchange(ref _released, 1) != 0) return;
         PythonRuntime.Release(_value);
+        _lease?.Release();
     }
 
     /// <summary>Marks this released and drops its reference, for a value handed into a sequence:

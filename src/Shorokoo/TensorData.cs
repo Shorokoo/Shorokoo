@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using Shorokoo.Graph;
 using Shorokoo.Core.Nodes;
 using Shorokoo.Core.Nodes.OnnxNodes;
@@ -30,7 +31,8 @@ namespace Shorokoo
         {
         }
 
-        /// <summary>The element values boxed as objects, for debugging/diagnostics.</summary>
+        /// <summary>The element values boxed as objects, for debugging/diagnostics: copied to the
+        /// host, from a card where the tensor is on one, which leaves the tensor where it is.</summary>
         public object[] DebugData
         {
             get
@@ -73,7 +75,7 @@ namespace Shorokoo
     }
 
     /// <summary>
-    /// Typed AccessMemory / AccessModifiableMemory / CopyMemory / ValueAt shortcuts mapping each
+    /// Typed AccessMemory / CopyMemory / ValueAt shortcuts mapping each
     /// IVarType to its storage primitive (e.g. <see cref="TensorData{T}"/> of bit to bool spans), so
     /// a typed tensor's elements are read without naming their type a second time.
     /// </summary>
@@ -105,31 +107,6 @@ namespace Shorokoo
         public static ReadOnlySpan<float> AccessMemory(this TensorData<float32> data) => data.AccessMemory<float>();
         /// <summary>Read-only span over the elements of a <c>float64</c> tensor as <c>double</c>.</summary>
         public static ReadOnlySpan<double> AccessMemory(this TensorData<float64> data) => data.AccessMemory<double>();
-
-        /// <summary>Writable span over the elements of a <c>int8</c> tensor as <c>sbyte</c>.</summary>
-        public static Span<sbyte> AccessModifiableMemory(this TensorData<int8> data) => data.AccessModifiableMemory<sbyte>();
-        /// <summary>Writable span over the elements of a <c>int16</c> tensor as <c>short</c>.</summary>
-        public static Span<short> AccessModifiableMemory(this TensorData<int16> data) => data.AccessModifiableMemory<short>();
-        /// <summary>Writable span over the elements of a <c>int32</c> tensor as <c>int</c>.</summary>
-        public static Span<int> AccessModifiableMemory(this TensorData<int32> data) => data.AccessModifiableMemory<int>();
-        /// <summary>Writable span over the elements of a <c>int64</c> tensor as <c>long</c>.</summary>
-        public static Span<long> AccessModifiableMemory(this TensorData<int64> data) => data.AccessModifiableMemory<long>();
-        /// <summary>Writable span over the elements of a <c>uint8</c> tensor as <c>byte</c>.</summary>
-        public static Span<byte> AccessModifiableMemory(this TensorData<uint8> data) => data.AccessModifiableMemory<byte>();
-        /// <summary>Writable span over the elements of a <c>uint16</c> tensor as <c>ushort</c>.</summary>
-        public static Span<ushort> AccessModifiableMemory(this TensorData<uint16> data) => data.AccessModifiableMemory<ushort>();
-        /// <summary>Writable span over the elements of a <c>uint32</c> tensor as <c>uint</c>.</summary>
-        public static Span<uint> AccessModifiableMemory(this TensorData<uint32> data) => data.AccessModifiableMemory<uint>();
-        /// <summary>Writable span over the elements of a <c>uint64</c> tensor as <c>ulong</c>.</summary>
-        public static Span<ulong> AccessModifiableMemory(this TensorData<uint64> data) => data.AccessModifiableMemory<ulong>();
-        /// <summary>Writable span over the elements of a <c>float16</c> tensor as <c>Float16</c>.</summary>
-        public static Span<Float16> AccessModifiableMemory(this TensorData<float16> data) => data.AccessModifiableMemory<Float16>();
-        /// <summary>Writable span over the elements of a <c>bfloat16</c> tensor as <c>BFloat16</c>.</summary>
-        public static Span<BFloat16> AccessModifiableMemory(this TensorData<bfloat16> data) => data.AccessModifiableMemory<BFloat16>();
-        /// <summary>Writable span over the elements of a <c>float32</c> tensor as <c>float</c>.</summary>
-        public static Span<float> AccessModifiableMemory(this TensorData<float32> data) => data.AccessModifiableMemory<float>();
-        /// <summary>Writable span over the elements of a <c>float64</c> tensor as <c>double</c>.</summary>
-        public static Span<double> AccessModifiableMemory(this TensorData<float64> data) => data.AccessModifiableMemory<double>();
 
         /// <summary>The elements of a <c>bit</c> tensor copied into a <c>bool</c> array the caller owns.</summary>
         public static bool[] CopyMemory(this TensorData<bit> data) => data.CopyMemory<bool>();
@@ -186,12 +163,6 @@ namespace Shorokoo
         public static double ValueAt(this TensorData<float64> data, int index) => data.ValueAt<double>(index);
     }
 
-    /// <summary>
-    /// Fills a tensor's buffer in place. Used by <see cref="TensorData.WriteMemory{V}"/>, which
-    /// keeps the tensor reachable for the length of the call — which a bare span does not.
-    /// </summary>
-    public delegate void SpanWriter<V>(Span<V> destination) where V : unmanaged;
-
     /// <summary>A data value with an associated <see cref="DType"/>.</summary>
     public interface IData
     {
@@ -213,14 +184,18 @@ namespace Shorokoo
     /// contexts it is attached to. A context keeps its own weak list of those, for its own
     /// purposes; attachment never keeps a tensor alive and never ends its life.</para>
     ///
+    /// <para><b>Its contents are fixed when it is built.</b> Every accessor reads; none writes. A
+    /// tensor with other contents is the output of a run — a computation graph is how data
+    /// changes.</para>
+    ///
     /// <para><b>A tensor you make dies in exactly three ways</b>: it is deleted
     /// (<see cref="Delete"/>, <see cref="Dispose"/>, <see cref="TryDelete"/>,
     /// <see cref="DeleteAsync"/>), it is consumed by a run — fed to it as it is, which is the
     /// default, or through <see cref="TryConsume"/> — or it is moved into an attribute
     /// (<see cref="MoveToAttribute"/>). Two kinds of tensor belong to something else and end with
     /// it: a copy a run made of a tensor it could not read where it was, which ends when that tensor
-    /// is written to or dies or lets its copies go, and an element of a list sequence, which ends
-    /// with its sequence.
+    /// dies or lets its copies go, and an element of a list sequence, which ends with its
+    /// sequence.
     /// Nothing else ends a tensor's life — disposing a context it is attached to does not — and a
     /// tensor nothing references is reclaimed like any other object, its memory released through its
     /// backend's ordinary path. A dead tensor's shape, dtype, <see cref="ToString"/> and where its
@@ -248,7 +223,8 @@ namespace Shorokoo
         /// <summary>The element data type.</summary>
         public DType DType { get; }
 
-        /// <summary>The raw storage bytes boxed as objects, for debugging/diagnostics.</summary>
+        /// <summary>The raw storage bytes boxed as objects, for debugging/diagnostics: copied to the
+        /// host, from a card where the tensor is on one, which leaves the tensor where it is.</summary>
         public virtual object[] Data
         {
             get
@@ -306,6 +282,14 @@ namespace Shorokoo
         internal virtual byte[]? OwnBytes => null;
 
         /// <summary>
+        /// The block this tensor's memory is a range of, where it shares one with other tensors —
+        /// an output a run placed in the memory of an input it consumed (see
+        /// <see cref="Core.Backends.SharedBlock"/>) — or null where the tensor owns its allocation
+        /// whole. A device-memory budget counts the block, once, rather than this tensor's bytes.
+        /// </summary>
+        internal virtual Core.Backends.SharedBlock? Block => null;
+
+        /// <summary>
         /// The bytes this tensor's elements take up where they are: its element count at its
         /// element's storage width, rounded up to a whole byte. What a compute context's
         /// device-memory budget counts it as.
@@ -344,20 +328,6 @@ namespace Shorokoo
             catch (UnsupportedDTypeException) { return 0; }
         }
 
-        // The arena this tensor was allocated out of, where it is an output a run left in device
-        // memory: a token standing for the session that ran it (see CompiledGraph), and null for
-        // everything else. A run on that same session counts it inside the session's arena limit,
-        // where it is, rather than against the room the limit is cut from.
-        private object? _arena;
-
-        /// <summary>The arena of the session whose run left this tensor in device memory, or
-        /// null.</summary>
-        internal object? Arena => Volatile.Read(ref _arena);
-
-        /// <summary>Records the arena a run's output was allocated out of. Once, as the output is
-        /// adopted and before anything else can see it.</summary>
-        internal void RecordArena(object arena) => Volatile.Write(ref _arena, arena);
-
         /// <summary>"shape:dtype" diagnostic string.</summary>
         public override string ToString()
         {
@@ -365,80 +335,57 @@ namespace Shorokoo
             return $"{shapeStr}:{this.DType.ToString()}";
         }
 
-        /// <summary>Exposes the underlying storage as a writable byte span. Same lifetime rule as
-        /// <see cref="AccessRawMemory"/>.</summary>
-        public abstract Span<byte> AccessModifiableRawMemory();
-
         /// <summary>
-        /// Exposes the underlying storage as a read-only byte span.
+        /// The storage as a read-only byte span, wherever the tensor is.
         ///
-        /// <para>The span is a window onto the tensor's own storage, not a copy, and nothing ties
-        /// its lifetime to the tensor's. It is valid only while the tensor is alive AND still
-        /// reachable: deleting the tensor frees what the span points at (later reads through the
-        /// tensor itself throw, but the span has no such guard), and so does letting the tensor
-        /// become unreachable, since its storage is released when the runtime value behind it is
-        /// finalized. Being in scope is not being reachable — a local is retired at its last read,
-        /// which is the call that produced the span. Copy out of the span before the tensor's last
-        /// use, or keep the tensor alive across it (Shorokoo/Shorokoo#178).</para>
+        /// <para>In host memory (<see cref="IsHostResident"/>) the span is a window onto the
+        /// tensor's own storage, not a copy, and nothing ties its lifetime to the tensor's. It is
+        /// valid only while the tensor is alive AND still reachable: deleting the tensor frees what
+        /// the span points at (later reads through the tensor itself throw, but the span has no such
+        /// guard), and so does letting the tensor become unreachable, since its storage is released
+        /// when the runtime value behind it is finalized. Being in scope is not being reachable — a
+        /// local is retired at its last read, which is the call that produced the span. Copy out of
+        /// the span before the tensor's last use, or keep the tensor alive across it
+        /// (Shorokoo/Shorokoo#178).</para>
+        ///
+        /// <para>In a device's memory the contents are first copied to host memory, into a managed
+        /// array, and the span is over that copy. A span over a managed array keeps the array alive
+        /// while the span is in use, so this one is valid however the tensor fares. The tensor holds
+        /// the copy weakly and hands the same one out to every later call, since its contents never
+        /// change: the copy lives while a span over it or anything else uses it, and until the next
+        /// garbage collection after that, and a call once it has been collected copies again. A
+        /// loop reading one element per call copies the tensor once, not once per element.</para>
+        ///
+        /// <para>Read-only either way: a tensor's contents are fixed when it is built.</para>
         /// </summary>
-        public abstract ReadOnlySpan<byte> AccessRawMemory();
+        /// <exception cref="InvalidOperationException">The tensor holds strings, which have no flat
+        /// buffer; or it is in device memory whose producer was not recorded
+        /// (<see cref="Create(Shape, DType, IShorokooTensorValue)"/>), so nothing can copy it
+        /// out.</exception>
+        public ReadOnlySpan<byte> AccessRawMemory()
+        {
+            ThrowIfDisposed();
+            return IsHostResident ? AccessRawStorage() : HostCopy();
+        }
+
+        /// <summary>The storage's own bytes as a read-only span, for a tensor whose storage is host
+        /// memory.</summary>
+        private protected abstract ReadOnlySpan<byte> AccessRawStorage();
 
         /// <summary>
         /// The storage bytes copied into an array the caller owns, valid however long the caller
-        /// keeps it — <see cref="AccessRawMemory"/> plus the copy, with the tensor kept alive
-        /// across it. Prefer this wherever the whole buffer is being copied anyway.
+        /// keeps it — <see cref="AccessRawMemory"/> plus the copy, with the tensor kept alive across
+        /// it. A tensor in a device's memory stays where it is, alive, and its contents are copied
+        /// once: out of the host copy <see cref="AccessRawMemory"/> holds where it is still alive,
+        /// and otherwise straight off the device into the array returned. Prefer this wherever the
+        /// whole buffer is being copied anyway.
         /// </summary>
-        public byte[] CopyRawMemory() => Reading(() => AccessRawMemory().ToArray());
-
-        /// <summary>
-        /// Exposes the elements as a writable span of V, V being this tensor's element storage type
-        /// — <c>float</c> for float32, <c>bool</c> for bit, <c>long</c> for int64. The span points
-        /// straight into the tensor's storage, so it is valid only while the tensor is — see
-        /// <see cref="AccessRawMemory"/>. <see cref="WriteMemory{V}"/> is the safe form.
-        /// </summary>
-        /// <exception cref="InvalidCastException">V is not this tensor's element storage type.</exception>
-        public Span<V> AccessModifiableMemory<V>() where V : unmanaged
+        public byte[] CopyRawMemory() => Reading(() =>
         {
             ThrowIfDisposed();
-            CheckElementType<V>();
-            return AccessModifiableElements<V>();
-        }
-
-        /// <summary>
-        /// Fills the buffer through <paramref name="write"/>, with the tensor kept alive for the
-        /// length of the call. This is <see cref="AccessModifiableMemory{V}"/> done safely, and it
-        /// is the write counterpart of <see cref="CopyMemory{V}"/>.
-        ///
-        /// <para>Taking the span is the tensor's last read, so a buffer filled through a bare
-        /// <c>AccessModifiableMemory</c> races the collection that frees what the span points at:
-        /// the tensor is unreachable from that call onwards, and on a backend-allocated buffer the
-        /// runtime value's finalizer hands the block back while the caller is still writing into
-        /// it (Shorokoo/Shorokoo#178). Scope is not reachability. Whatever fills a tensor should
-        /// fill it here.</para>
-        ///
-        /// <para>The tensor is held for the write as a run holds what it reads: a run that would
-        /// consume it, and a delete, are refused until the write is done, rather than taking the
-        /// memory from under it.</para>
-        /// </summary>
-        /// <exception cref="ArgumentNullException"><paramref name="write"/> is null.</exception>
-        /// <exception cref="InvalidCastException">V is not this tensor's element storage type.</exception>
-        /// <exception cref="ObjectDisposedException">The tensor is dead.</exception>
-        /// <exception cref="InvalidOperationException">The tensor is a copy a run made of another to
-        /// read it, which runs read again in that tensor's place.</exception>
-        public void WriteMemory<V>(SpanWriter<V> write) where V : unmanaged
-        {
-            ArgumentNullException.ThrowIfNull(write);
-            Reading(() =>
-            {
-                write(AccessModifiableMemory<V>());
-                // Again, now the write is done: a run that copied the contents while it was under way
-                // holds what was there partway, and that copy would be read by every later run as if
-                // it were what was written.
-                Written();
-                return 0;
-            }, OutsideARun.Writing);
-            GC.KeepAlive(this);
-        }
+            if (IsHostResident) return AccessRawStorage().ToArray();
+            return HeldHostCopy() is { } held ? held.AsSpan().ToArray() : CopyContentBytes();
+        });
 
         /// <summary>
         /// The elements copied into an array of V the caller owns, valid however long the caller
@@ -446,41 +393,134 @@ namespace Shorokoo
         /// <see cref="CopyRawMemory"/> is the same copy as bytes, for any dtype. This is
         /// <see cref="AccessMemory{V}"/> plus the copy, done safely: taking a span is the tensor's
         /// last read, so copying out of one by hand races the collection that frees what it points
-        /// at (Shorokoo/Shorokoo#178). Prefer this wherever the whole buffer is being copied anyway.
+        /// at (Shorokoo/Shorokoo#178). A tensor in a device's memory stays where it is, alive, and its
+        /// contents are copied once where its backend can copy them straight into the array
+        /// returned. Prefer this wherever the whole buffer is being copied anyway.
         /// </summary>
         /// <exception cref="InvalidCastException">V is not this tensor's element storage type.</exception>
-        public V[] CopyMemory<V>() where V : unmanaged => Reading(() => AccessMemory<V>().ToArray());
+        public V[] CopyMemory<V>() where V : unmanaged => Reading(() =>
+        {
+            ThrowIfDisposed();
+            CheckElementType<V>();
+            // Through the host copy wherever there is no single copy to make straight into the array:
+            // a tensor the host reads, one whose host copy is already held, a string tensor, and one
+            // nothing can copy out at all, which is refused there in its own words.
+            if (IsHostResident || HeldHostCopy() is not null || DType.IsSameElementTypeAs(DType.Utf8) || !CanBeCopiedOut)
+                return AccessMemory<V>().ToArray();
+            var elements = new V[ContentByteLength / System.Runtime.CompilerServices.Unsafe.SizeOf<V>()];
+            return TryCopyContentRange(0, MemoryMarshal.AsBytes(elements.AsSpan()))
+                ? elements
+                : AccessMemory<V>().ToArray();
+        });
 
         /// <summary>
         /// One element, read safely — the single-value counterpart of <see cref="CopyMemory{V}"/>,
         /// for the very common case of a scalar or a leading element. Reading
         /// <c>AccessMemory&lt;V&gt;()[i]</c> by hand indexes a span whose tensor the JIT may already
-        /// have retired (Shorokoo/Shorokoo#178).
+        /// have retired (Shorokoo/Shorokoo#178). A tensor in a device's memory is read through the
+        /// host copy <see cref="AccessMemory{V}"/> holds, and stays where it is.
         /// </summary>
         /// <exception cref="InvalidCastException">V is not this tensor's element storage type.</exception>
         public V ValueAt<V>(int index) where V : unmanaged => Reading(() => AccessMemory<V>()[index]);
 
         /// <summary>
-        /// Exposes the elements as a read-only span of V, V being this tensor's element storage
-        /// type. The span points straight into the tensor's storage, so it is valid only while the
-        /// tensor is — see <see cref="AccessRawMemory"/>. <see cref="CopyMemory{V}"/> and
-        /// <see cref="ValueAt{V}"/> are the safe forms.
+        /// The elements as a read-only span of V, V being this tensor's element storage type —
+        /// <c>float</c> for float32, <c>bool</c> for bit, <c>long</c> for int64 — wherever the
+        /// tensor is: over its own storage in host memory, and over a host copy of its contents in a
+        /// device's memory. <see cref="AccessRawMemory"/> says how long either is valid and what is
+        /// held. <see cref="CopyMemory{V}"/> and <see cref="ValueAt{V}"/> are the safe forms.
         /// </summary>
         /// <exception cref="InvalidCastException">V is not this tensor's element storage type.</exception>
         public ReadOnlySpan<V> AccessMemory<V>() where V : unmanaged
         {
             ThrowIfDisposed();
             CheckElementType<V>();
-            return AccessElements<V>();
+            return IsHostResident ? AccessElements<V>() : MemoryMarshal.Cast<byte, V>(HostCopy());
         }
 
-        /// <summary>The storage as a writable span of V, V already checked to be the element
-        /// storage type.</summary>
-        private protected abstract Span<V> AccessModifiableElements<V>() where V : unmanaged;
-
         /// <summary>The storage as a read-only span of V, V already checked to be the element
-        /// storage type.</summary>
+        /// storage type, for a tensor whose storage is host memory.</summary>
         private protected abstract ReadOnlySpan<V> AccessElements<V>() where V : unmanaged;
+
+        // The host copy of a tensor in a device's memory that AccessMemory and AccessRawMemory read
+        // through, held weakly (see AccessRawMemory). Null until the first such read.
+        private WeakReference<byte[]>? _hostCopy;
+
+        /// <summary>
+        /// This tensor's contents in host memory, for a tensor in a device's memory: the copy an
+        /// earlier call made where it is still alive, and otherwise a fresh one, copied out under a
+        /// reader lock by the backend that allocated the memory and held weakly from then on. Two
+        /// calls racing may each make one; both are the same contents.
+        /// </summary>
+        private byte[] HostCopy()
+        {
+            if (HeldHostCopy() is { } held) return held;
+            var bytes = Reading(CopyContentBytes);
+            Volatile.Write(ref _hostCopy, new WeakReference<byte[]>(bytes));
+            return bytes;
+        }
+
+        /// <summary>The host copy an earlier read of a tensor in a device's memory made, where it is
+        /// still alive; null where there is none.</summary>
+        private byte[]? HeldHostCopy()
+            => Volatile.Read(ref _hostCopy) is { } held && held.TryGetTarget(out var bytes) ? bytes : null;
+
+        /// <summary>
+        /// Copies <paramref name="destination"/>'s length of this tensor's contents, starting
+        /// <paramref name="byteOffset"/> bytes in, into <paramref name="destination"/>: out of its
+        /// own storage where the host reads it, and otherwise through the backend that made its
+        /// memory, which copies just that range off the device. False, having copied nothing, where
+        /// that backend cannot copy part of a value; the caller then reads the contents whole.
+        /// Without the liveness check: the caller holds this tensor's lock.
+        /// </summary>
+        private protected virtual bool TryCopyContentRange(long byteOffset, Span<byte> destination)
+        {
+            AccessRawStorage().Slice(checked((int)byteOffset), destination.Length).CopyTo(destination);
+            // The span is a window onto storage this tensor owns and roots nothing itself
+            // (Shorokoo/Shorokoo#178).
+            GC.KeepAlive(this);
+            return true;
+        }
+
+        /// <summary>
+        /// Copies the rows <paramref name="rows"/> of this tensor, each <paramref name="rowBytes"/>
+        /// bytes of its contents, into <paramref name="destination"/> one after the other, under a
+        /// reader lock for the length of the copy. Rows that follow one another in the tensor are
+        /// copied as one range, so a run of them costs one copy wherever the tensor is; a tensor in
+        /// a device's memory has only those rows copied off it, never its whole contents. False,
+        /// having copied nothing that counts, where the backend that made its memory cannot copy
+        /// part of a value; the caller then reads the contents whole.
+        /// </summary>
+        /// <exception cref="ObjectDisposedException">The tensor is dead.</exception>
+        internal bool TryCopyRows(int[] rows, int rowBytes, Span<byte> destination)
+        {
+            _life.AcquireReadLock(OutsideARun.CopyingOut);
+            try
+            {
+                ThrowIfDisposed();
+                for (int k = 0; k < rows.Length;)
+                {
+                    var run = 1;
+                    while (k + run < rows.Length && rows[k + run] == rows[k] + run) run++;
+                    var piece = destination.Slice(k * rowBytes, run * rowBytes);
+                    if (!TryCopyContentRange((long)rows[k] * rowBytes, piece))
+                    {
+                        // A backend answers for a value, not for a piece of it: one that copied the
+                        // first rows and declines later ones has failed, not declined.
+                        if (k == 0) return false;
+                        throw new InvalidOperationException(
+                            $"{AllocatingBackend.Description} copied the first rows of {Describe()} out "
+                            + "of its memory and then declined the rest.");
+                    }
+                    k += run;
+                }
+                return true;
+            }
+            finally
+            {
+                _life.ReleaseReadLock(OutsideARun.CopyingOut);
+            }
+        }
 
         /// <summary>
         /// Throws unless V is the CLR type this tensor's elements are stored as: one per dtype, and
@@ -523,13 +563,14 @@ namespace Shorokoo
         }
 
         /// <summary>
-        /// Whether this tensor's storage is host memory, so the <c>Access…Memory</c> accessors
-        /// may be called. Like every path to the elements it throws once the tensor is dead, rather
-        /// than answering about storage that is gone — ask <see cref="IsDisposed"/> first if a
-        /// tensor may have died. It is <c>false</c> for a tensor an execution provider produced in
-        /// its own memory, or one put there by <see cref="To"/> or <see cref="CopyTo"/> on a device
-        /// context; reading such a tensor throws, and <see cref="ToHost"/> is what brings one back
-        /// to the host.
+        /// Whether this tensor's storage is host memory, so <see cref="AccessMemory{V}"/> and
+        /// <see cref="AccessRawMemory"/> hand out spans over the storage itself rather than over a
+        /// host copy of it. Like every path to the elements it throws once the tensor is dead, rather
+        /// than answering about storage that is gone — ask <see cref="IsDisposed"/> first if a tensor
+        /// may have died. It is <c>false</c> for a tensor a run left in a device's memory, or one put
+        /// there by <see cref="To"/> or <see cref="CopyTo"/> on a device context. Every read of such
+        /// a tensor's values copies them to the host and leaves it where it is;
+        /// <see cref="ToHost"/> makes a copy of the whole tensor in host memory.
         /// </summary>
         public virtual bool IsHostResident
         {
@@ -643,7 +684,7 @@ namespace Shorokoo
         /// Returns the backing backend-runtime tensor value, on the process-wide backend;
         /// throws if this instance has none and none can be built.
         /// </summary>
-        public IShorokooTensorValue ToTensorValue() => ToTensorValue(DefaultBackend.Instance);
+        internal IShorokooTensorValue ToTensorValue() => ToTensorValue(DefaultBackend.Instance);
 
         /// <summary>
         /// This tensor as a value of <paramref name="backend"/>'s runtime. A tensor that already
@@ -706,7 +747,7 @@ namespace Shorokoo
     }
 
     /// <summary>TensorData backed by a backend-runtime tensor value.</summary>
-    public interface IOnnxData
+    internal interface IOnnxData
     {
         /// <summary>The backing backend-runtime tensor value.</summary>
         public IShorokooTensorValue Value { get; }
@@ -726,7 +767,7 @@ namespace Shorokoo
         /// <see cref="TensorData.AllocatingBackend"/> when the tensor dies, and nothing else may hold
         /// or free it (Shorokoo/Shorokoo#180).
         /// </summary>
-        public IShorokooTensorValue Value
+        internal IShorokooTensorValue Value
         {
             get
             {
@@ -734,6 +775,9 @@ namespace Shorokoo
                 return backing;
             }
         }
+
+        /// <inheritdoc/>
+        IShorokooTensorValue IOnnxData.Value => Value;
 
         /// <summary>
         /// Creates TensorData of the given shape around an existing runtime tensor value, without
@@ -772,9 +816,9 @@ namespace Shorokoo
         /// producer to ask.
         ///
         /// <para>That order matters. Letting the backend answer outright would label a genuinely
-        /// host-readable value — a device session's ordinary output, which ONNX Runtime fetches to
-        /// the host — as living on the card it came from, and every later hand-off of it would copy
-        /// bytes that were already where they were wanted.</para>
+        /// host-readable value — a string tensor a device session produced, which ONNX Runtime keeps
+        /// in host memory — as living on the card it came from, and every later hand-off of it would
+        /// copy bytes that were already where they were wanted.</para>
         /// </summary>
         private static MemorySpace SpaceOf(IShorokooTensorValue value, IShorokooBackend allocatingBackend)
         {
@@ -785,6 +829,9 @@ namespace Shorokoo
 
         /// <inheritdoc/>
         private protected override void ReleaseMemory() => AllocatingBackend.Release(backing);
+
+        /// <inheritdoc/>
+        internal override Core.Backends.SharedBlock? Block => backing.Range?.Block;
 
         /// <inheritdoc/>
         private protected override IShorokooTensorValue ValueFor(IShorokooBackend backend) => backing;
@@ -816,6 +863,21 @@ namespace Shorokoo
         }
 
         /// <inheritdoc/>
+        private protected override bool TryCopyContentRange(long byteOffset, Span<byte> destination)
+        {
+            // A host value is read through the piece of its buffer it addresses, which reaches past
+            // 2 GiB as no span over the whole buffer does.
+            if (backing.IsHostAccessible)
+                backing.HostPiece(byteOffset, destination.Length).CopyTo(destination);
+            else if (!AllocatingBackend.TryCopyTensorRangeToHost(backing, byteOffset, destination))
+                return false;
+            // Taking the piece, or the pointer the backend copies from, is the value's last read
+            // (Shorokoo/Shorokoo#178).
+            GC.KeepAlive(backing);
+            return true;
+        }
+
+        /// <inheritdoc/>
         private protected override IReadOnlyList<string> CopyContentStrings()
             => backing.IsHostAccessible
                 ? backing.GetStringTensorData()
@@ -826,6 +888,38 @@ namespace Shorokoo
                     $"This tensor ({Shape}:{DType}) lives in the execution provider's own memory, "
                     + "not host memory, so its elements cannot be read here. ToHost() takes a copy "
                     + "in host memory.");
+
+        /// <summary>
+        /// Laid out from the element type and shape, wherever the value is, rather than read off a
+        /// span over its storage: a span's length is an <see cref="int"/>, so no span measures a
+        /// tensor past 2 GiB.
+        /// </summary>
+        internal override long ContentByteLength
+        {
+            get
+            {
+                var value = this.Value;
+                return TensorElementLayout.ByteLength(value.ElementType, value.Shape);
+            }
+        }
+
+        /// <summary>
+        /// The storage's own bytes where the host can read them all through one span, and otherwise
+        /// the value streamed through one bounded buffer by the backend that made it — out of the
+        /// provider's memory, or out of host memory longer than one span reaches.
+        /// </summary>
+        private protected override void WriteContentBytes(Stream destination)
+        {
+            var length = ContentByteLength;
+            if (backing.IsHostAccessible && length <= int.MaxValue)
+            {
+                destination.Write(backing.GetTensorDataAsSpan<byte>());
+                GC.KeepAlive(backing);
+                return;
+            }
+            StagedReadBack.Write(AllocatingBackend, backing, length, destination);
+            GC.KeepAlive(backing);
+        }
 
         /// <inheritdoc/>
         public override bool IsHostResident => this.Value.IsHostAccessible;
@@ -839,22 +933,7 @@ namespace Shorokoo
         private IShorokooTensorValue HostValue => this.Value.IsHostAccessible ? this.Value
             : throw new InvalidOperationException(
                 $"This tensor ({this.Shape}:{this.DType}) lives in the execution provider's own " +
-                "memory, not host memory, so its contents cannot be read here. ToHost() takes a " +
-                "copy in host memory; a ResidentTrainingRun, which keeps training state on the " +
-                "device between steps, brings its state home with StepToCheckpoint(...) on the " +
-                "step you want to read or save.");
-
-        /// <summary>
-        /// A writable span over the elements. Taking it retires every copy a run made of this
-        /// tensor, since the contents they were copied from are about to change: the next run makes
-        /// a fresh one, and a run still reading an old copy finishes on it.
-        /// </summary>
-        private protected override Span<V> AccessModifiableElements<V>()
-        {
-            var value = this.HostValue;
-            Written();
-            return value.GetTensorMutableDataAsSpan<V>();
-        }
+                "memory, not host memory, so no span can point into its storage.");
 
         /// <inheritdoc/>
         private protected override ReadOnlySpan<V> AccessElements<V>()
@@ -862,16 +941,8 @@ namespace Shorokoo
             return this.HostValue.GetTensorDataAsSpan<V>();
         }
 
-        /// <summary>A writable byte span over the storage, retiring the copies runs made of this
-        /// tensor as <see cref="TensorData.AccessModifiableMemory{V}"/> does.</summary>
-        public override Span<byte> AccessModifiableRawMemory()
-        {
-            var value = this.HostValue;
-            Written();
-            return value.GetTensorMutableDataAsSpan<byte>();
-        }
         /// <inheritdoc/>
-        public override ReadOnlySpan<byte> AccessRawMemory()
+        private protected override ReadOnlySpan<byte> AccessRawStorage()
         {
             return this.HostValue.GetTensorDataAsSpan<byte>();
         }
@@ -879,6 +950,8 @@ namespace Shorokoo
         // There is deliberately no finalizer -- one here could only release the backing value,
         // and a finalizer must not touch another managed object that may already have been
         // finalized itself. The backing value has its own finalizer, which is what reclaims a
-        // tensor nobody deletes (Shorokoo/Shorokoo#180).
+        // tensor nobody deletes (Shorokoo/Shorokoo#180); a value standing on a shared block holds
+        // its lease on its range in an object of its own that releases it as it is collected
+        // (see HeldLease).
     }
 }

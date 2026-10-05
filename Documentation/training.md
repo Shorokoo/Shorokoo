@@ -10,9 +10,10 @@ Related: [defining-models.md](defining-models.md) · [nn-library.md](nn-library.
   trainable step. You never write backward passes. A rig built with
   `trainingBackend: TrainingBackend.Native` leaves the gradient to the backend that runs the step —
   see [training-backends.md](training-backends.md).
-- `TrainStep` moves the whole training state through host memory every step, which dominates on a
-  GPU; run long loops with `rig.BeginResidentRun()` (or `Fit` / `Train`, which use one) — see
-  [Keeping training state on the device](#keeping-training-state-on-the-device).
+- A step leaves the training state where it ran — on a GPU, the card's memory — so nothing
+  crosses the bus between steps; reading a state tensor's values copies them to the host and
+  leaves it there. `rig.BeginResidentRun()` (which `Fit` / `Train` use) also owns the state between
+  steps — see [Keeping training state on the device](#keeping-training-state-on-the-device).
 - A step **consumes** what it is fed as it is (the checkpoint's state and the batch), so
   `cp = rig.TrainStep(cp, x, y)` releases superseded state as it runs. Feed `cp.Shared()` /
   `x.Shared()` to keep something past the step. `CreateInitialCheckpoint()` returns fresh copies
@@ -388,20 +389,26 @@ public TrainingResult Fit(
     TensorDataStruct[] trainingInputs,
     TensorDataStruct[] trainingOutputs,
     int numEpochs,
-    TrainingCheckpoint? initialCheckpoint = null); // defaults to CreateInitialCheckpoint()
+    TrainingCheckpoint? initialCheckpoint = null,  // defaults to CreateInitialCheckpoint()
+    Action<TrainingStepReport>? onStep = null,     // see "Stopping and watching a run"
+    CancellationToken cancellationToken = default);
 
 // The loader owns the batch stream; step / epoch / batch advance for you.
 public TrainingResult Fit(
     IDataLoader loader,
     int numEpochs,
-    TrainingCheckpoint? initialCheckpoint = null); // defaults to CreateInitialCheckpoint()
+    TrainingCheckpoint? initialCheckpoint = null,  // defaults to CreateInitialCheckpoint()
+    Action<TrainingStepReport>? onStep = null,
+    CancellationToken cancellationToken = default);
 
 // The array Fit with the checkpoint first and required (not interchangeable argument order).
 public TrainingResult Train(
     TrainingCheckpoint initialCheckpoint,
     TensorDataStruct[] trainingInputs,
     TensorDataStruct[] trainingOutputs,
-    int numEpochs);
+    int numEpochs,
+    Action<TrainingStepReport>? onStep = null,
+    CancellationToken cancellationToken = default);
 
 // Keeps training state on the device — see "Keeping training state on the device".
 // The initial checkpoint is fed to the first step as TrainStep feeds one.
@@ -418,12 +425,15 @@ public sealed class ResidentTrainingRun : IDisposable
     public float Step(IDataLoader loader);                              // draws loader.Next()
     public float Step(DataBatch batch);                                 // a batch you drew yourself
 
-    // One step that also brings the state to the host as a checkpoint.
+    // One step that also hands out the state as a checkpoint, left where the step put it.
     public TrainingCheckpoint StepToCheckpoint(IData trainingInput, IData trainingTarget);
     public TrainingCheckpoint StepToCheckpoint(IData hyperparameters,
                                                IData trainingInput, IData trainingTarget);
     public TrainingCheckpoint StepToCheckpoint(IDataLoader loader);
     public TrainingCheckpoint StepToCheckpoint(DataBatch batch);
+
+    // The current state as a checkpoint, between steps: no step, no copy.
+    public TrainingCheckpoint TakeCheckpoint();
 
     public long CurrentStep { get; }   // the Step the run's last checkpoint carries; next is +1
     // Last step's values, host-side (no download).
@@ -458,8 +468,8 @@ releases the copies of its **batch** as it returns, success or failure, so a `.S
 not held a second time (on a card, not uploaded whole); each step copies its batch afresh. Copies of
 the **checkpoint's state** are kept: a checkpoint fed `.Shared()` on a card keeps a copy on the card
 while it lives, so drop kept checkpoints when done. In a resident run, a checkpoint it does not own
-(the one you began from `.Shared()`, or one `StepToCheckpoint` returned) is read by one step only,
-which releases its copies.
+(the one you began from `.Shared()`, or one `StepToCheckpoint` or `TakeCheckpoint` handed out) is
+read by one step only, which releases its copies.
 
 - **A checkpoint** is fed as its `FeedMode` says. `null` (every checkpoint a step or load returns)
   is consumed. `cp.Shared()` returns a checkpoint over the same tensors to be read, and
@@ -485,7 +495,8 @@ which releases its copies.
   `rig.InputDef.FromOrderedData(tokens, mask.Shared())` keeps the mask and consumes the tokens. A
   field given `.Shared()` is always read; a struct fed `.Shared()` has every field read; otherwise
   each field is fed as given, or as the struct is. `Fields` and the indexer return the tensor
-  itself; `To`, `CopyTo`, `ToHost` and `rig.AdoptCheckpoint` keep each field's mode.
+  itself; `To`, `CopyTo`, `ToHost` and `rig.AdoptCheckpoint` keep each field's mode, and a
+  checkpoint's `ToHost()` keeps its `FeedMode`.
 - **Runtime hyperparameters** are fed like a batch. `MakeHyperparameters` builds a fresh struct and
   copies the tensors given to it.
 - **`Fit` and `Train` over arrays read their batches** and feed the initial checkpoint like
@@ -497,42 +508,112 @@ which releases its copies.
 
 ### Keeping training state on the device
 
-`TrainStep` returns a host copy of every parameter, model state and optimizer state and takes them
-back next call. On CPU that is free; on a GPU the whole state crosses the bus twice per step, so
-step time tracks parameter count rather than FLOPs. `BeginResidentRun` keeps the state where the
-execution provider produced it:
+A step's outputs stay where the step ran, so `TrainStep` returns a checkpoint whose state is in
+the run's memory — on a GPU, the card's — and the next step reads it there: the state does not
+cross the bus between steps. `BeginResidentRun` keeps the state there too, and also owns it between
+steps, releasing each step's state as the next one supersedes it; its checkpoints keep the state
+where it is:
 
 ```csharp
 using var run = rig.BeginResidentRun();
 for (int step = 0; step < 50_000; step++)
 {
     if (step % 1_000 == 999)
-        run.StepToCheckpoint(loader).Save($"ckpt-{step}.safetensors");  // this step transfers
+        run.StepToCheckpoint(loader).Save($"ckpt-{step}.safetensors");  // saved from the card
     else
-        run.Step(loader);                                               // no transfer
+        run.Step(loader);                                               // loss only
 }
 ```
 
 - **`Step`** returns only the loss.
-- **`StepToCheckpoint`** runs a step (use it *instead of* `Step`) and returns the state as an
-  ordinary `TrainingCheckpoint`. Use it on every step you want a checkpoint at, including the last.
-- **`Dispose`** discards what the run still holds; checkpoints it already returned stay valid.
+- **`StepToCheckpoint`** runs a step (use it *instead of* `Step`) and hands out the state as an
+  ordinary `TrainingCheckpoint`, its tensors left where the step put them: on a GPU, the card's
+  memory. Nothing is copied to the host.
+- **`TakeCheckpoint`** hands out the current state as a checkpoint between steps, without running a
+  step and without copying; before the first step it is the checkpoint the run began from. This is
+  how a loop that stops (cancelled, or satisfied) keeps what it trained:
+
+  ```csharp
+  using var run = rig.BeginResidentRun();
+  for (int i = 0; i < steps && !satisfied; i++) run.Step(loader);
+  TrainingCheckpoint checkpoint = run.TakeCheckpoint();  // no step, no copy: on a GPU, on the card
+  checkpoint.Save("ckpt.safetensors");                    // written straight out of device memory
+  TrainingCheckpoint onHost = checkpoint.ToHost();        // a copy of the whole state in host memory
+  ```
+- **A checkpoint handed out is yours.** The run goes on training from it but only reads it, and
+  `Dispose` leaves it alone. A later step therefore writes its new state beside it rather than over
+  it: on a card that is a second copy of the state for as long as you hold the checkpoint.
+- **`Dispose`** discards what the run still holds; checkpoints it handed out stay valid.
 - **Each step consumes the state the previous step produced**, writing over it where it can
   ([below](#a-step-writes-its-state-over-the-state-it-consumed)). The starting checkpoint is
   consumed unless passed `.Shared()`; the default is a fresh `CreateInitialCheckpoint()`.
 - **A failed step can end the run.** If it fails after consuming the run's own state, every later
   step throws `InvalidOperationException` saying so and what is left to restart from. Restart from
-  the last `StepToCheckpoint` result (a failure while reading a published checkpoint leaves it and
-  the run intact), or, before any, from the starting checkpoint if you passed it `.Shared()`.
+  the last checkpoint you took with `StepToCheckpoint` or `TakeCheckpoint` (a failure while reading a
+  checkpoint handed out leaves it and the run intact), or, before any, from the starting checkpoint
+  if you passed it `.Shared()`.
 - **Feeding a published checkpoint elsewhere as-is consumes the run's state too**, since they share
   tensors; the run's next step is then refused with that state's error, naming the step that took it.
 
-`Train` and every `Fit` overload use a resident run internally and transfer only on the final step.
-A manual `TrainStep` loop transfers every step. On a backend with no device memory, a resident run
-gives the same losses and checkpoints, to the bit, as a step loop.
+`Train` and every `Fit` overload drive a resident run internally and take the result with
+`TakeCheckpoint` after the loop, so `TrainingResult.FinalCheckpoint` holds its state where the last
+step left it — on a GPU, device memory. A manual `TrainStep` loop leaves its state there too. On a
+backend with no device memory, a resident run gives the same losses and checkpoints, to the bit, as
+a step loop.
 
-> A checkpoint's tensors are readable only on the host. Reading state a run still holds on the
-> device throws; get it through `StepToCheckpoint`.
+> Saving, resuming, training from and reading a checkpoint work wherever its state is. Reading a
+> tensor's values (`CopyMemory`, `ValueAt`, `AccessMemory` and the other accessors) copies them to
+> the host and leaves the tensor where it is. `checkpoint.ToHost()` copies each tensor the host
+> cannot read into host memory of its own, and is the same checkpoint where every tensor already is
+> host-readable (always on a CPU backend).
+
+### Stopping and watching a run
+
+`Fit` and `Train` take a `CancellationToken` and a step callback. Both act **between** steps, never
+during one: a step takes the state it trains from when it starts, so one abandoned part-way would
+leave nothing whole to return, while the state between two steps always is.
+
+- **`cancellationToken`** is checked before each step (and, for `Fit(loader)`, before the loader
+  draws). The step running when it is cancelled finishes; the run then returns the state after it,
+  with `StopReason == TrainingStopReason.Cancelled`. Nothing is thrown.
+- **`onStep`** is called after every step, in order, on the training thread, with a
+  `TrainingStepReport`: `Step`, `Epoch`, `BatchIndex`, `Loss`, `Elapsed` and the full `Entry` (the
+  step's [history](#the-training-history) entry). All of it is already on the host, so watching
+  costs no transfer, and a run given no callback builds no report.
+  - `report.RequestStop()` ends the run after this step (`StopReason.StopRequested`, or
+    `Completed` when it was the last step anyway), e.g. for early stopping on a validation metric.
+  - `report.TakeCheckpoint()` returns the state after this step as a checkpoint, without a copy (see
+    `TakeCheckpoint` above), to save it or evaluate it while the run goes on.
+  - A report is valid only during its callback; acting on a kept one throws.
+  - A callback that throws ends the run with a `TrainingCallbackException`: its `InnerException` is
+    what the callback threw, and its `Checkpoint` is the state after that step — whole, since the
+    callback runs between steps — so the training done is kept. Passing it back resumes at the next
+    batch, as from a run stopped with `RequestStop()`.
+- **The result** is the state after the last step taken, whatever ended the run, with its data
+  position. Passing it back resumes at the next batch exactly as a completed run's would, for the
+  loader and the array forms alike; `numEpochs` counts from the resume epoch (see
+  [Feeding data](#feeding-data-the-data-loader)). To finish a stopped run at the end it was started
+  with, call `rig.FitUntilEpoch(loader, untilEpoch, checkpoint)` instead: it trains until the loader
+  reaches `untilEpoch`, counted from the start of training, so a restarted host makes the same call
+  every time, and one whose checkpoint already got there trains nothing.
+  `EpochLosses` covers the epochs the run trained in, a partial one averaged over its steps.
+
+```csharp
+// A BackgroundService, or SIGTERM on a spot instance: stop cleanly and keep the progress.
+var result = rig.FitUntilEpoch(loader, untilEpoch: 10, resumeFrom,
+    onStep: r =>
+    {
+        if (r.Step % 1_000 == 999) r.TakeCheckpoint().Save($"ckpt-{r.Step}.safetensors");
+        if (float.IsNaN(r.Loss)) r.RequestStop();
+    },
+    cancellationToken: stoppingToken);
+result.FinalCheckpoint.Save("last.safetensors");   // resumable, whether or not it was stopped
+stoppingToken.ThrowIfCancellationRequested();
+```
+
+The runtime context's own `RunSettings.CancellationToken` is different: it abandons the step
+running, which consumes the run's state, so the run ends with nothing newer than the last checkpoint
+you saved.
 
 ### A step writes its state over the state it consumed
 
@@ -545,9 +626,11 @@ It applies:
 
 - **To consumed state** — a checkpoint fed as it is, and a resident run's own state. A `.Shared()`
   checkpoint is left untouched.
-- **Where new state lands in the old state's memory** — every step on a CPU backend, and a resident
-  run's `Step` on a GPU. `TrainStep` and `StepToCheckpoint` on a GPU return state to the host, so
-  they overwrite nothing on the card.
+- **Where the old state is consumed** — every step on either backend: the new state is written
+  into the consumed state's memory where it is, on the card on a GPU. A host checkpoint consumed by
+  a step on a GPU is copied onto the card first, and the new state is written into that copy. A
+  resident step overwrites nothing while you hold a checkpoint the run handed out, since that state
+  is only read.
 - **Where the graph proves it.** Optimizer state read only by its own update qualifies (e.g. AdamW's
   moments and step counter). A weight the backward pass also reads — to propagate a gradient to the
   layer below, or at each place a tied weight is used — qualifies once its update is ordered after
@@ -557,9 +640,18 @@ It applies:
   reads it after its update, or when the pass declines to order the update. For a stack of `Linear`
   layers under AdamW every weight, bias and moment is written over.
 
+On PyTorch the step goes further: the element-wise arithmetic leading to each new state value —
+AdamW's chain to a new moment, say — is written over the consumed state it reads last, so the
+optimizer's temporaries take no memory of their own either
+([pytorch-backend.md](pytorch-backend.md#runs)).
+
 Results are bit-identical with or without it, and there is nothing to configure. On a card a
 resident run thus holds its state once rather than twice; under a device-memory budget the state
-is counted once — see [inference.md](inference.md#a-contexts-device-memory-budget).
+is counted once — see [inference.md](inference.md#a-contexts-device-memory-budget). A step's peak
+falls by what of the new state a step writing it beside the old would hold at its busiest, which
+is not always all of it. The update's temporaries take memory of their own on ONNX Runtime either
+way, and under AdamW it frees one of them before it writes a weight's new value, so a step over
+one large weight peaks lower by the weight's two moments rather than by its whole state.
 
 ### What construction costs
 
@@ -590,8 +682,9 @@ did not let a step consume (fed `.Shared()`, or `.TryConsume()` while shared) ho
 behind small managed handles, so the rig triggers a garbage collection once more than 32 MiB of
 such state has accumulated across steps, and backs off (doubling the threshold) while collections
 reclaim nothing, e.g. when you keep every checkpoint. You need not collect yourself. Initial
-checkpoints count against the same budget; a resident run's `Step` bypasses it, `StepToCheckpoint`
-results do not.
+checkpoints count against the same budget. A resident run's `Step` bypasses it, but a checkpoint
+the run hands out — from `StepToCheckpoint` or `TakeCheckpoint` — counts once a later step has
+moved on from it.
 
 On a large model the build can take minutes; see [Watching a long build](#watching-a-long-build).
 
@@ -606,8 +699,9 @@ a per-call override, so all share one set of compiled sessions (one per input sh
 derivations keep both. The rig's `TrainingBackend`, also never persisted, decides who computes the
 gradient — see [training-backends.md](training-backends.md).
 
-Each context carries its backend, its `DeviceMemory` (a device-memory budget and arena settings)
-and `RunSettings` — see [Device memory](inference.md#device-memory-gpu-backends). So a rig can
+Each context carries its backend, its `DeviceMemory` (a device-memory budget), its `Precision`
+(`float32` in full precision unless it allows TensorFloat-32 on a card — see
+[Precision](inference.md#precision-gpu-backends)) and `RunSettings` — see [Device memory](inference.md#device-memory-gpu-backends). So a rig can
 build on one device and train on another:
 
 ```csharp
@@ -626,21 +720,19 @@ Split only when the build does not fit on the card; leaving both `null` is norma
 [Which device am I on?](inference.md#which-device-am-i-on).
 
 On GPU backends the runtime context's budget covers the state and batches it holds on the card plus
-the running step's arena; a step that would exceed it is rebuilt with a smaller arena — see
-[A context's device-memory budget](inference.md#a-contexts-device-memory-budget). The default arena
-strategy `Auto` uses exact-size extension for a step compiled for one shape. The rig keeps a
-compiled step for up to four input shapes; further shapes share one shape-generic step, which `Auto`
-gives ORT's doubling. Feed a few stable batch shapes to stay on the tighter arena.
+what the running step's session allocates, which is held to what the state and batches leave it —
+see [A context's device-memory budget](inference.md#a-contexts-device-memory-budget). The rig keeps a
+compiled step for up to four input shapes; further shapes share one shape-generic step.
 
-A context's settings are fixed at construction: budget, arena strategy, `ShrinkArenaAfterRun`
-(implied by a budget), and the `CancellationToken` that abandons a long `Fit` or `Train` — see
-[Stopping a run](inference.md#stopping-a-run). Put them on the `runtimeContext` you pass to
+A context's settings are fixed at construction: budget, precision, `ShrinkArenaAfterRun` (implied by a budget), and the `CancellationToken` that abandons the step running — see
+[Stopping a run](inference.md#stopping-a-run); to stop a `Fit` or `Train` and keep its progress, pass
+its own `cancellationToken` instead ([Stopping and watching a run](#stopping-and-watching-a-run)). Put them on the `runtimeContext` you pass to
 `FromScratch`. To watch a run near the card's limit, read the static `DeviceMemory` class and the
 context's `ReadDeviceMemoryUse()` inside your loop.
 
-**Host vs device memory.** The rig's collection governs *host* memory (a `TrainStep` loop's
-checkpoints); `DeviceMemory` settings govern only device memory. A resident run keeps state on the
-card and frees it deterministically.
+**Host vs device memory.** The rig's collection governs the memory behind a `TrainStep` loop's
+dropped checkpoints, on the host or on the card; `DeviceMemory` settings govern only device memory.
+A resident run keeps state on the card and frees it deterministically.
 
 Result types:
 - `TrainingCheckpoint`:
@@ -653,11 +745,15 @@ Result types:
   - `.Loss` (`float?`; `null` on an initial or bare checkpoint; saved as its own `Loss` component).
   - `.AppliedHyperparameters` (see [Hyperparameter kinds](#hyperparameter-kinds-hyperparameter)).
   - `.History` (see [The training history](#the-training-history)).
+  - `.ToHost()`: the checkpoint with its state in host memory, copying each tensor the host cannot
+    read; the same checkpoint where every tensor already is host-readable. Every other slot carries
+    through.
 
   `WithCounters`/`WithStep`/`WithEpoch`/`WithBatchIndex` and
   `WithTrainableParams`/`WithModelState`/`WithOptimizerState` return a new checkpoint with one slot
   replaced and everything else carried; the receiver is never mutated.
-- `TrainingResult` → `.FinalCheckpoint`, `.EpochLosses` (per-epoch mean losses).
+- `TrainingResult` → `.FinalCheckpoint` (its state where the last step left it; on a GPU, device
+  memory), `.EpochLosses` (per-epoch mean losses).
 
 **Constructing one directly.** The three state slots are **required** init properties, so the
 compiler rejects a missing one and the call site names each (they share a type and often shapes):
@@ -782,25 +878,27 @@ streams coherently, or `RngConfig.NonDeterministic()` for per-run variation.
 An allocation failure in a step is rethrown as a `ComputeContextException` with code `CR009`
 reporting:
 
-- **Which pool**: `HOST memory` (a failed C++ allocation; a bare `bad allocation` is host even on a
-  GPU) or `DEVICE memory` (the accelerator's arena). ORT's arena message is the same for the CPU
-  arena, so on a CPU-only session it reads as host. Where the backend names no allocator on a
-  session with device memory, the report says so.
+- **Which pool**: `HOST memory` (a failed host allocation; a bare `bad allocation` is host even on
+  a GPU) or `DEVICE memory` (the accelerator's own). On ONNX Runtime the allocator every session
+  allocates through names the memory it failed to allocate, the card's or the host's. Where the
+  backend names no allocator on a session with device memory, the report says so.
 - **What the step held**: trainable parameters, model state, optimizer state and the batch, each
   with tensor count and size, plus the five largest tensors.
 - **The card's figures** (where a CUDA runtime is installed; `DeviceMemory.Read()`): used, free and
-  total across processes, how much of it is this process's, and this session's arena cap if set.
+  total across processes, how much of it is this process's, and the most this session may allocate
+  where a budget limits it.
 - **This process's memory**: working set, commit charge and managed heap against the limit in force
   (cgroup/container, Job Object, or machine RAM).
 
 On Windows/WDDM, device allocations count against system commit, so a process memory limit also
 caps device memory and fails with the same message as a full card. The report distinguishes three
 cases: the device is full; the device has room but the process is at its limit (raise the limit);
-or both have room and the arena could not extend by the block it wanted.
+or both have room and the session was held to less than it asked for — by a budget, or by an
+allocator keeping blocks it is not using.
 
 ```
 [CR009] Compute context operation failed in TrainingRig.TrainStep: allocating memory for the training
-step at step 1 failed. The failing allocation was for DEVICE memory — the accelerator's arena (backend
+step at step 1 failed. The failing allocation was for DEVICE memory — the accelerator's own (backend
 'Shorokoo.WinGPU'). Training state held for this operation: 296 tensor(s), 1.83 GiB in total (...).
 Device: 12.59 GiB of 23.99 GiB in use across all processes, 11.9 GiB of it this process's, 11.4 GiB
 free. Host process: working set
@@ -808,7 +906,8 @@ free. Host process: working set
 used). The device has room, yet this process is close to its own memory limit — and on Windows/WDDM a
 device allocation is backed by system commit, so a limit meant to bound HOST memory bounds DEVICE
 memory too ... This is the limit, not the model: re-run with it raised or removed. Underlying failure:
-[ErrorCode:Fail] ...bfc_arena.cc:358 ...
+[ErrorCode:RuntimeException] ... Failed to allocate 2359296 bytes on CUDA device 0: the card has no
+such block free (CUDA refused it) ...
 ```
 
 The backend's text is kept verbatim at the end and the original exception as `InnerException`.
@@ -829,21 +928,23 @@ A process's private bytes (its commit charge) are more than what it holds:
   commit as native. Under a container's or a Job Object's memory limit the runtime caps its heap
   below the limit (at 75% of it by default) and collects harder as it nears the cap.
 - **On Windows, a card's memory is commit too.** Under WDDM every allocation on the card is backed
-  by system commit, so a GPU process's private bytes include its arenas on the card, which keep the
-  most they have held (see above).
+  by system commit, so a GPU process's private bytes include what it holds on the card, the blocks
+  its allocator keeps for reuse among it (see above).
 
 What a rig itself holds is the model's state once over at most. A rig built from scratch keeps its
-initial values — parameters, model state and optimizer state — for `CreateInitialCheckpoint`. A
-rig from `TrainingRig.Load` keeps none, where every parameter declares a concrete shape (the
-case for a model built by Shorokoo): it computes them the first time something asks, since the
-checkpoint it loads replaces them. A resident run holds the state on its device; each checkpoint it
-hands out is a host copy of the whole state, held for as long as you hold the checkpoint.
+initial values — parameters, model state and optimizer state — for `CreateInitialCheckpoint`, where
+the runs that computed them left them: on the card when its merge context runs on one, attached to
+that context. A rig from `TrainingRig.Load` keeps none, where every parameter declares a concrete
+shape (the case for a model built by Shorokoo): it computes them the first time something asks,
+since the checkpoint it loads replaces them. A resident run holds the state on its device; each
+checkpoint it hands out is that state where it is, which the run then only reads, so its next step
+writes beside it: a second copy of the state on the device for as long as you hold the checkpoint.
 
 ## Feeding data: the data loader
 
-The array overloads of `Fit`/`Train` take pre-batched `TensorDataStruct[]` and leave the epoch /
-batch counters to you. A **data loader** owns the batch stream: it batches your data, tracks its
-position, and lets `Fit` advance step / epoch / batch, so a saved checkpoint records where the run
+The array overloads of `Fit`/`Train` take pre-batched `TensorDataStruct[]`, each element one
+batch: element `i` is batch index `i` of every epoch. A **data loader** owns the batch stream: it
+batches your data, tracks its position, and lets `Fit` advance step / epoch / batch, so a saved checkpoint records where the run
 was and a resumed run continues from the next batch.
 
 ```csharp
@@ -889,9 +990,11 @@ positionally and throws on a count mismatch; for many same-shaped fields,
   new process, rebuild the rig and a loader over the same data/seed and call
   `rig.Fit(loader, numEpochs, initialCheckpoint: loaded)`: `Fit` calls `RestoreAfter`, so training
   resumes at the next batch. A position-unknown checkpoint starts at `(0, 0)` via `RestoreFrom`.
-  `numEpochs` counts from the resume epoch (a mid-epoch checkpoint first finishes that epoch; one saved at an epoch's last batch begins
-  the next). For
-  an external data pipeline, keep its position in the checkpoint's host user-data bag.
+  `numEpochs` counts from the resume epoch (a mid-epoch checkpoint first finishes that epoch; one
+  saved at an epoch's last batch begins the next); `rig.FitUntilEpoch(loader, untilEpoch, loaded)`
+  trains to an epoch counted from the start instead. The array forms of `Fit` / `Train` stamp and
+  resume the same way, batch `i` of the array being batch index `i`. For an external data
+  pipeline, keep its position in the checkpoint's host user-data bag.
 
 ### The training history
 
@@ -998,7 +1101,9 @@ var more = rig.Fit(inputs, targets, numEpochs: 5, ckpt);  // continues where it 
 - **Saves are atomic.** `checkpoint.Save` (and `Persistence.SaveTrainingCheckpoint`) writes a
   `.tmp-` sibling, flushes it, and renames it into place, so a crash mid-save leaves the old or the
   new file, never a truncated one. The target **directory must exist** (it is not created); a
-  leftover `.tmp-` sibling is swept by the next successful save. `.skpt` saves are atomic too — see
+  leftover `.tmp-` sibling is swept by the next successful save. A file held for a moment by
+  another process (an antivirus scanner, the search indexer) does not fail the save; see
+  [onnx-and-weights.md](onnx-and-weights.md#facts). `.skpt` saves are atomic too — see
   [skpt-checkpoints.md](skpt-checkpoints.md#the-directory-form) for the directory form's one
   exception.
 - **`.skpt` container.** `Persistence.SaveTrainingCheckpointToSkpt(checkpoint, "run.skpt")` (or the
@@ -1065,16 +1170,34 @@ steady.Start();
 savedBytes += save.BytesWritten;
 ```
 
-The flat safetensors save streams each tensor from its storage with no extra copy. It has no size
-guard: a file over the 2 GB safetensors read limit is written without complaint and cannot be read
-back ([#48](https://github.com/Shorokoo/Shorokoo/issues/48)).
+The flat safetensors save streams each tensor from its storage with no extra copy, and a load reads
+the file forward a tensor at a time, so a file of any size, holding tensors of any size, is read back
+whole. Into host memory, a tensor one managed array holds (`Array.MaxLength` bytes, just under
+2 GiB) is read into the framework's own host memory; a larger one is read through one bounded host
+buffer (8 MiB) into host memory of the backend `ComputeContext.Default` runs on, so it is never whole
+in a managed array, and a run on that context reads it where it is.
 
 The `.skpt` save also streams each entry straight from the tensors' storage, with no managed copy of
-the training state. The exception is an entry compressed with `WithZstdCompressedData`: it is built
-in memory and then compressed, one entry at a time, so the peak is that entry rather than the whole
-state. An entry over `int.MaxValue` bytes, an archive of 4 GiB or more, or more than 65,535 entries
-is refused with `NotSupportedException` before anything is written, and any previous file at the
-target is left intact.
+the training state. An entry compressed with `WithZstdCompressedData` is compressed as it streams,
+afresh on each pass the writer makes over it, so it is never held whole either; its length is known
+only once it is compressed, so its tensors are read three times rather than two. An entry over
+`int.MaxValue` bytes as stored, an archive of 4 GiB or more, or more than 65,535 entries is refused
+with `NotSupportedException` before anything is written, and any previous file at the target is
+left intact. A Zstd entry is held to that limit by its compressed size, and may decompress to more.
+
+A checkpoint in device memory is saved from there: the flat and `.skpt` saves (file and directory
+form) write each tensor through one bounded host staging buffer (8 MiB), piece by piece, so the
+state is never whole in host memory. On ONNX Runtime CUDA the CUDA runtime copies the pieces, and
+PyTorch and JAX copy them with their own operations; JAX brings a tensor no larger than the buffer
+home whole. The `.skpt` save reads each device tensor twice, once to hash it for the manifest
+and once to write it, and binds the model it writes from the weights' shapes and dtypes, copying
+only the smallest weights to the host. There is no direct device-to-disk path.
+
+Loading is the same in reverse. A checkpoint loaded for a rig that trains on a device
+(`rig.LoadCheckpoint`, `rig.LoadCheckpointFromSkpt`) reads its state from the file straight into
+the rig's device memory, through the same bounded buffer, and comes back device-resident, as a
+trained one does; the counters and the history are read on the host. A compressed `.skpt` entry is
+decoded as it streams.
 
 ### Bind trained weights into an inference model
 
@@ -1269,7 +1392,8 @@ Constraints:
   read throws. Pass it `.Shared()`.
 - Do not run a long GPU loop on `TrainStep` when you want only the last checkpoint; use
   `rig.BeginResidentRun()`, `Fit` or `Train`.
-- Do not expect a resident run's state after disposing it; take it with `StepToCheckpoint` first.
+- Do not expect a resident run's state after disposing it; take it with `TakeCheckpoint` or
+  `StepToCheckpoint` first.
 - Do not declare optimizer state as `Inline` parameters.
 - Do not call `Globals.StateUpdate` on inputs, trainable parameters, or computed tensors — only on
   a `[StateInitializer]` `Init` result.

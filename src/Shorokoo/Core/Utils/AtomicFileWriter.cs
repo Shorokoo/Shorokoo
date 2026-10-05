@@ -20,6 +20,11 @@ namespace Shorokoo.Core.Utils
     /// failed saves of the same target. This cleanup never fails the save: the new content is
     /// already committed, so a cleanup failure is surfaced only through the optional
     /// <c>onWarning</c> callback (silent if none is given).
+    ///
+    /// <para>Every rename the protocol makes — a commit, a previous target renamed aside, a
+    /// restore — tolerates a file another process holds for a moment: a sharing or lock violation
+    /// is retried with a short bounded backoff before it fails the save (see
+    /// <see cref="RenameRetryPausesMs"/>). Any other failure fails it at once.</para>
     /// </remarks>
     internal static class AtomicFileWriter
     {
@@ -48,6 +53,16 @@ namespace Shorokoo.Core.Utils
         /// </summary>
         [ThreadStatic]
         internal static Action<string>? RotationFaultInjection;
+
+        /// <summary>
+        /// Test hook: invoked with the source and destination of every rename a save makes — a
+        /// commit, a previous target renamed aside, and its restore — before each attempt at it.
+        /// Throwing here fails that attempt as the rename itself would. Thread-scoped, so a hook
+        /// installed by one parallel test is invisible to every other thread; still reset it in a
+        /// <c>finally</c>.
+        /// </summary>
+        [ThreadStatic]
+        internal static Action<string, string>? RenameFaultInjection;
 
         /// <summary>True if <paramref name="name"/> is a staged (uncommitted) sibling name.</summary>
         internal static bool IsTempName(string name) =>
@@ -97,7 +112,7 @@ namespace Shorokoo.Core.Utils
                     flushed = clock.Elapsed;
                 }
                 CommitFaultInjection?.Invoke(tempPath);
-                File.Move(tempPath, fullTarget, overwrite: true);
+                MoveFile(tempPath, fullTarget, overwrite: true);
             }
             catch
             {
@@ -152,7 +167,10 @@ namespace Shorokoo.Core.Utils
                 staged.Add((directory, name, fullTarget, Path.Combine(directory, StageName(name)), writeContent));
             }
 
-            var committed = new List<(string FullTarget, string? AsidePath)>(staged.Count);
+            // What a failure must undo, in commit order: a target's previous file from the moment it
+            // is renamed aside — so a failed rename in still puts it back — or, for a target that
+            // had none, the new file once it is in.
+            var undo = new List<(string FullTarget, string? AsidePath)>(staged.Count);
             try
             {
                 foreach (var t in staged)
@@ -170,15 +188,16 @@ namespace Shorokoo.Core.Utils
                     if (File.Exists(t.FullTarget))
                     {
                         aside = Path.Combine(t.Directory, StageName(t.Name));
-                        File.Move(t.FullTarget, aside);
+                        MoveFile(t.FullTarget, aside);
+                        undo.Add((t.FullTarget, aside));
                     }
-                    File.Move(t.TempPath, t.FullTarget, overwrite: true);
-                    committed.Add((t.FullTarget, aside));
+                    MoveFile(t.TempPath, t.FullTarget, overwrite: true);
+                    if (aside is null) undo.Add((t.FullTarget, null));
                 }
             }
             catch
             {
-                RollBack(committed, onWarning);
+                RollBack(undo, onWarning);
                 foreach (var t in staged)
                 {
                     try { File.Delete(t.TempPath); }
@@ -194,22 +213,23 @@ namespace Shorokoo.Core.Utils
         }
 
         /// <summary>
-        /// Undoes the commits a failed <see cref="WriteFiles"/> had already made, newest first:
-        /// each target goes back to the file renamed aside for it, or is removed when there was
-        /// none. Best-effort — the failure that triggered the rollback is the one that matters —
-        /// but a target that cannot be restored says where its previous content was left.
+        /// Undoes what a failed <see cref="WriteFiles"/> had already done to its targets, newest
+        /// first: each target goes back to the file renamed aside for it, whether or not its own
+        /// rename in had happened, or its new file is removed when there was none. Best-effort —
+        /// the failure that triggered the rollback is the one that matters — but a target that
+        /// cannot be restored says where its previous content was left.
         /// </summary>
         private static void RollBack(
-            List<(string FullTarget, string? AsidePath)> committed, Action<string>? onWarning)
+            List<(string FullTarget, string? AsidePath)> undo, Action<string>? onWarning)
         {
             onWarning ??= static _ => { };
-            for (int i = committed.Count - 1; i >= 0; i--)
+            for (int i = undo.Count - 1; i >= 0; i--)
             {
-                var (fullTarget, aside) = committed[i];
+                var (fullTarget, aside) = undo[i];
                 try
                 {
                     if (aside is null) File.Delete(fullTarget);
-                    else File.Move(aside, fullTarget, overwrite: true);
+                    else MoveFile(aside, fullTarget, overwrite: true);
                 }
                 catch (Exception e)
                 {
@@ -274,7 +294,7 @@ namespace Shorokoo.Core.Utils
                     // A staged-shaped aside name, so a crash between the two renames leaves it
                     // recognizable as uncommitted debris for the post-commit sweep.
                     string asidePath = Path.Combine(directory, StageName(name));
-                    Directory.Move(fullTarget, asidePath);
+                    MoveDirectory(fullTarget, asidePath);
                     // The rename preserves the old tree's timestamps, which would make the aside
                     // look abandoned to a concurrent same-target saver's post-commit sweep the
                     // instant it exists. Touch it so the activity grace period protects the
@@ -287,14 +307,14 @@ namespace Shorokoo.Core.Utils
                     try
                     {
                         ReplaceFaultInjection?.Invoke(tempPath);
-                        Directory.Move(tempPath, fullTarget);
+                        MoveDirectory(tempPath, fullTarget);
                     }
                     catch
                     {
                         // Roll the previous checkpoint back into place, so a failed replace
                         // leaves the target exactly as it was. If even the rollback fails, the
                         // previous tree was last seen under the aside name — say where to look.
-                        try { Directory.Move(asidePath, fullTarget); }
+                        try { MoveDirectory(asidePath, fullTarget); }
                         catch (Exception rollbackFailure)
                         {
                             (onWarning ?? (static _ => { }))(
@@ -313,7 +333,7 @@ namespace Shorokoo.Core.Utils
                 }
                 else
                 {
-                    Directory.Move(tempPath, fullTarget);
+                    MoveDirectory(tempPath, fullTarget);
                 }
             }
             catch
@@ -505,6 +525,54 @@ namespace Shorokoo.Core.Utils
                     "create the directory first.");
             return (directory, name, fullTarget);
         }
+
+        /// <summary>Windows <c>ERROR_SHARING_VIOLATION</c> as an <see cref="Exception.HResult"/>.</summary>
+        private const int SharingViolation = unchecked((int)0x80070020);
+
+        /// <summary>Windows <c>ERROR_LOCK_VIOLATION</c> as an <see cref="Exception.HResult"/>.</summary>
+        private const int LockViolation = unchecked((int)0x80070021);
+
+        /// <summary>
+        /// Pauses, in milliseconds, before each retry of a rename that met a sharing or lock
+        /// violation. On Windows an antivirus scanner or the search indexer routinely opens a file
+        /// for a moment just after it is written, which makes a rename of it fail although nothing
+        /// is wrong; these pauses (310 ms in all) ride that out. A file held longer than that fails
+        /// the save with the rename's own error.
+        /// </summary>
+        private static readonly int[] RenameRetryPausesMs = [10, 20, 40, 80, 160];
+
+        /// <summary>
+        /// Performs one rename of the commit protocol, retrying it after each of the
+        /// <see cref="RenameRetryPausesMs"/> while it fails with a sharing or lock violation — the
+        /// signature of another process holding the file for a moment. Every other failure, and
+        /// the last violation once the retries are spent, propagates unchanged. A rename that
+        /// failed changed nothing, so each retry starts from the same state.
+        /// </summary>
+        private static void Rename(string source, string destination, Action<string, string> rename)
+        {
+            for (int attempt = 0; ; attempt++)
+            {
+                try
+                {
+                    RenameFaultInjection?.Invoke(source, destination);
+                    rename(source, destination);
+                    return;
+                }
+                catch (IOException e) when (e.HResult is SharingViolation or LockViolation
+                    && attempt < RenameRetryPausesMs.Length)
+                {
+                    Thread.Sleep(RenameRetryPausesMs[attempt]);
+                }
+            }
+        }
+
+        /// <summary>Renames a file for the commit protocol; see <see cref="Rename"/>.</summary>
+        private static void MoveFile(string source, string destination, bool overwrite = false) =>
+            Rename(source, destination, (s, d) => File.Move(s, d, overwrite));
+
+        /// <summary>Renames a directory for the commit protocol; see <see cref="Rename"/>.</summary>
+        private static void MoveDirectory(string source, string destination) =>
+            Rename(source, destination, Directory.Move);
 
         /// <summary>Staged sibling name for a target name; unique so concurrent savers never collide.</summary>
         private static string StageName(string targetName) =>

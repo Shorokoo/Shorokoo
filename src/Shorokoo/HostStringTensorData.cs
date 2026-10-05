@@ -15,24 +15,22 @@ namespace Shorokoo
     ///
     /// <para><see cref="HostTensorData{T}"/>'s counterpart for <c>utf8</c>, and here for
     /// the same reason. <c>TensorData([2], "a", "b")</c> and <c>Scalar("hello")</c> describe a
-    /// graph; they do not run one, so building one should need no execution provider, no native
-    /// runtime and no deployed backend. Each of them went through
-    /// <c>DefaultBackend.Instance.CreateStringTensor</c> instead, which resolved the process-wide
-    /// backend the moment a model mentioned a string literal.</para>
+    /// graph; they do not run one, so building one needs no execution provider, no native runtime
+    /// and no deployed backend.</para>
     ///
-    /// <para>Strings stayed out of <see cref="HostTensorData{T}"/> because its storage is a flat
-    /// byte buffer and a string element is variable-length and reference-typed. That is an
-    /// argument about the storage and not about when the value is built: the storage differs here,
-    /// the deferral does not. The runtime value is built the first time a backend asks for one — a
+    /// <para>Strings are not in <see cref="HostTensorData{T}"/> because its storage is a flat byte
+    /// buffer and a string element is variable-length and reference-typed. That is an argument
+    /// about the storage and not about when the value is built: the storage differs here, the
+    /// deferral does not. The runtime value is built the first time a backend asks for one — a
     /// copy of these strings in host memory of that backend's runtime, which is where ONNX Runtime
     /// keeps every string tensor whatever its provider — and held by this tensor from then on, a
     /// tensor in its own right (<see cref="TensorData.CopyAt"/>).</para>
     ///
-    /// <para>There is no byte view of these elements, and there was none before: an ONNX Runtime
-    /// string tensor has no flat buffer to span over either, so <see cref="AccessRawMemory"/> and
-    /// its siblings refuse here exactly as they refused through <see cref="OnnxTensorData{T}"/>.
-    /// <see cref="Strings"/> is the read that needs no backend at all;
-    /// <c>ToTensorValue(...).GetStringTensorData()</c> is the same answer by way of a runtime.</para>
+    /// <para>There is no byte view of these elements: an ONNX Runtime string tensor has no flat
+    /// buffer to span over either, so <see cref="TensorData.AccessRawMemory"/> and
+    /// <see cref="TensorData.AccessMemory{V}"/> refuse here exactly as they do through
+    /// <see cref="OnnxTensorData{T}"/>. <see cref="Strings"/> is the read that needs no backend at
+    /// all.</para>
     /// </summary>
     public sealed class HostStringTensorData : TensorData<utf8>, IDisposable
     {
@@ -83,14 +81,15 @@ namespace Shorokoo
         ///
         /// <para>Exactly <see cref="TensorData.Shape"/>'s worth of them: <see cref="From"/> refuses
         /// a short literal at the construction site, where the mistake is, rather than padding it
-        /// with empty strings.</para>
+        /// with empty strings. A read-only view of the tensor's own array, which nothing can write
+        /// through.</para>
         /// </summary>
         public IReadOnlyList<string> Strings
         {
             get
             {
                 ThrowIfDisposed();
-                return Values;
+                return Array.AsReadOnly(Values);
             }
         }
 
@@ -118,13 +117,6 @@ namespace Shorokoo
         }
 
         /// <inheritdoc/>
-        private protected override Span<V> AccessModifiableElements<V>()
-        {
-            ThrowIfDisposed();
-            throw NoFlatBuffer();
-        }
-
-        /// <inheritdoc/>
         private protected override ReadOnlySpan<V> AccessElements<V>()
         {
             ThrowIfDisposed();
@@ -132,14 +124,7 @@ namespace Shorokoo
         }
 
         /// <inheritdoc/>
-        public override Span<byte> AccessModifiableRawMemory()
-        {
-            ThrowIfDisposed();
-            throw NoFlatBuffer();
-        }
-
-        /// <inheritdoc/>
-        public override ReadOnlySpan<byte> AccessRawMemory()
+        private protected override ReadOnlySpan<byte> AccessRawStorage()
         {
             ThrowIfDisposed();
             throw NoFlatBuffer();
@@ -174,12 +159,11 @@ namespace Shorokoo
         // another managed object that may already have been finalized, and each copy has its own.
 
         // Every byte-wise accessor lands here rather than on a cast that cannot work. The message
-        // names the two reads that do, because the caller reaching for a span of a string tensor
-        // is asking a question with an answer -- just not that one.
+        // names the read that does, because the caller reaching for a span of a string tensor is
+        // asking a question with an answer -- just not that one.
         private InvalidOperationException NoFlatBuffer() => new(
             $"Tensor {this} holds strings. Their elements are variable-length and reference-typed, "
             + "so there is no flat buffer to span over -- an ONNX Runtime string tensor has none "
-            + $"either. Read them with {nameof(Strings)}, which needs no backend, or build a "
-            + "runtime value with ToTensorValue(...) and read that with GetStringTensorData().");
+            + $"either. Read them with {nameof(Strings)}, which needs no backend.");
     }
 }

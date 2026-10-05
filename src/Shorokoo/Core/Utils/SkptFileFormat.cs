@@ -732,8 +732,9 @@ namespace Shorokoo.Core.Utils
         /// </summary>
         internal sealed class EntryPayload
         {
-            /// <summary>The largest entry a .skpt reader reads, in either form; a produced entry
-            /// larger than this is refused when it is measured.</summary>
+            /// <summary>The largest entry a .skpt reader reads, in either form, as the entry is
+            /// stored: a Zstd entry is held to it by its compressed bytes, and may decompress to more.
+            /// A produced entry larger than this is refused when it is measured.</summary>
             public const long MaxEntryLength = int.MaxValue;
 
             private readonly byte[]? _bytes;
@@ -826,7 +827,7 @@ namespace Shorokoo.Core.Utils
         /// written through it, forwarding it to <c>destination</c> when there is one. A write that
         /// would take it past <c>limit</c> bytes throws <c>overrun</c>'s exception before any of that
         /// write is hashed or forwarded.</summary>
-        private sealed class MeasuringStream : Stream
+        private sealed class MeasuringStream : Stream, ILengthOnlyStream
         {
             private readonly Stream? _destination;
             private readonly IncrementalHash? _sha256;
@@ -863,6 +864,16 @@ namespace Shorokoo.Core.Utils
 
             public override void Write(byte[] buffer, int offset, int count)
                 => Write(buffer.AsSpan(offset, count));
+
+            public bool IsLengthOnly => _destination is null && _sha256 is null;
+
+            public void Advance(long count)
+            {
+                if (!IsLengthOnly)
+                    throw new InvalidOperationException("Only a stream that just counts can be advanced without writing.");
+                if (_length + count > _limit) throw _overrun(_length + count);
+                _length += count;
+            }
 
             public override void WriteByte(byte value) => Write([value]);
 

@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
+using Shorokoo.Core.Backends;
 
 namespace Shorokoo.PythonHost;
 
@@ -84,7 +85,7 @@ public static class PythonEnvironmentResolver
     {
         var root = CacheRoot(options, variables);
         var directory = Path.Combine(root, lockFile.CacheKey);
-        if (IsComplete(directory, lockFile))
+        if (IsComplete(directory, lockFile) && CudaLibrariesLinked(directory))
             return PythonEnvironment.Open(directory, lockFile.PythonVersion, PythonEnvironmentSource.Provisioned);
 
         try
@@ -109,12 +110,65 @@ public static class PythonEnvironmentResolver
             // environment built by the process it waited for needs none.
             if (!IsComplete(directory, lockFile))
                 Build(FindUv(options, variables), lockFile, directory, options.ProvisioningTimeout, deadline);
+            LinkCudaLibraries(directory, lockFile, variables, CudaLibraryCache.Left(options.ProvisioningTimeout, deadline));
         }
         finally
         {
             gate.Release();
         }
         return PythonEnvironment.Open(directory, lockFile.PythonVersion, PythonEnvironmentSource.Provisioned);
+    }
+
+    /// <summary>Whether the environment's copies of the NVIDIA libraries every CUDA backend shares
+    /// are links into the shared cache already, or there are none to link.</summary>
+    private static bool CudaLibrariesLinked(string directory)
+    {
+        if (CudaLibraryPins.Current is not { } pins) return true;
+        var marker = Path.Combine(directory, CudaLibraryCache.LinkedMarker);
+        try
+        {
+            return File.Exists(marker) && File.ReadAllText(marker) == pins.Identity;
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>What is told, on this thread, the timeout each linking of an environment's CUDA
+    /// libraries is handed; null for nothing. A test's view of what provisioning leaves the
+    /// linking.</summary>
+    [ThreadStatic]
+    internal static Action<TimeSpan>? LinkingHanded;
+
+    /// <summary>
+    /// Makes the environment's copies of the pinned cuDNN and cuBLAS — PyTorch's <c>torch\lib</c> on
+    /// Windows, the <c>nvidia</c> wheels' folders on Linux — hard links to the shared cache's, so a
+    /// process that runs PyTorch beside another CUDA backend loads one copy of each, whichever starts
+    /// first. The cache is filled from these very copies where it is empty, which downloads nothing.
+    /// Called holding the environment's lock, with what is left of the provisioning's timeout; a copy
+    /// another process has loaded stays a copy of the same release, and is linked by a later call. The
+    /// cache and the installed copies are where <paramref name="variables"/> say.
+    /// </summary>
+    private static void LinkCudaLibraries(
+        string directory, PythonEnvironmentLock lockFile, Func<string, string?> variables, TimeSpan timeout)
+    {
+        LinkingHanded?.Invoke(timeout);
+        if (CudaLibraryPins.Current is not { } pins) return;
+        var windows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
+        var sitePackages = PythonEnvironment.SitePackagesOf(directory, Version.Parse(lockFile.PythonVersion), windows);
+        try
+        {
+            CudaLibraryCache.LinkEnvironment(directory, sitePackages, pins, CudaLibraryCache.Root(variables, windows),
+                pin => CudaLibraryCache.InstalledCandidates(pin, variables, windows), timeout);
+        }
+        // Linking only saves the second copy: the environment's own are the pinned release, byte for
+        // byte, and serve as they are. So a cache that cannot be filled or written leaves them be,
+        // and a later start tries again.
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException
+                                       or InvalidDataException or TimeoutException)
+        {
+        }
     }
 
     private static bool IsComplete(string directory, PythonEnvironmentLock lockFile)

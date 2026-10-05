@@ -10,6 +10,7 @@ import math
 import torch
 
 from .ops_elementwise import add as _add
+from . import runtime as _rt
 
 # Every integer up to 2**53 is a float64.
 _EXACT = 2 ** 53
@@ -72,15 +73,22 @@ def matmul(a, b):
     return torch.matmul(a, b)
 
 
-def gemm(a, b, c=None, /, *, alpha=1.0, beta=1.0, transA=0, transB=0):
+def gemm(a, b, c=None, /, *, alpha=1.0, beta=1.0, transA=0, transB=0, _out=None):
+    """Gemm; a floating-point one written into `_out` where that is a tensor of the product's type,
+    shape and device, the scaling and the addend taken in place there."""
     a = a.transpose(0, 1) if transA else a
     b = b.transpose(0, 1) if transB else b
-    product = matmul(a, b)
+    if _out is not None and not (a.dtype.is_floating_point and a.dtype == b.dtype and _out.dtype == a.dtype
+                                 and _out.device == a.device and tuple(_out.shape) == (a.shape[0], b.shape[1])):
+        _out = None
+    product = matmul(a, b) if _out is None else torch.matmul(a, b, out=_out)
     if alpha != 1.0:
-        product = (product * alpha).to(product.dtype)
+        product = (product * alpha).to(product.dtype) if _out is None else torch.mul(product, alpha, out=_out)
     if c is None:
         return product
     addend = c if beta == 1.0 else (c * beta).to(c.dtype)
+    if _out is not None:
+        return torch.add(product, addend.to(product.dtype), out=_out)
     return _add(product, addend.to(product.dtype))
 
 

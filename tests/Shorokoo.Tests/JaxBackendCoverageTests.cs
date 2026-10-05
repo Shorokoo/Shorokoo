@@ -1,3 +1,4 @@
+using Python.Runtime;
 using Shorokoo.Core.Backends;
 using Shorokoo.Core.Factory.IR;
 using Shorokoo.Jax;
@@ -36,6 +37,29 @@ public class JaxBackendCoverageTests
             outputs[0].Dispose();
         }
     }
+
+    [Fact]
+    public void TestAHostTensorPastTwoGibibytesIsCopiedInAndOutByThePieceAndSavedFromItsAddress()
+        => Utils.OwnProcess.Run(typeof(JaxBackendCoverageTests), nameof(AHostTensorPastTwoGibibytesIsCopiedInAndOutByThePieceAndSavedFromItsAddress));
+
+    internal static void AHostTensorPastTwoGibibytesIsCopiedInAndOutByThePieceAndSavedFromItsAddress()
+    {
+        const long Elements = (1L << 30) + 2;
+        using var head = (JaxTensorValue)Jax.CreateTensor(new float[StagedReadBack.StagingBytes / 4], [StagedReadBack.StagingBytes / 4]);
+        JaxTensorValue large;
+        using (PythonRuntime.Gil())
+        {
+            using var ctypes = head.Value.GetAttr("ctypes");
+            using var address = ctypes.GetAttr("data");
+            using var description = HostFloats(address.As<long>(), Elements);
+            large = JaxTensorValue.Wrap(head.Value.InvokeMethod("view"), description);
+        }
+        AssertAHostValuePastTwoGibibytesIsCopiedByThePiece(Jax, large, 4 * Elements);
+    }
+
+    [Fact]
+    public void TestAHostTensorPastTwoGibibytesIsReadIntoJaxsHostMemoryByThePiece()
+        => AssertAHostTensorPastTwoGibibytesIsReadByThePiece(Jax);
 
     [Fact]
     public void TestTypedTensorsSpansAndUninitializedTensorsAreTheTensorsTheySayTheyAre()
@@ -223,7 +247,7 @@ public class JaxBackendCoverageTests
     }
 
     [Fact]
-    public void TestACpuSessionHasNoArenaFiguresBindsNoAliasRetainsNothingAndRunsEveryNodeOnTheHost()
+    public void TestACpuSessionHasNoArenaFiguresBindsNoAliasLeavesItsOutputsInHostMemoryAndRunsEveryNodeOnTheHost()
     {
         var graph = ComputeContextLifetimeCoverageTests.GraphOf("a:float[2] b:float[2]", "O:float[2]",
             ComputeContextLifetimeCoverageTests.Op("Sub", "a b", "t"), ComputeContextLifetimeCoverageTests.Op("Neg", "t", "O"));
@@ -232,9 +256,8 @@ public class JaxBackendCoverageTests
         using var b = Jax.CreateTensor([1f, 2f], [2]);
         var consumed = Jax.CreateTensor([5f, 7f], [2]);
         var feeds = new Dictionary<string, IShorokooTensorValue> { ["a"] = consumed, ["b"] = b };
-        using var kept = traced.RunConsuming(feeds, [consumed], ["O"], new HashSet<string> { "O" }, RunSettings.Default)[0];
+        using var kept = traced.RunConsuming(feeds, [consumed], ["O"], RunSettings.Default)[0];
 
-        Assert.False(traced.HasDeviceMemory);
         Assert.True(kept.IsHostAccessible);
         Assert.Equal([-4f, -5f], kept.GetTensorDataAsSpan<float>().ToArray());
         Assert.Throws<ObjectDisposedException>(() => consumed.IsHostAccessible);
@@ -242,6 +265,38 @@ public class JaxBackendCoverageTests
         Assert.Null(traced.ReadArenaStatistics());
         Assert.Equal(SessionOutputPlacement.Host, traced.OutputPlacement);
         Assert.Equal([("Sub", "cpu"), ("Neg", "cpu")], traced.ReadNodePlacement()!.Nodes.Select(n => (n.OpType, n.Provider)));
+    }
+
+    [Fact]
+    public void TestProductsAreCompiledInFullPrecisionUnlessASessionOnACardAllowsTensorFloat32()
+    {
+        var allowing = SideBySideModel.AllowingTensorFloat32;
+        string[] precisions =
+        [
+            JaxSession.Float32Precision(Jax, PrecisionSettings.Default), JaxSession.Float32Precision(Jax, allowing),
+            JaxSession.Float32Precision(new JaxCudaBackend(), PrecisionSettings.Default), JaxSession.Float32Precision(new JaxCudaBackend(), allowing),
+        ];
+        Jax.Start();
+        string compiled;
+        using (PythonRuntime.Gil())
+        {
+            using var scope = Py.CreateScope();
+            scope.Exec("""
+                import re
+                import numpy as np
+                from shorokoo_jax import runtime
+                source = "from shorokoo_jax import ops_linalg\ndef main(a, b):\n    return (ops_linalg.matmul(a, b),)\n"
+                def compiled_at(precision):
+                    model = runtime.load_model(source, f"<precision-{precision}>", [], "cpu", precision)
+                    text = model.program((((4, 4), np.dtype(np.float32)), ((4, 4), np.dtype(np.float32)))).as_text()
+                    return ",".join(sorted(set(re.findall(r"operand_precision=\{(\w+)", text))))
+                result = f"{compiled_at('HIGHEST')} {compiled_at('HIGH')}"
+                """);
+            compiled = scope.Get<string>("result");
+        }
+
+        Assert.Equal(["HIGHEST", "HIGHEST", "HIGHEST", "HIGH"], precisions);
+        Assert.Equal("highest high", compiled);
     }
 
     [Fact]

@@ -89,9 +89,9 @@ namespace Shorokoo
         /// training loop advances (the graph never does), persisted so a resumed run restores
         /// its position in the data schedule — or <c>null</c> when it is genuinely <b>unknown</b>: a
         /// checkpoint produced without a data loader or an explicit epoch (an initial checkpoint, or one
-        /// trained through <see cref="TrainingRig.Train"/> / <see cref="TrainingRig.Fit(TensorDataStruct[], TensorDataStruct[], int, TrainingCheckpoint?)"/>
+        /// trained through <see cref="TrainingRig.Train"/> / <see cref="TrainingRig.Fit(TensorDataStruct[], TensorDataStruct[], int, TrainingCheckpoint?, Action{TrainingStepReport}?, System.Threading.CancellationToken)"/>
         /// / the counter-agnostic <c>TrainStep</c>) carries <c>null</c> rather than a misleading <c>0</c>.
-        /// The loader-driven and explicit-counter paths (<see cref="TrainingRig.Fit(IDataLoader, int, TrainingCheckpoint?)"/>,
+        /// The loader-driven and explicit-counter paths (<see cref="TrainingRig.Fit(IDataLoader, int, TrainingCheckpoint?, Action{TrainingStepReport}?, System.Threading.CancellationToken)"/>,
         /// <see cref="TrainingRig.TrainStep(TrainingCheckpoint, IDataLoader)"/>,
         /// <see cref="TrainingRig.TrainStep(TrainingCheckpoint, IData, IData, long, long)"/>)
         /// set a concrete value. Persisted as its own presence-gated part of the
@@ -113,7 +113,7 @@ namespace Shorokoo
         /// The <see cref="TrainingRig"/> this checkpoint belongs to, or <c>null</c> for a bare
         /// checkpoint constructed without one. Every rig-produced checkpoint carries its rig
         /// (<see cref="TrainingRig.CreateInitialCheckpoint()"/>, <see cref="TrainingRig.TrainStep(TrainingCheckpoint, IData, IData)"/>,
-        /// <see cref="TrainingRig.Train"/>/<see cref="TrainingRig.Fit(TensorDataStruct[], TensorDataStruct[], int, TrainingCheckpoint?)"/>, load, and
+        /// <see cref="TrainingRig.Train"/>/<see cref="TrainingRig.Fit(TensorDataStruct[], TensorDataStruct[], int, TrainingCheckpoint?, Action{TrainingStepReport}?, System.Threading.CancellationToken)"/>, load, and
         /// <see cref="TrainingRig.AdoptCheckpoint"/> all set it), so <see cref="ToInferenceModel()"/>
         /// can extract the inference model with no re-supplied graph. The rig does not store
         /// checkpoints, so there is no reference cycle. Attach one to a bare checkpoint via
@@ -218,6 +218,44 @@ namespace Shorokoo
         /// <see cref="Shared"/>'s is.
         /// </summary>
         public TrainingCheckpoint TryConsume() => Derive(feedMode: SharedInputMode.TryConsume);
+
+        /// <summary>
+        /// This checkpoint with its state in host memory. A checkpoint a training run hands out
+        /// keeps its tensors where the run left them — on a GPU, the training device's memory — and
+        /// nothing needs them on the host to save, resume or train from it, or to read their values,
+        /// which copies them to the host and leaves each tensor where it is. This is for the state
+        /// wanted in host memory as a whole: it copies each tensor the host cannot read into host
+        /// memory of the new checkpoint's own, and takes each one it can as it is: the very same
+        /// checkpoint where every tensor already is host-readable.
+        ///
+        /// <para>Every other slot — counters, rig, loss, applied hyperparameters, history and
+        /// <see cref="FeedMode"/> — carries through. The feed mode does because a tensor already
+        /// host-readable is taken as it is, not copied, and is still this checkpoint's too: a
+        /// checkpoint this one's owner only lends must not have its tensors consumed through the
+        /// copy.</para>
+        /// </summary>
+        /// <exception cref="ObjectDisposedException">A tensor of the state is dead.</exception>
+        public TrainingCheckpoint ToHost()
+        {
+            var (trainable, model, optimizer) = (TrainableParams.ToHost(), ModelState.ToHost(), OptimizerState.ToHost());
+            if (ReferenceEquals(trainable, TrainableParams) && ReferenceEquals(model, ModelState)
+                && ReferenceEquals(optimizer, OptimizerState))
+                return this;
+            return new()
+            {
+                TrainableParams = trainable,
+                ModelState = model,
+                OptimizerState = optimizer,
+                Step = Step,
+                Epoch = Epoch,
+                BatchIndex = BatchIndex,
+                Rig = Rig,
+                Loss = Loss,
+                AppliedHyperparameters = AppliedHyperparameters,
+                History = History,
+                FeedMode = FeedMode,
+            };
+        }
 
         /// <summary>
         /// Packages trainable params, model state and optimizer state, plus the run counters and the
@@ -615,14 +653,14 @@ namespace Shorokoo
             Persistence.VerifyFlatTrainingCheckpoint(filePath,
                 "Load a .skpt training checkpoint with rig.LoadCheckpointFromSkpt(path) " +
                 "(or rebuild the whole rig from it with the static TrainingRig.Load(path)).");
-            var raw = LoadFlat(
-                filePath, r.TrainableParamStructDef, r.ModelStateDef, r.OptimizerStateDef,
-                components, r);
             // Attach the rig (sets Rig, preserves counters). Reading against the rig's own defs
             // settles the field names, so the def check inside AdoptCheckpoint passes by construction
             // — but the dimension check there does not: the defs carry no shapes, so a checkpoint from
-            // a model of another width reaches this point and is refused as it is adopted.
-            return r.AdoptCheckpoint(raw);
+            // a model of another width is read and then refused as it is adopted. Adopted inside the
+            // load, so a refusal frees what was read onto the rig's card.
+            return LoadFlat(
+                filePath, r.TrainableParamStructDef, r.ModelStateDef, r.OptimizerStateDef,
+                components, r, r.LoadDestination, r.AdoptCheckpoint);
         }
 
         /// <summary>
@@ -647,10 +685,9 @@ namespace Shorokoo
             var r = ValidateRigLoadArguments(filePath, rig, components);
             Persistence.VerifySkptContainer(filePath,
                 "Load a flat safetensors training checkpoint with rig.LoadCheckpoint(path).");
-            var raw = Persistence.LoadTrainingCheckpointFromSkpt(
+            return Persistence.LoadTrainingCheckpointFromSkpt(
                 filePath, r.TrainableParamStructDef, r.ModelStateDef, r.OptimizerStateDef,
-                components, r);
-            return r.AdoptCheckpoint(raw);
+                components, r, r.LoadDestination, r.AdoptCheckpoint);
         }
 
         /// <summary>The argument contract <see cref="Load"/> and <see cref="LoadFromSkpt"/> share:
@@ -690,6 +727,9 @@ namespace Shorokoo
         /// <paramref name="components"/> (null ⇒ everything present). A component not present in the
         /// file (or not requested) is filled from <paramref name="rigForDefaults"/>'s initial values
         /// when a rig is supplied; without a rig, an absent-but-expected section fails loud.
+        /// <paramref name="adopt"/>, when given, takes the checkpoint read (a rig adopting it), and
+        /// what it returns is the result: a load it refuses fails as one that could not be read does,
+        /// leaving nothing it read in <paramref name="destination"/>'s memory.
         /// </summary>
         internal static TrainingCheckpoint LoadFlat(
             string filePath,
@@ -697,9 +737,61 @@ namespace Shorokoo
             TensorStructDef? modelStateDef,
             TensorStructDef? optimizerStateDef,
             CheckpointComponents? components,
+            TrainingRig? rigForDefaults,
+            ComputeContext destination,
+            Func<TrainingCheckpoint, TrainingCheckpoint>? adopt = null)
+        {
+            bool Want(CheckpointComponents c) => components is null || (components.Value & c) != 0;
+            // The state sections are read straight into the memory the rig trains in -- on a card,
+            // through one bounded buffer, never whole in host memory (Shorokoo/Shorokoo#436). The
+            // marker, the counters and the history are read on the host, where they are read back.
+            // A state section the rig fills from its own values is passed over, its bytes read into
+            // no memory at all: nothing reads it, and nothing is put anywhere that the checkpoint
+            // does not hold.
+            bool Kept(CheckpointComponents c) => Want(c) || rigForDefaults is null;
+            ComputeContext? Placement(string name)
+            {
+                if (name.StartsWith(TrainableSection + "/", StringComparison.Ordinal)
+                    || name.StartsWith(ModelStateSection + "/", StringComparison.Ordinal))
+                    return Kept(CheckpointComponents.InferenceState) ? destination : null;
+                if (name.StartsWith(OptimizerStateSection + "/", StringComparison.Ordinal))
+                    return Kept(CheckpointComponents.OptimizerState) ? destination : null;
+                return ComputeContext.Host;
+            }
+            var tensors = SafeTensorLoader.LoadSafeTensors(filePath, (name, _) => Placement(name));
+            try
+            {
+                var read = ReadFlat(filePath, tensors, trainableParamDef, modelStateDef, optimizerStateDef,
+                    components, rigForDefaults);
+                return adopt is null ? read : adopt(read);
+            }
+            catch
+            {
+                // Nothing holds what was read onto the card but the checkpoint that is not returned.
+                DeleteReadOnto(destination, tensors.Select(t => t.Data));
+                throw;
+            }
+        }
+
+        /// <summary>Deletes every tensor of <paramref name="read"/> that a load put in
+        /// <paramref name="destination"/>'s memory, for a load that fails after reading it: nothing
+        /// else holds it, and on a card its memory is not the collector's to free.</summary>
+        internal static void DeleteReadOnto(ComputeContext destination, IEnumerable<TensorData> read)
+        {
+            foreach (var tensor in read)
+                if (destination.Attaches(tensor)) tensor.Delete();
+        }
+
+        private static TrainingCheckpoint ReadFlat(
+            string filePath,
+            IReadOnlyList<SafeTensor> tensors,
+            TensorStructDef? trainableParamDef,
+            TensorStructDef? modelStateDef,
+            TensorStructDef? optimizerStateDef,
+            CheckpointComponents? components,
             TrainingRig? rigForDefaults)
         {
-            var tensors = SafeTensorLoader.LoadSafeTensors(filePath);
+            bool Want(CheckpointComponents c) => components is null || (components.Value & c) != 0;
             var byName = tensors.ToDictionary(t => t.Name, t => t.Data);
 
             // A null def means "read what the file says it holds": the flat format is
@@ -745,7 +837,6 @@ namespace Shorokoo
             modelStateDef ??= InferSectionDef(tensors, ModelStateSection, "ModelState");
             optimizerStateDef ??= InferSectionDef(tensors, OptimizerStateSection, "OptimizerState");
 
-            bool Want(CheckpointComponents c) => components is null || (components.Value & c) != 0;
             bool SectionPresent(string section)
             {
                 var prefix = section + "/";

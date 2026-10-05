@@ -1,79 +1,66 @@
 namespace Shorokoo.Core.Backends;
 
+// A session reads its inputs where its backend's runs read them and leaves its outputs there, and
+// does nothing else with where a value is. Every value a run hands it is in the backend's run
+// memory for that value -- IShorokooBackend.RunMemoryOf for a tensor of its element type,
+// IShorokooBackend.SequenceRunMemory for a sequence -- because the framework places each input
+// there before the run, through the backend's own moves. A session refuses any value outside that
+// memory by throwing, before it runs anything: it never copies one in, so a value in the wrong
+// place surfaces as an error rather than as a copy nobody asked for. Every output it returns is in
+// that memory too, wherever the runtime computed it, and goes to the caller as it is.
+//
+// And every output it returns holds nothing of the session's -- no block of an arena the run
+// computed in, no workspace -- so a caller that keeps an output keeps nothing of the session alive,
+// whether the session goes on running, sits idle, or is disposed. It is where the runtime wrote it,
+// never a copy made after the run: its own bytes, or a range of the memory of a value the run
+// consumed (RunConsuming below), which it holds with the run's other outputs placed there -- on a
+// backend that hands such memory back by ranges, the part no output has let go of -- until the
+// last of them goes.
 public interface IShorokooSession : IDisposable
 {
     IReadOnlyList<string> InputNames { get; }
     IReadOnlyList<string> OutputNames { get; }
 
-    // Runs the session. The returned values are owned by the caller and must
-    // be disposed. runSettings applies to this run alone -- ORT reads these off the run, not
-    // the session, so two runs of one session may differ.
+    // Runs the session on `inputs`, every one of them in this backend's run memory, and returns the
+    // outputs named in `outputNames`, every one of them in that memory too. The returned values are
+    // owned by the caller and must be disposed. runSettings applies to this run alone -- ORT reads
+    // these off the run, not the session, so two runs of one session may differ.
     IReadOnlyList<IShorokooTensorValue> Run(
         IReadOnlyDictionary<string, IShorokooTensorValue> inputs,
         IReadOnlyList<string> outputNames,
         RunSettings runSettings);
 
-    // Whether this session's execution provider produces its outputs somewhere other than
-    // host memory -- true for a GPU provider, false for a CPU one. When it is false
-    // RunRetainingOutputs has nothing to retain and behaves exactly like Run.
-    //
-    // Defaulted so that a backend outside this repository keeps compiling when this interface
-    // grows: a backend that does not answer is one that produces everything on the host, and the
-    // default below follows from that rather than papering over it.
-    bool HasDeviceMemory => false;
-
-    // Runs the session leaving the outputs named in retainedOutputNames in the execution
-    // provider's own memory instead of fetching them back to the host, so they can be fed
-    // straight into the next run without crossing the bus. Every other output comes back
-    // host-resident as Run's do. The returned values are owned by the caller and must be
-    // disposed; a retained one is not host-readable (IShorokooTensorValue.IsHostAccessible).
-    //
-    // Only a tensor is left in the provider's memory. A sequence output named here comes back to the
-    // host as any other output does: a sequence's elements are read out of it one at a time through
-    // the host, which cannot read an element the provider kept in its own memory.
-    //
-    // Inputs may themselves be device-resident values from an earlier run: the provider
-    // uses them where they are.
-    IReadOnlyList<IShorokooTensorValue> RunRetainingOutputs(
-        IReadOnlyDictionary<string, IShorokooTensorValue> inputs,
-        IReadOnlyList<string> outputNames,
-        IReadOnlySet<string> retainedOutputNames,
-        RunSettings runSettings) => Run(inputs, outputNames, runSettings);
-
-    // Runs the session -- as Run, or as RunRetainingOutputs when retainedOutputNames names any --
-    // with the values in `consumed` handed over rather than lent. Every run calls the overload
-    // below, which may also write outputs into consumed memory, and whose default is this.
+    // Runs the session as Run does, with the values in `consumed` handed over rather than lent.
+    // Every run calls the overload below, which may also write outputs into consumed memory, and
+    // whose default is this.
     //
     // A consumed value is one the caller has given up: a tensor fed to the run as it is, which the
     // run took when it started. From the moment this is called it belongs to this session's
     // backend alone, ON EVERY PATH -- a run that returns, one that throws, one that is stopped, and
-    // one that fails before it reaches the native call -- and the caller never touches it again,
-    // not even to release it. The backend must release each consumed value exactly once, through
-    // its own IShorokooBackend.Release, as soon as the run no longer reads it: before this returns
-    // its outputs, and before it rethrows a failure. That is the contract
-    // IShorokooBackend.CreateSequence has for the values it is handed, and for the same reason:
-    // a caller that hands memory over cannot also be the one to free it. A value may appear under
-    // several input names; it appears in `consumed` once.
+    // one that fails before it reaches the native call, its refusal of an input outside its run
+    // memory included -- and the caller never touches it again, not even to release it. The backend
+    // must release each consumed value exactly once, through its own IShorokooBackend.Release, as
+    // soon as nothing reads it: before this returns its outputs, and before it rethrows a failure --
+    // or, for one the overload below placed an output in, with the last output standing on it. That
+    // is the contract IShorokooBackend.CreateSequence has for the values it is handed,
+    // and for the same reason: a caller that hands memory over cannot also be the one to free it. A
+    // value may appear under several input names; it appears in `consumed` once.
     //
     // Every value in `consumed` is also in `inputs`, and every other value in `inputs` is lent:
     // read it, and leave it to the caller.
     //
-    // Defaulted so a backend outside this repository keeps compiling, and so that one that does not
-    // implement it keeps the contract anyway: the default runs the ordinary way and disposes each
-    // consumed value in a finally, which is what IShorokooBackend.Release's own default does. A
-    // backend whose Release does more than dispose implements this and releases through it.
+    // The default runs the ordinary way and disposes each consumed value in a finally, which is what
+    // IShorokooBackend.Release's own default does. A backend whose Release does more than dispose
+    // implements this and releases through it.
     IReadOnlyList<IShorokooTensorValue> RunConsuming(
         IReadOnlyDictionary<string, IShorokooTensorValue> inputs,
         IReadOnlyCollection<IShorokooTensorValue> consumed,
         IReadOnlyList<string> outputNames,
-        IReadOnlySet<string> retainedOutputNames,
         RunSettings runSettings)
     {
         try
         {
-            return retainedOutputNames.Count == 0
-                ? Run(inputs, outputNames, runSettings)
-                : RunRetainingOutputs(inputs, outputNames, retainedOutputNames, runSettings);
+            return Run(inputs, outputNames, runSettings);
         }
         finally
         {
@@ -89,50 +76,71 @@ public interface IShorokooSession : IDisposable
     // which is what a run that aliases nothing answers without allocating. This is the call every
     // run makes.
     //
-    // The contract on `consumed` is RunConsuming's, unchanged: each value is released exactly once,
-    // through the backend, before this returns or rethrows. An aliased output is a value of its own
-    // that holds the memory it was written into, so releasing the consumed value leaves the output
-    // whole -- ONNX Runtime counts the references to a buffer, and releases it with the last.
+    // It may also place values in consumed memory: write outputs, and values only the run reads, into
+    // ranges of a consumed value where the session proved that safe for the run. The contract on
+    // `consumed` is RunConsuming's: each value is released exactly once, through the backend -- one an
+    // output was placed in with the last output standing on it, every other before this returns or
+    // rethrows. An aliased output is a value of its own that holds the memory it was written into, so
+    // releasing the consumed value leaves the output whole -- ONNX Runtime counts the references to a
+    // buffer, and releases it with the last.
     //
     // A session binds a pair only on a run that consumed the input, where no other input is fed the
-    // same value, and where the value is in the memory the output is produced in, of the output's
-    // element type and its shape: an output that could not be written there is produced as usual.
+    // same value, and where the value is of the output's element type and its shape: an output that
+    // could not be written there is produced as usual. The consumed value and the output are both in
+    // this backend's run memory, so where they are never stands in the way.
     //
-    // Defaulted to RunConsuming, aliasing nothing, so a backend outside this repository keeps
-    // compiling and keeps its contract.
+    // The default is RunConsuming, aliasing nothing.
     IReadOnlyList<IShorokooTensorValue> RunConsuming(
         IReadOnlyDictionary<string, IShorokooTensorValue> inputs,
         IReadOnlyCollection<IShorokooTensorValue> consumed,
         IReadOnlyList<string> outputNames,
-        IReadOnlySet<string> retainedOutputNames,
         RunSettings runSettings,
         out IReadOnlyList<string?> aliasedInputs)
     {
         aliasedInputs = [];
-        return RunConsuming(inputs, consumed, outputNames, retainedOutputNames, runSettings);
+        return RunConsuming(inputs, consumed, outputNames, runSettings);
     }
 
     // The pairs of those it was built with that a run of this session can bind at all (see
     // RunConsuming), by this session's names: each output, and the input whose consumed memory it
-    // may be written into. An output is written only into memory where it is produced -- the
-    // provider's own, for one a run keeps there, and the host's for one it fetches back -- so the
-    // framework feeds a consumed tensor of an input paired with an output the run keeps through a
-    // copy in the provider's memory, which the output can then take; one of any other input that the
-    // run cannot read where it is goes to the session as the host has it, for the runtime to copy
-    // into its own arena -- inside the limit the session was built with, rather than outside it
-    // cutting that limit -- and an output the run fetches back may then be written into it there.
+    // may be written into. The framework feeds a consumed tensor in the run memory of the session's
+    // backend -- as it is, where it is there already, and otherwise through a copy it makes there
+    // -- so every pair is open to every run that consumes its input.
     //
-    // Defaulted to none, so a backend outside this repository keeps compiling: one that aliases
-    // nothing binds no pair.
+    // The default is none: a session that aliases nothing binds no pair.
     IReadOnlyList<OutputAlias> BindableAliases => [];
 
-    // This session's own memory arena as its runtime reports it, or null when the backend has no
+    // Stops this session from placing its runs' values in the memory of the inputs they consume
+    // (PlacementProof): from then on a consuming run writes nothing into that memory but the pairs
+    // it binds. Called on a new session, before its first run.
+    //
+    // The default does nothing: a session that places nothing has nothing to stop.
+    internal void StopPlacing() { }
+
+    // Stops this session from planning where its runs place values (PlacementProof), for a session
+    // built for a single run, which would not run long enough to repay what the planning builds. It
+    // stops only that: whatever else its runs write into the memory they consume at no such cost --
+    // a node written over a consumed input it reads last, on PyTorch -- they still write, unlike
+    // after StopPlacing. Called on a new session, before its first run.
+    //
+    // The default is StopPlacing: a session whose placing all costs planning stops it all.
+    internal void StopPlanningPlacements() => StopPlacing();
+
+    // Sets the most this session's runs may hold in its device memory -- what a device-memory
+    // budget leaves them -- without the session being built again, where its backend can enforce
+    // that itself, and answers whether it can. The framework sets it before each run under a budget,
+    // to exactly what the budget leaves that run.
+    //
+    // The default is false: such a session keeps the limit it was built with
+    // (DeviceMemorySettings.LimitBytes), and is built again where that limit no longer fits.
+    bool TryLimitDeviceMemory(long limitBytes) => false;
+
+    // This session's own memory as its allocator reports it, or null when the backend has no
     // such figures to give. Cheap enough to call either side of a run, which is how a run's peak
     // is attributed; see ArenaStatistics for why MaxInUseBytes alone cannot be.
     //
-    // Defaulted, like HasDeviceMemory above, so a backend outside this repository keeps compiling:
-    // a backend that does not answer has no arena figures, and null is what no figures reads as
-    // everywhere else here -- DeviceMemory.Read on a machine with no card answers the same way.
+    // The default is null, which is what no figures reads as everywhere else here --
+    // DeviceMemory.Read on a machine with no card answers the same way.
     ArenaStatistics? ReadArenaStatistics() => null;
 
     // The pinned host arena this session's execution provider stages its host-device crossings
@@ -140,16 +148,17 @@ public interface IShorokooSession : IDisposable
     // ones above, since a byte of pinned host memory and a byte of device memory are not the same
     // thing and adding them would quietly change what either figure means.
     //
-    // Defaulted to null, which is also what a backend with no such arena answers: a CPU session
+    // The default is null, which is also what a backend with no such arena answers: a CPU session
     // stages nothing, so there is nothing to report rather than an arena that read as empty.
     ArenaStatistics? ReadPinnedArenaStatistics() => null;
 
-    // Where this session produces its outputs. The free half of the placement question: the
-    // session already knows, so no profiling and no extra run is needed, and on a device backend a
-    // host-memory output is the tail of a graph that ran on the host.
+    // Where this session's runtime computes its outputs, before they are left in the backend's run
+    // memory. The free half of the placement question: the session already knows, so no profiling
+    // and no extra run is needed, and on a device backend an output computed in host memory is the
+    // tail of a graph that ran on the host.
     //
-    // Defaulted to Unknown rather than Host: a backend that does not answer has not said its
-    // outputs are host-resident, and reading silence as Host would report a device backend's
+    // The default is Unknown rather than Host: a backend that does not answer has not said its
+    // outputs are computed on the host, and reading silence as Host would report a device backend's
     // fallback as a deliberate CPU session.
     SessionOutputPlacement OutputPlacement => SessionOutputPlacement.Unknown;
 

@@ -27,7 +27,27 @@
     <ProjectReference Include="..\Shorokoo.CodeGen\Shorokoo.CodeGen.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" PrivateAssets="all" />
   </ItemGroup>
 
+  <!-- The NVIDIA libraries every CUDA backend shares are pinned beside the lock of the CUDA Python
+       environment, whose PyTorch carries the same releases, and read from here: one file, so the two
+       cannot drift apart. The logical name is "CudaLibraries/cu13/<rid>/cuda-libraries.txt". -->
+  <ItemGroup>
+    <EmbeddedResource Include="..\Backend\Python\Shorokoo.PythonHost\Environments\cu13\**\cuda-libraries.txt"
+                      LogicalName="CudaLibraries/cu13/$([System.String]::Copy('%(RecursiveDir)').Replace('\', '/'))%(Filename)%(Extension)" />
+  </ItemGroup>
+
   <ItemGroup>
     <InternalsVisibleTo Include="Shorokoo.Tests" />
+    <!-- The ONNX Runtime backends hand the process's allocator (Core/Backends/CachingAllocator.cs) to
+         their runtimes; every copy of a backend has to reach the one in this assembly. -->
+    <InternalsVisibleTo Include="Shorokoo.OnnxRuntime" />
+    <InternalsVisibleTo Include="Shorokoo.PythonHost" />
+    <!-- A backend that places a run's outputs in the memory of what the run consumed proves the
+         placements and hands back values standing on a shared block (Core/Backends/PlacementProof.cs,
+         Core/Backends/SharedBlock.cs), which are this assembly's. -->
+    <InternalsVisibleTo Include="Shorokoo.PyTorch" />
+    <!-- A backend's host values address a piece of their own buffer for the range copies
+         (Core/Backends/IShorokooTensorValue.cs, HostPiece), which is how one longer than a span is
+         saved and loaded. -->
+    <InternalsVisibleTo Include="Shorokoo.Jax" />
   </ItemGroup>
 </Project>

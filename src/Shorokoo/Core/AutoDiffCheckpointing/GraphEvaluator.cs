@@ -31,6 +31,38 @@ internal enum EvaluationOrder
 }
 
 /// <summary>
+/// How a backend lays a run's values out in memory, as <see cref="GraphEvaluator"/> charges them.
+/// </summary>
+internal enum RunLayout
+{
+    /// <summary>
+    /// ONNX Runtime's: a value's buffer is handed on to the next value of its exact shape and type
+    /// rather than freed, a reshape is its input's buffer, and an activation writes over its input
+    /// where that dies there — its allocation plan (see the evaluator's summary).
+    /// </summary>
+    OnnxRuntime,
+
+    /// <summary>
+    /// ONNX Runtime's on the host: as <see cref="OnnxRuntime"/>, and its CPU <c>Where</c> selects
+    /// each operand into a temporary of the output's size before merging the two into the output,
+    /// so the node holds two values of its output's size beside it.
+    /// </summary>
+    OnnxRuntimeHost,
+
+    /// <summary>
+    /// A model translation's (PyTorch's): every value is freed after its last read, which the
+    /// caching allocator has again at once; a slice, reshape, transpose, expansion or split, a cast to
+    /// the type it has and a one-input sum, mean, maximum or minimum is its input's memory; and an
+    /// element-wise operator, a <c>Where</c>, a softmax, a normalization, a <c>Clip</c> or a
+    /// <c>Gelu</c> writes its result over an operand of its own memory that dies there — what the
+    /// translation does, in ONNX Runtime's order, which is the order it runs a graph in; a layer
+    /// normalization holds one value of its input's size beside it where it writes over its operand,
+    /// and two where it does not.
+    /// </summary>
+    Translation,
+}
+
+/// <summary>
 /// The state a graph carries from one run to the next — a training step's parameters, model state
 /// and optimizer state — as <see cref="GraphEvaluator"/> charges it.
 ///
@@ -78,6 +110,7 @@ internal class GraphEvaluator
     private readonly OpPerfRegistry _perfRegistry;
     private readonly bool _modelOrtBufferReuse;
     private readonly StepState? _state;
+    private readonly RunLayout _layout;
 
     /// <param name="perfRegistry">The per-op estimators to price nodes with; the default registry when null.</param>
     /// <param name="modelOrtBufferReuse">Model ORT's static buffer reuse (see <c>AllocationPlan</c>).
@@ -87,12 +120,20 @@ internal class GraphEvaluator
     /// <see cref="StepState"/> describes; none when null. A pass that hands this evaluator to each
     /// of its strategies scores every candidate with the state it will run with, so a candidate
     /// that keeps a pair written in place outscores one that loses it.</param>
-    public GraphEvaluator(OpPerfRegistry? perfRegistry = null, bool modelOrtBufferReuse = true, StepState? state = null)
+    /// <param name="layout">How the backend the graphs run on lays a run's values out; a
+    /// translation's frees every value at its last read, whatever <paramref name="modelOrtBufferReuse"/>
+    /// says.</param>
+    public GraphEvaluator(OpPerfRegistry? perfRegistry = null, bool modelOrtBufferReuse = true, StepState? state = null,
+        RunLayout layout = RunLayout.OnnxRuntime)
     {
         _perfRegistry = perfRegistry ?? new OpPerfRegistry();
-        _modelOrtBufferReuse = modelOrtBufferReuse;
+        _modelOrtBufferReuse = modelOrtBufferReuse && layout != RunLayout.Translation;
         _state = state;
+        _layout = layout;
     }
+
+    /// <summary>How the backend the graphs this evaluates run on lays a run's values out.</summary>
+    internal RunLayout Layout => _layout;
 
     /// <summary>The state every graph this evaluates carries across runs; none when null.</summary>
     internal StepState? State => _state;
@@ -153,6 +194,10 @@ internal class GraphEvaluator
                     if (output is not null) graphInputs.Add(output.Value);
 
         var plan = new AllocationPlan(graphOutputs, graphInputs, _modelOrtBufferReuse);
+        // Under a translation's layout: the values that are another's memory, never written over, and
+        // the strides of each, which decide whether a reshape of it is a view or a copy.
+        var views = new HashSet<FastTensorKey>();
+        var strides = new Dictionary<FastTensorKey, long[]>();
 
         // The state: each input held from the first position, and each output its step writes in
         // place bound to the buffer of the input it replaces, to be placed there by its writer.
@@ -209,6 +254,9 @@ internal class GraphEvaluator
             var perfInput = BuildOpPerfInput(node, pos, shapeInfo, tensorLastUse, consumerOpCodes);
             var perfResult = _perfRegistry.Estimate(perfInput);
             extraAtPos[pos] = perfResult.ExtraMemoryBytes;
+            if (_layout == RunLayout.OnnxRuntimeHost && node.OpCode == Shorokoo.Core.Nodes.NodeDefinitions.OpCodes.WHERE
+                && nodeOutputs.Count > 0 && nodeOutputs[0] is { } selected && shapeInfo.GetTensorInfo(selected) is { } selectedInfo)
+                extraAtPos[pos] += 2 * selectedInfo.MemoryBytes;
 
             // Step 3: Add output tensor memory (accounting for in-place reuse)
             var inPlaceReuse = perfResult.InPlaceBufferReuse;
@@ -224,6 +272,30 @@ internal class GraphEvaluator
                 if (writtenInPlace.TryGetValue(output.Value, out var stateBuffer))
                 {
                     plan.Place(stateBuffer, output.Value, outputInfo.MemoryBytes);
+                    continue;
+                }
+
+                if (_layout == RunLayout.Translation)
+                {
+                    var writtenOver = false;
+                    if (!readsMetadataOnly
+                        && TranslationReuse(node, outIdx, shapeInfo, plan, views, strides, tensorLastUse, graphOutputs, pos) is var (over, isView))
+                    {
+                        plan.Alias(over, output.Value, isView ? 0 : outputInfo.MemoryBytes);
+                        if (isView) views.Add(output.Value);
+                        writtenOver = !isView;
+                    }
+                    else
+                    {
+                        plan.Allocate(output.Value, outputInfo, pos);
+                        LayOutAsOperands(node, nodeInputs, output.Value, outputInfo, shapeInfo, strides);
+                    }
+                    // The translation's layer normalization holds the squares of its centered values
+                    // where it writes over its operand, and otherwise the centered values and one
+                    // value more, each of its input's size, as it runs.
+                    if (outIdx == 0 && node.OpCode == "LayerNormalization" && nodeInputs.Count > 0 && nodeInputs[0] is { } normalized
+                        && shapeInfo.GetTensorInfo(normalized) is { } normalizedInfo)
+                        extraAtPos[pos] += (writtenOver ? 1 : 2) * normalizedInfo.MemoryBytes;
                     continue;
                 }
 
@@ -302,6 +374,88 @@ internal class GraphEvaluator
             StateWrittenInPlace = statePairsInPlace,
             NodeDetails = nodeDetails,
         };
+    }
+
+    /// <summary>
+    /// Under a translation's layout (<see cref="RunLayout.Translation"/>), the value whose memory
+    /// <paramref name="node"/>'s output <paramref name="outIdx"/> takes, and whether as a view of it;
+    /// null where it takes memory of its own. A view's input may stay live; an operand written over
+    /// dies at this node, is of the output's bytes and type, is memory of its own — not a view, not
+    /// a fed input, not a graph output — lies row by row, as torch writes over no other, and no other
+    /// value shares it. A reshape is a view only where
+    /// torch can view what it reshapes by its strides (<paramref name="strides"/>, followed here),
+    /// and memory of its own otherwise, as torch copies it.
+    /// </summary>
+    private static (FastTensorKey Over, bool IsView)? TranslationReuse(
+        FastNode node, int outIdx, ShapeInferenceResult shapeInfo, AllocationPlan plan, HashSet<FastTensorKey> views,
+        Dictionary<FastTensorKey, long[]> strides, Dictionary<FastTensorKey, int> tensorLastUse, HashSet<FastTensorKey> graphOutputs, int pos)
+    {
+        var inputs = node.Inputs;
+        var used = inputs.Count(i => i is not null);
+        var op = node.OpCode;
+        var first = inputs.Count > 0 ? inputs[0] : null;
+        bool viewOfFirst = op switch
+        {
+            "Slice" or "Identity" or "Reshape" or "Squeeze" or "Unsqueeze" or "Flatten" or "Transpose" or "Expand" or "Split" => true,
+            "Cast" => first is { } cast && shapeInfo.GetTensorInfo(cast) is { } from && node.Outputs[outIdx] is { } cast_out
+                      && shapeInfo.GetTensorInfo(cast_out) is { } to && from.DType == to.DType,
+            "Max" or "Min" or "Sum" or "Mean" => used == 1,
+            _ => false,
+        };
+        if (viewOfFirst)
+        {
+            if (first is not { } source || !plan.Contains(source)) return null;
+            if (node.Outputs[outIdx] is { } view && shapeInfo.GetTensorInfo(source) is { } viewedInfo && shapeInfo.GetTensorInfo(view) is { } viewInfo
+                && viewedInfo.Shape.Dims.All(d => d >= 0) && viewInfo.Shape.Dims.All(d => d >= 0))
+            {
+                var viewedStrides = strides.TryGetValue(source, out var known) ? known : Shorokoo.Core.Backends.TorchStrides.Contiguous(viewedInfo.Shape.Dims);
+                var viewStrides = Shorokoo.Core.Backends.TorchStrides.OfView(op, node.Attributes.IsAttributeDefined("perm") ? node.Attributes.GetLongsVal("perm") : null, viewedInfo.Shape.Dims, viewedStrides, viewInfo.Shape.Dims);
+                if (viewStrides is null && op is "Reshape" or "Flatten" or "Squeeze" or "Unsqueeze") return null;
+                if (viewStrides is not null) strides[view] = viewStrides;
+            }
+            return (source, true);
+        }
+
+        if (outIdx != 0 || node.Outputs.Count(o => o is not null) != 1 || node.Outputs[0] is not { } output) return null;
+        IReadOnlyList<int> slots = op switch
+        {
+            _ when Shorokoo.Core.Backends.PlacementMemory.TorchElementWise.Contains(op)
+                => Shorokoo.Core.Backends.PlacementProof.InPlaceUnary.Contains(op) ? (used == 1 ? [0] : []) : (used == 2 ? [0, 1] : []),
+            "Clip" or "Gelu" or "Softmax" or "LogSoftmax" or "LayerNormalization" or "BatchNormalization" => [0],
+            "Where" when used == 3 => [1, 2],
+            _ => [],
+        };
+        if (slots.Count == 0 || graphOutputs.Contains(output) || shapeInfo.GetTensorInfo(output) is not { } outputInfo) return null;
+        foreach (var slot in slots)
+        {
+            if (slot >= inputs.Count || inputs[slot] is not { } operand || !plan.Contains(operand) || views.Contains(operand)) continue;
+            if (tensorLastUse.TryGetValue(operand, out var last) && last > pos) continue;
+            if (plan.AliasCount(operand) != 1 || plan.IsGraphInput(operand) || plan.IsGraphOutput(operand)) continue;
+            if (shapeInfo.GetTensorInfo(operand) is not { } operandInfo || operandInfo.MemoryBytes != outputInfo.MemoryBytes
+                || operandInfo.DType != outputInfo.DType) continue;
+            if (strides.TryGetValue(operand, out var laid) && !Shorokoo.Core.Backends.TorchStrides.IsContiguous(operandInfo.Shape.Dims, laid)) continue;
+            return (operand, false);
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Under a translation's layout, the strides torch gives an element-wise result of memory of its
+    /// own (<see cref="Shorokoo.Core.Backends.TorchStrides.OfElementwise"/>), kept in
+    /// <paramref name="strides"/> where they are not row by row.
+    /// </summary>
+    private static void LayOutAsOperands(FastNode node, IReadOnlyList<FastTensorKey?> inputs, FastTensorKey output, TensorShapeInfo outputInfo,
+        ShapeInferenceResult shapeInfo, Dictionary<FastTensorKey, long[]> strides)
+    {
+        if (!Shorokoo.Core.Backends.TorchStrides.LaidOutAsOperands.Contains(node.OpCode) || outputInfo.Shape.Dims.Any(d => d < 0)) return;
+        var operands = new List<(IReadOnlyList<long>, IReadOnlyList<long>)>();
+        foreach (var input in inputs)
+        {
+            if (input is not { } key || shapeInfo.GetTensorInfo(key) is not { } info || info.Shape.Dims.Any(d => d < 0)) continue;
+            operands.Add((info.Shape.Dims, strides.TryGetValue(key, out var known) ? known : Shorokoo.Core.Backends.TorchStrides.Contiguous(info.Shape.Dims)));
+        }
+        var laid = Shorokoo.Core.Backends.TorchStrides.OfElementwise(operands, outputInfo.Shape.Dims);
+        if (!Shorokoo.Core.Backends.TorchStrides.IsContiguous(outputInfo.Shape.Dims, laid)) strides[output] = laid;
     }
 
     /// <summary>Reads only its input's metadata; ORT folds it away under static shapes.</summary>

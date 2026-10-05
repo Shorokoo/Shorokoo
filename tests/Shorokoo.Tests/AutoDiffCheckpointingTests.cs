@@ -380,6 +380,31 @@ public class AutoDiffCheckpointingCoverageTests
         }
     }
 
+    [Fact]
+    public void TestEachLayoutChargesWhatItsBackendHoldsAViewAWhereAndItsTemporariesCoverage()
+    {
+        Assert.Equal((2 * Mb, 2 * Mb, Mb + 4), PeaksByLayout(x => OnnxOp.ReduceSum(OnnxOp.Transpose(x, null))));
+        Assert.Equal((9 * Mb / 4 + 4, 17 * Mb / 4 + 4, 2 * Mb + 8), PeaksByLayout(x =>
+        {
+            var e = OnnxOp.Exp(x);
+            return OnnxOp.ReduceSum(OnnxOp.Where(OnnxOp.Greater(e, Scalar(1f)), e, Scalar(0f)));
+        }));
+        Assert.Equal(3 * Mb + 8, PeaksByLayout(x => OnnxOp.Add(OnnxOp.ReduceSum(x), OnnxOp.ReduceSum(OnnxOp.Reshape(OnnxOp.Transpose(OnnxOp.Exp(x), null), Vector(512L * 512L), allowZero: false)))).Translation);
+        Assert.Equal(2 * Mb + 8, PeaksByLayout(x => OnnxOp.Add(OnnxOp.ReduceSum(x), OnnxOp.ReduceSum(OnnxOp.Reshape(OnnxOp.Exp(x), Vector(512L * 512L), allowZero: false)))).Translation);
+        Assert.Equal(3 * Mb + 8, PeaksByLayout(x => OnnxOp.Add(OnnxOp.ReduceSum(x), OnnxOp.ReduceSum(OnnxOp.Reshape(OnnxOp.Neg(OnnxOp.Transpose(x, null)), Vector(512L * 512L), allowZero: false)))).Translation);
+    }
+
+    /// <summary>The peak of a graph of one [512, 512] input, under ONNX Runtime's layout on a card,
+    /// on the host, and a translation's.</summary>
+    private static (long OnnxRuntime, long OnnxRuntimeHost, long Translation) PeaksByLayout(Func<Tensor<float32>, Variable> body)
+    {
+        var x = InputTensor<float32>("x", rank: 2);
+        var graph = new InternalComputationGraph([x], [body(x)]);
+        var shapeInfo = Infer(graph, [512, 512]);
+        long Peak(RunLayout layout) => new GraphEvaluator(layout: layout).Evaluate(graph, shapeInfo).PeakMemoryBytes;
+        return (Peak(RunLayout.OnnxRuntime), Peak(RunLayout.OnnxRuntimeHost), Peak(RunLayout.Translation));
+    }
+
     private static readonly StepState StateInPlace = new([(0, 0)], WrittenInPlace: true);
     private static readonly StepState StateHeld = new([(0, 0)], WrittenInPlace: false);
 
@@ -723,6 +748,30 @@ public class AutoDiffCheckpointingCoverageTests
         Assert.True(new GraphEvaluator().Evaluate(graph, shapeInfo).PeakMemoryBytes >= Mb);
     }
 
+    [Fact]
+    public void TestEveryStepTakenOnARecurrentStepIsJudgedByTheBackendsModelOrNotTakenCoverage()
+    {
+        var rig = TrainingRig.FromScratch(Benchmarks.MemoryPassLstm.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            [Pattern([32L, 8L, 64L], 1f)], (Hyperparameter[])[0.01f]);
+        var graph = rig.PreOptimizationGraph.ToInternal();
+        var shapeInfo = new ShapeInferenceInterpreter(CpuContext).Infer(graph, [.. rig.OptimizationInputShapes.Select(s => Synthesize(s.Shape, s.DType))]);
+
+        Assert.Contains(graph.Nodes, n => n.IsOpenNode());
+        Assert.Same(graph, new MemoryAwareGraphOptimizer(backendPeak: g => ReferenceEquals(g, graph) ? 64 * Mb : null).OptimizeWithShapeInfo(graph, shapeInfo).OptimizedGraph);
+    }
+
+    [Fact]
+    public void TestAStepBelowTheSizeThresholdIsNeverJudgedByTheBackendsModelCoverage()
+    {
+        var (graph, shapeInfo) = StepGraph(DoubleReader, ordered: false, side: 128);
+        var asked = 0;
+        var optimized = new MemoryAwareGraphOptimizer(evaluator: new GraphEvaluator(state: StateInPlace), backendPeak: _ => { asked++; return Mb; })
+            .OptimizeWithShapeInfo(graph, shapeInfo);
+
+        Assert.Equal(MemoryAwareGraphOptimizer.OrderedStateReads, optimized.StrategyName);
+        Assert.Equal(0, asked);
+    }
+
     // ----- [Module(Checkpoint = true)] and the rematerializer's invariants -----
 
     private static TensorData Pattern(long[] dims, float scale)
@@ -833,6 +882,18 @@ public class AutoDiffCheckpointingCoverageTests
     }
 
     [Fact]
+    public void TestARigOnABackendWithNoModelOfARunNeverAsksItForOneCoverage()
+    {
+        var backend = new SessionCountingBackend(Shorokoo.Core.Backends.DefaultBackend.Instance);
+        using var context = new ComputeContext(backend);
+        var rig = TrainingRig.FromScratch(ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            [Pattern([512L, 1024L], 1f)], (Hyperparameter[])[0.01f], runtimeContext: context);
+
+        Assert.True(rig.PreOptimizationEval.PeakMemoryBytes >= MemoryAwareGraphOptimizer.MinimumPeakBytesToOptimize);
+        Assert.Equal(0, backend.ModelledPeaks);
+    }
+
+    [Fact]
     public void TestRematerializedTrainingStepsMatchTheirOriginalsThroughOrtCoverage()
     {
         foreach (var model in (ComputationGraph[])[Modules.PlainNarrowMlpStack.ComputationGraph, Modules.CheckpointedNarrowMlpStack.ComputationGraph])
@@ -887,6 +948,27 @@ public class AutoDiffCheckpointingCoverageTests
     }
 
     [Fact]
+    public void TestTheRematerializerTakesAPlateausTrialAQuickBackendModelScoresBetterAndAsksASlowOneNothingCoverage()
+    {
+        var (graph, shapeInfo) = SdpaMeanPoolStepD64.Value;
+        var evaluator = new GraphEvaluator();
+        var baseline = evaluator.Evaluate(graph, shapeInfo);
+        var asked = 0;
+        int Committed(bool? quick)
+        {
+            var judge = quick is { } weighs
+                ? new BackendJudge(g => { asked++; return (1L << 40) >> Math.Clamp(g.Nodes.Count - graph.Nodes.Count, 0, 40); }, 1.0, 2.0, graph, baseline, weighs)
+                : null;
+            var remat = new Rematerializer(new ComputeMemoryObjective(1.0, 2.0, baseline), evaluator, judge: judge);
+            remat.Apply(graph, shapeInfo);
+            return remat.CommitLog.Count;
+        }
+        Assert.Equal(Committed(null), Committed(quick: false));
+        Assert.Equal(0, asked);
+        Assert.True(Committed(quick: true) > Committed(null));
+    }
+
+    [Fact]
     public void TestRematerializerStopsAtAnyBudgetMidSearchWithoutRaisingThePeakCoverage()
     {
         var (graph, shapeInfo) = SdpaMeanPoolStepD64.Value;
@@ -898,7 +980,7 @@ public class AutoDiffCheckpointingCoverageTests
     private static bool FirstCommittedBatchIsMinimal(InternalComputationGraph graph, ShapeInferenceResult shapeInfo, GraphEvaluator evaluator)
     {
         var baseline = evaluator.Evaluate(graph, shapeInfo);
-        var objective = new ComputeMemoryObjective(1.0, 2.0, baseline);
+        var objective = new ComputeMemoryObjective(1.0, 4.0, baseline);
         var remat = new Rematerializer(objective, evaluator);
         remat.Apply(graph, shapeInfo);
         var log = remat.CommitLog.TakeWhile(c => c.PeakBefore == baseline.PeakMemoryBytes).ToList();

@@ -3,8 +3,9 @@ and Lp pools with their global forms, MaxUnpool and MaxRoiPool.
 
 Every helper pads explicitly (ONNX's pads may be asymmetric or, cropping, negative, and an auto_pad
 of SAME_UPPER or SAME_LOWER puts the odd element at a chosen end), then runs the kernel unpadded
-over exactly the windows ONNX defines. A convolution runs in full precision (`runtime.PRECISION`),
-and a 16-bit float one, like an average or Lp pool of one, is computed in float32 and rounded back.
+over exactly the windows ONNX defines. A convolution runs in the session's precision
+(`runtime.precision()`: full precision unless TensorFloat-32 is allowed on a card), and a 16-bit
+float one, like an average or Lp pool of one, is computed in float32 and rounded back.
 """
 
 import itertools
@@ -117,7 +118,7 @@ def _taps(values, kernel, strides, dilations, outs):
 def _conv(x, w, strides, padding, dilations, group, lhs_dilation=None):
     return jax.lax.conv_general_dilated(
         x, w.astype(x.dtype), tuple(strides), padding, lhs_dilation=lhs_dilation,
-        rhs_dilation=tuple(dilations), feature_group_count=group, precision=_rt.PRECISION)
+        rhs_dilation=tuple(dilations), feature_group_count=group, precision=_rt.precision())
 
 
 def conv(x, w, b=None, /, *, auto_pad="NOTSET", dilations=None, group=1, kernel_shape=None, pads=None,
@@ -257,7 +258,7 @@ def deform_conv(x, w, offset, b=None, mask=None, /, *, dilations=None, group=1, 
     cols = cols.reshape(n, group, (c // group) * k, oh * ow)
     oc = w.shape[0]
     weights = w.astype(x.dtype).reshape(group, oc // group, (c // group) * k)
-    y = jnp.matmul(weights[None], cols, precision=_rt.PRECISION).reshape(n, oc, oh, ow)
+    y = jnp.matmul(weights[None], cols, precision=_rt.precision()).reshape(n, oc, oh, ow)
     if b is not None:
         y = y + b.astype(y.dtype).reshape(1, oc, 1, 1)
     return y

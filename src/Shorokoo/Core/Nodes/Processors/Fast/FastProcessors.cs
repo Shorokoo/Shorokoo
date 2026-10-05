@@ -48,44 +48,6 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         }
 
         /// <summary>
-        /// Copies a freshly computed result onto storage of its own, then releases the backend
-        /// tensor it came out of. For a caller that runs many sessions and RETAINS their
-        /// outputs; a caller that reads a result and drops it wants the zero-copy path instead.
-        ///
-        /// <para>A backend result tensor is allocated by ITS OWN session's allocator and keeps
-        /// that allocator — and so that session's whole arena, sized to the largest thing the
-        /// session computed rather than to the result — alive for as long as the result is
-        /// referenced. Nothing reclaims it: the value is genuinely reachable, so a forced
-        /// collection does not help, and the arena outlives the session's own disposal. Retaining
-        /// N such results therefore costs as many arenas as there were sessions. Measured on one
-        /// caller (<c>FastInitializeModelParams</c>, initializing a 12 x [384, 384] model): 131 MiB
-        /// of native memory still live after a forced collection with the results left on their
-        /// session, for 6.75 MiB of actual parameter, against 16-23 MiB with this copy. See
-        /// Shorokoo/Shorokoo#180 for the general ownership question this sidesteps rather than
-        /// settles.</para>
-        ///
-        /// <para>The copy is the part that frees the arena — it makes the backend tensor
-        /// unreachable. Disposing the source as well makes the release deterministic instead of
-        /// leaving it to the finalizer thread, and leaves the source guarded: a tensor is
-        /// disposed by disposing it, and every read afterwards says so rather than reading freed
-        /// memory (Shorokoo/Shorokoo#180).</para>
-        ///
-        /// <para>A string tensor is returned untouched — it has no fixed byte stride to copy
-        /// through — so a caller retaining one still pins its session.</para>
-        /// </summary>
-        public static TensorData RehostOffSession(TensorData data)
-        {
-            if (data.DType.ProtoTypeNum == DType.Utf8.ProtoTypeNum) return data;
-            // Read the bytes before disposing: that invalidates the buffer they came from.
-            var copy = TensorData.CreateFromRawBytes(data.Shape, data.DType, data.CopyRawMemory());
-            // Taking the span is data's last read, so keep it alive until the copy is out of the
-            // buffer the span points at (Shorokoo/Shorokoo#178).
-            GC.KeepAlive(data);
-            data.Dispose();
-            return copy;
-        }
-
-        /// <summary>
         /// Builds a FastNodeKey → FastNode lookup that also maps output FastTensorKey.FastNodeKey
         /// entries. This handles LOOP_OPEN carry variables whose output TensorKeys have a
         /// FastNodeKey different from the LOOP_OPEN's own Key.

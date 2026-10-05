@@ -58,6 +58,7 @@ public class OnnxExternalDataTests
     private const int FloatElem = 1;    // TensorProto.DataType.FLOAT
     private const int Int64Elem = 7;    // INT64
     private const int Float16Elem = 10; // FLOAT16
+    private const int DoubleElem = 11;  // DOUBLE
 
     private static NodeProto Node(string opType, string name, string[] inputs, string[] outputs)
     {
@@ -251,6 +252,243 @@ public class OnnxExternalDataTests
             float[] expected = [2f, 4f, 6f, 8f];
             Assert.Equal(expected,
                 RunAddModel(OnnxModelImporter.FromOnnxModel(bytes, externalDataDirectory: dir)));
+        });
+    }
+
+    [Fact]
+    public void TestAnOnnxFileIsScannedWithItsFlatPayloadsReadWhereTheyLieAndImportsAsParsedWhole()
+    {
+        WithTempDir(dir =>
+        {
+            const int N = 512;
+            float[] Values(float scale) => [.. Enumerable.Range(0, N).Select(i => scale * MathF.Sin(i))];
+            NodeProto With(NodeProto node, AttributeProto attribute) { node.Attributes.Add(attribute); return node; }
+            AttributeProto To(int elemType) => new() { Name = "to", Type = AttributeProto.AttributeType.Int, I = elemType };
+            AttributeProto Value(float scale) => new() { Name = "value", Type = AttributeProto.AttributeType.Tensor, T = Init("", FloatElem, [N], FloatBytes(Values(scale))) };
+            GraphProto Branch(string name, float scale)
+            {
+                var branch = new GraphProto { Name = name };
+                branch.Nodes.Add(With(Node("Constant", name + "_c", [], [name + "_out"]), Value(scale)));
+                branch.Outputs.Add(TensorInfo(name + "_out", FloatElem, N));
+                return branch;
+            }
+
+            var g = new GraphProto { Name = "payloads" };
+            g.Inputs.Add(TensorInfo("x", FloatElem, N));
+            g.Initializers.Add(Init("raw", FloatElem, [N], FloatBytes(Values(1f))));
+            g.Initializers.Add(new TensorProto { Name = "stated", data_type = FloatElem, Dims = [N], RawData = FloatBytes(Values(1.5f)), data_location = TensorProto.DataLocation.Default });
+            g.Initializers.Add(new TensorProto { Name = "packed", data_type = FloatElem, Dims = [N], FloatDatas = Values(2f) });
+            g.Initializers.Add(new TensorProto { Name = "wide", data_type = DoubleElem, Dims = [N], DoubleDatas = [.. Values(3f).Select(v => (double)v)] });
+            g.Initializers.Add(new TensorProto { Name = "varint", data_type = Int64Elem, Dims = [N], Int64Datas = [.. Enumerable.Range(0, N).Select(i => (long)i)] });
+            g.Initializers.Add(Init("surplus", FloatElem, [N], FloatBytes([.. Values(4f), 9f])));
+            g.Initializers.Add(Init("small", FloatElem, [4], FloatBytes(1f, 2f, 3f, 4f)));
+            g.Initializers.Add(Init("cond", 9, [], [1]));
+            g.Nodes.Add(With(Node("Constant", "c", [], ["c"]), Value(5f)));
+            g.Nodes.Add(With(Node("Cast", "castw", ["wide"], ["widef"]), To(FloatElem)));
+            g.Nodes.Add(With(Node("Cast", "casti", ["varint"], ["varintf"]), To(FloatElem)));
+            var ifNode = Node("If", "if", ["cond"], ["branch"]);
+            ifNode.Attributes.Add(new AttributeProto { Name = "then_branch", Type = AttributeProto.AttributeType.Graph, G = Branch("then", 6f) });
+            ifNode.Attributes.Add(new AttributeProto { Name = "else_branch", Type = AttributeProto.AttributeType.Graph, G = Branch("else", 7f) });
+            g.Nodes.Add(ifNode);
+            string[] terms = ["raw", "stated", "packed", "widef", "varintf", "surplus", "c", "branch"];
+            for (int i = 0; i < terms.Length; i++)
+                g.Nodes.Add(Node("Add", "add" + i, [i == 0 ? "x" : "s" + i, terms[i]], [i == terms.Length - 1 ? "y" : "s" + (i + 1)]));
+            g.Outputs.Add(TensorInfo("y", FloatElem, N));
+            var path = WriteModel(dir, "payloads.onnx", WrapModel(g));
+
+            ModelProto Scan(string file) { using var stream = OnnxStreamingScan.Open(file); return OnnxStreamingScan.ReadModel(stream); }
+            var scanned = Scan(path);
+            var external = TensorProto.DataLocation.External;
+            Assert.Equal([external, external, external, external, default, default, default, default], scanned.Graph.Initializers.Select(t => t.data_location));
+            Assert.Equal(external, scanned.Graph.Nodes[0].Attributes[0].T.data_location);
+            Assert.All(scanned.Graph.Nodes[3].Attributes, a => Assert.Equal(external, a.G.Nodes[0].Attributes[0].T.data_location));
+
+            var x = TensorData([(long)N], Values(0.5f));
+            byte[] Run(ComputationGraph model) => ComputeContext.Default.Execute(model, x.Shared())[0].ToTensorData().AccessRawMemory().ToArray();
+            var parsedWhole = Run(OnnxModelImporter.FromOnnxModel(File.ReadAllBytes(path)));
+            Assert.Equal(parsedWhole, Run(Persistence.ImportOnnx(path)));
+            Assert.Equal(parsedWhole, Run(OnnxModelImporter.FromOnnxModel(path)));
+
+            var original = File.ReadAllBytes(path);
+            g.Initializers[0] = Init("raw", FloatElem, [N], FloatBytes(Values(-1f)));
+            var replacement = File.ReadAllBytes(WriteModel(dir, "replacement.onnx", WrapModel(g)));
+            byte[] Replaced(Func<ComputationGraph> import)
+            {
+                OnnxStreamingScan.ScannedInjection = file =>
+                {
+                    try { File.WriteAllBytes(file + ".new", replacement); File.Move(file + ".new", file, overwrite: true); }
+                    catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
+                };
+                try { return Run(import()); }
+                finally { OnnxStreamingScan.ScannedInjection = null; File.WriteAllBytes(path, original); }
+            }
+            Assert.Equal(parsedWhole, Replaced(() => Persistence.ImportOnnx(path)));
+            Assert.Equal(parsedWhole, Replaced(() => OnnxModelImporter.FromOnnxModel(path)));
+
+            long ScanAllocation(int count)
+            {
+                var inline = new GraphProto { Name = "inline" };
+                inline.Initializers.Add(Init("inline", FloatElem, [count], new byte[4 * count + 4]));
+                var file = WriteModel(dir, $"inline{count}.onnx", WrapModel(inline));
+                Scan(file);
+                var before = GC.GetAllocatedBytesForCurrentThread();
+                Scan(file);
+                return GC.GetAllocatedBytesForCurrentThread() - before;
+            }
+            const int Inline = 1 << 20;
+            Assert.True(ScanAllocation(Inline) - ScanAllocation(1) < 3 * 4L * Inline);
+
+            var truncated = Path.Combine(dir, "truncated.onnx");
+            File.WriteAllBytes(truncated, File.ReadAllBytes(path)[..^(N * 4)]);
+            Assert.Contains(truncated, Assert.Throws<InvalidDataException>(() => Persistence.ImportOnnx(truncated)).Message);
+
+            g.SparseInitializers.Add(new SparseTensorProto { Values = Init("sparse", FloatElem, [1], FloatBytes(1f)), Indices = Init("", Int64Elem, [1], LongBytes(0)), Dims = [N] });
+            var sparse = WriteModel(dir, "sparse.onnx", WrapModel(g));
+            Assert.Contains("sparse initializer", Assert.Throws<InvalidDataException>(() => Persistence.ImportOnnx(sparse)).Message);
+            Assert.Contains("sparse initializer", Assert.Throws<InvalidDataException>(() => OnnxModelImporter.FromOnnxModel(File.ReadAllBytes(sparse))).Message);
+        });
+    }
+
+    /// <summary>A model whose messages nest <paramref name="depth"/> deep, each the one field of
+    /// the message around it: keyed by <paramref name="outer"/>, then by <paramref name="cycle"/>
+    /// over and over, the innermost holding <paramref name="innermost"/>.</summary>
+    internal static byte[] Nested(byte[] outer, byte[] cycle, int depth, byte[]? innermost = null)
+    {
+        static int VarintLength(long value) { int n = 1; for (; value >= 0x80; value >>= 7) n++; return n; }
+        var lengths = new long[depth + 1];
+        lengths[depth] = innermost?.Length ?? 0;
+        for (int i = depth - 1; i >= 0; i--)
+            lengths[i] = 1 + VarintLength(lengths[i + 1]) + lengths[i + 1];
+        var bytes = new List<byte>();
+        for (int i = 0; i < depth; i++)
+        {
+            bytes.Add(i < outer.Length ? outer[i] : cycle[(i - outer.Length) % cycle.Length]);
+            var length = (ulong)lengths[i + 1];
+            for (; length >= 0x80; length >>= 7) bytes.Add((byte)(length | 0x80));
+            bytes.Add((byte)length);
+        }
+        return [.. bytes, .. innermost ?? []];
+    }
+
+    [Fact]
+    public void TestAModelNestedDeeperThanProtobufReadsIsRefusedWhereverItIsRead()
+        => Utils.OwnProcess.Run(typeof(OnnxExternalDataTests), nameof(AModelNestedDeeperThanProtobufReadsIsRefusedWhereverItIsRead));
+
+    internal static void AModelNestedDeeperThanProtobufReadsIsRefusedWhereverItIsRead()
+    {
+        WithTempDir(dir =>
+        {
+            byte[] graph = [0x3A], input = [0x3A, 0x5A, 0x12], subgraphs = [0x0A, 0x2A, 0x32], sequences = [0x22, 0x0A];
+            string Written(string name, byte[] bytes) { var path = Path.Combine(dir, name); File.WriteAllBytes(path, bytes); return path; }
+            ModelProto Scan(string path) { using var file = OnnxStreamingScan.Open(path); return OnnxStreamingScan.ReadModel(file); }
+
+            Assert.NotNull(Scan(Written("deepest.onnx", Nested(graph, subgraphs, 100))).Graph);
+            Assert.NotNull(Whole(Nested(graph, subgraphs, 100)).Graph);
+            Assert.Throws<ProtoBuf.ProtoException>(() => Scan(Written("deeper.onnx", Nested(graph, subgraphs, 101))));
+            Assert.Throws<ProtoBuf.ProtoException>(() => Whole(Nested(graph, subgraphs, 101)));
+            var weightAtTheDeepest = Nested(graph, subgraphs, 99, [0x2A, .. Varint(Tensor.Length), .. Tensor]);
+            Assert.NotNull(Whole(weightAtTheDeepest).Graph);
+            Assert.NotNull(Scan(Written("weight-at-the-deepest.onnx", weightAtTheDeepest)).Graph);
+            foreach (var (name, bytes) in (ValueTuple<string, byte[]>[])[("subgraphs.onnx", Nested(graph, subgraphs, 100_000)), ("types.onnx", Nested(input, sequences, 100_000))])
+            {
+                var path = Written(name, bytes);
+                Assert.Contains(path, Assert.Throws<InvalidDataException>(() => Persistence.ImportOnnx(path)).Message);
+                Assert.Throws<ProtoBuf.ProtoException>(() => OnnxModelImporter.FromOnnxModel(path));
+                Assert.Throws<ProtoBuf.ProtoException>(() => OnnxModelImporter.FromOnnxModel(bytes));
+                Assert.Equal(0, SideBySideBackendHardwareTests.InAChildProcess([], "deep-model-routes", path));
+            }
+        });
+    }
+
+    /// <summary>What the child process of <see cref="TestAModelNestedDeeperThanProtobufReadsIsRefusedWhereverItIsRead"/>
+    /// runs: the model at <paramref name="path"/> handed to every route that parses a model's bytes
+    /// outside the importer; 0 where each refuses it as a malformed protobuf.</summary>
+    internal static int DeepModelRoutes(string path)
+    {
+        var bytes = File.ReadAllBytes(path);
+        Action[] routes =
+        [
+            () => Shorokoo.Core.Backends.OutputAliasProof.Prove(bytes, []),
+            () => new Shorokoo.PyTorch.Cpu.TorchCpuBackend().CreateSession(bytes, default, default, Shorokoo.Core.Backends.DeviceMemorySettings.Default).Dispose(),
+            () => new Shorokoo.Jax.Cpu.JaxCpuBackend().CreateSession(bytes, default, default, Shorokoo.Core.Backends.DeviceMemorySettings.Default).Dispose(),
+        ];
+        foreach (var route in routes)
+        {
+            try
+            {
+                route();
+                return 1;
+            }
+            catch (ProtoBuf.ProtoException)
+            {
+            }
+        }
+        return 0;
+    }
+
+    private static ModelProto Whole(byte[] bytes)
+    {
+        using var stream = new MemoryStream(bytes, writable: false);
+        return OnnxProtobuf.ReadModel(stream);
+    }
+
+    private static byte[] Varint(long value)
+    {
+        var bytes = new List<byte>();
+        for (; value >= 0x80; value >>= 7) bytes.Add((byte)(value | 0x80));
+        bytes.Add((byte)value);
+        return [.. bytes];
+    }
+
+    /// <summary>A float tensor of 256 elements, as an attribute's <c>t</c> holds it: 1 KiB of
+    /// <c>raw_data</c>, which the scan references in place.</summary>
+    private static readonly byte[] Tensor = [0x08, 0x80, 0x02, 0x10, 0x01, 0x4A, .. Varint(1024), .. new byte[1024]];
+
+    [Fact]
+    public void TestAModelWithAGroupItsParseSkipsIsScannedAsItIsParsed()
+    {
+        WithTempDir(dir =>
+        {
+            byte[] group = [.. Varint(100 << 3 | 3), 0x08, 0x01, .. Varint(101 << 3 | 3), .. Varint(101 << 3 | 4), .. Varint(100 << 3 | 4)];
+            byte[] initializer = [.. Tensor, .. group, 0x42, 0x01, (byte)'w'];
+            byte[] graphBody = [.. group, 0x2A, .. Varint(initializer.Length), .. initializer];
+            byte[] bytes = [0x3A, .. Varint(graphBody.Length), .. graphBody, .. group];
+            var path = Path.Combine(dir, "group.onnx");
+            File.WriteAllBytes(path, bytes);
+            using var file = OnnxStreamingScan.Open(path);
+            Assert.Equal(Whole(bytes).Graph.Initializers[0].Name, OnnxStreamingScan.ReadModel(file).Graph.Initializers[0].Name);
+        });
+    }
+
+    [Fact]
+    public void TestTheScanKeepsTheWireOrderOfAPayloadWrittenBothPackedAndUnpacked()
+    {
+        WithTempDir(dir =>
+        {
+            static byte[] Varint(long value) { var bytes = new List<byte>(); for (; value >= 0x80; value >>= 7) bytes.Add((byte)(value | 0x80)); bytes.Add((byte)value); return [.. bytes]; }
+            static byte[] Delimited(int field, byte[] body) => [.. Varint(field << 3 | 2), .. Varint(body.Length), .. body];
+            static byte[] Floats(int from, int count) => FloatBytes([.. Enumerable.Range(from, count).Select(i => (float)i)]);
+            static byte[] Doubles(int from, int count) => [.. Enumerable.Range(from, count).SelectMany(i => BitConverter.GetBytes((double)i))];
+            static byte[] Unpacked(int field, int wire, byte[] values) => [.. values.Chunk(wire == 5 ? 4 : 8).SelectMany(v => (byte[])[(byte)(field << 3 | wire), .. v])];
+            void Same(string name, long dims, int dataType, params byte[][] payloads)
+            {
+                byte[] tensor = [0x08, .. Varint(dims), 0x10, (byte)dataType, .. payloads.SelectMany(p => p)];
+                var path = Path.Combine(dir, name);
+                File.WriteAllBytes(path, Delimited(7, Delimited(5, tensor)));
+                TensorProto whole;
+                using (var stream = File.OpenRead(path)) whole = OnnxProtobuf.ReadModel(stream).Graph.Initializers[0];
+                TensorProto scanned;
+                using (var file = OnnxStreamingScan.Open(path)) scanned = OnnxStreamingScan.ReadModel(file).Graph.Initializers[0];
+                Assert.Equal(whole.data_location, scanned.data_location);
+                Assert.Equal(whole.FloatDatas, scanned.FloatDatas);
+                Assert.Equal(whole.DoubleDatas, scanned.DoubleDatas);
+            }
+
+            byte[] name = Delimited(8, "w"u8.ToArray());
+            Same("packed-then-unpacked.onnx", 257, FloatElem, Delimited(4, Floats(0, 256)), Unpacked(4, 5, Floats(256, 1)), name);
+            Same("packed-to-shape-then-unpacked.onnx", 256, FloatElem, Delimited(4, Floats(0, 256)), Unpacked(4, 5, Floats(256, 1)));
+            Same("interleaved.onnx", 259, FloatElem, Unpacked(4, 5, Floats(0, 1)), name, Delimited(4, Floats(1, 256)), Unpacked(4, 5, Floats(257, 2)));
+            Same("doubles-packed-then-unpacked.onnx", 129, DoubleElem, Delimited(10, Doubles(0, 128)), Unpacked(10, 1, Doubles(128, 1)), name);
         });
     }
 

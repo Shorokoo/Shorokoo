@@ -50,6 +50,21 @@ namespace Shorokoo.Core.Utils
                 $"'{CheckpointPath}': the manifest references entry '{entryPath}' (for {role}), " +
                 $"but {MissingEntryWhere}.");
 
+        /// <summary>
+        /// One entry as a forward stream over its stored bytes, with their length, or <c>null</c>
+        /// when the checkpoint has no such entry — how a data entry is read into the memory its
+        /// tensors live in without being held whole on the way. Refused alike with
+        /// <see cref="TryReadEntry"/>. The caller disposes the stream.
+        /// </summary>
+        internal abstract Stream? TryOpenEntry(string entryPath, out long length);
+
+        /// <summary><see cref="TryOpenEntry"/> for an entry the manifest requires, failing loudly
+        /// (naming <paramref name="role"/>) when the checkpoint lacks it.</summary>
+        internal Stream OpenRequiredEntry(string entryPath, string role, out long length)
+            => TryOpenEntry(entryPath, out length) ?? throw new InvalidDataException(
+                $"'{CheckpointPath}': the manifest references entry '{entryPath}' (for {role}), " +
+                $"but {MissingEntryWhere}.");
+
         /// <summary>Reads the config.json manifest bytes, failing loudly when absent — a
         /// checkpoint without its manifest is not a .skpt at all.</summary>
         internal byte[] ReadManifestBytes()
@@ -137,6 +152,19 @@ namespace Shorokoo.Core.Utils
             return bytes;
         }
 
+        internal override Stream? TryOpenEntry(string entryPath, out long length)
+        {
+            length = 0;
+            var entry = _archive.GetEntry(entryPath);
+            if (entry is null) return null;
+            if (entry.Length > int.MaxValue)
+                throw new InvalidDataException(
+                    $"'{CheckpointPath}': entry '{entry.FullName}' declares an uncompressed size of {entry.Length} " +
+                    "bytes, which exceeds the maximum this .skpt version reads.");
+            length = entry.Length;
+            return entry.Open();
+        }
+
         private protected override string MissingEntryWhere => "the archive contains no such entry";
 
         private protected override string NotACheckpointMessage =>
@@ -170,6 +198,24 @@ namespace Shorokoo.Core.Utils
                     $"'{CheckpointPath}': entry '{entryPath}' is {length} bytes, which exceeds the " +
                     "maximum this .skpt version reads.");
             return File.ReadAllBytes(resolved);
+        }
+
+        internal override Stream? TryOpenEntry(string entryPath, out long length)
+        {
+            length = 0;
+            var resolved = ResolveEntryPath(_rootFull, entryPath, CheckpointPath);
+            if (!File.Exists(resolved)) return null;
+            var stream = new FileStream(resolved, FileMode.Open, FileAccess.Read, FileShare.Read,
+                bufferSize: 1 << 16, FileOptions.SequentialScan);
+            if (stream.Length > int.MaxValue)
+            {
+                stream.Dispose();
+                throw new InvalidDataException(
+                    $"'{CheckpointPath}': entry '{entryPath}' is {stream.Length} bytes, which exceeds the " +
+                    "maximum this .skpt version reads.");
+            }
+            length = stream.Length;
+            return stream;
         }
 
         /// <summary>

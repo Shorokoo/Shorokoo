@@ -62,6 +62,23 @@ public abstract class TorchBackend : IShorokooBackend
     public bool AcceptsTrainingFormat(string format)
         => format is TrainingFormats.Onnx or TrainingFormats.OnnxAutoGrad;
 
+    /// <summary>What a run of the model's translation holds at once beyond its inputs
+    /// (<see cref="TorchRunMemory"/>), in either precision: measured on a card, a training step
+    /// holds the same under TensorFloat-32 as in full precision.</summary>
+    long? IShorokooBackend.ModelledRunPeak(Shorokoo.Core.Factory.IR.ModelProto model, IReadOnlyList<OutputAlias> outputAliases,
+        PrecisionSettings precision)
+        => TorchRunMemory.Peak(model, outputAliases, onHost: !OnCuda);
+
+    /// <summary>It has one: <see cref="TorchRunMemory"/>.</summary>
+    bool IShorokooBackend.ModelsARun => true;
+
+    /// <summary>Its model walks the model it is handed and builds nothing of torch's.</summary>
+    bool IShorokooBackend.ModelsARunQuickly => true;
+
+    /// <summary>A translation's: each value freed at its last read, its views and its writes over
+    /// dying operands.</summary>
+    Shorokoo.Core.AutoDiffCheckpointing.RunLayout IShorokooBackend.RunLayout => Shorokoo.Core.AutoDiffCheckpointing.RunLayout.Translation;
+
     /// <summary>torch's name for this backend's device: <c>cpu</c> or <c>cuda:N</c>.</summary>
     public string DeviceName { get; }
 
@@ -149,7 +166,7 @@ public abstract class TorchBackend : IShorokooBackend
         ShorokooGraphOptimization graphOptimization,
         ShorokooLogSeverity logSeverity,
         DeviceMemorySettings deviceMemory)
-        => TorchSession.Create(this, modelBytes, logSeverity, deviceMemory, DiagnosticSettings.Default, []);
+        => TorchSession.Create(this, modelBytes, logSeverity, deviceMemory, DiagnosticSettings.Default, [], PrecisionSettings.Default);
 
     /// <summary>The same session, recording which device ran each node where
     /// <paramref name="diagnostics"/> asks (<see cref="DiagnosticSettings.TraceNodePlacement"/>):
@@ -160,7 +177,7 @@ public abstract class TorchBackend : IShorokooBackend
         ShorokooLogSeverity logSeverity,
         DeviceMemorySettings deviceMemory,
         DiagnosticSettings diagnostics)
-        => TorchSession.Create(this, modelBytes, logSeverity, deviceMemory, diagnostics, []);
+        => TorchSession.Create(this, modelBytes, logSeverity, deviceMemory, diagnostics, [], PrecisionSettings.Default);
 
     /// <summary>
     /// The same session, writing the outputs <paramref name="outputAliases"/> names into the memory
@@ -177,7 +194,38 @@ public abstract class TorchBackend : IShorokooBackend
         IReadOnlyList<OutputAlias> outputAliases)
     {
         ArgumentNullException.ThrowIfNull(outputAliases);
-        return TorchSession.Create(this, modelBytes, logSeverity, deviceMemory, diagnostics, outputAliases);
+        return TorchSession.Create(this, modelBytes, logSeverity, deviceMemory, diagnostics, outputAliases, PrecisionSettings.Default);
+    }
+
+    /// <summary>
+    /// The same session, computing in <paramref name="precision"/>: on CUDA, a session that
+    /// <see cref="PrecisionSettings.AllowTensorFloat32"/> lets compute <c>float32</c> products,
+    /// convolutions and recurrent layers in TensorFloat-32 sets torch's switches for cuBLAS and cuDNN
+    /// to allow it as each of its runs starts, and every other session sets them to forbid it (see
+    /// <see cref="TorchSession"/>); on the CPU, <c>float32</c> is computed in full precision either
+    /// way. torch has no thread pool of its own per session, so <paramref name="intraOpThreads"/> is
+    /// unused, and it takes no initializer as a value it already holds.
+    /// </summary>
+    /// <exception cref="NotSupportedException"><paramref name="suppliedInitializers"/> names
+    /// any.</exception>
+    public IShorokooSession CreateSession(
+        ReadOnlyMemory<byte> modelBytes,
+        ShorokooGraphOptimization graphOptimization,
+        ShorokooLogSeverity logSeverity,
+        DeviceMemorySettings deviceMemory,
+        DiagnosticSettings diagnostics,
+        IReadOnlyList<OutputAlias> outputAliases,
+        int intraOpThreads,
+        IReadOnlyList<SuppliedInitializer> suppliedInitializers,
+        PrecisionSettings precision)
+    {
+        ArgumentNullException.ThrowIfNull(outputAliases);
+        ArgumentNullException.ThrowIfNull(suppliedInitializers);
+        ArgumentNullException.ThrowIfNull(precision);
+        if (suppliedInitializers.Count > 0)
+            throw new NotSupportedException(
+                $"{Description} cannot take a model's initializers as values it already holds.");
+        return TorchSession.Create(this, modelBytes, logSeverity, deviceMemory, diagnostics, outputAliases, precision);
     }
 
     public IShorokooTensorValue CreateTensor<T>(T[] data, long[] shape) where T : unmanaged
@@ -207,14 +255,23 @@ public abstract class TorchBackend : IShorokooBackend
     /// <summary>An uninitialized tensor on this backend's device.</summary>
     public IShorokooTensorValue CreateUninitializedTensorInBackendMemory(
         ShorokooTensorElementType elementType, long[] shape)
+        => Uninitialized(elementType, shape, DeviceName);
+
+    /// <summary>An uninitialized tensor in host memory, whatever this backend's device, of any
+    /// size: torch allocates it, so no managed array of its contents is ever made.</summary>
+    public IShorokooTensorValue CreateUninitializedHostTensor(
+        ShorokooTensorElementType elementType, long[] shape)
+        => Uninitialized(elementType, shape, "cpu");
+
+    private IShorokooTensorValue Uninitialized(ShorokooTensorElementType elementType, long[] shape, string device)
     {
         ArgumentNullException.ThrowIfNull(shape);
-        PythonElementTypes.ByteCount(elementType, shape);
+        PythonElementTypes.ByteLength(elementType, shape);
         var runtime = Runtime;
         using (PythonRuntime.Gil())
         {
             using var dims = Shape(shape);
-            var tensor = PyCall.Invoke(runtime.Empty, (int)elementType, dims, DeviceName);
+            var tensor = PyCall.Invoke(runtime.Empty, (int)elementType, dims, device);
             return TorchTensorValue.Wrap(runtime, tensor, elementType);
         }
     }
@@ -266,7 +323,9 @@ public abstract class TorchBackend : IShorokooBackend
     /// <summary>
     /// A sequence of <paramref name="values"/>, which it takes over: on success the sequence holds
     /// them and each value handed over refuses every read from then on; on failure every one is
-    /// released before this throws. A value of another runtime is copied in, and released too.
+    /// released before this throws. A value of another runtime is copied in, and released too; so is
+    /// one standing on a block other values stand on (<see cref="TorchTensorValue.Range"/>), since a
+    /// sequence holds its elements' memory with no lease on a block.
     /// </summary>
     public IShorokooTensorValue CreateSequence(IReadOnlyList<IShorokooTensorValue> values)
     {
@@ -281,8 +340,8 @@ public abstract class TorchBackend : IShorokooBackend
             {
                 foreach (var value in values)
                 {
-                    if (value is TorchTensorValue torch) { own.Add(torch); continue; }
-                    var copy = (TorchTensorValue)BackendTransfer.CopyTo(this, value);
+                    if (value is TorchTensorValue { Range: null } torch) { own.Add(torch); continue; }
+                    var copy = value is TorchTensorValue standing ? Cloned(runtime, standing) : (TorchTensorValue)BackendTransfer.CopyTo(this, value);
                     copies.Add(copy);
                     own.Add(copy);
                 }
@@ -307,6 +366,13 @@ public abstract class TorchBackend : IShorokooBackend
             // on in the sequence's list, which holds a reference of its own.
             foreach (var value in values) value.Dispose();
         }
+    }
+
+    /// <summary>A copy of <paramref name="value"/> in memory of its own.</summary>
+    private static TorchTensorValue Cloned(TorchRuntime runtime, TorchTensorValue value)
+    {
+        using (PythonRuntime.Gil())
+            return TorchTensorValue.Wrap(runtime, value.Value.InvokeMethod("clone"), value.ElementType);
     }
 
     private static TorchTensorValue WrapSequence(TorchRuntime runtime, PyObject list, ShorokooTensorElementType elementType)
@@ -354,6 +420,67 @@ public abstract class TorchBackend : IShorokooBackend
             return host.GetTensorDataAsSpan<byte>().ToArray();
         }
     }
+
+    /// <summary>
+    /// Copies <paramref name="destination"/>'s length of bytes of <paramref name="value"/>,
+    /// <paramref name="byteOffset"/> bytes in, to <paramref name="destination"/>: out of the piece of
+    /// its buffer a host tensor addresses, and out of a tensor on a card by torch copying that piece
+    /// of its memory home, so a save streams a card tensor of any size through one bounded buffer.
+    /// False for a value of another runtime's that the host cannot read, and for a string tensor or
+    /// a sequence on a card.
+    /// </summary>
+    public unsafe bool TryCopyTensorRangeToHost(IShorokooTensorValue value, long byteOffset, Span<byte> destination)
+    {
+        ArgumentNullException.ThrowIfNull(value);
+        if (value.IsHostAccessible)
+        {
+            value.HostPiece(byteOffset, destination.Length).CopyTo(destination);
+            // The piece is the value's last read (Shorokoo/Shorokoo#178).
+            GC.KeepAlive(value);
+            return true;
+        }
+        if (OnCard(value) is not { } torch) return false;
+        IShorokooTensorValue.PieceWithin(byteOffset, destination.Length, TorchPlacements.BytesOf(torch));
+        var runtime = Runtime;
+        using (PythonRuntime.Gil())
+        fixed (byte* target = destination)
+            PyCall.Invoke(runtime.CopyRangeToHost, torch.Value, byteOffset, (long)target, destination.Length).Dispose();
+        GC.KeepAlive(torch);
+        return true;
+    }
+
+    /// <summary>
+    /// Copies <paramref name="source"/> into <paramref name="value"/>, <paramref name="byteOffset"/>
+    /// bytes in: into the piece of its buffer a host tensor addresses, and into a tensor on a card by
+    /// torch copying the bytes into that piece of its memory, so a load streams a card tensor of any
+    /// size through one bounded buffer. False where <see cref="TryCopyTensorRangeToHost"/> is.
+    /// </summary>
+    public unsafe bool TryCopyHostToTensorRange(IShorokooTensorValue value, long byteOffset, ReadOnlySpan<byte> source)
+    {
+        ArgumentNullException.ThrowIfNull(value);
+        if (value.IsHostAccessible)
+        {
+            source.CopyTo(value.HostPiece(byteOffset, source.Length));
+            // The piece is the value's last read (Shorokoo/Shorokoo#178).
+            GC.KeepAlive(value);
+            return true;
+        }
+        if (OnCard(value) is not { } torch) return false;
+        IShorokooTensorValue.PieceWithin(byteOffset, source.Length, TorchPlacements.BytesOf(torch));
+        var runtime = Runtime;
+        using (PythonRuntime.Gil())
+        fixed (byte* bytes = source)
+            PyCall.Invoke(runtime.CopyHostToRange, torch.Value, byteOffset, (long)bytes, source.Length).Dispose();
+        GC.KeepAlive(torch);
+        return true;
+    }
+
+    /// <summary><paramref name="value"/> where it is a fixed-stride tensor of torch's on a card.</summary>
+    private static TorchTensorValue? OnCard(IShorokooTensorValue value)
+        => value is TorchTensorValue { ValueType: ShorokooOnnxValueType.Tensor } torch
+           && torch.ElementType != ShorokooTensorElementType.String && torch.CudaDevice >= 0
+            ? torch
+            : null;
 
     internal static PyList Shape(long[] shape)
     {

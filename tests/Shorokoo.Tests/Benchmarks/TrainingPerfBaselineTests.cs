@@ -89,6 +89,45 @@ public class TrainingPerfBaselineTests
             measured.TrainStepsPerSecond, baseline.TrainStepsPerSecond, baseline.SlowdownFactor);
     }
 
+    [Fact]
+    public void AlternatingConsumingAndSharedRunsOfOneCompileTakeNoLongerPlacedThanNot()
+    {
+        long[] shape = [128L, 128L, 128L];
+        float[] values = [.. Enumerable.Range(0, 128 * 128 * 128).Select(i => (i % 101) / 101f - 0.5f)];
+        var model = MemoryPassEncoder2.ComputationGraph.ToConcreteArchitecture([TensorData(shape, values)]).ToConcreteModel();
+        double Pair(bool placing)
+        {
+            using var context = new ComputeContext { ValuePlacement = placing };
+            var compiled = context.Compile(model);
+            var shared = TensorData(shape, values);
+            void Run()
+            {
+                ComputeContext.ReleaseOutputs(compiled.Execute(TensorData(shape, values)));
+                ComputeContext.ReleaseOutputs(compiled.Execute(shared.Shared()));
+            }
+            Run();
+            Run();
+            var least = double.MaxValue;
+            for (int i = 0; i < 8; i++)
+            {
+                var watch = Stopwatch.StartNew();
+                Run();
+                least = Math.Min(least, watch.Elapsed.TotalMilliseconds);
+            }
+            shared.Delete();
+            return least;
+        }
+
+        double off = double.MaxValue, on = double.MaxValue;
+        for (int round = 0; round < 3; round++)
+        {
+            off = Math.Min(off, Pair(placing: false));
+            on = Math.Min(on, Pair(placing: true));
+        }
+
+        Assert.True(on <= off * 1.15);
+    }
+
     private static void AssertNotSlower(string phase, double measuredMs, double baselineMs, double factor)
     {
         Assert.True(measuredMs <= baselineMs * factor);

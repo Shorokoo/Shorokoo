@@ -2,13 +2,18 @@
 Layer-, Group-, RMS-, Lp- and MeanVarianceNormalization, LRN, NegativeLogLikelihoodLoss
 and SoftmaxCrossEntropyLoss.
 
-Every helper is functional -- no input is written to, the running statistics of a training-mode
-BatchNormalization included, which come back as new tensors -- so autograd can differentiate
-through all of them.
+No helper writes into a tensor it is handed but the `_out` two take -- the running statistics of a
+training-mode BatchNormalization included, which come back as new tensors -- so autograd can
+differentiate through all of them. batch_normalization and layer_normalization write their first
+output into `_out`, which a run hands them only while it computes no gradient -- a range of memory
+the run consumed, or their very input where nothing reads it after the node (the runtime's
+place_into and write_over) -- reading their statistics off the input before they write it.
 """
 
 import torch
 import torch.nn.functional as F
+
+from . import runtime as _rt
 
 _NARROW_FLOATS = (torch.float16, torch.bfloat16)
 
@@ -25,11 +30,20 @@ def _channel_shape(x):
     return [1, -1] + [1] * (x.dim() - 2)
 
 
+def _out_for(out, x, compute):
+    """`out` where a normalization of `x` computed in `compute` writes its result into it, step by
+    step: it `writes_into` the result, of x's type, and x is computed in its own type."""
+    return out if out is not None and compute == x.dtype and _rt.writes_into(out, x) else None
+
+
 def batch_normalization(x, scale, bias, mean, var, /, *, epsilon=1e-5, momentum=0.9, training_mode=0,
-                        _outputs):
+                        _outputs, _out=None):
+    """BatchNormalization; its first output written into `_out` where `_out_for` says it can be,
+    every step of it in place there."""
     shape = _channel_shape(x)
     compute = torch.float32 if x.dtype in _NARROW_FLOATS else x.dtype
     xs = x.to(compute)
+    _out = _out_for(_out, x, compute)
     if training_mode:
         dims = [0] + list(range(2, x.dim()))
         batch_mean = torch.mean(xs, dim=dims)
@@ -37,8 +51,8 @@ def batch_normalization(x, scale, bias, mean, var, /, *, epsilon=1e-5, momentum=
         use_mean, use_var = batch_mean, batch_var
     else:
         use_mean, use_var = mean.to(compute), var.to(compute)
-    y = (xs - use_mean.reshape(shape)) / torch.sqrt(use_var.reshape(shape) + epsilon)
-    y = (y * scale.to(compute).reshape(shape) + bias.to(compute).reshape(shape)).to(x.dtype)
+    y = torch.div(torch.sub(xs, use_mean.reshape(shape), out=_out), torch.sqrt(use_var.reshape(shape) + epsilon), out=_out)
+    y = torch.add(torch.mul(y, scale.to(compute).reshape(shape), out=_out), bias.to(compute).reshape(shape), out=_out).to(x.dtype)
     if _outputs == 1:
         return (y,)
     if not training_mode:
@@ -59,21 +73,25 @@ def instance_normalization(x, scale, bias, /, *, epsilon=1e-5):
     return y.to(x.dtype)
 
 
-def layer_normalization(x, scale, bias=None, /, *, axis=-1, epsilon=1e-5, stash_type=1, _outputs):
+def layer_normalization(x, scale, bias=None, /, *, axis=-1, epsilon=1e-5, stash_type=1, _outputs, _out=None):
+    """LayerNormalization; its first output written into `_out` where `_out_for` says it can be,
+    every step of it in place there -- the centered values first, whose squares are the one
+    temporary of the input's size."""
     axis = axis % x.dim()
     compute = _stashed(x, stash_type)
     xs = x.to(compute)
+    _out = _out_for(_out, x, compute)
     dims = list(range(axis, x.dim()))
     mean = torch.mean(xs, dim=dims, keepdim=True)
     # The variance as E[(x - E[x])^2], as the function body ONNX defines computes it. The form
     # E[x^2] - E[x]^2 cancels away every digit of a variance that is small next to the square of
     # the mean, down to a negative one and a NaN.
-    centered = xs - mean
+    centered = torch.sub(xs, mean, out=_out)
     std = torch.sqrt(torch.mean(torch.square(centered), dim=dims, keepdim=True) + epsilon)
     inv_std = 1 / std
-    y = centered / std * scale.to(compute)
+    y = torch.mul(torch.div(centered, std, out=_out), scale.to(compute), out=_out)
     if bias is not None:
-        y = y + bias.to(compute)
+        y = torch.add(y, bias.to(compute), out=_out)
     return (y.to(x.dtype), mean, inv_std)[:_outputs]
 
 

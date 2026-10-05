@@ -1,7 +1,9 @@
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using Microsoft.ML.OnnxRuntime;
 using Shorokoo.Core.Backends;
 using Shorokoo.Core.Factory;
+using Shorokoo.Core.Factory.IR;
 using Shorokoo.Core.Nodes.Processors.Helpers;
 using Shorokoo.Modules.Layers;
 using Shorokoo.Modules.Losses;
@@ -57,7 +59,7 @@ public partial class SquareStackModel
 /// </summary>
 [Trait("Domain", "Core")]
 [Trait("Purpose", "Hardware")]
-[Collection(DeviceMemoryPeak.Name)]
+[Collection(ProcessWideMemory.Name)]
 public class GpuExecutionTests
 {
     /// <summary>
@@ -133,7 +135,6 @@ public class GpuExecutionTests
                 DeviceMemory = new DeviceMemorySettings
                 {
                     LimitBytes = 2L * 1024 * 1024 * 1024,
-                    ArenaExtend = ArenaExtendStrategy.NextPowerOfTwo,
                 },
                 RunSettings = new RunSettings { ShrinkArenaAfterRun = true },
             };
@@ -178,7 +179,6 @@ public class GpuExecutionTests
         Assert.Contains("asks this compute context for 33554432 bytes of CUDA device 0 memory", refused.Message);
         Assert.Contains("is 67108864 bytes, and 50331648 bytes of it are attached", refused.Message);
         Assert.Throws<InvalidOperationException>(() => tooBig.To(budgeted));
-        Assert.Throws<InvalidOperationException>(() => budgeted.AllocateUninitialized<float32>(new Shape(8L << 20)));
         var onTheCard = tooBig.CopyTo(uncapped);
         Assert.False(onTheCard.IsHostResident);
         Assert.Throws<InvalidOperationException>(() => onTheCard.To(budgeted));
@@ -194,14 +194,219 @@ public class GpuExecutionTests
         Assert.Equal(new DeviceMemoryUse(32 * MiB, 1, 64 * MiB), budgeted.ReadDeviceMemoryUse());
     }
 
+    [CudaFact]
+    public void CudaProvider_TheTwoHalvesScenarioRunsWithNothingAllocatedBeyondWhatItConsumesAndItsOutputsOutliveTheSession()
+    {
+        const int Rows = 512, Columns = 1024;
+        var (a, b, l) = ComputeContextLifetimeCoverageTests.TwoHalvesValues(Rows, Columns);
+        NamedModelParam[] outputs = [];
+        static float[] Read(NamedModelParam p) => [.. p.ToTensorData().ToHost().As<float32>().AccessMemory<float>()];
+        using (var context = new ComputeContext())
+        {
+            var compiled = context.Compile(ComputeContextLifetimeCoverageTests.TwoHalves());
+            for (int run = 0; run < 3; run++)
+            {
+                outputs = compiled.Execute(TensorData([(long)Rows, Columns], a).CopyTo(context), TensorData([(long)Rows, Columns], b).CopyTo(context));
+                Assert.True(l.Zip(Read(outputs[0]), (x, y) => MathF.Abs(x - y) < 1e-5f).All(x => x));
+                Assert.Equal(a[..(Rows / 2 * Columns)], Read(outputs[1]));
+                Assert.Equal(b[(Rows / 2 * Columns)..], Read(outputs[2]));
+            }
+            var entry = Assert.Single(((OrtSession)compiled.Session).Placements!.Entries);
+            Assert.Equal(OrtPlacements.Stage.Adopted, entry.Stage);
+            Assert.True(entry.PlacedPeak < 1L << 20);
+            Assert.All(outputs, o => Assert.False(o.ToTensorData().IsHostResident));
+            Assert.Same(outputs[1].ToTensorData().Block, outputs[2].ToTensorData().Block);
+        }
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        Assert.True(l.Zip(Read(outputs[0]), (x, y) => MathF.Abs(x - y) < 1e-5f).All(x => x));
+        Assert.Equal(b[(Rows / 2 * Columns)..], Read(outputs[2]));
+    }
+
+    [CudaFact]
+    public void CudaProvider_ARunThatFitsItsBudgetOnlyWhenPlacedSucceedsOnItsFirstCall()
+    {
+        const int Rows = 512, Columns = 1024;
+        const long MiB = 1024 * 1024;
+        var (a, b, l) = ComputeContextLifetimeCoverageTests.TwoHalvesValues(Rows, Columns);
+        static float[] Read(NamedModelParam p) => [.. p.ToTensorData().ToHost().As<float32>().AccessMemory<float>()];
+        NamedModelParam[] Run(ComputeContext on)
+            => on.Compile(ComputeContextLifetimeCoverageTests.TwoHalves())
+                .Execute(TensorData([(long)Rows, Columns], a).CopyTo(on), TensorData([(long)Rows, Columns], b).CopyTo(on));
+        using var unplaced = new ComputeContext { ValuePlacement = false, DeviceMemory = new DeviceMemorySettings { LimitBytes = 6 * MiB } };
+        using var context = new ComputeContext { DeviceMemory = new DeviceMemorySettings { LimitBytes = 6 * MiB } };
+
+        Assert.ThrowsAny<Exception>(() => Run(unplaced));
+        var outputs = Run(context);
+        Assert.True(l.Zip(Read(outputs[0]), (x, y) => MathF.Abs(x - y) < 1e-5f).All(x => x));
+        Assert.Equal(a[..(Rows / 2 * Columns)], Read(outputs[1]));
+        Assert.Equal(b[(Rows / 2 * Columns)..], Read(outputs[2]));
+        Assert.All(outputs, o => Assert.NotNull(o.ToTensorData().Block));
+    }
+
+    [CudaFact]
+    public void CudaProvider_OutputsOnOneBlockOfASessionsMemoryEachFreeTheirOwnPagesAndWhatNoneStandsOnGoesWithTheRun()
+    {
+        const long MiB = 1024 * 1024;
+        using var context = new ComputeContext { DeviceMemory = new DeviceMemorySettings { LimitBytes = 512 * MiB } };
+        var (both, together) = ComputeContextLifetimeCoverageTests.OutputsOnBlocksEnding(context, ComputeContextLifetimeCoverageTests.TwoHalves(), 4096, 1024, firstPage: 0);
+        var (one, _) = ComputeContextLifetimeCoverageTests.OutputsOnBlocksEnding(context, ComputeContextLifetimeCoverageTests.TwoHalves(oneHalf: true), 4096, 1024, firstPage: 0);
+        Assert.Equal(2, together);
+        Assert.True(one[0].OnBlocks > 0);
+        Assert.All(both, stage => Assert.Equal((stage.OnBlocks, stage.OnBlocks), (stage.InUse - both[^1].InUse, stage.Books)));
+        Assert.All(one, stage => Assert.Equal((stage.OnBlocks, stage.OnBlocks), (stage.InUse - one[^1].InUse, stage.Books)));
+    }
+
+    [CudaFact]
+    public void CudaProvider_AModelOverSixteenMebibytesPlacesARunsValuesWhereThatPays()
+    {
+        using var context = new ComputeContext();
+        var (output, session, expected) = ComputeContextLifetimeCoverageTests.LargeModelRun(context, 9 << 19);
+        Assert.Equal(OrtPlacements.Stage.Adopted, Assert.Single(Assert.IsType<OrtPlacements>(session.Placements).Entries).Stage);
+        Assert.NotNull(output.Block);
+        Assert.Equal(expected, [.. output.ToHost().As<float32>().AccessMemory<float>()]);
+    }
+
+    [CudaFact]
+    public void CudaProvider_TheSessionAModelOverSixteenMebibytesPlacesThroughHoldsNoCopyOfTheWeightsItCarries()
+    {
+        using var context = new ComputeContext();
+        var (_, session, _) = ComputeContextLifetimeCoverageTests.LargeModelRun(context, 9 << 19);
+        var entry = Assert.Single(Assert.IsType<OrtPlacements>(session.Placements).Entries);
+        Assert.Equal(OrtPlacements.Stage.Adopted, entry.Stage);
+        Assert.True(entry.VariantHeld < 1L << 20);
+        Assert.True(session.HeldBytes < (18L + 1) << 20);
+    }
+
+    [CudaFact]
+    public void CudaProvider_ASessionRunsEachProvidersNodesInTheOrderOfTheGraphItWritesOutBuiltFromAModelOrFromAWrittenGraph()
+    {
+        foreach (var orders in ((string[])["encoder2", "attn-chunk4"]).Select(ComputeContextLifetimeCoverageTests.RunOrders))
+        {
+            Assert.NotEmpty(orders);
+            Assert.All(orders, order => Assert.Equal(order.Written, order.Ran));
+        }
+    }
+
+    [CudaFact]
+    public void CudaProvider_ARunPlacesAValueOverAnInputABranchItNeedNotFollowReadsWhereTheSessionRunsThatBranchFirst()
+    {
+        var (entry, output, expected) = ComputeContextLifetimeCoverageTests.BranchesRun(DefaultBackend.Instance);
+        Assert.Equal(OrtPlacements.Stage.Adopted, entry.Stage);
+        Assert.Contains("a", entry.Plan.Select(p => p.Value));
+        Assert.Equal(expected, output);
+    }
+
     /// <summary>
-    /// A run's arena is capped at the budget less what the context holds on the card: with nothing
-    /// held, a run whose arena needs 160 MiB fits a 256 MiB budget; with 100 MiB held on the card
-    /// the session is built again with the room that leaves, and the same run fails where the arena
-    /// passes it. A graph compiled once the tensor is gone gets the room back.
+    /// <paramref name="graph"/> over <paramref name="inputs"/>, each <c>float[N, N]</c>, run on the
+    /// card with the inputs shared and with them consumed: the output each time, and the provider
+    /// each operator ran on in the shared run.
+    /// </summary>
+    private static (byte[] Shared, byte[] Consumed, ILookup<string, string> Providers) SharedAndConsumed(GraphProto graph, params string[] inputs)
+    {
+        const int N = 1024;
+        var backend = DefaultBackend.Instance;
+        var model = ComputeContextLifetimeCoverageTests.ModelOf(graph);
+        byte[] x = [.. MemoryMarshal.AsBytes(Enumerable.Range(0, N * N).Select(i => (i % 13) * 0.25f - 1.5f).ToArray().AsSpan())];
+        (byte[], ILookup<string, string>?) Run(bool consume)
+        {
+            using var session = backend.CreateSession(model, ShorokooGraphOptimization.EnableAll, ShorokooLogSeverity.Fatal, new DeviceMemorySettings(),
+                new DiagnosticSettings { TraceNodePlacement = !consume });
+            var fed = inputs.ToDictionary(name => name, _ => backend.CreateTensorInBackendMemory(ShorokooTensorElementType.Float, x, [N, N]));
+            var feeds = fed.ToDictionary(f => f.Key, f => f.Value);
+            using var output = consume
+                ? session.RunConsuming(feeds, [.. fed.Values], [graph.Outputs[0].Name], RunSettings.Default, out _).Single()
+                : session.Run(feeds, [graph.Outputs[0].Name], RunSettings.Default).Single();
+            if (!consume) foreach (var value in fed.Values) value.Dispose();
+            return (backend.CopyTensorToHost(output), consume ? null : session.ReadNodePlacement()!.Nodes.ToLookup(n => n.OpType, n => n.Provider));
+        }
+
+        var (shared, providers) = Run(consume: false);
+        return (shared, Run(consume: true).Item1, providers!);
+    }
+
+    [CudaFact]
+    public void CudaProvider_ARunWithANodeTheCardHasNoKernelForComputesWhatItComputesUnplaced()
+    {
+        var (shared, consumed, providers) = SharedAndConsumed(ComputeContextLifetimeCoverageTests.GraphOf("x:float[1024,1024]", "z:float[1024,1024]",
+            ComputeContextLifetimeCoverageTests.Op("Relu", "x", "r"), ComputeContextLifetimeCoverageTests.Op("Hardmax", "r", "y"),
+            ComputeContextLifetimeCoverageTests.Op("Neg", "y", "z")), "x");
+        Assert.Equal(["CPUExecutionProvider"], providers["Hardmax"]);
+        Assert.Equal(shared, consumed);
+    }
+
+    [CudaFact]
+    public void CudaProvider_ARunWhoseHostNodeReadsAConsumedInputComputesWhatItComputesUnplaced()
+    {
+        var (shared, consumed, providers) = SharedAndConsumed(ComputeContextLifetimeCoverageTests.GraphOf("x:float[1024,1024] w:float[1024,1024]", "z:float[1024,1024]",
+            ComputeContextLifetimeCoverageTests.Op("Relu", "w", "t"), ComputeContextLifetimeCoverageTests.Op("Hardmax", "x", "y"),
+            ComputeContextLifetimeCoverageTests.Op("Neg", "y", "n"), ComputeContextLifetimeCoverageTests.Op("Add", "n t", "z")), "x", "w");
+        Assert.Equal(["CPUExecutionProvider"], providers["Hardmax"]);
+        Assert.Equal(shared, consumed);
+    }
+
+    [CudaFact]
+    public void CudaProvider_ABudgetCountsABlockOnceForAsLongAsAnyTensorOnItIsAttached()
+    {
+        const long MiB = 1024 * 1024;
+        using var budgeted = new ComputeContext { DeviceMemory = new DeviceMemorySettings { LimitBytes = 64 * MiB } };
+        var backend = DefaultBackend.Instance;
+        var owner = (OrtTensorValue)backend.CreateTensorInBackendMemory(ShorokooTensorElementType.Float, new byte[16 * MiB], [4L << 20]);
+        var block = new SharedBlock(16 * MiB, () => backend.Release(owner));
+        var first = TensorData.Create((long[])[2L << 20], DType.Float32, OrtBackend.View(owner, 0, ShorokooTensorElementType.Float, [2L << 20], 8 * MiB, block, 0), backend).To(budgeted);
+        var second = TensorData.Create((long[])[1L << 20], DType.Float32, OrtBackend.View(owner, 8 * MiB, ShorokooTensorElementType.Float, [1L << 20], 4 * MiB, block, 8 * MiB), backend).To(budgeted);
+        Assert.Equal(new DeviceMemoryUse(16 * MiB, 2, 64 * MiB), budgeted.ReadDeviceMemoryUse());
+        first.Delete();
+        Assert.Equal(new DeviceMemoryUse(16 * MiB, 1, 64 * MiB), budgeted.ReadDeviceMemoryUse());
+        second.Delete();
+        Assert.Equal(new DeviceMemoryUse(0, 0, 64 * MiB), budgeted.ReadDeviceMemoryUse());
+        Assert.True(block.IsReleased);
+    }
+
+    [CudaFact]
+    public void CudaProvider_APlacedRunComputesInItsContextsPrecision()
+    {
+        var host = ComputeContextLifetimeCoverageTests.ProductIntoConsumedOnTheHost();
+        using var strictContext = new ComputeContext();
+        using var allowedContext = new ComputeContext { Precision = SideBySideModel.AllowingTensorFloat32 };
+        var strict = ComputeContextLifetimeCoverageTests.RunProductIntoConsumed(strictContext);
+        var allowed = ComputeContextLifetimeCoverageTests.RunProductIntoConsumed(allowedContext);
+
+        Assert.Equal((true, true), (strict.Placed, allowed.Placed));
+        SideBySideModel.AssertFullPrecision([host], [strict.Values]);
+        SideBySideModel.AssertTensorFloat32([host], [allowed.Values]);
+    }
+
+    [CudaFact]
+    public void CudaProvider_ARunFedTwoTensorsStandingOnOneBlockCountsTheBlockOnce()
+    {
+        const long MiB = 1024 * 1024;
+        var backend = DefaultBackend.Instance;
+        var owner = (OrtTensorValue)backend.CreateTensorInBackendMemory(ShorokooTensorElementType.Float, new byte[16 * MiB], [4L << 20]);
+        var block = new SharedBlock(16 * MiB, () => backend.Release(owner));
+        TensorData On(long offset) => TensorData.Create((long[])[1L << 20], DType.Float32, OrtBackend.View(owner, offset, ShorokooTensorElementType.Float, [1L << 20], 4 * MiB, block, offset), backend);
+        var (first, second) = (On(0), On(8 * MiB));
+        using var budgeted = new ComputeContext { DeviceMemory = new DeviceMemorySettings { LimitBytes = 28 * MiB } };
+        var a = InputTensor<float32>("A", rank: 1);
+        var b = InputTensor<float32>("B", rank: 1);
+        var sum = budgeted.Compile(new InternalComputationGraph([a, b], [OnnxOp.Add(a, b)])).Execute(first.Shared(), second.Shared());
+        Assert.Equal(new DeviceMemoryUse(20 * MiB, 3, 28 * MiB), budgeted.ReadDeviceMemoryUse());
+        ComputeContext.ReleaseOutputs(sum);
+        first.Delete();
+        second.Delete();
+        Assert.True(block.IsReleased);
+    }
+
+    /// <summary>
+    /// What a run's session may allocate is capped at exactly the budget less what the context holds
+    /// on the card for the run — here the eight-byte copy of the shape it is fed: with nothing else
+    /// held, a run whose session needs 160 MiB fits a 256 MiB budget; with 100 MiB held on the
+    /// card the same session is limited to the room that leaves, and the same run fails with an
+    /// allocation failure as the allocator refuses the block that would pass it. Once the tensor is
+    /// gone the session gets the room back, and is never built again.
     /// </summary>
     [CudaFact]
-    public void CudaProvider_ARunsArenaIsCappedAtItsContextsBudgetLessWhatTheContextHoldsOnTheCard()
+    public void CudaProvider_WhatARunsSessionAllocatesIsCappedAtItsContextsBudgetLessWhatTheContextHoldsOnTheCard()
     {
         const long MiB = 1024 * 1024;
         using var ctx = new ComputeContext
@@ -209,33 +414,58 @@ public class GpuExecutionTests
             DeviceMemory = new DeviceMemorySettings { LimitBytes = 256 * MiB },
         };
         var filled = ArenaProbeModels.Filled(ctx);
-        IData Ones() => ArenaProbeModels.FilledShape(40L << 20);
+        float Sum()
+        {
+            var outputs = filled.Execute(ArenaProbeModels.FilledShape(40L << 20));
+            var sum = ArenaProbeModels.Sum(outputs);
+            ComputeContext.ReleaseOutputs(outputs);
+            return sum;
+        }
+        long Limit() => Assert.IsType<ArenaStatistics>(filled.ReadArenaStatistics()).LimitBytes;
 
-        Assert.Equal(252 * MiB, filled.DeviceMemory.LimitBytes);
-        Assert.True(ArenaProbeModels.Sum(filled.Execute(Ones())) > 0f);
-        Assert.Equal(252 * MiB, Assert.IsType<ArenaStatistics>(filled.ReadArenaStatistics()).LimitBytes);
+        Assert.True(Sum() > 0f);
+        Assert.Equal((256 * MiB - 8, 256 * MiB - 8), (filled.DeviceMemory.LimitBytes!.Value, Limit()));
 
         var held = TensorData([25L << 20], new float[25 << 20]).CopyTo(ctx);
-        var failed = Assert.ThrowsAny<OnnxRuntimeException>(() => filled.Execute(Ones()));
-        Assert.Contains("BFCArena", failed.Message);
-        Assert.Equal(152 * MiB, filled.DeviceMemory.LimitBytes);
-        Assert.Equal(152 * MiB, Assert.IsType<ArenaStatistics>(filled.ReadArenaStatistics()).LimitBytes);
+        Assert.Equal(AllocationPool.Device, AllocationFailureReport.Classify(
+            Assert.ThrowsAny<Exception>(() => Sum()), gpuBackend: false));
+        Assert.Equal((156 * MiB - 8, 156 * MiB - 8), (filled.DeviceMemory.LimitBytes!.Value, Limit()));
 
         held.Delete();
-        var again = ArenaProbeModels.Filled(ctx);
-        Assert.Equal(252 * MiB, again.DeviceMemory.LimitBytes);
-        Assert.True(ArenaProbeModels.Sum(again.Execute(Ones())) > 0f);
+        Assert.True(Sum() > 0f);
+        Assert.Equal(256 * MiB - 8, Limit());
     }
 
     /// <summary>
-    /// What <c>gpu_mem_limit</c> caps, measured on a session of its own: only what its arena
-    /// allocates. A 64 MiB input already on the card is read where it is by a session whose arena is
-    /// capped at 32 MiB, and the arena never holds it; the same bytes fed from host memory have to
-    /// be copied into the arena, and do not fit. That is why a context's budget discounts what it
-    /// holds on the card from the arena's limit for the length of the run.
+    /// A request the card cannot serve — a run's, or a tensor's placed on the card — fails as an
+    /// allocation failure on the card, the way ONNX Runtime's own allocators fail one, and leaves the
+    /// card as usable as it found it: the session that failed runs on.
     /// </summary>
     [CudaFact]
-    public void CudaProvider_AnArenaLimitCapsWhatTheArenaAllocatesAndNotAnInputReadWhereItIs()
+    public void CudaProvider_ARequestTheCardCannotServeFailsAsACardAllocationFailureAndTheCardRunsOn()
+    {
+        using var ctx = new ComputeContext();
+        var filled = ArenaProbeModels.Filled(ctx);
+        AllocationPool Refused(Action request)
+            => AllocationFailureReport.Classify(Assert.ThrowsAny<Exception>(request), gpuBackend: false);
+        float Sum() => ArenaProbeModels.Sum(filled.Execute(ArenaProbeModels.FilledShape(1000)));
+
+        Assert.Equal(AllocationPool.Device, Refused(() => filled.Execute(ArenaProbeModels.FilledShape(1L << 50))));
+        Assert.Equal(1000f, Sum());
+        Assert.Equal(AllocationPool.Device, Refused(() => DefaultBackend.Instance.CreateUninitializedTensorInBackendMemory(
+            ShorokooTensorElementType.Float, [1L << 50])));
+        Assert.Equal(1000f, Sum());
+    }
+
+    /// <summary>
+    /// What a session's limit caps, measured on a session of its own: only what the session
+    /// allocates. A 64 MiB input already on the card is read where it is by a session limited to
+    /// 32 MiB, which never allocates it; the same bytes in host memory are refused, since a session
+    /// takes its inputs only in its own memory. That is why a context's budget discounts what it
+    /// holds on the card from the session's limit for the length of the run.
+    /// </summary>
+    [CudaFact]
+    public void CudaProvider_ASessionsLimitCapsWhatItAllocatesAndNotAnInputReadWhereItIs()
     {
         const long MiB = 1024 * 1024;
         var backend = DefaultBackend.Instance;
@@ -246,7 +476,7 @@ public class GpuExecutionTests
         ProtoBuf.Serializer.Serialize(model, proto);
         using var session = backend.CreateSession(
             model.ToArray(), ShorokooGraphOptimization.EnableAll, ShorokooLogSeverity.Fatal,
-            new DeviceMemorySettings { LimitBytes = 32 * MiB }.Resolve(reusedAcrossShapes: false));
+            new DeviceMemorySettings { LimitBytes = 32 * MiB });
         var bytes = new byte[64 * MiB];
         IReadOnlyList<IShorokooTensorValue> Run(IShorokooTensorValue input) => session.Run(
             new Dictionary<string, IShorokooTensorValue> { [session.InputNames[0]] = input },
@@ -255,30 +485,94 @@ public class GpuExecutionTests
         using var onCard = backend.CreateTensorInBackendMemory(ShorokooTensorElementType.Float, bytes, [16L << 20]);
         Assert.False(onCard.IsHostAccessible);
         foreach (var output in Run(onCard)) output.Dispose();
-        var arena = Assert.IsType<ArenaStatistics>(session.ReadArenaStatistics());
-        Assert.Equal(32 * MiB, arena.LimitBytes);
-        Assert.True(arena.MaxInUseBytes < 32 * MiB);
+        var allocated = Assert.IsType<ArenaStatistics>(session.ReadArenaStatistics());
+        Assert.Equal(32 * MiB, allocated.LimitBytes);
+        Assert.True(allocated.MaxInUseBytes < 32 * MiB);
 
         using var onHost = backend.CreateTensorFromRawBytes(ShorokooTensorElementType.Float, bytes, [16L << 20]);
         Assert.True(onHost.IsHostAccessible);
-        Assert.Contains("BFCArena", Assert.ThrowsAny<OnnxRuntimeException>(() => Run(onHost)).Message);
+        Assert.Contains("outside the memory its runs read it in", Assert.Throws<InvalidOperationException>(() => Run(onHost)).Message);
+    }
+
+    [CudaFact]
+    public void CudaProvider_ATensorOnTheCardLargerThanOneArraySavesItsBytesThroughBoundedPieces()
+    {
+        const int N = 640 << 20;
+        using var ctx = new ComputeContext();
+        var limit = InputScalar<int32>("l");
+        var compiled = ctx.Compile(new InternalComputationGraph([limit], [OnnxOp.Range(Scalar(0), limit, Scalar(1))]));
+        var held = compiled.Execute(TensorData(DType.Int32, [], N))[0].ToTensorData();
+        Assert.False(held.IsHostResident);
+        long[] sampled = [0, (1L << 29) - 1, 1L << 29, (1L << 29) + 1, (9L << 26) + 12345, N - 1];
+        var probe = new SamplingStream(sampled);
+
+        long allocated = GC.GetAllocatedBytesForCurrentThread();
+        held.WriteContentTo(probe);
+        Assert.True(GC.GetAllocatedBytesForCurrentThread() - allocated < 64L << 20);
+        Assert.Equal(4L * N, probe.Length);
+        Assert.Equal(sampled.Select(i => (int)i), probe.Values);
+    }
+
+    [CudaFact]
+    public void CudaProvider_ACopyTheCudaRuntimeFailsIsAnErrorRatherThanADeclinedRange()
+    {
+        using var info = new OrtMemoryInfo("Cuda", OrtAllocatorType.DeviceAllocator, 0, OrtMemType.Default);
+        using var bogus = new OrtTensorValue(OrtValue.CreateTensorValueWithData(info, Microsoft.ML.OnnxRuntime.Tensors.TensorElementType.Float, [4L], (IntPtr)16, 16));
+        Assert.Throws<InvalidOperationException>(() => DefaultBackend.Instance.TryCopyTensorRangeToHost(bogus, 0, new byte[16]));
+        using var ctx = new ComputeContext();
+        Assert.Equal(5f, AddTwoScalars(ctx, 2f, 3f));
+    }
+
+    /// <summary>Keeps the <c>int32</c> element at each sampled index of what is written to it, and
+    /// nothing else.</summary>
+    private sealed class SamplingStream(long[] sampled) : Stream
+    {
+        private readonly byte[] _pending = new byte[4];
+        private long _position;
+        public List<int> Values { get; } = [];
+        public override void Write(ReadOnlySpan<byte> buffer)
+        {
+            foreach (var index in sampled)
+                for (long b = 4 * index; b < 4 * index + 4; b++)
+                    if (b >= _position && b < _position + buffer.Length)
+                    {
+                        _pending[b - 4 * index] = buffer[(int)(b - _position)];
+                        if (b == 4 * index + 3) Values.Add(BitConverter.ToInt32(_pending));
+                    }
+            _position += buffer.Length;
+        }
+        public override void Write(byte[] buffer, int offset, int count) => Write(buffer.AsSpan(offset, count));
+        public override bool CanRead => false;
+        public override bool CanSeek => false;
+        public override bool CanWrite => true;
+        public override long Length => _position;
+        public override long Position { get => _position; set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
     }
 
     /// <summary>
     /// A tensor fed to a run on the card as it is goes to that run: one in the card's memory is
-    /// handed over where it is, and one in host memory goes to the session from the host, or as the
-    /// card copy it already holds where it has one — dead afterwards either way. Fed
+    /// handed over where it is, and one in host memory as the card copy it already holds where it
+    /// has one, and a fresh card copy otherwise — dead afterwards either way. Fed
     /// <c>.Shared()</c>, a host tensor is copied onto the card once, attached to the context that
-    /// read it, and read there by every run after until it is written.
+    /// read it, and read there by every run after until the tensor lets its copies go.
     /// </summary>
     [CudaFact]
-    public void CudaProvider_AFeedIsConsumedOnTheCardAndAHostOneIsReadThroughOneCopyUntilWritten()
+    public void CudaProvider_AFeedIsConsumedOnTheCardAndAHostOneIsReadThroughOneCopyUntilItLetsItGo()
     {
         using var ctx = new ComputeContext();
         var a = InputVector<float32>();
         var b = InputVector<float32>();
         var compiled = ctx.Compile(new InternalComputationGraph([a, b], [a * b + a]));
-        float[] Run(IData x, IData y) => [.. compiled.Execute(x, y)[0].ToTensorData().As<float32>().AccessMemory<float>()];
+        float[] Run(IData x, IData y)
+        {
+            var output = compiled.Execute(x, y)[0].ToTensorData();
+            ctx.Detach(output);
+            return output.As<float32>().CopyMemory<float>();
+        }
         var onHost = TensorData([2L], 10f, 20f);
         var onCard = TensorData([2L], 1f, 2f).To(ctx);
         Assert.False(onCard.IsHostResident);
@@ -290,12 +584,51 @@ public class GpuExecutionTests
         Assert.Equal([11f, 42f], Run(TensorData([2L], 1f, 2f), onHost.Shared()));
         Assert.Same(copy, Assert.Single(ctx.Tensors, t => !t.IsHostResident));
 
-        onHost.As<float32>().AccessModifiableMemory<float>()[0] = 30f;
+        onHost.ReleaseRunCopies();
         Assert.True(copy.IsDisposed);
-        Assert.Equal([31f, 42f], Run(TensorData([2L], 1f, 2f), onHost.Shared()));
-        Assert.Equal([31f, 42f], Run(TensorData([2L], 1f, 2f), onHost));
+        Assert.Equal([11f, 42f], Run(TensorData([2L], 1f, 2f), onHost.Shared()));
+        Assert.Equal([11f, 42f], Run(TensorData([2L], 1f, 2f), onHost));
         Assert.True(onHost.IsDisposed);
         Assert.DoesNotContain(ctx.Tensors, t => !t.IsHostResident);
+    }
+
+    /// <summary>
+    /// Every read of a tensor on the card copies its values to the host and returns them; the
+    /// tensor stays where it is, alive, and the next run reads it there.
+    /// </summary>
+    [CudaFact]
+    public void CudaProvider_ReadingATensorOnTheCardCopiesItsValuesToTheHostAndLeavesItThere()
+    {
+        using var ctx = new ComputeContext();
+        var a = InputVector<float32>();
+        var doubled = ctx.Compile(new InternalComputationGraph([a], [a + a]));
+        var onCard = doubled.Execute(TensorData([3L], 1f, 2f, 3f))[0].ToTensorData().As<float32>();
+        float[] values = [2f, 4f, 6f];
+
+        Assert.Equal((MemorySpace.Cuda(0), false), (onCard.Space, onCard.IsHostResident));
+        Assert.Equal(values, onCard.AccessMemory().ToArray());
+        Assert.Equal(6f, onCard.AccessMemory()[2]);
+        Assert.Equal(values, onCard.CopyMemory());
+        Assert.Equal(4f, onCard.ValueAt(1));
+        Assert.Equal(System.Runtime.InteropServices.MemoryMarshal.AsBytes<float>(values).ToArray(), onCard.CopyRawMemory());
+        Assert.Equal<object>([2f, 4f, 6f], onCard.DebugData);
+        Assert.Equal((MemorySpace.Cuda(0), false, false), (onCard.Space, onCard.IsHostResident, onCard.IsDisposed));
+        Assert.Equal(System.Runtime.InteropServices.MemoryMarshal.AsBytes<float>((float[])[4f, 8f, 12f]).ToArray(), doubled.Execute(onCard.Shared())[0].ToTensorData().CopyRawMemory());
+        Assert.Equal([4f, 8f, 12f], doubled.Execute(onCard)[0].ToTensorData().As<float32>().CopyMemory());
+    }
+
+    [CudaFact]
+    public void CudaProvider_AnInMemoryLoaderOverTheCardBatchesAsOneOverTheHostDoes()
+    {
+        using var ctx = new ComputeContext();
+        var (inputs, targets) = (TrainingRigHelpers.InBatch(1f, 2f, 3f, 4f, 5f, 6f), TrainingRigHelpers.TargetBatch(2f, 4f, 6f, 8f, 10f, 12f));
+        var (onCardInputs, onCardTargets) = (inputs.CopyTo(ctx), targets.CopyTo(ctx));
+        var onCard = new InMemoryDataLoader(onCardInputs, onCardTargets, batchSize: 3, shuffle: true, seed: 7);
+        var onHost = new InMemoryDataLoader(inputs, targets, batchSize: 3, shuffle: true, seed: 7);
+        float[] Rows(DataBatch batch) => ((TensorData)((TensorDataStruct)batch.Target).Fields["targets"]).As<float32>().CopyMemory();
+
+        Assert.False(((TensorData)onCardTargets.Fields["targets"]).IsHostResident);
+        Assert.Equal([.. Enumerable.Range(0, 4).SelectMany(_ => Rows(onHost.Next()))], Enumerable.Range(0, 4).SelectMany(_ => Rows(onCard.Next())));
     }
 
     /// <summary>
@@ -316,7 +649,6 @@ public class GpuExecutionTests
             DeviceMemory = new DeviceMemorySettings
             {
                 LimitBytes = 2L * 1024 * 1024 * 1024,
-                ArenaExtend = ArenaExtendStrategy.SameAsRequested,
             },
             RunSettings = new RunSettings { ShrinkArenaAfterRun = true },
         });
@@ -333,13 +665,12 @@ public class GpuExecutionTests
     }
 
     /// <summary>
-    /// A checkpoint a resident run hands out is host memory the run goes on from: the next step
-    /// reads it through a card copy of its whole state, and then trains from state of its own. The
-    /// copies go with that step rather than staying with the caller's checkpoint, which would keep
-    /// a second copy of the state on the card for as long as the checkpoint lives.
+    /// A checkpoint a resident run hands out stays on the card, where the run goes on from it: the
+    /// next step reads it in place, so no copy of it is made, on the card or anywhere else, and
+    /// the caller's checkpoint holds the state once.
     /// </summary>
     [CudaFact]
-    public void CudaProvider_AResidentRunLetsGoOfTheCardCopiesOfACheckpointItHandedOutOnceItHasMovedOn()
+    public void CudaProvider_ACheckpointAResidentRunHandsOutStaysOnTheCardAndIsReadThereWithoutACopy()
     {
         var (input, target) = (TrainingRigHelpers.InBatch(1f, 2f, 3f, 4f),
                                TrainingRigHelpers.TargetBatch(2f, 4f, 6f, 8f));
@@ -352,7 +683,109 @@ public class GpuExecutionTests
         TensorData[] state = [.. ((TensorDataStruct[])[published.TrainableParams, published.ModelState, published.OptimizerState])
             .SelectMany(fields => fields.Fields.Values.OfType<TensorData>())];
         Assert.NotEmpty(state);
+        Assert.All(state, t => Assert.False(t.IsHostResident));
         Assert.All(state, t => Assert.True(t.CopiesAreEmpty));
+    }
+
+    [CudaFact]
+    public void CudaProvider_AFittedCheckpointSavesFromTheCardAndLoadsOntoItInBoundedPieces()
+    {
+        TrainingRig Rig(ComputationGraph model) => TrainingRig.FromScratch(
+            model, L2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph,
+            [TensorData([1L], [1f])], new AdamWOptimizerHyperparameters { LearningRate = 0.1f });
+        TrainingCheckpoint Fitted(TrainingRig rig, long width) => rig.Fit(
+            [rig.InputDef.FromOrderedData(TensorData([1L], [2f]))], [rig.TargetDef.FromOrderedData(TensorData([width], new float[width]))],
+            numEpochs: 2).FinalCheckpoint;
+        var (wideRig, narrowRig) = (Rig(WideMultiplyModel.ComputationGraph), Rig(ScalarMultiplyModel.ComputationGraph));
+        var (wide, narrow) = (Fitted(wideRig, 1L << 20), Fitted(narrowRig, 1L));
+        var home = wide.ToHost();
+        float[] State(TrainingCheckpoint c) =>
+            [.. TrainingRigHelpers.FlattenStruct(c.TrainableParams), .. TrainingRigHelpers.FlattenStruct(c.OptimizerState)];
+        bool OnCard(TrainingCheckpoint c) => c.TrainableParams.Fields.Values.Concat(c.OptimizerState.Fields.Values)
+            .OfType<TensorData>().All(t => !t.IsHostResident);
+        long stateBytes = 4L * State(home).Length;
+        Assert.True(OnCard(wide));
+
+        (Action<TrainingCheckpoint, string> Save, Func<TrainingRig, string, TrainingCheckpoint> Load, string Suffix)[] forms =
+        [
+            ((c, p) => c.Save(p), (r, p) => r.LoadCheckpoint(p), ".safetensors"),
+            ((c, p) => Persistence.SaveTrainingCheckpointToSkpt(c, p), (r, p) => r.LoadCheckpointFromSkpt(p), ".skpt"),
+            ((c, p) => Persistence.ForTrainingCheckpoint(c).SaveAsDirectory(p), (r, p) => r.LoadCheckpointFromSkpt(p), "_dir"),
+        ];
+        var path = TrainingRigHelpers.TempPath("device_ckpt");
+        try
+        {
+            foreach (var (save, load, suffix) in forms)
+            {
+                var (widePath, narrowPath) = (path + "_wide" + suffix, path + "_narrow" + suffix);
+                Assert.True(Allocation(() => save(wide, widePath)) - Allocation(() => save(narrow, narrowPath)) < stateBytes / 2);
+                Assert.True(Allocation(() => load(wideRig, widePath)) - Allocation(() => load(narrowRig, narrowPath)) < stateBytes / 2);
+                var loaded = load(wideRig, widePath);
+                Assert.True(OnCard(loaded));
+                Assert.Equal(State(home), State(loaded.ToHost()));
+            }
+        }
+        finally
+        {
+            foreach (var (_, _, suffix) in forms)
+                foreach (var p in (string[])[path + "_wide" + suffix, path + "_narrow" + suffix])
+                    if (Directory.Exists(p)) Directory.Delete(p, recursive: true);
+                    else File.Delete(p);
+        }
+    }
+
+    [CudaFact]
+    public void CudaProvider_AModelLoadedCompiledReadsItsWeightsOntoTheCardAndRunsAsTheLoadedGraphDoes()
+    {
+        const long Width = 8192;
+        var numOut = TensorData(DType.Int64, [], Width);
+        var input = TensorData([1L, Width], [.. Enumerable.Range(0, (int)Width).Select(i => MathF.Sin(i))]);
+        var path = TrainingRigHelpers.TempPath("compiled") + ".skpt";
+        var (onnx, onnxPair) = (Path.ChangeExtension(path, ".onnx"), Path.ChangeExtension(path, ".pair.onnx"));
+        try
+        {
+            {
+                var model = FCLayer.ComputationGraph.ToConcreteArchitecture([numOut, input]).ToConcreteModel();
+                Persistence.From(model).WithModel().WithWeights().Save(path);
+                Persistence.ExportOnnx(model, onnx);
+                Persistence.ExportOnnx(model, onnxPair, new OnnxExternalDataOptions { SizeThreshold = 0 });
+            }
+            using var context = new ComputeContext();
+            float[] Run(CompiledGraph compiled) => [.. compiled.Execute(numOut.Shared(), input.Shared())[0].ToTensorData().ToHost().As<float32>().AccessMemory<float>()];
+            float[] expected;
+            using (var viaGraph = context.Compile(Persistence.Load(path))) expected = Run(viaGraph);
+
+            foreach (var load in (Func<CompiledGraph>[])[() => context.ImportCompiledOnnx(onnx), () => context.ImportCompiledOnnx(onnxPair), () => context.LoadCompiled(path)])
+            {
+                GC.Collect();
+                long managed = GC.GetAllocatedBytesForCurrentThread();
+                long Private() => System.Diagnostics.Process.GetCurrentProcess().PrivateMemorySize64;
+                long Card() => DeviceMemory.Read()!.Value.UsedBytes;
+                var (host, card) = (Private(), Card());
+                using var loaded = load();
+                var (hostGrowth, cardGrowth) = (Private() - host, Card() - card);
+                Assert.True(GC.GetAllocatedBytesForCurrentThread() - managed < 64L << 20);
+                Assert.True(cardGrowth < 3 * 4 * Width * Width / 2);
+                Assert.True(hostGrowth - cardGrowth < 4 * Width * Width / 2);
+                Assert.Equal([false, false], loaded.SuppliedTensors.Select(t => t.IsHostResident));
+                Assert.True(expected.Zip(Run(loaded)).All(p => MathF.Abs(p.First - p.Second) <= 1e-5f * MathF.Max(1f, MathF.Abs(p.First))));
+            }
+        }
+        finally
+        {
+            File.Delete(path);
+            File.Delete(onnx);
+            File.Delete(onnxPair);
+            File.Delete(onnxPair + ".data");
+        }
+    }
+
+    private static long Allocation(Action act)
+    {
+        act();
+        var before = GC.GetAllocatedBytesForCurrentThread();
+        act();
+        return GC.GetAllocatedBytesForCurrentThread() - before;
     }
 
     /// <summary>
@@ -378,11 +811,15 @@ public class GpuExecutionTests
         ProtoBuf.Serializer.Serialize(model, proto);
         using var options = new SessionOptions();
         OrtBackend.Configure(options, ShorokooGraphOptimization.EnableAll, ShorokooLogSeverity.Fatal);
-        OrtBackend.AppendCuda(options, 0, new DeviceMemorySettings
+        CudaLibraries.Prepare();
+        using var cuda = new OrtCUDAProviderOptions();
+        cuda.UpdateOptions(new Dictionary<string, string>
         {
-            LimitBytes = 136 * MiB,
-            ArenaExtend = ArenaExtendStrategy.SameAsRequested,
+            ["device_id"] = "0",
+            ["gpu_mem_limit"] = (136 * MiB).ToString(System.Globalization.CultureInfo.InvariantCulture),
+            ["arena_extend_strategy"] = "kSameAsRequested",
         });
+        options.AppendExecutionProvider_CUDA(cuda);
         using var session = new InferenceSession(model.ToArray(), options);
         using var onDevice = new OrtMemoryInfo("Cuda", OrtAllocatorType.DeviceAllocator, 0, OrtMemType.Default);
         using var shape = OrtValue.CreateTensorValueFromMemory<long>([N], [1L]);
@@ -423,7 +860,7 @@ public class GpuExecutionTests
     /// one that writes it anywhere else — the same bits, not merely close — with and without a
     /// budget on the context, which counts that state outside the arena. Every step writes all 56
     /// of the stack's state outputs over their inputs, the first one over the copies of the initial
-    /// checkpoint it took; the checkpoint step brings its state home and writes none.
+    /// checkpoint it took, and the checkpoint step too, since its state stays on the card.
     /// </summary>
     [CudaFact]
     public void CudaProvider_AResidentRunWritingItsStateOverTheStateItConsumedTrainsExactlyAsWithout()
@@ -442,7 +879,7 @@ public class GpuExecutionTests
                 using var run = rig.BeginResidentRun();
                 for (int i = 0; i < 4; i++) run.Step(input.Shared(), target.Shared());
                 var final = run.StepToCheckpoint(input.Shared(), target.Shared());
-                return ([.. Weights(final), .. TrainingRigHelpers.FlattenStruct(final.OptimizerState)], context.AliasedOutputs);
+                return ([.. Weights(final), .. TrainingRigHelpers.FlattenStruct(final.ToHost().OptimizerState)], context.AliasedOutputs);
             }
         }
 
@@ -456,73 +893,97 @@ public class GpuExecutionTests
         Assert.Equal(plain, aliased);
         Assert.Equal(plain, budgeted);
         Assert.Equal(0L, none);
-        Assert.Equal(4 * 56L, written);
-        Assert.Equal(4 * 56L, budgetWritten);
+        Assert.Equal(5 * 56L, written);
+        Assert.Equal(5 * 56L, budgetWritten);
     }
 
-    /// <summary>
-    /// What writing a step's state over the state it consumed saves: a resident run of
-    /// <see cref="WideLinearModel"/> under AdamW, with shrinkage on as a budget would force it. A
-    /// step that writes its state elsewhere holds the state it consumed and the state it makes in
-    /// its arena together — measured, 704 MiB at the step's peak against 320 MiB for one that writes
-    /// the new state over the old, which keeps both out of the arena — and the card's own peak falls
-    /// with it. The arena falls by twice the state; the card, read across every process on it, by at
-    /// least the state. A first run grows the card's transfer allocator, which never shrinks, so
-    /// neither measured run pays for that.
-    /// </summary>
+    // A resident AdamW run of WideLinearModel, shrinking as under a budget: the plain step holds the
+    // new state beside the consumed one, two of its three parameter-sized values at once on the card
+    // (the third is written after a temporary goes).
     [CudaFact]
-    public void CudaProvider_WritingAStepsStateOverWhatItConsumedTakesTwiceTheStateOffItsArenaPeak()
+    public void CudaProvider_WritingAStepsStateOverWhatItConsumedTakesMostOfTheStateOffTheCardsPeak()
     {
-        (long Arena, long Card, long State) Peaks(bool aliasing)
-        {
-            using var context = new ComputeContext
-            {
-                OutputAliasing = aliasing,
-                Diagnostics = new DiagnosticSettings { CollectRunStatistics = true },
-                RunSettings = new RunSettings { ShrinkArenaAfterRun = true },
-            };
-            var sample = TensorData([2L, 4096L], [.. Enumerable.Range(0, 8192).Select(i => (i % 13) / 13f)]);
-            var rig = TrainingRig.FromScratch(
-                WideLinearModel.ComputationGraph, L2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph,
-                [sample.CopyTo(ComputeContext.Host)],
-                new AdamWOptimizerHyperparameters { LearningRate = 0.001f }, runtimeContext: context);
-            var input = rig.InputDef.FromOrderedData(sample);
-            var target = rig.TargetDef.FromOrderedData(TensorData([2L, 4096L], new float[8192]));
-            var initial = rig.CreateInitialCheckpoint();
-            var state = ((TensorDataStruct[])[initial.TrainableParams, initial.ModelState, initial.OptimizerState])
-                .SelectMany(s => s.Fields.Values.OfType<TensorData>()).Sum(t => t.ByteCount);
-
-            DeviceMemory.ResetPeak();
-            var idle = DeviceMemory.Sample()!.Value.UsedBytes;
-            using var stop = new CancellationTokenSource();
-            var sampler = Task.Run(() => { while (!stop.IsCancellationRequested) DeviceMemory.Sample(); });
-            try
-            {
-                using var run = rig.BeginResidentRun(initial);
-                for (int i = 0; i < 4; i++) run.Step(input.Shared(), target.Shared());
-            }
-            finally
-            {
-                stop.Cancel();
-                sampler.Wait();
-            }
-            return (context.RunStats.PeakBytes, DeviceMemory.PeakUsedBytes - idle, state);
-        }
-
         DeviceMemory.ResetPeak();
         try
         {
-            Peaks(aliasing: true);
-            var plain = Peaks(aliasing: false);
-            var aliased = Peaks(aliasing: true);
+            StepPeaks(aliasing: true, placing: false);
+            var plain = StepPeaks(aliasing: false);
+            var aliased = StepPeaks(aliasing: true, placing: false);
 
-            Assert.True(plain.Arena - aliased.Arena >= 2 * aliased.State - (1L << 20));
-            Assert.True(plain.Card - aliased.Card >= aliased.State);
+            Assert.True(plain.Arena - aliased.Arena >= aliased.State);
+            Assert.True(plain.Card - aliased.Card >= aliased.State / 2);
         }
         finally
         {
             DeviceMemory.ResetPeak();
         }
+    }
+
+    [CudaFact]
+    public void CudaProvider_PlacingAStepsStateOverWhatItConsumedTakesTheStateOffTheCardsPeakAsAliasingDoes()
+    {
+        DeviceMemory.ResetPeak();
+        try
+        {
+            StepPeaks(aliasing: true, placing: false);
+            var plain = StepPeaks(aliasing: false);
+            var aliased = StepPeaks(aliasing: true, placing: false);
+            var placed = StepPeaks(aliasing: false, placing: true);
+
+            Assert.True(plain.Arena - placed.Arena >= placed.State - (1L << 20));
+            Assert.True(placed.Arena <= aliased.Arena + (1L << 20));
+        }
+        finally
+        {
+            DeviceMemory.ResetPeak();
+        }
+    }
+
+    /// <summary>
+    /// The resident AdamW step of <see cref="WideLinearModel"/>, four times: the most its context's
+    /// arena held, the most the card held beyond what it did as the run began, and the bytes of the
+    /// step's state — with output aliasing as <paramref name="aliasing"/> says, and placement as
+    /// <paramref name="placing"/> does, or as aliasing does where it says nothing.
+    /// </summary>
+    private static (long Arena, long Card, long State) StepPeaks(bool aliasing, bool? placing = null)
+    {
+        using var context = new ComputeContext
+        {
+            OutputAliasing = aliasing,
+            ValuePlacement = placing,
+            Diagnostics = new DiagnosticSettings { CollectRunStatistics = true },
+            RunSettings = new RunSettings { ShrinkArenaAfterRun = true },
+        };
+        var sample = TensorData([2L, 4096L], [.. Enumerable.Range(0, 8192).Select(i => (i % 13) / 13f)]);
+        var rig = TrainingRig.FromScratch(
+            WideLinearModel.ComputationGraph, L2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph,
+            [sample.CopyTo(ComputeContext.Host)],
+            new AdamWOptimizerHyperparameters { LearningRate = 0.001f }, runtimeContext: context);
+        var input = rig.InputDef.FromOrderedData(sample);
+        var target = rig.TargetDef.FromOrderedData(TensorData([2L, 4096L], new float[8192]));
+        var initial = rig.CreateInitialCheckpoint();
+        var state = ((TensorDataStruct[])[initial.TrainableParams, initial.ModelState, initial.OptimizerState])
+            .SelectMany(s => s.Fields.Values.OfType<TensorData>()).Sum(t => t.ByteCount);
+
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        var x = InputVector<float32>("x");
+        context.Execute(new InternalComputationGraph([x], [x + 1f]), TensorData([1L], 0f)).Single().ToTensorData().Delete();
+        DeviceMemory.ResetPeak();
+        var idle = DeviceMemory.Sample()!.Value.ProcessBytes!.Value;
+        using var stop = new CancellationTokenSource();
+        var sampler = Task.Run(() => { while (!stop.IsCancellationRequested) DeviceMemory.Sample(); });
+        try
+        {
+            using var run = rig.BeginResidentRun(initial);
+            for (int i = 0; i < 4; i++) run.Step(input.Shared(), target.Shared());
+        }
+        finally
+        {
+            stop.Cancel();
+            sampler.Wait();
+        }
+        return (context.RunStats.PeakBytes, DeviceMemory.PeakProcessBytes - idle, state);
     }
 
     /// <summary>
@@ -563,11 +1024,235 @@ public class GpuExecutionTests
     }
 
     /// <summary>
-    /// A graph the provider cannot run whole: one output stays on the card and one comes back from
-    /// the host, which is what <see cref="SessionOutputPlacement.Mixed"/ > is for, and the crossing
+    /// A one-shot run whose intermediates fill 256 MiB of the card and whose output is four
+    /// kilobytes, made after the fill is freed, leaves the card holding the output and nothing more
+    /// once it returns, though the output is kept. Compiled, with the outputs kept, a session holds in
+    /// use its weights and each output's own bytes once a run that hands its memory back is over,
+    /// nothing beyond what is in use, and its weights alone once the outputs are let go of.
+    /// </summary>
+    [CudaFact]
+    public void CudaProvider_AKeptOutputHoldsOnlyItsOwnBytesOnTheCardAndNothingOfItsSessionsArena()
+    {
+        const long MiB = 1024 * 1024;
+        using var ctx = new ComputeContext { RunSettings = new RunSettings { ShrinkArenaAfterRun = true } };
+
+        ctx.Execute(ArenaProbeModels.Widened(), ArenaProbeModels.FilledShape(1024))[0].ToTensorData().Delete();
+        var before = HeldOnTheCard();
+        var widened = ctx.Execute(ArenaProbeModels.Widened(), ArenaProbeModels.FilledShape(64L << 20))[0].ToTensorData();
+        Assert.True(HeldOnTheCard() - before < 16 * MiB);
+
+        using var unshrinking = new ComputeContext();
+        before = HeldOnTheCard();
+        var widenedUnshrunk = unshrinking.Execute(ArenaProbeModels.Widened(), ArenaProbeModels.FilledShape(64L << 20))[0].ToTensorData();
+        Assert.True(HeldOnTheCard() - before < 16 * MiB);
+        widenedUnshrunk.Delete();
+
+        var filled = ArenaProbeModels.Filled(ctx);
+        var spread = ArenaProbeModels.Spread(ctx);
+        (long, long, long, long) Held()
+        {
+            var learned = Assert.IsType<ArenaStatistics>(filled.ReadArenaStatistics());
+            var settled = Assert.IsType<ArenaStatistics>(spread.ReadArenaStatistics());
+            return (learned.RequestedInUseBytes, settled.RequestedInUseBytes,
+                learned.TotalAllocatedBytes - learned.InUseBytes, settled.TotalAllocatedBytes - settled.InUseBytes);
+        }
+        var built = Held();
+        var sum = filled.Execute(ArenaProbeModels.FilledShape(64L << 20))[0].ToTensorData();
+        var spreadSum = spread.Execute(ArenaProbeModels.Ones(64 << 20))[0].ToTensorData();
+        var kept = Held();
+        Assert.Equal([64 << 20, 64 << 20, -(64 << 20)], [widened.ValueAt<float>(999), sum.ValueAt<float>(0), spreadSum.ValueAt<float>(999)]);
+        var bytes = (sum.ByteCount, spreadSum.ByteCount);
+        sum.Delete();
+        spreadSum.Delete();
+
+        Assert.Equal((built.Item1 + bytes.Item1, built.Item2 + bytes.Item2, 0L, 0L), kept);
+        Assert.Equal((built.Item1, built.Item2), (Held().Item1, Held().Item2));
+    }
+
+    /// <summary>
+    /// An output whose shape only the run learns — 256 MiB of indices of a 128 MiB tensor on the
+    /// card — is the block its session's run wrote it into, on the card once: the session's
+    /// allocator holds exactly its bytes more while it is kept and nothing more once it is let go,
+    /// and the card holds less than the output twice over for the run's every block.
+    /// </summary>
+    [CudaFact]
+    public void CudaProvider_AnOutputWhoseShapeTheRunLearnsIsOnTheCardOnceAsTheBlockItsSessionWroteItInto()
+    {
+        using var ctx = new ComputeContext();
+        var learned = ArenaProbeModels.Learned(ctx);
+        long Requested() => Assert.IsType<ArenaStatistics>(learned.ReadArenaStatistics()).RequestedInUseBytes;
+        var ones = ArenaProbeModels.Ones(32 << 20).CopyTo(ctx);
+        var (before, requestedBefore) = (HeldOnTheCard(), Requested());
+
+        var indices = learned.Execute(ones.Shared())[0].ToTensorData();
+        var (bytes, held, requested) = (indices.ByteCount, HeldOnTheCard() - before, Requested() - requestedBefore);
+        indices.Delete();
+
+        Assert.Equal((bytes, requestedBefore), (requested, Requested()));
+        Assert.True(held < 2 * bytes);
+    }
+
+    /// <summary>
+    /// The card's allocator — the one tensors placed on the card and everything a session allocates
+    /// there come from — keeps the blocks of tensors that are gone, through a run that keeps what it
+    /// has, and hands them back to the card as a run that hands back its memory ends, or as the
+    /// program asks.
+    /// </summary>
+    [CudaFact]
+    public void CudaProvider_TheCardsAllocatorHandsBackWhatNoTensorUsesAsARunThatHandsBackItsMemoryEndsOrTheProgramAsks()
+    {
+        const long MiB = 1024 * 1024;
+        using var ctx = new ComputeContext();
+        var product = ArenaProbeModels.MatMul(ctx);
+        void Run(bool shrink) => product.Execute(
+            [ArenaProbeModels.MatMulOperand(8), ArenaProbeModels.MatMulOperand(8)],
+            new RunSettings { ShrinkArenaAfterRun = shrink })[0].ToTensorData().Delete();
+
+        HeldOnTheCard();
+        Run(shrink: true);
+        var before = HeldOnTheCard();
+        void PlaceAndDelete()
+        {
+            foreach (var placed in Enumerable.Range(0, 8).Select(_ => TensorData([8L << 20], new float[8 << 20]).CopyTo(ctx)).ToList())
+                placed.Delete();
+        }
+        PlaceAndDelete();
+        Run(shrink: false);
+        var kept = HeldOnTheCard() - before;
+        Run(shrink: true);
+        var shrunk = HeldOnTheCard() - before;
+        PlaceAndDelete();
+        var keptAgain = HeldOnTheCard() - before;
+        var released = DeviceMemory.ReleaseCached();
+
+        Assert.True(kept >= 256 * MiB);
+        Assert.True(shrunk < 16 * MiB);
+        Assert.True(keptAgain >= 256 * MiB);
+        Assert.True(released >= 256 * MiB);
+        Assert.True(HeldOnTheCard() - before < 16 * MiB);
+    }
+
+    [CudaFact]
+    public void CudaProvider_ASessionRunOverManyShapesKeepsNoMoreOnTheCardThanItsBusiestRunHadInUse()
+    {
+        using var ctx = new ComputeContext();
+        var filled = ArenaProbeModels.Filled(ctx);
+        foreach (var elements in (long[])[16L << 20, 3L << 22, 1L << 23, 3L << 21, 1L << 22])
+            ComputeContext.ReleaseOutputs(filled.Execute(ArenaProbeModels.FilledShape(elements)));
+        var held = Assert.IsType<ArenaStatistics>(filled.ReadArenaStatistics());
+        Assert.True(held.TotalAllocatedBytes <= held.MaxInUseBytes);
+    }
+
+    [CudaFact]
+    public void CudaProvider_ASessionCyclingThroughShapesTakesNothingMoreFromTheCardAfterItsFirstCycle()
+    {
+        using var ctx = new ComputeContext();
+        var filled = ArenaProbeModels.Filled(ctx);
+        (long, long) Cycle()
+        {
+            foreach (var elements in (long[])[2L << 20, 8L << 20, 4L << 20, 6L << 20])
+                ComputeContext.ReleaseOutputs(filled.Execute(ArenaProbeModels.FilledShape(elements)));
+            var held = Assert.IsType<ArenaStatistics>(filled.ReadArenaStatistics());
+            return (held.ArenaShrinkageCount, held.TotalAllocatedBytes);
+        }
+
+        Cycle();
+        var second = Cycle();
+        Assert.Equal(second, Cycle());
+    }
+
+    [CudaFact]
+    public void CudaProvider_BlocksUpToAMebibyteHoldTheirOwnBytesAndALargerOneWholeCardPagesOfItsOwn()
+    {
+        var card = RuntimeAllocator.ForCard(0);
+        var account = card.Shared.Open("probe");
+        List<OrtValue> values = [];
+        long Take(long floats)
+        {
+            using (CachingAllocator.Charge(null, account))
+                values.Add(OrtValue.CreateAllocatedTensorValue(card.Managed, Microsoft.ML.OnnxRuntime.Tensors.TensorElementType.Float, [floats]));
+            return (long)OrtBackend.AddressOf(values[^1]) % (2L << 20);
+        }
+
+        Take(1000);
+        Take(1L << 18);
+        var large = Take((1L << 18) + 1);
+        var held = card.Shared.Statistics(account).TotalAllocatedBytes;
+        values.ForEach(value => value.Dispose());
+        card.Shared.Close(account);
+
+        Assert.Equal((0L, 4096 + (1L << 20) + (2L << 20)), (large, held));
+    }
+
+    [CudaFact]
+    public void CudaProvider_ABlockHandsItsFirstGranuleBackToTheCardButKeepsItsAddressUntilItGoes()
+    {
+        var card = RuntimeAllocator.ForCard(0);
+        var account = card.Shared.Open("probe");
+        OrtValue Take(long floats)
+        {
+            using (CachingAllocator.Charge(null, account))
+                return OrtValue.CreateAllocatedTensorValue(card.Managed, Microsoft.ML.OnnxRuntime.Tensors.TensorElementType.Float, [floats]);
+        }
+
+        var first = Take(3L << 19);
+        var address = OrtBackend.AddressOf(first);
+        card.Shared.ReleaseRange(address, 0, 4L << 20, toTheEnd: false);
+        var held = card.Shared.Statistics(account).TotalAllocatedBytes;
+        var second = Take(1L << 19);
+        var aliased = OrtBackend.AddressOf(second) == address;
+        second.Dispose();
+        first.Dispose();
+        card.Shared.Close(account);
+
+        Assert.Equal((4L << 20, false), (held, aliased));
+    }
+
+    [CudaFact]
+    public void CudaProvider_TheReuseScenarioTakesItsKnownBlocksAndNoMoreBeyondItsInputsAndWeightsOnTheCard()
+    {
+        Assert.Equal((10L, 6L), ArenaProbeModels.ReuseRun(ArenaProbeModels.ReuseShapes.Computed));
+        Assert.Equal((10L, 6L), ArenaProbeModels.ReuseRun(ArenaProbeModels.ReuseShapes.Paired));
+        Assert.Equal((5L, 5L), ArenaProbeModels.ReuseRun(ArenaProbeModels.ReuseShapes.Static));
+        Assert.Equal((11L, 6L), ArenaProbeModels.ReuseRun(ArenaProbeModels.ReuseShapes.Tracked));
+    }
+
+    [CudaFact]
+    public void CudaProvider_TheReuseScenarioTakesWhatTheCardsArenaIsAskedForAndHoldsNoMoreThanItAtOnce()
+    {
+        var arena = new OrtArenaCardBackend();
+        foreach (var shapes in Enum.GetValues<ArenaProbeModels.ReuseShapes>())
+        {
+            var (ours, theirs) = (ArenaProbeModels.ReuseRun(shapes), ArenaProbeModels.ReuseRun(shapes, arena));
+            Assert.Equal(theirs.Allocations, ours.Allocations);
+            Assert.True(ours.Halves <= theirs.Halves);
+        }
+    }
+
+    private sealed class OrtArenaCardBackend : OrtBackend
+    {
+        public OrtArenaCardBackend() : base(cudaDeviceId: 0) => SessionsUseOrtArena = true;
+    }
+
+    /// <summary>What this process holds on the card once every tensor nothing reaches any more is
+    /// released: a released tensor's finalizer can leave another to the next collection.</summary>
+    private static long HeldOnTheCard()
+    {
+        for (int i = 0; i < 3; i++)
+        {
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+        }
+        return DeviceMemory.Read()!.Value.ProcessBytes!.Value;
+    }
+
+    /// <summary>
+    /// A graph the provider cannot run whole: one output is computed on the card and one on the
+    /// host, which is what <see cref="SessionOutputPlacement.Mixed"/ > is for, and the crossing
     /// is charged to the pinned host arena rather than to the device one. A graph with no node the
-    /// provider can run is <see cref="SessionOutputPlacement.Host"/>, and one it runs whole is
-    /// <see cref="SessionOutputPlacement.Device"/>.
+    /// provider can run is <see cref="SessionOutputPlacement.Host"/>, its device memory holding
+    /// nothing but the output it copies onto the card, and one it runs whole is
+    /// <see cref="SessionOutputPlacement.Device"/>. Every output comes back on the card.
     /// </summary>
     [CudaFact]
     public void CudaProvider_OutputPlacementSeparatesADeviceGraphAPartitionedOneAndOneThatFellBack()
@@ -576,12 +1261,11 @@ public class GpuExecutionTests
 
         var partitioned = ArenaProbeModels.Partitioned(ctx);
         Assert.Equal(SessionOutputPlacement.Mixed, partitioned.OutputPlacement);
-        Assert.True(partitioned.HasDeviceMemory);
 
         var pinnedBefore = Assert.IsType<ArenaStatistics>(partitioned.ReadPinnedArenaStatistics());
         Assert.Equal(0L, pinnedBefore.AllocationCount);
 
-        partitioned.Execute(ArenaProbeModels.Square());
+        Assert.All(partitioned.Execute(ArenaProbeModels.Square()), o => Assert.False(o.ToTensorData().IsHostResident));
         var pinned = Assert.IsType<ArenaStatistics>(partitioned.ReadPinnedArenaStatistics());
         var device = Assert.IsType<ArenaStatistics>(partitioned.ReadArenaStatistics());
         Assert.True(pinned.AllocationCount > 0);
@@ -589,15 +1273,13 @@ public class GpuExecutionTests
         Assert.NotEqual(device, pinned);
 
         var host = ArenaProbeModels.HostOnly(ctx);
-        host.Execute(ArenaProbeModels.Square());
+        Assert.All(host.Execute(ArenaProbeModels.Square()), o => Assert.False(o.ToTensorData().IsHostResident));
         Assert.Equal(SessionOutputPlacement.Host, host.OutputPlacement);
-        Assert.False(host.HasDeviceMemory);
-        Assert.Equal(0L, Assert.IsType<ArenaStatistics>(host.ReadArenaStatistics()).AllocationCount);
+        Assert.Equal(1L, Assert.IsType<ArenaStatistics>(host.ReadArenaStatistics()).AllocationCount);
 
         var onCard = ArenaProbeModels.MatMul(ctx);
-        onCard.Execute(ArenaProbeModels.MatMulOperand(8), ArenaProbeModels.MatMulOperand(8));
+        Assert.All(onCard.Execute(ArenaProbeModels.MatMulOperand(8), ArenaProbeModels.MatMulOperand(8)), o => Assert.False(o.ToTensorData().IsHostResident));
         Assert.Equal(SessionOutputPlacement.Device, onCard.OutputPlacement);
-        Assert.True(onCard.HasDeviceMemory);
     }
 
     /// <summary>
@@ -653,7 +1335,7 @@ public class GpuExecutionTests
             };
             var compiled = ArenaProbeModels.MatMul(ctx);
             var operand = ArenaProbeModels.MatMulOperand(512);
-            for (int run = 0; run < 3; run++) compiled.Execute(operand.Shared(), operand.Shared());
+            for (int run = 0; run < 3; run++) ComputeContext.ReleaseOutputs(compiled.Execute(operand.Shared(), operand.Shared()));
             return ctx.RunStats;
         }
 
@@ -723,7 +1405,8 @@ public class GpuExecutionTests
         using var ctx = new ComputeContext();
         Assert.True(DeviceMemory.Read()!.Value.ProcessBytes > 0);
 
-        var held = ctx.AllocateUninitialized<float32>(new Shape(256L << 20));
+        var shape = InputVector<int64>("shape");
+        var held = ctx.Execute(new InternalComputationGraph([shape], [OnnxOp.Expand(Vector(1f), shape)]), TensorData([1L], 256L << 20))[0].ToTensorData();
         DeviceMemoryReading reading;
         try { reading = DeviceMemory.Read()!.Value; }
         finally { held.Delete(); }
@@ -799,7 +1482,7 @@ public class GpuExecutionTests
     }
 
     private static float[] Weights(TrainingCheckpoint checkpoint) =>
-        TrainingRigHelpers.FlattenStruct(checkpoint.TrainableParams);
+        TrainingRigHelpers.FlattenStruct(checkpoint.ToHost().TrainableParams);
 
     private static float AddTwoScalars(ComputeContext ctx, float left, float right)
     {
@@ -813,6 +1496,6 @@ public class GpuExecutionTests
             TensorData([], left),
             TensorData([], right));
 
-        return results[0].ToTensorData().As<float32>().AccessMemory<float>()[0];
+        return results[0].ToTensorData().As<float32>().ValueAt<float>(0);
     }
 }

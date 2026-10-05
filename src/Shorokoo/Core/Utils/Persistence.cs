@@ -113,9 +113,37 @@ namespace Shorokoo
 
             var (modelKey, modelEntry) = SingleModel(manifest, filePath);
             var graph = LoadModelDefinition(container, modelKey, modelEntry, filePath);
-            BindWeights(container, manifest, modelKey, set, graph, filePath);
+            BindWeights(container, manifest, modelKey, set, graph, filePath, onto: null, supplied: null);
 
             return new ComputationGraph(graph, GraphKind.ConcreteModel);
+        }
+
+        /// <summary>
+        /// <see cref="Load(string, string)"/> for a model compiled on <paramref name="onto"/> by
+        /// <see cref="ComputeContext.LoadCompiled(string, string)"/>: a weight of more than
+        /// <see cref="Shorokoo.Core.AutoDiffCheckpointing.ShapeInferenceInterpreter.MaxSmallTensorElements"/> elements is read straight
+        /// from the file into <paramref name="onto"/>'s memory and handed back by its parameter's
+        /// identifier, its placeholder in the graph left without values; a smaller one is bound as
+        /// <see cref="Load(string, string)"/> binds it, so what the graph's own passes read of the
+        /// weights is there to read. On failure every weight read is deleted.
+        /// </summary>
+        internal static (InternalComputationGraph Graph, Dictionary<string, TensorData> Supplied) LoadOnto(
+            string filePath, string set, ComputeContext onto)
+        {
+            if (string.IsNullOrWhiteSpace(filePath))
+                throw new ArgumentException("Checkpoint path cannot be null or empty.", nameof(filePath));
+            if (string.IsNullOrWhiteSpace(set))
+                throw new ArgumentException("Mapping set name cannot be null or empty.", nameof(set));
+
+            using var container = SkptContainer.Open(filePath);
+            var manifest = SkptFileFormat.ParseManifest(container.ReadManifestBytes(), filePath);
+            ValidateManifestIdentity(manifest, filePath);
+
+            var (modelKey, modelEntry) = SingleModel(manifest, filePath);
+            var graph = LoadModelDefinition(container, modelKey, modelEntry, filePath);
+            var supplied = new Dictionary<string, TensorData>(StringComparer.Ordinal);
+            BindWeights(container, manifest, modelKey, set, graph, filePath, onto, supplied);
+            return (graph, supplied);
         }
 
         /// <summary>
@@ -159,7 +187,7 @@ namespace Shorokoo
             var lossGraph = ReadLossConstituent(container, manifest, filePath);
             var (modelKey, modelEntry) = SingleModel(manifest, filePath);
             var model = LoadModelDefinition(container, modelKey, modelEntry, filePath);
-            BindWeights(container, manifest, modelKey, SkptFileFormat.DefaultMappingSetName, model, filePath);
+            BindWeights(container, manifest, modelKey, SkptFileFormat.DefaultMappingSetName, model, filePath, onto: null, supplied: null);
 
             return new ComputationGraph(
                 Core.Training.TrainingGraphBuilder.ComposeEvaluationGraph(model, lossGraph.ToInternal()),
@@ -268,7 +296,7 @@ namespace Shorokoo
                 + "its rig from the file with TrainingRig.Load(path).");
             return TrainingCheckpoint.LoadFlat(
                 filePath, trainableParamDef: null, modelStateDef: null, optimizerStateDef: null,
-                components: null, rigForDefaults: null);
+                components: null, rigForDefaults: null, destination: ComputeContext.Host);
         }
 
         // ---- Load-path format verification (issue #185) ----
@@ -419,7 +447,8 @@ namespace Shorokoo
         /// </summary>
         private static void BindWeights(
             SkptContainer container, SkptManifest manifest, string modelKey, string setName,
-            InternalComputationGraph graph, string filePath)
+            InternalComputationGraph graph, string filePath, ComputeContext? onto,
+            Dictionary<string, TensorData>? supplied)
         {
             if (manifest.TensorMappings is null
                 || !manifest.TensorMappings.TryGetValue(modelKey, out var mappingSets)
@@ -437,7 +466,38 @@ namespace Shorokoo
             }
             var tensorRefs = mappingSet.Tensors ?? new Dictionary<string, SkptTensorRef>();
 
-            var tensorsByDataKey = new Dictionary<string, OrderedDictionary<string, TensorData>>(StringComparer.Ordinal);
+            var tensorsByDataKey = new SkptDataEntries((_, elements) =>
+                onto is not null && elements > Shorokoo.Core.AutoDiffCheckpointing.ShapeInferenceInterpreter.MaxSmallTensorElements ? onto : ComputeContext.Host);
+            try
+            {
+                BindLoadedWeights(container, manifest, modelKey, setName, graph, filePath, tensorRefs, tensorsByDataKey, onto, supplied);
+            }
+            catch
+            {
+                // Everything read and not yet moved into the graph goes now, wherever it was read
+                // to: a weight on a device is not the collector's to free, and one in host memory
+                // past what a managed array holds is native memory the collector does not see.
+                foreach (var entry in tensorsByDataKey.Values)
+                    foreach (var tensor in entry.Values)
+                        if (!tensor.IsDisposed) tensor.Delete();
+                throw;
+            }
+
+            // A data entry is read whole, and one set's mapping may name only some of an entry's
+            // tensors -- an additional set shares the default one's entry for the tensors it has
+            // in common with it -- so what was read for no parameter of this set has no one to hand
+            // it to, and goes now. A tensor bound into the graph was moved, and is dead already.
+            var handedOver = new HashSet<TensorData>((IEnumerable<TensorData>?)supplied?.Values ?? [], ReferenceEqualityComparer.Instance);
+            foreach (var entry in tensorsByDataKey.Values)
+                foreach (var tensor in entry.Values)
+                    if (!tensor.IsDisposed && !handedOver.Contains(tensor)) tensor.Delete();
+        }
+
+        private static void BindLoadedWeights(
+            SkptContainer container, SkptManifest manifest, string modelKey, string setName,
+            InternalComputationGraph graph, string filePath, Dictionary<string, SkptTensorRef> tensorRefs,
+            SkptDataEntries tensorsByDataKey, ComputeContext? onto, Dictionary<string, TensorData>? supplied)
+        {
             // One attribute per stored tensor, because one stored tensor can serve several
             // parameters: the saver is content-addressed, so two parameters whose values are
             // byte-identical are written once and both mapping entries name it. The bind below
@@ -488,6 +548,14 @@ namespace Shorokoo
                 // same stored tensor is safe for the reason an attribute exists: it is immutable,
                 // so there is nothing for two parameters to disagree about. Shape and dtype stay
                 // readable on the spent tensor, so the check above still holds for the second.
+                // A weight read into a device's memory stays there, handed to the session that reads
+                // it; the placeholder keeps its dtype and shape and holds no values.
+                if (supplied is not null && onto is not null && onto.Attaches(loaded))
+                {
+                    supplied[paramId] = loaded;
+                    continue;
+                }
+
                 var storedTensorKey = $"{tensorRef.Data}\0{tensorRef.Tensor}";
                 if (!attributeByStoredTensor.TryGetValue(storedTensorKey, out var bound))
                     attributeByStoredTensor[storedTensorKey] = bound = loaded.MoveToAttribute();
@@ -512,7 +580,7 @@ namespace Shorokoo
         /// </summary>
         private static OrderedDictionary<string, TensorData> ResolveDataEntry(
             SkptContainer container, SkptManifest manifest, SkptTensorRef tensorRef, string referrer,
-            Dictionary<string, OrderedDictionary<string, TensorData>> tensorsByDataKey, string filePath)
+            SkptDataEntries tensorsByDataKey, string filePath)
         {
             var dataKey = tensorRef.Data;
             if (string.IsNullOrEmpty(dataKey))
@@ -532,64 +600,114 @@ namespace Shorokoo
                 throw new InvalidDataException(
                     $"'{filePath}': data entry '{dataKey}' uses unsupported storage format " +
                     $"'{dataEntry.Format}' (supported: '{SkptFileFormat.DataFormatSafeTensors}').");
-            var storedBytes = container.ReadRequiredEntry(dataEntry.Entry, $"data entry '{dataKey}'");
-            // The manifest sha256 covers the entry's bytes as stored in the archive — for a
-            // compressed entry, the compressed bytes — so integrity is checked here, before
-            // and without decompression (mirroring .srk's payloadSha256 semantics).
-            VerifySha256(storedBytes, dataEntry.Sha256, dataEntry.Entry, filePath);
-            var dataBytes = DecodeDataEntryPayload(storedBytes, dataEntry, dataKey, filePath);
+            if (string.IsNullOrEmpty(dataEntry.Sha256))
+                throw new InvalidDataException(
+                    $"'{filePath}': the manifest records no sha256 for entry '{dataEntry.Entry}' — " +
+                    "required by .skpt version 1.");
+
+            // The entry is read once, forward, each tensor's bytes going straight into the memory
+            // it lives in -- on a device, through one bounded buffer -- so neither the entry nor a
+            // tensor of it is ever whole in host memory on the way (Shorokoo/Shorokoo#436). The
+            // manifest sha256 covers the entry's bytes as stored in the archive -- for a compressed
+            // entry, the compressed bytes -- and is taken over them as they pass. Only once the last
+            // byte is through is the entry known whole, so a failure before then is decided by the
+            // hash: a corrupt entry is refused as one, whatever the parser made of its bytes, and
+            // what was read of it is deleted.
+            using var stored = container.OpenRequiredEntry(dataEntry.Entry, $"data entry '{dataKey}'", out long storedLength);
+            using var hashed = new Sha256ReadStream(stored);
+            ComputeContext place(long elements) => tensorsByDataKey.Placement(dataKey, elements);
+            List<SafeTensor> read;
+            try
+            {
+                read = ReadDataEntryPayload(hashed, storedLength, dataEntry, dataKey, place, filePath,
+                    () => container.OpenRequiredEntry(dataEntry.Entry, $"data entry '{dataKey}'", out _));
+            }
+            catch
+            {
+                string? actual = null;
+                // Where the rest of the entry cannot be read either, the failure already in hand
+                // is the one to report.
+                try { hashed.Drain(); actual = hashed.Sha256Hex(); }
+                catch (Exception) { }
+                if (actual is not null) VerifySha256(actual, dataEntry.Sha256, dataEntry.Entry, filePath);
+                throw;
+            }
+            try
+            {
+                hashed.Drain();
+                VerifySha256(hashed.Sha256Hex(), dataEntry.Sha256, dataEntry.Entry, filePath);
+            }
+            catch
+            {
+                foreach (var t in read) t.Data.Delete();
+                throw;
+            }
 
             // Ordered as the entry was written, which the parser reports and a plain Dictionary
             // does not promise to keep: a reader that rebuilds a list from the entry -- the
             // history's hyperparameter names -- gets them in the order they were saved.
             var tensors = new OrderedDictionary<string, TensorData>(StringComparer.Ordinal);
-            foreach (var t in SafeTensorLoader.ParseSafeTensorBytes(dataBytes)) tensors.Add(t.Name, t.Data);
+            foreach (var t in read) tensors.Add(t.Name, t.Data);
             tensorsByDataKey[dataKey] = tensors;
             return tensors;
         }
 
         /// <summary>
-        /// Removes a data entry's manifest-declared compression layer (none today for
-        /// "none", one Zstd layer for "zstd"). The declared compression is cross-checked
-        /// against the stored bytes' framing, so a manifest/stored mismatch in either
-        /// direction fails loudly naming the entry instead of feeding garbage to the
-        /// safetensors parser. The Zstd-frame sniff cannot misfire on a genuine
-        /// uncompressed payload: every supported data format is safetensors, whose first
-        /// 8 bytes are a little-endian header length, and the Zstd magic in bytes 0–3
-        /// would put that length beyond the 2 GiB entry cap enforced on read.
+        /// Reads a data entry's tensors through its manifest-declared compression layer (none for
+        /// "none", one Zstd layer for "zstd", decoded as it streams), into
+        /// the memory <paramref name="destination"/> names for a tensor of each element count. The declared compression is cross-checked against the
+        /// stored bytes' framing, so a manifest/stored mismatch in either direction fails loudly
+        /// naming the entry instead of feeding garbage to the safetensors parser. The Zstd-frame
+        /// sniff cannot misfire on a genuine uncompressed payload: every supported data format is
+        /// safetensors, whose first 8 bytes are a little-endian header length, and the Zstd magic in
+        /// bytes 0–3 would put that length beyond the 2 GiB entry cap enforced on read.
         /// </summary>
-        private static byte[] DecodeDataEntryPayload(
-            byte[] storedBytes, SkptDataEntry dataEntry, string dataKey, string filePath)
+        private static List<SafeTensor> ReadDataEntryPayload(
+            Stream stored, long storedLength, SkptDataEntry dataEntry, string dataKey,
+            Func<long, ComputeContext> destination, string filePath, Func<Stream> reopen)
         {
+            // Enough of the entry to hold a Zstd frame header, which is looked at before decoding.
+            var head = new byte[CompressedFormatUtils.ZstdFrameHeaderMaxBytes];
+            int got = stored.ReadAtLeast(head, head.Length, throwOnEndOfStream: false);
+            bool zstdFrame = SkptFileFormat.LooksLikeZstdFrame(head.AsSpan(0, got));
+            using var payload = new PrefixedReadStream(head, got, stored);
             switch (dataEntry.Compression ?? SkptFileFormat.CompressionNone)
             {
                 case SkptFileFormat.CompressionNone:
-                    if (SkptFileFormat.LooksLikeZstdFrame(storedBytes))
+                    if (zstdFrame)
                         throw new InvalidDataException(
                             $"'{filePath}': data entry '{dataKey}' ('{dataEntry.Entry}') declares compression " +
                             $"'{SkptFileFormat.CompressionNone}' but its stored bytes are a Zstd frame — " +
                             "the manifest and the stored entry disagree; the checkpoint is corrupt or was modified.");
-                    return storedBytes;
+                    return SafeTensorLoader.ReadSafeTensors(payload, storedLength, (_, elements) => destination(elements), filePath);
 
                 case SkptFileFormat.CompressionZstd:
-                    if (!SkptFileFormat.LooksLikeZstdFrame(storedBytes))
+                    if (!zstdFrame)
                         throw new InvalidDataException(
                             $"'{filePath}': data entry '{dataKey}' ('{dataEntry.Entry}') declares compression " +
                             $"'{SkptFileFormat.CompressionZstd}' but its stored bytes are not a Zstd frame — " +
                             "the manifest and the stored entry disagree; the checkpoint is corrupt or was modified.");
-                    try
-                    {
-                        // ZstdSharp allocates from the frame's declared content size, capped at
-                        // 2 GiB — the same bound SkptContainer.TryReadEntry enforces on stored entries — so a
-                        // hostile frame cannot demand an unbounded allocation.
-                        return CompressedFormatUtils.Decompress(storedBytes);
-                    }
-                    catch (Exception e)
-                    {
-                        throw new InvalidDataException(
+                    // The frames are decoded as the reader asks for bytes, so they fail wherever the
+                    // reader happens to be -- a truncated frame mid-tensor, say. A failure of the
+                    // decoder itself is the entry failing to decompress, and is refused as that, not as
+                    // whatever the reader was reading when it happened. The decompressed size each
+                    // frame header must declare bounds, summed, what the entry's own header may claim,
+                    // so a tensor the entry cannot hold is refused before it is allocated. The frames
+                    // are walked through an opening of the entry of their own, as the one read here is
+                    // read forward, once.
+                    long declared;
+                    using (var frames = reopen())
+                        declared = CompressedFormatUtils.DeclaredZstdContentSize(frames, reason =>
+                            new InvalidDataException(
+                                $"'{filePath}': data entry '{dataKey}' ('{dataEntry.Entry}'): {reason} — the " +
+                                "checkpoint is corrupt or was modified."));
+                    using (var decoded = new DecodingReadStream(
+                        new ZstdSharp.DecompressionStream(payload, leaveOpen: true),
+                        e => new InvalidDataException(
                             $"'{filePath}': failed to Zstd-decompress data entry '{dataKey}' " +
-                            $"('{dataEntry.Entry}') — the checkpoint is corrupt or was modified. ({e.Message})", e);
-                    }
+                            $"('{dataEntry.Entry}') — the checkpoint is corrupt or was modified. ({e.Message})", e)))
+                        return SafeTensorLoader.ReadSafeTensors(decoded, declared,
+                            (_, elements) => destination(elements), filePath);
 
                 default:
                     throw new InvalidDataException(
@@ -605,12 +723,143 @@ namespace Shorokoo
                 throw new InvalidDataException(
                     $"'{filePath}': the manifest records no sha256 for entry '{entryPath}' — " +
                     "required by .skpt version 1.");
-            var actual = SkptFileFormat.Sha256Hex(bytes);
+            VerifySha256(SkptFileFormat.Sha256Hex(bytes), expected, entryPath, filePath);
+        }
+
+        private static void VerifySha256(string actual, string expected, string entryPath, string filePath)
+        {
             if (!string.Equals(actual, expected, StringComparison.OrdinalIgnoreCase))
                 throw new InvalidDataException(
                     $"'{filePath}': entry '{entryPath}' fails its SHA-256 check — the checkpoint is " +
                     $"corrupt or was modified (manifest records {expected}, entry hashes to {actual}).");
         }
+    }
+
+    /// <summary>
+    /// The data entries one .skpt load has read, by data key — each read once however many
+    /// references reach it — and where each one's tensors are to live.
+    /// </summary>
+    internal sealed class SkptDataEntries(Func<string, long, ComputeContext> placement)
+        : Dictionary<string, OrderedDictionary<string, TensorData>>(StringComparer.Ordinal)
+    {
+        /// <summary>The context whose memory a data entry's tensors are read into, by data key.</summary>
+        internal Func<string, long, ComputeContext> Placement { get; } = placement;
+    }
+
+    /// <summary>A read-only forward stream over another that takes the SHA-256 of every byte read
+    /// through it, so an entry is hashed as it is read rather than read once more to hash it.</summary>
+    internal sealed class Sha256ReadStream(Stream inner) : Stream
+    {
+        private readonly System.Security.Cryptography.IncrementalHash _hash =
+            System.Security.Cryptography.IncrementalHash.CreateHash(System.Security.Cryptography.HashAlgorithmName.SHA256);
+
+        /// <summary>Reads the rest of the underlying stream, so the hash covers all of it.</summary>
+        public void Drain()
+        {
+            var scratch = new byte[64 * 1024];
+            while (Read(scratch, 0, scratch.Length) > 0) { }
+        }
+
+        /// <summary>The lowercase hex SHA-256 of everything read so far.</summary>
+        public string Sha256Hex() => Convert.ToHexStringLower(_hash.GetCurrentHash());
+
+        public override int Read(Span<byte> buffer)
+        {
+            int n = inner.Read(buffer);
+            _hash.AppendData(buffer[..n]);
+            return n;
+        }
+
+        public override int Read(byte[] buffer, int offset, int count) => Read(buffer.AsSpan(offset, count));
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing) _hash.Dispose();
+            base.Dispose(disposing);
+        }
+    }
+
+    /// <summary>A read-only forward stream over a decoder that reports any failure of the decoder
+    /// itself as <paramref name="failed"/> makes it, and disposes the decoder with it.</summary>
+    internal sealed class DecodingReadStream(Stream decoder, Func<Exception, Exception> failed) : Stream
+    {
+        public override int Read(Span<byte> buffer)
+        {
+            try
+            {
+                return decoder.Read(buffer);
+            }
+            catch (Exception e) when (e is not OperationCanceledException && !FromTheStreamUnderIt(e))
+            {
+                throw failed(e);
+            }
+        }
+
+        /// <summary>
+        /// Whether <paramref name="e"/> is the stream under the decoder failing to read rather than
+        /// the decoder failing on what it read. The decoder reports a frame that ends early as an
+        /// <see cref="EndOfStreamException"/> and one it cannot decode as an exception of its own
+        /// that is no <see cref="IOException"/>, so any other <see cref="IOException"/> came up
+        /// from beneath it — a disk failing to read, say — and says nothing of the bytes stored.
+        /// </summary>
+        private static bool FromTheStreamUnderIt(Exception e) => e is IOException and not EndOfStreamException;
+
+        public override int Read(byte[] buffer, int offset, int count) => Read(buffer.AsSpan(offset, count));
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing) decoder.Dispose();
+            base.Dispose(disposing);
+        }
+    }
+
+    /// <summary>A read-only forward stream that gives back bytes already read off another before
+    /// reading on from it — how a stream's first bytes are looked at without being lost to the
+    /// reader after.</summary>
+    internal sealed class PrefixedReadStream(byte[] prefix, int prefixLength, Stream rest) : Stream
+    {
+        private int _prefixRead;
+
+        public override int Read(Span<byte> buffer)
+        {
+            if (_prefixRead < prefixLength)
+            {
+                int n = Math.Min(buffer.Length, prefixLength - _prefixRead);
+                prefix.AsSpan(_prefixRead, n).CopyTo(buffer);
+                _prefixRead += n;
+                return n;
+            }
+            return rest.Read(buffer);
+        }
+
+        public override int Read(byte[] buffer, int offset, int count) => Read(buffer.AsSpan(offset, count));
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
     }
 
     /// <summary>

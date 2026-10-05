@@ -26,15 +26,6 @@ namespace Shorokoo
         // Created on the first copy: most tensors are read where they are, or never read at all.
         private RunCopies<TensorData>? _copies;
 
-        // The sequence this tensor is an element of, where it is one of a list sequence's own: the
-        // sequence values runs built from that sequence were copied from this tensor too, so a
-        // write here retires them as well as this tensor's own copies.
-        private TensorDataSequence? _sequence;
-
-        // Where this tensor is a copy a run made of another to read it, how that tensor is named: runs
-        // read this in its place, so it may not be written. Null for every other tensor.
-        private string? _copyOf;
-
         /// <inheritdoc/>
         Lifetime ILifetimeOwner.Life => _life;
 
@@ -49,8 +40,8 @@ namespace Shorokoo
 
         /// <summary>
         /// True once this tensor is dead — deleted, consumed by a run, or moved into an attribute;
-        /// retired, where it is a copy a run made of another tensor that was written or let its
-        /// copies go; or ended with the list sequence it was an element of. Its shape, dtype,
+        /// retired, where it is a copy a run made of another tensor that died or let its copies go;
+        /// or ended with the list sequence it was an element of. Its shape, dtype,
         /// <see cref="ToString"/> and where its memory was stay readable as metadata; every other
         /// access throws, saying how it died.
         /// </summary>
@@ -59,6 +50,15 @@ namespace Shorokoo
         /// <summary>Whether a run is reading this tensor right now — what <see cref="Delete"/>
         /// refuses on and <see cref="TryDelete"/> declines on.</summary>
         internal bool IsLocked => _life.IsLocked;
+
+        /// <summary>
+        /// Whether this tensor's memory is still where it was allocated: while the tensor lives, and
+        /// after it is deleted while something still reads it — a run, through
+        /// <see cref="DeleteAsync"/>, or a compiled graph's session reading it as a weight — until
+        /// the last of them stands down. What a device-memory budget counts, since that memory is
+        /// still taken.
+        /// </summary>
+        internal bool HoldsItsMemory => !IsDisposed || _life.HoldsItsMemory;
 
         /// <summary>How a refusal names this tensor: "Tensor (4,):Float32".</summary>
         internal string Describe() => $"Tensor {this}";
@@ -191,6 +191,15 @@ namespace Shorokoo
             => _life.DeleteAsync(timeout, cancellationToken);
 
         /// <summary>
+        /// Ends this tensor's life with <paramref name="death"/> whoever is reading it: marks it dead
+        /// now, and releases its memory now where nothing reads it and otherwise when the last reader
+        /// stands down — asking none of them to stop, as <see cref="DeleteAsync"/> would. Never
+        /// throws for a reader, so an owner letting go of what it owns always finishes; a tensor
+        /// already dead is left as it is.
+        /// </summary>
+        internal void DeleteOnceUnread(TensorDeath death) => _life.Retire(death);
+
+        /// <summary>
         /// Ends this tensor's life deliberately, if no run is reading it: marks it dead with
         /// <paramref name="death"/> and hands its memory to the caller, who must either release it
         /// with <see cref="ReleaseTaken"/> or hand it to a backend and say so with
@@ -258,8 +267,9 @@ namespace Shorokoo
         ///
         /// <para>It is a tensor in its own right: one allocation, allocated by the backend that
         /// built it and released through it, with a life and a reader lock of its own. It lives as
-        /// long as this tensor, and a write to this tensor retires it. A copy that has died some
-        /// other way — deleted by someone who found it on a context's list — is replaced.</para>
+        /// long as this tensor, or until this tensor lets its copies go
+        /// (<see cref="ReleaseRunCopies"/>). A copy that has died some other way — deleted by someone
+        /// who found it on a context's list — is replaced.</para>
         ///
         /// <para>The caller vouches for this tensor's memory: a run holding its reader lock, or a
         /// caller that has just checked it is alive. <paramref name="build"/> reads the contents
@@ -269,12 +279,7 @@ namespace Shorokoo
         /// <exception cref="ObjectDisposedException">This tensor's memory was released while the
         /// copy was being made, by a caller that held no lock on it.</exception>
         internal TensorData CopyAt(MemoryLocation where, Func<TensorData> build)
-            => RunCopiesOf().CopyAt(where, () =>
-            {
-                var copy = build();
-                copy._copyOf = Describe();
-                return copy;
-            }, _life);
+            => RunCopiesOf().CopyAt(where, build, _life);
 
         /// <summary>
         /// The live copy held for runs at <paramref name="where"/>, or null when there is none —
@@ -294,54 +299,32 @@ namespace Shorokoo
             => Volatile.Read(ref _copies)?.Take(where, death);
 
         /// <summary>
-        /// Retires every copy runs made of this tensor, as a write would, for a caller that knows the
-        /// copies will not be read again soon: a training step letting go of the copies of the batch
+        /// Retires every copy runs made of this tensor, for a caller that knows the copies will not
+        /// be read again soon: a training step letting go of the copies of the batch
         /// it read, which would otherwise stay in the run's memory for as long as the batch lives.
         /// </summary>
         internal void ReleaseRunCopies() => RetireCopies();
 
-        /// <summary>Records that <paramref name="sequence"/> holds this tensor as one of its own
-        /// elements, so that a write to this tensor reaches the copies runs built of it.</summary>
-        internal void BelongsTo(TensorDataSequence sequence) => Volatile.Write(ref _sequence, sequence);
-
-        /// <summary>Records that <paramref name="sequence"/>, which died while a run was reading this
-        /// tensor on its own account, holds it no longer: the tensor lives on by itself.</summary>
-        internal void Leaves(TensorDataSequence sequence) => Interlocked.CompareExchange(ref _sequence, null, sequence);
-
         /// <summary>
         /// A new value of <paramref name="backend"/>'s runtime, in host memory, holding this tensor's
         /// contents as they stand — the caller's to own. What a sequence value is built from, element
-        /// by element. Without the liveness check: the caller holds this tensor, by a reader lock or
-        /// by having taken it.
+        /// by element: from one array of the contents where one holds them, and otherwise read into
+        /// a value the backend allocates, from this tensor a piece at a time. Without the liveness
+        /// check: the caller holds this tensor, by a reader lock or by having taken it.
         /// </summary>
         internal IShorokooTensorValue HostCopyOn(IShorokooBackend backend)
             => DType.IsSameElementTypeAs(DType.Utf8)
                 ? backend.CreateStringTensor(CopyContentStrings(), (long[])Shape)
-                : backend.CreateTensorFromRawBytes(
-                    (ShorokooTensorElementType)(int)DType, ContentBytesForCopy(), (long[])Shape);
+                : PastOneArray
+                    ? StagedUpload.ReadIntoHostMemory(backend, (ShorokooTensorElementType)(int)DType, (long[])Shape,
+                        ByteCount, new ContentStream(this))
+                    : backend.CreateTensorFromRawBytes(
+                        (ShorokooTensorElementType)(int)DType, ContentBytesForCopy(), (long[])Shape);
 
         /// <summary>
-        /// Called by every accessor that hands out a writable view of the contents, before it does:
-        /// the copies runs made from these contents are stale from here — this tensor's own, and
-        /// those of the sequence it is an element of — and are retired, so the next run reads what
-        /// was written.
-        /// </summary>
-        private protected void Written()
-        {
-            if (_copyOf is { } source)
-                throw new InvalidOperationException(
-                    $"Tensor {this} is the copy a run made of {source} to read it where it could not be read "
-                    + "as it stands, and later runs read it again in that tensor's place: written, it "
-                    + "would change what they read and not the tensor. Write the tensor itself, which "
-                    + "retires this copy.");
-            RetireCopies();
-            Volatile.Read(ref _sequence)?.ElementWritten();
-        }
-
-        /// <summary>
-        /// Retires every copy runs made of this tensor, because the contents they were copied from
-        /// are about to change or are gone. Each is dead from here — the next run makes a fresh one
-        /// — and released once the last run reading it returns.
+        /// Retires every copy runs made of this tensor, because the tensor they were copied from is
+        /// gone or has let them go. Each is dead from here — the next run makes a fresh one — and
+        /// released once the last run reading it returns.
         /// </summary>
         private protected void RetireCopies() => Volatile.Read(ref _copies)?.RetireAll();
 
@@ -385,6 +368,14 @@ namespace Shorokoo
         /// <summary>A short name for the cause, for a diagnostic that wants one.</summary>
         internal string Cause { get; }
 
+        /// <summary>A weight a compiled graph's session read where it was, deleted with that
+        /// graph.</summary>
+        internal static TensorDeath DeletedWithItsGraph { get; } = new("deleted with its compiled graph", what =>
+            $"{what} was a weight of a compiled graph loaded with LoadCompiled or ImportCompiledOnnx, "
+            + "read by that graph's session where it was, and was deleted when the graph was disposed "
+            + "-- directly, or with the compute context that compiled it -- so nothing may read it "
+            + "any more.");
+
         /// <summary>Deleted: <c>Delete</c>, <c>Dispose</c>, <c>TryDelete</c> or
         /// <c>DeleteAsync</c>.</summary>
         internal static TensorDeath Deleted { get; } = new("deleted", what =>
@@ -403,10 +394,10 @@ namespace Shorokoo
             + "CopyTo(...) before the move where both are needed.");
 
         /// <summary>A copy a run made of a tensor it could not read where it was, retired because
-        /// that tensor was written to or ended, or let the copies of it go.</summary>
+        /// that tensor ended, or let the copies of it go.</summary>
         internal static TensorDeath Retired { get; } = new("retired", what =>
             $"{what} was a copy a run made of another tensor, in memory the run could read, and was "
-            + "released: the tensor it was copied from was written to or ended, or let go of the "
+            + "released: the tensor it was copied from ended, or let go of the "
             + "copies runs had made of it, as a training step does of its batch's once it has read "
             + "it. Nothing may read it any more; read the tensor it was copied from instead.");
 

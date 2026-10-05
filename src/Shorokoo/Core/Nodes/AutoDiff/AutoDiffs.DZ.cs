@@ -113,12 +113,14 @@ namespace Shorokoo.Core.Nodes.AutoDiff
 
         // ===== Activation Functions =====
 
-        [AutoDiff(RELU)]
-        public static Variable?[] Relu<T>(Tensor<T> x, Tensor<T> grad) where T : IVarType
+        [AutoDiff(RELU, UsesOutputs = true)]
+        public static Variable?[] Relu<T>(Tensor<T> x, Tensor<T> y, Tensor<T> grad) where T : IVarType
         {
-            // d(relu(x))/dx = 1 if x > 0, 0 otherwise
-            var zero = TypedConst(0.0f, x);
-            var mask = x > zero;
+            // d(relu(x))/dx = 1 if x > 0, 0 otherwise. relu(x) > 0 exactly where x > 0, so the mask
+            // reads the output: the input then need not be kept for the backward pass, and a runtime
+            // may write the output over it.
+            var zero = TypedConst(0.0f, y);
+            var mask = y > zero;
             return [OnnxOp.Where(mask, grad, zero)];
         }
 
@@ -155,14 +157,15 @@ namespace Shorokoo.Core.Nodes.AutoDiff
             where T1 : IVarType
             where T2 : IVarType
         {
-            // Gradient of ReduceMean: broadcast grad / N back to original shape, N the size of
-            // each group. noop_with_empty_axes with no axes makes every element a group of its own
-            // (N = 1). With axes, N is the input's element count over the output's, which covers an
-            // empty axes tensor either way: every element one group without noop_with_empty_axes,
-            // each element its own under it. The output's count is floored at 1 so an empty output
+            // Gradient of ReduceMean: grad / N broadcast back to original shape, N the size of
+            // each group — divided before it is broadcast, so the division reads and writes the
+            // output's size rather than the input's, and computes each element just the same.
+            // noop_with_empty_axes with no axes makes every element a group of its own (N = 1).
+            // With axes, N is the input's element count over the output's, which covers an empty
+            // axes tensor either way: every element one group without noop_with_empty_axes, each
+            // element its own under it. The output's count is floored at 1 so an empty output
             // (whose gradient is empty) never divides by zero.
-            var expandedGrad = ExpandGradToOriginalShape(grad, data, axes, keepdims);
-            if (!axes.HasValue && noopWithEmptyAxes == true) return [expandedGrad, null];
+            if (!axes.HasValue && noopWithEmptyAxes == true) return [ExpandGradToOriginalShape(grad, data, axes, keepdims), null];
 
             Tensor<int64> reducedCount = OnnxOp.ReduceProd(OnnxOp.Shape(data), keepdims: false);
             if (axes.HasValue)
@@ -172,7 +175,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
             }
             Tensor<T1> reducedCountTyped = OnnxOp.Cast(reducedCount, saturate: null, to: data.Type);
 
-            return [expandedGrad / reducedCountTyped, null];
+            return [ExpandGradToOriginalShape(grad / reducedCountTyped, data, axes, keepdims), null];
         }
 
         // ===== Shape Operations =====

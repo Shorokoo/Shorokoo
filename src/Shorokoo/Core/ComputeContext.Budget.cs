@@ -12,23 +12,24 @@ namespace Shorokoo.Runtime
     ///
     /// <list type="bullet">
     /// <item><b>What it counts.</b> The bytes of the live tensors attached to the context that are in
-    /// its memory (<see cref="ReadDeviceMemoryUse"/>), plus — while one of its runs executes — that
-    /// run's arena, which the session was built to cap at what the attached tensors leave.</item>
-    /// <item><b>Transfers.</b> <see cref="TensorData.To"/>, <see cref="TensorData.CopyTo"/>,
-    /// <see cref="AllocateUninitialized(Shape, DType)"/> and the copies a run makes of memory it
-    /// cannot read where it is are refused, naming the budget, what is attached and what was asked
+    /// its memory (<see cref="ReadDeviceMemoryUse"/>), plus — while one of its runs executes — what
+    /// that run's session allocates, which is limited to what the attached tensors leave.</item>
+    /// <item><b>Transfers.</b> <see cref="TensorData.To"/>, <see cref="TensorData.CopyTo"/> and the
+    /// copies a run makes of memory it cannot read where it is are refused, naming the budget, what is attached and what was asked
     /// for, when what is attached plus what they would add would pass the limit.</item>
-    /// <item><b>Runs.</b> A session's arena limit is the budget less what the context holds in its
-    /// memory outside that arena for the length of the run — the <i>discount</i>. A session is kept
-    /// while its limit is within what the budget allows, and built again when the discount has grown
-    /// past what it left room for; see <see cref="ArenaLimitWithin"/>. A host tensor a run consumes
-    /// goes to the session in host memory, for the runtime to copy into the arena, unless an output
-    /// may be written into it (<see cref="IShorokooSession.BindableAliases"/>). An output a run wrote into
-    /// memory it consumed (<see cref="OutputAlias"/>) is where that memory was — outside the arena,
-    /// or inside it where the consumed tensor was the session's own earlier output — and is counted
-    /// there, once.</item>
+    /// <item><b>Runs.</b> What a run's session may allocate is the budget less what the context holds
+    /// in its memory apart from it for the length of the run — the <i>discount</i>. A session that
+    /// enforces its limit itself (<see cref="IShorokooSession.TryLimitDeviceMemory"/>) is given exactly
+    /// that before each run; any other is kept while the limit it was built with is within it, and
+    /// built again when the discount has grown past what it left room for; see
+    /// <see cref="ArenaLimitWithin"/>. A tensor a run reads or consumes outside the context's memory
+    /// — a host tensor fed to a run on a card — is placed there through a copy the framework makes
+    /// before the run, and counted with the rest of the discount. The outputs a run makes are its
+    /// session's allocations until it returns, and counted with the attached tensors from then
+    /// on.</item>
     /// <item><b>One at a time.</b> Under a budget, the context's runs, the sessions it builds and what
-    /// is placed in its memory are serialized, and every run shrinks its arena when it ends.</item>
+    /// is placed in its memory are serialized, and every run hands back the memory its session keeps
+    /// cached when it ends.</item>
     /// </list>
     ///
     /// <para>A context with no <c>LimitBytes</c>, and one whose memory is the host's, keeps no budget:
@@ -37,11 +38,12 @@ namespace Shorokoo.Runtime
     public partial class ComputeContext
     {
         /// <summary>
-        /// Into how many parts a budget is cut for the room a session's arena leaves: a session is
-        /// built with the budget less the discount rounded up to the next whole part above it — a
-        /// sixty-fourth of the budget — so that it is kept until the discount grows past that, and
-        /// rebuilt at most this many times as the discount climbs through the parts, and once more
-        /// each time what is left halves in the last one (see <see cref="ArenaLimitWithin"/>).
+        /// Into how many parts a budget is cut for the limit of a session that cannot take one in
+        /// place: such a session is built with the budget less the discount rounded up to the next
+        /// whole part above it — a sixty-fourth of the budget — so that it is kept until the
+        /// discount grows past that, and rebuilt at most this many times as the discount climbs
+        /// through the parts, and once more each time what is left halves in the last one (see
+        /// <see cref="ArenaLimitWithin"/>).
         /// </summary>
         internal const int BudgetParts = 64;
 
@@ -51,15 +53,17 @@ namespace Shorokoo.Runtime
 
         /// <summary>
         /// What is attached to this context in its own memory, against its device-memory budget:
-        /// the bytes of the live tensors on its books that are in its memory — on a GPU backend,
+        /// the bytes of the tensors on its books whose memory is in its memory — on a GPU backend,
         /// the card's — how many they are, and the budget, where one is in force.
         ///
         /// <para>That is what the budget counts. A transfer onto this context is refused when what is
         /// attached plus what it would add passes <see cref="DeviceMemoryUse.LimitBytes"/>, and a
-        /// session compiled or run here gets an arena limited to what is left. A tensor on two
-        /// contexts' books counts on both; one that dies, is collected or is detached
-        /// (<see cref="Detach"/>) drops out. <see cref="Host"/> keeps no books and reads as
-        /// nothing.</para>
+        /// session compiled or run here is limited to what is left. A tensor on two
+        /// contexts' books counts on both; one that is collected or detached
+        /// (<see cref="Detach"/>) drops out, and so does one that dies once its memory is released —
+        /// which, for a tensor deleted while something still reads it, a run or a compiled graph's
+        /// session, is when the last of them stands down. <see cref="Host"/> keeps no books and
+        /// reads as nothing.</para>
         ///
         /// <para>It is a reading: it walks this context's list, and nothing is remembered.</para>
         /// </summary>
@@ -78,24 +82,65 @@ namespace Shorokoo.Runtime
         internal long? BudgetIn() => _isHost || MemorySpace.IsHost ? null : DeviceMemory.LimitBytes;
 
         /// <summary>
-        /// The bytes of the live tensors attached to this context in its own memory, and
-        /// how many they are — leaving out those in <paramref name="excludingArena"/>, the arena of
-        /// the session about to run, whose limit already covers them.
+        /// The bytes of the tensors attached to this context whose memory is in its own memory, and
+        /// how many they are: the live ones, and the dead ones whose memory waits on a reader
+        /// (<see cref="TensorData.HoldsItsMemory"/>). A run's outputs are among them once the run has
+        /// returned, apart from what its session's runs are limited to. Tensors standing on one
+        /// shared block count the block once, for what of its memory is still held while any of
+        /// them lives.
         /// </summary>
-        internal (long Bytes, int Tensors) AttachedIn(object? excludingArena = null)
+        internal (long Bytes, int Tensors) AttachedIn()
+        {
+            HashSet<SharedBlock>? blocks = null;
+            return AttachedIn(ref blocks);
+        }
+
+        /// <summary><see cref="AttachedIn()"/>, adding to <paramref name="blocks"/> the shared blocks
+        /// those tensors stand on.</summary>
+        internal (long Bytes, int Tensors) AttachedIn(ref HashSet<SharedBlock>? blocks)
         {
             var space = MemorySpace;
             long bytes = 0;
             var tensors = 0;
             foreach (var tensor in _attached.Snapshot())
             {
-                if (tensor.IsDisposed || tensor.Space != space) continue;
-                if (excludingArena is not null && ReferenceEquals(tensor.Arena, excludingArena)) continue;
-                bytes += tensor.ByteCount;
+                if (!tensor.HoldsItsMemory || tensor.Space != space) continue;
+                if (tensor.Block is { } block)
+                {
+                    if ((blocks ??= new(ReferenceEqualityComparer.Instance)).Add(block)) bytes += block.HeldBytes;
+                }
+                else bytes += tensor.ByteCount;
                 tensors++;
             }
             return (bytes, tensors);
         }
+
+        /// <summary>
+        /// What putting <paramref name="tensor"/> on this context's books adds to them: its own
+        /// bytes, or for a tensor standing on a shared block, what of the block is still held where
+        /// no live tensor on this context's books stands on it already, nor another of
+        /// <paramref name="alongside"/>, put on them with it, and nothing where one does.
+        /// </summary>
+        internal long BooksBytesOf(TensorData tensor, IEnumerable<TensorData>? alongside = null)
+        {
+            if (tensor.Block is not { } block) return tensor.ByteCount;
+            foreach (var attached in _attached.Snapshot())
+                if (attached.HoldsItsMemory && ReferenceEquals(attached.Block, block)) return 0;
+            foreach (var other in alongside ?? [])
+                if (!ReferenceEquals(other, tensor) && !other.IsDisposed && ReferenceEquals(other.Block, block)) return 0;
+            return block.HeldBytes;
+        }
+
+        /// <summary>
+        /// What putting <paramref name="tensor"/> on the books adds to them where
+        /// <paramref name="blocks"/> holds every shared block they stand on, those already on them
+        /// (<see cref="AttachedIn(ref HashSet{SharedBlock}?)"/>) and those put on them with it: its
+        /// own bytes, or for a tensor standing on a block not among them, what of the block is still
+        /// held, the block joining them.
+        /// </summary>
+        internal static long BooksBytesOf(TensorData tensor, ref HashSet<SharedBlock>? blocks)
+            => tensor.Block is not { } block ? tensor.ByteCount
+               : (blocks ??= new(ReferenceEqualityComparer.Instance)).Add(block) ? block.HeldBytes : 0;
 
         /// <summary>
         /// Enters this context's budget gate when its memory is under a budget, and answers null — having entered nothing — when it is not. From here to the
@@ -259,12 +304,12 @@ namespace Shorokoo.Runtime
 
         /// <summary>
         /// The refusal of a compile when what is attached to this context leaves no room in its
-        /// budget for the new session's arena: a session holds its weights in that arena from the
-        /// moment it is built, so it needs a limit above zero.
+        /// budget for the new session: a session holds its weights from the moment it is built, so
+        /// it needs a limit above zero.
         /// </summary>
         private InvalidOperationException NoRoomToCompile(MemorySpace space, long limit, long attached, int tensors)
             => new(
-                "Compiling a graph on this compute context builds a session whose arena has to fit "
+                "Compiling a graph on this compute context builds a session whose memory has to fit "
                 + $"in the context's device-memory budget, and the {Figure(attached)} bytes of the "
                 + $"{Figure(tensors)} tensor(s) attached to it in {space} leave nothing of the "
                 + $"{Figure(limit)} bytes it has (DeviceMemorySettings.LimitBytes). Delete what the "
@@ -275,17 +320,17 @@ namespace Shorokoo.Runtime
         internal static string Figure(long value) => value.ToString(CultureInfo.InvariantCulture);
 
         /// <summary>
-        /// The arena limit a session is built with under a budget of <paramref name="limit"/>
-        /// bytes while <paramref name="outside"/> bytes of the context's memory are held outside
-        /// that arena, or null when they leave it nothing.
+        /// The limit a session that cannot be limited in place is built with under a budget of
+        /// <paramref name="limit"/> bytes while <paramref name="outside"/> bytes of the context's
+        /// memory are held apart from what it allocates, or null when they leave it nothing.
         ///
         /// <para>The budget less the discount rounded up to the next whole
         /// <see cref="BudgetParts"/>th of the budget above it. Rounding up is the headroom that keeps
         /// a session: one is kept while its limit is within what the budget allows, which it stays
         /// until the discount grows past the part it rounded up to. So a steady run keeps its
         /// session, and one whose discount keeps climbing rebuilds once per part it climbs through —
-        /// at most <see cref="BudgetParts"/> times — rather than on every run. It costs the arena at
-        /// most one part of the budget.</para>
+        /// at most <see cref="BudgetParts"/> times — rather than on every run. It costs the session
+        /// at most one part of the budget.</para>
         ///
         /// <para>In the budget's last part, where that rounding would leave less than a part — nothing,
         /// or the few bytes a budget that is not a whole number of parts has over — the limit is the
@@ -306,9 +351,9 @@ namespace Shorokoo.Runtime
             var rounded = limit - outside - headroom;
             if (rounded >= part) return rounded;
             var room = limit - outside;
-            var arena = part;
-            while (arena > room) arena /= 2;
-            return arena;
+            var halved = part;
+            while (halved > room) halved /= 2;
+            return halved;
         }
     }
 

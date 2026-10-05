@@ -59,9 +59,17 @@ FLOAT8 = (_DTYPES[17], _DTYPES[18], _DTYPES[19], _DTYPES[20])
 
 KIND_TENSOR = 0
 
-# Products and convolutions in full float32 precision: XLA's default on a card may round the
-# operands of a float32 product to TensorFloat-32, and the backend computes what the graph says.
-PRECISION = jax.lax.Precision.HIGHEST
+# The precision of the products and convolutions of the program being traced: the model's own,
+# which the .NET side settles from the session's PrecisionSettings -- HIGHEST, full float32 precision,
+# unless a session on a card allows TensorFloat-32, which XLA computes at HIGH. XLA's default on a
+# card rounds the operands of a float32 product to TensorFloat-32, so every product and convolution
+# names its precision rather than leaving it to that default.
+_precision = contextvars.ContextVar("shorokoo_jax_precision", default=jax.lax.Precision.HIGHEST)
+
+
+def precision():
+    """The precision a product or convolution of the program being traced is computed in."""
+    return _precision.get()
 
 
 def jax_dtype(code):
@@ -187,11 +195,23 @@ def from_host(address, nbytes, code, shape, device_name):
     return array
 
 
+# The bytes of the one host buffer the .NET side streams a save or a load through
+# (StagedReadBack.StagingBytes): an array no larger is moved whole, through host memory that size,
+# compiling nothing; only a larger one is moved by the piece, through the programs below.
+_STAGING_BYTES = 8 << 20
+
+
 def empty(code, shape, device_name):
-    """A tensor whose contents are unspecified: zeros, since a jax array is never uninitialized."""
+    """A tensor whose contents are unspecified: zeros, since a jax array is never uninitialized. An
+    array on a device no larger than the staging buffer is sent there from host zeros, compiling
+    nothing; a larger one is made on the device, never through host memory, at the cost of one
+    program per shape and type."""
+    dtype = jax_dtype(code)
     if device_name == "cpu":
-        return np.zeros(tuple(shape), dtype=jax_dtype(code))
-    return jax.device_put(np.zeros(tuple(shape), dtype=jax_dtype(code)), device_of(device_name))
+        return np.zeros(tuple(shape), dtype=dtype)
+    if int(np.prod(shape, dtype=np.int64)) * dtype.itemsize <= _STAGING_BYTES:
+        return jax.device_put(np.zeros(tuple(shape), dtype=dtype), device_of(device_name))
+    return jnp.zeros(tuple(shape), dtype=dtype, device=device_of(device_name))
 
 
 def host_copy(value):
@@ -200,15 +220,83 @@ def host_copy(value):
     return array if array.flags.writeable else array.copy()
 
 
+# A device array's elements `first` to `first + size` as an array of their own, and the array with
+# those elements replaced, written over the array handed in (donated): XLA reshapes an array to a
+# flat one in place, so neither copies the rest of it. Each compiles a program per array shape and
+# type and per size: _piece is only asked for a power of two of elements (_fetch), so it keeps a
+# handful per array; _with_piece is asked for a load's pieces, which are of one size and the last.
+_piece = jax.jit(lambda array, first, size: jax.lax.dynamic_slice(array.reshape(-1), (first,), (size,)),
+                 static_argnums=2)
+_with_piece = jax.jit(
+    lambda array, piece, first: jax.lax.dynamic_update_slice(array.reshape(-1), piece, (first,)).reshape(array.shape),
+    donate_argnums=0)
+
+# The fewest elements _fetch slices off a device array, so that pieces of every size under it share
+# one program.
+_LEAST_PIECE = 4096
+
+
+def _elements_of(array, byte_offset, count):
+    """The elements covering `count` bytes `byte_offset` bytes into `array`: the first, how many, and
+    where the bytes start in them."""
+    itemsize = np.dtype(array.dtype).itemsize
+    first = byte_offset // itemsize
+    return first, -(-(byte_offset + count) // itemsize) - first, byte_offset - first * itemsize
+
+
+def _fetch(array, first, size):
+    """Elements `first` to `first + size` of a device array, in host memory: the whole array copied
+    home where they are most of it -- which holds no copy of it on the device -- and otherwise a
+    slice holding them of a power of two of elements, and at least _LEAST_PIECE, so that the pieces
+    of a gather's many run lengths share a few programs and each holds at most twice its size on
+    the device."""
+    length = int(np.prod(array.shape, dtype=np.int64))
+    elements = max(1 << max(size - 1, 0).bit_length(), _LEAST_PIECE)
+    if elements >= length:
+        return np.asarray(array).reshape(-1)[first:first + size]
+    start = min(first, length - elements)
+    return np.asarray(_piece(array, np.int64(start), elements))[first - start:first - start + size]
+
+
+def copy_range_to_host(array, byte_offset, address, count):
+    """Copies `count` bytes of a device array, `byte_offset` bytes in, to host `address`: the
+    elements covering them fetched home (_fetch), without the rest of the array where they are
+    only part of it."""
+    if count:
+        first, size, skip = _elements_of(array, byte_offset, count)
+        piece = np.ascontiguousarray(_fetch(array, first, size))
+        ctypes.memmove(address, piece.ctypes.data + skip, count)
+
+
+def copy_host_to_range(array, byte_offset, address, count):
+    """A device array holding `array`'s contents with `count` bytes at host `address` written
+    `byte_offset` bytes in -- `array` itself, written over in place, which leaves the array handed
+    in deleted. Only the elements covering those bytes cross to the device, and those of them the
+    bytes cover only in part are fetched first."""
+    if not count:
+        return array
+    first, size, skip = _elements_of(array, byte_offset, count)
+    itemsize = np.dtype(array.dtype).itemsize
+    if skip or (skip + count) % itemsize:
+        piece = np.array(_fetch(array, first, size), copy=True)
+    else:
+        piece = np.empty(size, dtype=array.dtype)
+    ctypes.memmove(piece.ctypes.data + skip, address, count)
+    device = next(iter(array.devices()))
+    return _with_piece(array, jax.device_put(piece, device), np.int64(first))
+
+
 def describe(value):
-    """(kind, element type code, shape, is host, data address, byte count) of a value."""
+    """(kind, element type code, shape, is host, data address, byte count, device id) of a value;
+    the device id is -1 for a value in host memory."""
     if isinstance(value, np.ndarray):
         if not value.flags.c_contiguous or not value.flags.writeable:
             # The .NET side reads and writes a host value as one dense buffer from its address.
             raise ValueError("only a contiguous, writable array can be handed to .NET")
-        return (KIND_TENSOR, dtype_code(value), list(value.shape), True, value.ctypes.data, value.nbytes)
+        return (KIND_TENSOR, dtype_code(value), list(value.shape), True, value.ctypes.data, value.nbytes, -1)
+    device = next(iter(value.devices()))
     return (KIND_TENSOR, dtype_code(value), list(value.shape), False, 0,
-            int(np.prod(value.shape, dtype=np.int64)) * np.dtype(value.dtype).itemsize)
+            int(np.prod(value.shape, dtype=np.int64)) * np.dtype(value.dtype).itemsize, device.id)
 
 
 # ---- models -----------------------------------------------------------------------------------
@@ -230,10 +318,11 @@ class Model:
     """A translated model loaded for one session: its `main`, its constants, and the XLA programs
     compiled from it so far, one per signature of the shapes and element types of its inputs."""
 
-    def __init__(self, main, constants, device):
+    def __init__(self, main, constants, device, precision):
         self._main = main
         self._constants = constants
         self.device = device
+        self.precision = precision
         self._large = [i for i, c in enumerate(constants) if np.size(c) > _LARGEST_LITERAL]
         self._large_values = [jax.device_put(constants[i], device) for i in self._large]
         self._programs = collections.OrderedDict()
@@ -245,10 +334,12 @@ class Model:
         for i, value in zip(self._large, large):
             self._constants[i] = value
         token = _keys.set(_Keys(jax.random.wrap_key_data(key)))
+        precision_token = _precision.set(self.precision)
         try:
             with np.errstate(all="ignore"):
                 return tuple(self._main(*args))
         finally:
+            _precision.reset(precision_token)
             _keys.reset(token)
             for i, value in zip(self._large, saved):
                 self._constants[i] = value
@@ -284,9 +375,10 @@ class Model:
         return program(_fresh_key(), self._large_values, *moved)
 
 
-def load_model(source, filename, constants, device_name):
-    """The model a translation's source defines, with `constants` bound as `_C`, on `device_name`.
-    The source's compiled Python code is cached by `filename`, which names the source's hash."""
+def load_model(source, filename, constants, device_name, precision="HIGHEST"):
+    """The model a translation's source defines, with `constants` bound as `_C`, on `device_name`,
+    its products and convolutions compiled at `precision` (a jax.lax.Precision name). The source's
+    compiled Python code is cached by `filename`, which names the source's hash."""
     code = _code.get(filename)
     if code is None:
         code = compile(source, filename, "exec")
@@ -300,7 +392,7 @@ def load_model(source, filename, constants, device_name):
     constants = list(constants)
     namespace = {"__name__": "shorokoo_model", "_C": constants}
     exec(code, namespace)
-    return Model(namespace["main"], constants, device_of(device_name))
+    return Model(namespace["main"], constants, device_of(device_name), jax.lax.Precision[precision])
 
 
 def prepare(model, inputs, severity=None):
@@ -311,19 +403,21 @@ def prepare(model, inputs, severity=None):
         _warning_severity.reset(token)
 
 
-def run(model, args, wanted, retained, severity=None):
-    """Runs a model and hands over the outputs at indices `wanted`: each retained in the device's
-    memory where `retained` says so, else copied home. Returns (value, description) per output.
-    Every output is ready when this returns: nothing the run reads or writes is still in flight."""
+def run(model, args, wanted, severity=None):
+    """Runs a model and hands over the outputs at indices `wanted`, each where the .NET side reads
+    the model's inputs and leaves its outputs: in the device's memory on a card, and a host value of
+    its own on the CPU. Returns (value, description) per output. Every output is ready when this
+    returns: nothing the run reads or writes is still in flight."""
     token = _warning_severity.set(severity)
     try:
         outputs = model(args)
     finally:
         _warning_severity.reset(token)
+    on_device = model.device.platform != "cpu"
     results = []
-    for index, retain in zip(wanted, retained):
+    for index in wanted:
         value = outputs[index]
-        value = jax.block_until_ready(value) if retain else host_copy(value)
+        value = jax.block_until_ready(value) if on_device else host_copy(value)
         results.append((value, describe(value)))
     return results
 

@@ -61,13 +61,12 @@ public class ComputeContextLifetimeCoverageTests
         var placed = Sample().To(context);
         var copied = Sample().CopyTo(context);
         var output = compiled.Execute(a.Shared(), b.Shared())[0].ToTensorData();
-        var allocated = context.AllocateUninitialized<float32>(new Shape(4L));
 
         context.Dispose();
 
         Assert.True(compiled.IsDisposed);
         Assert.Empty(context.Tensors);
-        Assert.All((TensorData[])[placed, copied, output, allocated, a, b], t => Assert.False(t.IsDisposed));
+        Assert.All((TensorData[])[placed, copied, output, a, b], t => Assert.False(t.IsDisposed));
         Assert.Equal([1f, 2f, 3f, 4f], Floats(placed));
         Assert.Equal([1f, 2f, 3f, 4f], Floats(copied));
         Assert.Equal(expected, Floats(output));
@@ -208,6 +207,7 @@ public class ComputeContextLifetimeCoverageTests
             () => backend.CreateTensorFromRawBytes(ShorokooTensorElementType.Float, raw, [4L]),
             () => backend.CreateTensorInBackendMemory(ShorokooTensorElementType.Float, raw, [4L]),
             () => backend.CreateUninitializedTensorInBackendMemory(ShorokooTensorElementType.Float, [4L]),
+            () => backend.CreateUninitializedHostTensor(ShorokooTensorElementType.Float, [4L]),
             () => backend.CreateStringTensor(["a", "b"], [2L]),
             () => backend.CreateSequence([]),
         ];
@@ -283,7 +283,6 @@ public class ComputeContextLifetimeCoverageTests
 
         Assert.True(compiled.IsDisposed);
         Assert.Throws<ObjectDisposedException>(() => context.Compile(graph));
-        Assert.Throws<ObjectDisposedException>(() => compiled.HasDeviceMemory);
         Assert.Throws<ObjectDisposedException>(() => compiled.OutputPlacement);
     }
 
@@ -295,53 +294,16 @@ public class ComputeContextLifetimeCoverageTests
         var passthrough = context.Compile(new InternalComputationGraph([x], [x]), [[4L]], trainingStep: false);
         var source = Sample();
         var output = passthrough.Execute(source.Shared())[0].ToTensorData();
+        var copy = source.CopyHeldAt(TensorData.RunMemoryOf(context.ResolvedBackend, source.DType))!;
 
-        output.As<float32>().WriteMemory<float>(span => span.Fill(9f));
-
-        Assert.Equal([1f, 2f, 3f, 4f], Floats(passthrough.Execute(source.Shared())[0].ToTensorData()));
+        Assert.False(SameMemory(output, copy));
+        Assert.Equal([1f, 2f, 3f, 4f], Floats(output));
 
         var doubled = x * 2f;
         var twice = context.Compile(new InternalComputationGraph([x], [doubled, doubled]), [[4L]], trainingStep: false)
             .Execute(Sample());
-        twice[0].ToTensorData().As<float32>().WriteMemory<float>(span => span.Fill(9f));
+        Assert.False(SameMemory(twice[0].ToTensorData(), twice[1].ToTensorData()));
         Assert.Equal([2f, 4f, 6f, 8f], Floats(twice[1].ToTensorData()));
-    }
-
-    [Fact]
-    public void TestACopyARunReadsInATensorsPlaceCannotBeWrittenSoEveryLaterReadSeesTheTensor()
-    {
-        using var context = new ComputeContext();
-        var compiled = context.Compile(Doubling());
-        var source = Sample();
-        compiled.Execute(source.Shared());
-        var copy = source.CopyHeldAt(TensorData.RunMemoryOf(context.ResolvedBackend, source.DType))!;
-
-        Assert.Throws<InvalidOperationException>(() => copy.As<float32>().WriteMemory<float>(span => span.Fill(9f)));
-        Assert.Equal([2f, 4f, 6f, 8f], Floats(compiled.Execute(source.Shared())[0].ToTensorData()));
-    }
-
-    [Fact]
-    public void TestATensorBeingWrittenCannotBeConsumedOrDeletedUntilTheWriteIsDone()
-    {
-        using var context = new ComputeContext();
-        var compiled = context.Compile(Doubling());
-        var written = Sample();
-        using var writing = new ManualResetEventSlim();
-        using var release = new ManualResetEventSlim();
-        var write = Task.Run(() => written.As<float32>().WriteMemory<float>(span =>
-        {
-            writing.Set();
-            release.Wait(TimeSpan.FromSeconds(10));
-            span.Fill(5f);
-        }));
-        Assert.True(writing.Wait(TimeSpan.FromSeconds(10)));
-
-        Assert.Throws<InvalidOperationException>(() => compiled.Execute(written));
-        Assert.Throws<InvalidOperationException>(written.Delete);
-
-        release.Set();
-        Assert.True(write.Wait(TimeSpan.FromSeconds(10)));
-        Assert.Equal([10f, 10f, 10f, 10f], Floats(compiled.Execute(written)[0].ToTensorData()));
     }
 
     [Fact]
@@ -395,69 +357,6 @@ public class ComputeContextLifetimeCoverageTests
     private static float[] Feed() => [.. Enumerable.Range(0, Wide).Select(i => (float)(i % 7))];
 
     private static HostTensorData<float32> Wide32() => (HostTensorData<float32>)TensorData([(long)Wide], Feed());
-
-    /// <summary>
-    /// Shorokoo/Shorokoo#366: writing to a tensor on one thread while a run on another reads it
-    /// used to free the buffer the execution provider was reading. The write retires the copy the
-    /// run reads through, and the retired copy waits for the run.
-    ///
-    /// <para>A round counts only where the write landed inside the run: where the run still held
-    /// the copy once the write was done. A write that lost the race to the run's end puts nothing
-    /// to the product, and is retried rather than taken for a pass.</para>
-    /// </summary>
-    [Fact]
-    public void TestATensorWrittenOnAnotherThreadStaysValidForTheRunFeedingIt()
-    {
-        using var context = new ComputeContext();
-        var (graph, expected) = Chain();
-        var compiled = context.Compile(graph);
-        var copyAt = TensorData.RunMemoryOf(DefaultBackend.Instance, DType.Float32);
-        var landed = 0;
-
-        for (int round = 0; round < 20 && landed < 3; round++)
-        {
-            var fed = Wide32();
-            var ran = false;
-            using var spinning = new ManualResetEventSlim();
-            var other = Task.Run(() =>
-            {
-                spinning.Set();
-                var spin = new SpinWait();
-                TensorData? held;
-                while ((held = fed.CopyHeldAt(copyAt)) is not { IsLocked: true } && !Volatile.Read(ref ran))
-                    spin.SpinOnce(sleep1Threshold: -1);
-                fed.AccessModifiableMemory<float>()[0] = 99f;
-                return held is { IsLocked: true };
-            });
-            Assert.True(spinning.Wait(TimeSpan.FromSeconds(10)));
-
-            float[] result;
-            try { result = Floats(compiled.Execute(fed.Shared())[0].ToTensorData()); }
-            finally { Volatile.Write(ref ran, true); }
-            var inside = other.Result;
-
-            Assert.Equal(expected, result);
-            if (inside) landed++;
-        }
-
-        Assert.NotEqual(0, landed);
-    }
-
-    [Fact]
-    public void TestARunReadingATensorWhileItIsWrittenLeavesNothingStaleForTheNextRun()
-    {
-        using var context = new ComputeContext();
-        var t = Sample();
-
-        t.As<float32>().WriteMemory<float>(span =>
-        {
-            span[0] = 9f;
-            context.Execute(Doubling(), t.Shared());
-            span[1] = 9f;
-        });
-
-        Assert.Equal([18f, 18f, 6f, 8f], Floats(context.Execute(Doubling(), t.Shared())[0].ToTensorData()));
-    }
 
     [Fact]
     public void TestATensorARunConsumedKeepsNeitherTheGraphNorTheContextThatRanItAlive()
@@ -831,13 +730,15 @@ public class ComputeContextLifetimeCoverageTests
         return new ValueInfoProto { Name = name, Type = new TypeProto { TensorType = tensor } };
     }
 
-    internal static NodeProto Op(string op, string inputs, string outputs, string domain = "", GraphProto? body = null)
+    internal static NodeProto Op(string op, string inputs, string outputs, string domain = "", GraphProto? body = null, (string Name, long Value)? attribute = null)
     {
         var node = new NodeProto { OpType = op, Domain = domain };
         node.Inputs.AddRange(Names(inputs));
         node.Outputs.AddRange(Names(outputs));
         if (body is not null)
             node.Attributes.Add(new AttributeProto { Name = "then_branch", Type = AttributeProto.AttributeType.Graph, G = body });
+        if (attribute is { } a)
+            node.Attributes.Add(new AttributeProto { Name = a.Name, Type = AttributeProto.AttributeType.Int, I = a.Value });
         return node;
     }
 
@@ -882,6 +783,1005 @@ public class ComputeContextLifetimeCoverageTests
         Assert.False(Proves(GraphOf("a b", "O a", Op("Sub", "a b", "O"))));
         Assert.False(Proves(GraphOf("a b", "O O", Op("Sub", "a b", "O"))));
         Assert.False(Proves(GraphOf("a b", "O", Op("Sub", "a b", "O", domain: "custom"))));
+    }
+
+    private static PlacementProof PlacementsOver(GraphProto graph, string consumed, PlacementMemory? memory = null)
+    {
+        var inputs = graph.Inputs.Where(i => i.Type?.TensorType?.Shape is not null).ToDictionary(
+            i => i.Name, i => (i.Type.TensorType.Shape.Dims.Select(d => d.DimValue).ToArray(), i.Type.TensorType.ElemType));
+        var shapes = PlacementShapes.Evaluate(graph, inputs);
+        return new PlacementProof(graph, Names(consumed).ToDictionary(n => n, n => shapes[n].Bytes), shapes, memory: memory);
+    }
+
+    private static bool Places(GraphProto graph, string consumed, params Placement[] placements)
+        => PlacementsOver(graph, consumed).Prove(placements).Count == placements.Length;
+
+    private static bool PlacesOnTorch(GraphProto graph, string consumed, params Placement[] placements)
+        => PlacementsOver(graph, consumed, PlacementMemory.PyTorch).Prove(placements).Count == placements.Length;
+
+    private static GraphProto FirstHalf(string outputs, params NodeProto[] nodes)
+        => WithInts(WithInts(GraphOf("a:float[256] c:float[128]", outputs, [Op("Slice", "a zero half zero", "x"), .. nodes]), "zero", 0), "half", 128);
+
+    private static Placement At(string value, string block, long offset, long bytes = 512) => new(value, block, offset, bytes);
+
+    internal static GraphProto WithInts(GraphProto graph, string name, params long[] values)
+    {
+        graph.Initializers.Add(new TensorProto { Name = name, data_type = (int)TensorProto.DataType.Int64, Dims = [values.Length], Int64Datas = values });
+        return graph;
+    }
+
+    private static GraphProto Halves()
+        => WithInts(WithInts(WithInts(GraphOf("a:float[128] b:float[128] c:float[64]", "O",
+            Op("Slice", "b zero two zero", "x"), Op("Neg", "c", "y"), Op("Concat", "x y", "O", attribute: ("axis", 0))),
+            "zero", 0), "two", 64), "four", 128);
+
+    [Fact]
+    public void TestAPlacementIsProvedOnlyForAValueOfItsOwnInsideItsBlockAtItsSize()
+    {
+        Assert.True(Places(GraphOf("a:float[128] b:float[128]", "O", Op("Neg", "a", "O")), "a", At("O", "a", 0)));
+        Assert.False(Places(GraphOf("a:float[128] b:float[128]", "O", Op("Neg", "a", "O")), "a", At("O", "a", 4)));
+        Assert.False(Places(GraphOf("a:float[128] b:float[128]", "O", Op("Neg", "a", "O")), "a", At("O", "a", 0, 256)));
+        Assert.False(Places(GraphOf("a:float[128] b:float[128]", "O", Op("Neg", "a", "O")), "b", At("O", "a", 0)));
+        Assert.False(Places(GraphOf("a:float[128] b:float[128]", "O O", Op("Neg", "a", "O")), "a", At("O", "a", 0)));
+        Assert.False(Places(GraphOf("a:float[128] b:float[128]", "b", Op("Neg", "a", "O")), "a", At("b", "a", 0)));
+        Assert.False(Places(Initializing("k", GraphOf("a:float[128]", "k")), "a", At("k", "a", 0)));
+        Assert.False(Places(GraphOf("a:float[128] b:float[128]", "O", Op("Flatten", "b", "O")), "a", At("O", "a", 0)));
+        Assert.False(Places(GraphOf("a:float[128] b:float[128]", "O", Op("Foo", "b", "O", domain: "custom")), "a", At("O", "a", 0)));
+        Assert.False(Places(GraphOf("a:float[128] c", "O", Op("If", "c", "O", body: GraphOf("", "t", Op("Neg", "a", "t")))), "a", At("O", "a", 0)));
+    }
+
+    [Fact]
+    public void TestAPlacementIsRefusedWhereAnythingReadsTheBytesItOverwritesWithoutRunningFirst()
+    {
+        Assert.False(Places(GraphOf("a:float[128]", "O Z", Op("Neg", "a", "O"), Op("Exp", "a", "Z")), "a", At("O", "a", 0)));
+        Assert.True(Places(GraphOf("a:float[128]", "O", Op("Exp", "a", "t"), Op("Neg", "t", "O")), "a", At("O", "a", 0)));
+        Assert.False(Places(GraphOf("a:float[128]", "O Z", Op("Exp", "a", "t"), Op("Shape", "t", "s"), Op("ConstantOfShape", "s", "O"), Op("Neg", "t", "Z")), "a", At("O", "a", 0)));
+        Assert.False(Places(GraphOf("a:float[128]", "O Z", Op("Flatten", "a", "v"), Op("Neg", "a", "O"), Op("Exp", "v", "Z")), "a", At("O", "a", 0)));
+        Assert.False(Places(GraphOf("a:float[128] c", "O Z", Op("Neg", "a", "O"), Op("If", "c", "Z", body: GraphOf("", "t", Op("Identity", "a", "t")))), "a", At("O", "a", 0)));
+        Assert.False(Places(GraphOf("a:float[128]", "O a", Op("Neg", "a", "O")), "a", At("O", "a", 0)));
+        Assert.False(Places(GraphOf("a:float[128]", "O P", Op("Neg", "a", "O"), Op("Exp", "O", "P")), "a", At("O", "a", 0), At("P", "a", 0)));
+        Assert.True(Places(GraphOf("a:float[128]", "P", Op("Neg", "a", "O"), Op("Exp", "O", "P")), "a", At("O", "a", 0), At("P", "a", 0)));
+        Assert.False(Places(GraphOf("a:float[128]", "P Z", Op("Neg", "a", "O"), Op("Exp", "O", "P"), Op("Abs", "O", "Z")), "a", At("O", "a", 0), At("P", "a", 0)));
+        Assert.False(Places(GraphOf("a:float[128] b:float[128]", "x y", Op("Split", "b", "x y")), "a", At("x", "a", 0, 256), At("y", "a", 0, 256)));
+    }
+
+    [Fact]
+    public void TestAWriterMayOverwriteWhatItReadsOnlyWhereItReadsEachByteInThePositionItWritesIt()
+    {
+        Assert.False(Places(GraphOf("a:float[8,16]", "O", Op("Transpose", "a", "O")), "a", At("O", "a", 0)));
+        Assert.False(Places(GraphOf("a:float[8,16] b:float[8,16]", "O", Op("MatMul", "a b", "O")), "a", At("O", "a", 0)));
+        Assert.False(Places(GraphOf("a:float[128] b:float[128] c:bool[128]", "O", Op("Where", "c a b", "O")), "a", At("O", "a", 0)));
+        Assert.False(Places(GraphOf("a:float[128] b:float[128] c:float[128]", "O", Op("Sum", "a b c", "O")), "a", At("O", "a", 0)));
+        Assert.True(Places(GraphOf("a:float[128] b:float[128]", "O", Op("Sum", "a b", "O")), "a", At("O", "a", 0)));
+        Assert.True(Places(GraphOf("a:float[128] b:float[128]", "O", Op("Sub", "b a", "O")), "a", At("O", "a", 0)));
+        Assert.False(Places(GraphOf("a:float[128]", "O", Op("Neg", "a", "O", domain: "custom")), "a", At("O", "a", 0)));
+        Assert.False(Places(GraphOf("a:float[128]", "O", Op("Softmax", "a", "O")), "a", At("O", "a", 0)));
+        Assert.True(Places(Halves(), "b", At("x", "b", 0, 256), At("y", "b", 256, 256), At("O", "b", 0)));
+        Assert.False(Places(WithInts(WithInts(GraphOf("a:float[256]", "x", Op("Slice", "a zero half zero", "x")), "zero", 0), "half", 128), "a", At("x", "a", 256)));
+        Assert.True(Places(WithInts(WithInts(GraphOf("a:float[256]", "x", Op("Slice", "a zero half zero", "x")), "zero", 0), "half", 128), "a", At("x", "a", 0)));
+    }
+
+    [Fact]
+    public void TestAPlacementInsideWhatASliceDoesNotReadNeedsNoOrderAndAConcatenationIsInPlaceOnlyWherePartsLieInTheirSlots()
+    {
+        var sliced = WithInts(WithInts(WithInts(GraphOf("a:float[128] c:float[64]", "O Z", Op("Slice", "a two four zero", "Z"), Op("Neg", "c", "O")), "zero", 0), "two", 64), "four", 128);
+        Assert.True(Places(sliced, "a", At("O", "a", 0, 256)));
+        Assert.False(Places(sliced, "a", At("O", "a", 256, 256)));
+        var swapped = WithInts(WithInts(GraphOf("a:float[128] b:float[128] c:float[64]", "O",
+            Op("Slice", "b zero two zero", "x"), Op("Neg", "c", "y"), Op("Concat", "y x", "O", attribute: ("axis", 0))), "zero", 0), "two", 64);
+        Assert.False(Places(swapped, "b", At("x", "b", 0, 256), At("y", "b", 256, 256), At("O", "b", 0)));
+        Assert.False(Places(swapped, "b", At("x", "b", 0, 256), At("O", "b", 0)));
+        Assert.True(Places(swapped, "b", At("x", "b", 256, 256), At("O", "b", 0)));
+    }
+
+    [Fact]
+    public void TestOnTorchAViewIsItsInputsMemoryUnlessPlacedAndSoIsWhatAnOperatorNotKnownToComputeAfreshHandsBack()
+    {
+        Assert.True(Places(FirstHalf("O x", Op("Neg", "x", "O")), "a", At("O", "a", 0)));
+        Assert.False(PlacesOnTorch(FirstHalf("O x", Op("Neg", "x", "O")), "a", At("O", "a", 0)));
+        Assert.True(PlacesOnTorch(FirstHalf("O x", Op("Neg", "c", "O")), "a", At("O", "a", 512)));
+        Assert.True(PlacesOnTorch(FirstHalf("x", Op("Neg", "c", "O")), "a", At("x", "a", 0)));
+        Assert.True(PlacesOnTorch(FirstHalf("x", Op("Neg", "c", "O")), "a", At("x", "a", 512)));
+        Assert.False(PlacesOnTorch(FirstHalf("x", Op("Neg", "c", "O")), "a", At("x", "a", 256)));
+        Assert.True(PlacesOnTorch(FirstHalf("O x", Op("Neg", "x", "O")), "a", At("x", "a", 512), At("O", "a", 0)));
+        Assert.True(Places(GraphOf("a:float[128]", "O Z", Op("Cast", "a", "y", attribute: ("to", 1)), Op("Neg", "y", "O"), Op("Exp", "y", "Z")), "a", At("O", "a", 0)));
+        Assert.False(PlacesOnTorch(GraphOf("a:float[128]", "O Z", Op("Cast", "a", "y", attribute: ("to", 1)), Op("Neg", "y", "O"), Op("Exp", "y", "Z")), "a", At("O", "a", 0)));
+        Assert.True(Places(GraphOf("a:float[128] c:bool[1]", "O:float[128] Z:float[128]", Op("If", "c", "Z", body: GraphOf("", "t", Op("Identity", "a", "t"))), Op("Neg", "Z", "O")), "a", At("O", "a", 0)));
+        Assert.False(PlacesOnTorch(GraphOf("a:float[128] c:bool[1]", "O:float[128] Z:float[128]", Op("If", "c", "Z", body: GraphOf("", "t", Op("Identity", "a", "t"))), Op("Neg", "Z", "O")), "a", At("O", "a", 0)));
+    }
+
+    [Fact]
+    public void TestOnTorchOnlyWhatItWritesIntoAGivenRangeAllocatingNoMoreThanAPlainRunIsPlaced()
+    {
+        Assert.True(Places(GraphOf("a:int64[64]", "O", Op("Neg", "a", "O")), "a", At("O", "a", 0)));
+        Assert.False(PlacesOnTorch(GraphOf("a:int64[64]", "O", Op("Neg", "a", "O")), "a", At("O", "a", 0)));
+        Assert.True(PlacesOnTorch(GraphOf("a:float[128]", "O", Op("Neg", "a", "O")), "a", At("O", "a", 0)));
+        Assert.False(PlacesOnTorch(GraphOf("a:float[128] b:float[128]", "O", Op("Clip", "a", "O")), "b", At("O", "b", 0)));
+        Assert.True(PlacesOnTorch(GraphOf("a:float[128] b:float[128] c:float[1]", "O", Op("Clip", "a c", "O")), "a", At("O", "a", 0)));
+        Assert.True(PlacesOnTorch(GraphOf("a:float[128] b:float[128]", "O", Op("Softmax", "a", "O")), "b", At("O", "b", 0)));
+        Assert.False(PlacesOnTorch(GraphOf("a:float[128] b:float[128]", "O", Op("Softmax", "a", "O")), "a", At("O", "a", 0)));
+        Assert.False(PlacesOnTorch(GraphOf("a:int64[128] b:float[128]", "O", Op("Softmax", "a", "O")), "b", At("O", "b", 0)));
+        Assert.True(PlacesOnTorch(GraphOf("a:float[2,64] s:float[64] b:float[128]", "O", Op("LayerNormalization", "a s", "O")), "b", At("O", "b", 0)));
+        Assert.False(PlacesOnTorch(GraphOf("a:float[2,64] s:float[64] b:float[128]", "O M", Op("LayerNormalization", "a s", "O M")), "b", At("O", "b", 0)));
+        Assert.True(PlacesOnTorch(GraphOf("a:float[8,16] b:float[16,8]", "O", Op("Transpose", "a", "O")), "b", At("O", "b", 0)));
+        Assert.True(PlacesOnTorch(GraphOf("a:float[8,16] b:float[16,8] c:float[8,8]", "O", Op("MatMul", "a b", "O")), "c", At("O", "c", 0, 256)));
+        Assert.False(PlacesOnTorch(GraphOf("a:float[8,8] b:float[8,8]", "O", Op("MatMul", "a b", "O")), "a", At("O", "a", 0, 256)));
+        Assert.True(PlacesOnTorch(WithInts(GraphOf("a:float[128]", "O", Op("Reshape", "a s", "O")), "s", 2, 64), "a", At("O", "a", 0)));
+        Assert.False(PlacesOnTorch(WithInts(GraphOf("a:float[8,16]", "O", Op("Transpose", "a", "t"), Op("Reshape", "t s", "O")), "s", 128), "a", At("O", "a", 0)));
+    }
+
+    [Fact]
+    public void TestAPlacementsShapesFollowTheShapeArithmeticConvolutionsPoolsAndRecurrencesAGraphRuns()
+    {
+        Assert.Equal("2:7=4,2", ShapeOf(GraphOf("a:float[2,4]", "O", Op("Shape", "a", "s"), Op("Gather", "s one", "c"), Op("Unsqueeze", "c zero", "u"),
+            Op("ReduceProd", "s", "p", attribute: ("keepdims", 0)), Op("Div", "p c", "q"), Op("Unsqueeze", "q zero", "v"), Op("Concat", "u v", "t", attribute: ("axis", 0)), Op("Reshape", "a t", "O")), "t"));
+        Assert.Equal("4x2", ShapeOf(GraphOf("a:float[2,4]", "O", Op("Shape", "a", "s"), Op("Gather", "s one", "c"), Op("Unsqueeze", "c zero", "u"),
+            Op("ReduceProd", "s", "p", attribute: ("keepdims", 0)), Op("Div", "p c", "q"), Op("Unsqueeze", "q zero", "v"), Op("Concat", "u v", "t", attribute: ("axis", 0)), Op("Reshape", "a t", "O")), "O"));
+        Assert.Equal("3:7=1,2,3", ShapeOf(GraphOf("a:float[4]", "O", Op("Size", "a", "n"), Op("Range", "one n one", "O")), "O"));
+        Assert.Equal("2:7=2,4", ShapeOf(GraphOf("a:float[2,4]", "O", Op("Shape", "a", "s"), Op("MemcpyFromHost", "s", "O")), "O"));
+        Assert.Equal(":7=1", ShapeOf(GraphOf("a:float[4]", "O", Op("Size", "a", "n"), Op("Equal", "n four", "e"), Op("Not", "e", "f"), Op("Cast", "f", "c", attribute: ("to", 7)),
+            Op("Where", "e one zero", "w"), Op("Add", "w c", "O")), "O"));
+        Assert.Equal("unknown", ShapeOf(GraphOf("a:float[4]", "O", Op("Size", "a", "n"), Op("Cast", "n", "u", attribute: ("to", 13)), Op("Sub", "u five", "d"), Op("Range", "zero d one", "O")), "O"));
+        Assert.Equal("1x4x8x8", ShapeOf(GraphOf("x:float[1,3,8,8] w:float[4,3,3,3]", "O", With(Op("Conv", "x w", "O"), "pads", 1, 1, 1, 1)), "O"));
+        Assert.Equal("1x4x4x4", ShapeOf(GraphOf("x:float[1,3,8,8] w:float[4,3,3,3]", "O", With(With(Op("Conv", "x w", "O"), "pads", 1, 1, 1, 1), "strides", 2, 2)), "O"));
+        Assert.Equal("1x3x4x4:7", ShapeOf(GraphOf("x:float[1,3,8,8]", "O I", With(With(Op("MaxPool", "x", "O I"), "kernel_shape", 2, 2), "strides", 2, 2)), "I"));
+        Assert.Equal("1x3x1x1", ShapeOf(GraphOf("x:float[1,3,8,8]", "O", Op("GlobalAveragePool", "x", "O")), "O"));
+        Assert.Equal("5x1x2x4 1x2x4", ShapeOf(GraphOf("x:float[5,2,3] w:float[1,16,3] r:float[1,16,4]", "Y H C", Op("LSTM", "x w r", "Y H C", attribute: ("hidden_size", 4))), "Y", "H"));
+    }
+
+    [Fact]
+    public void TestAPlacementsShapesFollowTheShapeArithmeticFusedOperatorsAndTransposedConvolutionsOfATrainingStep()
+    {
+        Assert.Equal("4:7=1,4,2,1", ShapeOf(WithInts(GraphOf("a:float[4,2]", "O", Op("Shape", "a", "s"), Op("Pad", "s pads one", "O")), "pads", 1, 1), "O"));
+        Assert.Equal("1:7=4", ShapeOf(GraphOf("a:float[4,2]", "O", Op("Shape", "a", "s"), Op("Greater", "s two", "g"), Op("Compress", "s g", "O")), "O"));
+        Assert.Equal("1:7=0", ShapeOf(GraphOf("a:float[4]", "O", Op("Shape", "a", "s"), Op("Shape", "s", "n"), Op("Expand", "zero n", "O")), "O"));
+        Assert.Equal("1x3x6x6", ShapeOf(GraphOf("x:float[1,4,4,4] w:float[4,3,3,3]", "O", Op("ConvTranspose", "x w", "O")), "O"));
+        Assert.Equal("1x3x8x8", ShapeOf(GraphOf("x:float[1,4,4,4] w:float[4,3,2,2]", "O", With(Op("ConvTranspose", "x w", "O"), "strides", 2, 2)), "O"));
+        Assert.Equal("1x4x8x8", ShapeOf(GraphOf("x:float[1,3,8,8] w:float[4,3,3,3]", "O", With(Op("FusedConv", "x w", "O", domain: "com.microsoft"), "pads", 1, 1, 1, 1)), "O"));
+        Assert.Equal("8x16", ShapeOf(GraphOf("a:float[8,4] b:float[4,16]", "O", Op("FusedGemm", "a b", "O", domain: "com.microsoft")), "O"));
+        Assert.Equal("4x2x8x8", ShapeOf(GraphOf("x:float[4,2,8,8] m:float[8,8]", "O", Op("BiasSoftmax", "x m", "O", domain: "com.microsoft")), "O"));
+        Assert.Equal("4x2", ShapeOf(GraphOf("a:float[4,2] c:bool[1]", "t", PyTorchBackendCoverageTests.Branch("c", GraphOf("", "t", Op("Neg", "a", "t")), GraphOf("", "t", Op("Abs", "a", "t")))), "t"));
+        Assert.Equal("unknown", ShapeOf(GraphOf("a:float[4,2] c:bool[1]", "t", PyTorchBackendCoverageTests.Branch("c", GraphOf("", "t", Op("Neg", "a", "t")), GraphOf("", "t", Op("Shape", "a", "t")))), "t"));
+        Assert.Equal("2:7=4,2", ShapeOf(GraphOf("a:float[4,2]", "t", Op("Greater", "two one", "c"),
+            PyTorchBackendCoverageTests.Branch("c", GraphOf("", "t", Op("Shape", "a", "t")), GraphOf("", "t", Op("Neg", "a", "t")))), "t"));
+    }
+
+    // 4x2 for a float value, 4x2:7 for another type, =4,2 after it for known contents; initializers zero to five.
+    private static string ShapeOf(GraphProto graph, params string[] values)
+    {
+        foreach (var (name, value) in (ReadOnlySpan<(string, long)>)[("zero", 0), ("one", 1), ("two", 2), ("four", 4), ("five", 5)])
+            graph.Initializers.Add(new TensorProto { Name = name, data_type = (int)TensorProto.DataType.Int64, Dims = [], Int64Datas = [value] });
+        var inputs = graph.Inputs.Where(i => i.Type?.TensorType?.Shape is not null).ToDictionary(
+            i => i.Name, i => (i.Type.TensorType.Shape.Dims.Select(d => d.DimValue).ToArray(), i.Type.TensorType.ElemType));
+        var shapes = PlacementShapes.Evaluate(graph, inputs);
+        return string.Join(" ", values.Select(v => shapes.TryGetValue(v, out var x)
+            ? string.Join("x", x.Shape) + (x.ElementType == 1 ? "" : $":{x.ElementType}") + (x.Ints is { } ints ? "=" + string.Join(",", ints) : "")
+            : "unknown"));
+    }
+
+    // inputs: the trip count and the carried values; no condition.
+    internal static NodeProto Loop(string inputs, string outputs, GraphProto body)
+    {
+        var loop = Op("Loop", inputs, outputs);
+        loop.Inputs.Insert(1, "");
+        loop.Attributes.Add(new AttributeProto { Name = "body", Type = AttributeProto.AttributeType.Graph, G = body });
+        return loop;
+    }
+
+    internal static NodeProto With(NodeProto node, string name, params long[] ints)
+    {
+        node.Attributes.Add(new AttributeProto { Name = name, Type = AttributeProto.AttributeType.Ints, Ints = ints });
+        return node;
+    }
+
+    [Fact]
+    public void TestThePlannerPlacesTheTwoHalvesScenarioWithNothingLeftToAllocate()
+    {
+        var graph = ProtoBuf.Serializer.Deserialize<ModelProto>(new MemoryStream(
+            Benchmarks.MemoryReuseScenarioTests.Scenario(Benchmarks.MemoryReuseScenarioTests.Shapes.Computed, exposeIntermediates: false))).Graph;
+        var shapes = PlacementShapes.Evaluate(graph, new Dictionary<string, (long[], int)> { ["A"] = ([512, 64], 1), ["B"] = ([512, 64], 1) });
+        var plan = new PlacementProof(graph, new Dictionary<string, long> { ["A"] = 131072, ["B"] = 131072 }, shapes).Plan(smallest: 65536, idleOutputBytes: 0);
+        Assert.Equal(
+            ["A_half@A+0", "B_half@A+65536", "C0@B+0", "C1@B+0", "C2@B+0", "C3@B+0", "L0@B+0", "L1@B+0", "L2@B+0", "L@B+0"],
+            plan.Select(p => $"{p.Value}@{p.Block}+{p.Offset}").Order(StringComparer.Ordinal));
+        Assert.Empty(new PlacementProof(graph, new Dictionary<string, long> { ["A"] = 131072 }, shapes).Plan(smallest: 65536, idleOutputBytes: 0).Where(p => p.Value == "L"));
+        var torchPlan = new PlacementProof(graph, new Dictionary<string, long> { ["A"] = 131072, ["B"] = 131072 }, shapes, memory: PlacementMemory.PyTorch)
+            .Plan(smallest: 65536, idleOutputBytes: 0);
+        Assert.Equal(plan.Select(p => p.ToString()).Order(), torchPlan.Select(p => p.ToString()).Order());
+    }
+
+    private static (TensorData First, TensorData Second, SharedBlock Block, OrtTensorValue Owner) Halved()
+    {
+        var backend = DefaultBackend.Instance;
+        var owner = (OrtTensorValue)backend.CreateTensor((float[])[1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f], [8L]);
+        var block = new SharedBlock(32, () => backend.Release(owner));
+        var first = TensorData.Create((long[])[4], DType.Float32, OrtBackend.View(owner, 0, ShorokooTensorElementType.Float, [4], 16, block, 0), backend);
+        var second = TensorData.Create((long[])[4], DType.Float32, OrtBackend.View(owner, 16, ShorokooTensorElementType.Float, [4], 16, block, 16), backend);
+        return (first, second, block, owner);
+    }
+
+    [Fact]
+    public void TestTensorsStandingOnOneBlockEachOwnTheirRangeAndTheBlockGoesWithTheLastOfThem()
+    {
+        var (first, second, block, owner) = Halved();
+        Assert.Equal([1f, 2f, 3f, 4f], Floats(first));
+        Assert.Equal([5f, 6f, 7f, 8f], Floats(second));
+        Assert.Same(block, first.Block);
+        Assert.Equal(2, block.Leases);
+        first.Delete();
+        Assert.False(block.IsReleased);
+        Assert.Equal([5f, 6f, 7f, 8f], Floats(second));
+        second.Delete();
+        Assert.True(block.IsReleased);
+        Assert.Throws<ObjectDisposedException>(() => owner.Inner);
+    }
+
+    [Fact]
+    public void TestAnOutputWrittenIntoTheInputItIsMarkedForIsNotPlacedElsewhere()
+    {
+        var backend = DefaultBackend.Instance;
+        using var session = Aliasing(backend, GraphOf("a:float[512,512] b:float[512,512]", "O:float[512,512]", Op("Sub", "a b", "O")));
+        float[] values = [.. Enumerable.Range(0, 512 * 512).Select(i => (float)(i % 7))];
+        var a = backend.CreateTensorInBackendMemory(ShorokooTensorElementType.Float, MemoryMarshal.AsBytes(values.AsSpan()).ToArray(), [512, 512]);
+        var b = backend.CreateTensorInBackendMemory(ShorokooTensorElementType.Float, MemoryMarshal.AsBytes(values.AsSpan()).ToArray(), [512, 512]);
+        var address = OrtBackend.AddressOf(((OrtTensorValue)a).Inner);
+        using var output = session.RunConsuming(new Dictionary<string, IShorokooTensorValue> { ["a"] = a, ["b"] = b }, [a, b], ["O"], RunSettings.Default, out var aliased).Single();
+        Assert.Equal(["a"], aliased);
+        Assert.Equal(address, OrtBackend.AddressOf(((OrtTensorValue)output).Inner));
+    }
+
+    [Fact]
+    public void TestEverySessionAPlacedRunIsBuiltWithIsBuiltInItsContextsPrecision()
+    {
+        const int Rows = 1024, Columns = 1024;
+        var (a, b, l) = TwoHalvesValues(Rows, Columns);
+        foreach (var allowed in (bool[])[false, true])
+        {
+            var seen = new List<PrecisionSettings>();
+            using var context = new ComputeContext(new PrecisionRecordingBackend(seen)) { Precision = new PrecisionSettings { AllowTensorFloat32 = allowed } };
+            var compiled = context.Compile(TwoHalves());
+            var outputs = compiled.Execute(TensorData([(long)Rows, Columns], a), TensorData([(long)Rows, Columns], b));
+            Assert.Equal(OrtPlacements.Stage.Adopted, Assert.Single(((OrtSession)compiled.Session).Placements!.Entries).Stage);
+            Assert.NotNull(outputs[0].ToTensorData().Block);
+            Assert.Equal([allowed], seen.Select(p => p.AllowTensorFloat32).Distinct());
+            Assert.True(l.Zip(Floats(outputs[0].ToTensorData()), (x, y) => MathF.Abs(x - y) < 1e-5f).All(x => x));
+        }
+    }
+
+    internal sealed class PrecisionRecordingBackend(List<PrecisionSettings> seen)
+        : OrtBackend((_, _, precision) => { lock (seen) seen.Add(precision); }, ComputeDevice.Cpu, cudaDeviceId: null, stockProvider: true);
+
+    internal static InternalComputationGraph ProductIntoConsumed()
+    {
+        var a = InputTensor<float32>("A", rank: 2);
+        var b = InputTensor<float32>("B", rank: 2);
+        var e = InputTensor<float32>("E", rank: 2);
+        return new InternalComputationGraph([a, b, e], [OnnxOp.Add(OnnxOp.MatMul(a, b), e)]);
+    }
+
+    internal static (float[] Values, bool Placed) RunProductIntoConsumed(ComputeContext context)
+    {
+        static TensorData Waves(long rows, long columns, float frequency)
+            => TensorData([rows, columns], [.. Enumerable.Range(0, (int)(rows * columns)).Select(i => MathF.Sin(frequency * i))]);
+        var output = context.Compile(ProductIntoConsumed()).Execute(
+            Waves(1024, 1024, 0.37f).CopyTo(context), Waves(1024, 512, 0.11f).CopyTo(context),
+            TensorData([1024L, 512L], new float[1 << 19]).CopyTo(context)).Single().ToTensorData();
+        return ([.. output.ToHost().As<float32>().AccessMemory<float>()], output.Block is not null);
+    }
+
+    internal static float[] ProductIntoConsumedOnTheHost()
+    {
+        using var host = new ComputeContext(new PrecisionRecordingBackend([]));
+        return RunProductIntoConsumed(host).Values;
+    }
+
+    [Fact]
+    public void TestASessionOfAContextThatPlacesNothingKeepsNothingToPlaceWith()
+    {
+        const int Rows = 1024, Columns = 1024;
+        var (a, b, l) = TwoHalvesValues(Rows, Columns);
+        using var context = new ComputeContext { ValuePlacement = false };
+        var compiled = context.Compile(TwoHalves());
+        var outputs = compiled.Execute(TensorData([(long)Rows, Columns], a), TensorData([(long)Rows, Columns], b));
+        Assert.Null(((OrtSession)compiled.Session).Placements);
+        Assert.True(l.Zip(Floats(outputs[0].ToTensorData()), (x, y) => MathF.Abs(x - y) < 1e-5f).All(x => x));
+    }
+
+    [Fact]
+    public void TestASignatureWhosePlacedRunFailsRunsAsUsualFromThen()
+    {
+        const int Rows = 1024, Columns = 1024;
+        var (a, b, l) = TwoHalvesValues(Rows, Columns);
+        using var context = new ComputeContext();
+        var compiled = context.Compile(TwoHalves());
+        var failures = 1;
+        OrtPlacements.PlacedRunFault = () => failures-- > 0 ? new InvalidOperationException() : null;
+        try
+        {
+            Assert.Throws<InvalidOperationException>(() => compiled.Execute(TensorData([(long)Rows, Columns], a), TensorData([(long)Rows, Columns], b)));
+            var outputs = compiled.Execute(TensorData([(long)Rows, Columns], a), TensorData([(long)Rows, Columns], b));
+            Assert.Equal(OrtPlacements.Stage.Refused, Assert.Single(((OrtSession)compiled.Session).Placements!.Entries).Stage);
+            Assert.True(l.Zip(Floats(outputs[0].ToTensorData()), (x, y) => MathF.Abs(x - y) < 1e-5f).All(x => x));
+        }
+        finally
+        {
+            OrtPlacements.PlacedRunFault = null;
+        }
+    }
+
+    [Fact]
+    public void TestACardSessionsNodesWritingHostMemoryAreTheHostOnesWhateverTheyRead()
+    {
+        string[] Host(GraphProto graph) => [.. OrtPlacements.HostNodes(graph).Select(n => n.OpType).Order()];
+        Assert.Equal(["Hardmax"], Host(GraphOf("x w", "z", Op("Hardmax", "x", "y"), Op("MemcpyFromHost", "y", "y_card"),
+            Op("Neg", "y_card", "n"), Op("Relu", "w", "t"), Op("Add", "n t", "z"))));
+        Assert.Equal(["Hardmax", "Softmax"], Host(GraphOf("x", "z", Op("Hardmax", "x", "y"), Op("Softmax", "y", "s"),
+            Op("MemcpyFromHost", "s", "s_card"), Op("Neg", "s_card", "z"))));
+        Assert.Equal(["Hardmax"], Host(GraphOf("x w", "z", Op("Hardmax", "x", "y"), Op("MemcpyFromHost", "y", "y_card"),
+            Op("MemcpyFromHost", "x", "x_card"), Op("Relu", "x_card", "r"), Op("Add", "y_card r", "s"), Op("Mul", "s w", "z"))));
+        Assert.Equal(["MemcpyToHost", "Shape"], Host(GraphOf("x", "z", Op("Relu", "x", "r"), Op("Shape", "r", "s"),
+            Op("MemcpyToHost", "r", "r_host"), Op("Neg", "r", "z"))));
+        Assert.Equal(["Hardmax", "Hardmax"], OrtPlacements.HostNodes(GraphOf("x w", "z v", Op("Hardmax", "x", "y"), Op("Hardmax", "y", "z"), Op("Neg", "w", "v")),
+            hostInputs: new HashSet<string> { "x" }).Select(n => n.OpType).Order());
+        Assert.Equal(["ConstantOfShape"], OrtPlacements.HostNodes(GraphOf("x", "z c", Op("Neg", "x", "z"), Op("ConstantOfShape", "s", "c")),
+            hostOutputs: new HashSet<string> { "c" }).Select(n => n.OpType).Order());
+    }
+
+    [Fact]
+    public void TestAPlacementsShapesFollowWhatAFusedProductTransposesAndWhatALossGradientIsShapedLike()
+    {
+        static NodeProto Fused(string attribute, string? also = null)
+        {
+            var node = Op("FusedMatMul", "a b", "O", domain: "com.microsoft", attribute: (attribute, 1));
+            if (also is not null) node.Attributes.Add(new AttributeProto { Name = also, Type = AttributeProto.AttributeType.Int, I = 1 });
+            return node;
+        }
+        Assert.Equal("4x1x5", ShapeOf(GraphOf("a:float[1,4,2] b:float[4,2,5]", "O", Fused("transBatchA")), "O"));
+        Assert.Equal("1x3x5", ShapeOf(GraphOf("a:float[1,3,2] b:float[2,1,5]", "O", Fused("transBatchB")), "O"));
+        Assert.Equal("1x3x5", ShapeOf(GraphOf("a:float[2,1,3] b:float[1,2,5]", "O", Fused("transBatchA", "transA")), "O"));
+        Assert.Equal("1x3x5", ShapeOf(GraphOf("a:float[1,3,2] b:float[5,1,2]", "O", Fused("transBatchB", "transB")), "O"));
+        Assert.Equal("8x10", ShapeOf(GraphOf("d:float[8] p:float[8,10] l:int64[8]", "O", Op("SoftmaxCrossEntropyLossGrad", "d p l", "O", domain: "com.microsoft")), "O"));
+    }
+
+    [Fact]
+    public void TestABlockWhoseLastPagePassesItsTensorCountsWhatItStillHoldsOfTheTensor()
+    {
+        var backend = DefaultBackend.Instance;
+        const long Floats = (1 << 18) + 1;
+        var owner = (OrtTensorValue)backend.CreateTensorInBackendMemory(ShorokooTensorElementType.Float, new byte[Floats * 4], [Floats]);
+        var block = OrtBackend.BlockOver(owner, Floats * 4, () => backend.Release(owner));
+        var first = OrtBackend.View(owner, 0, ShorokooTensorElementType.Float, [1L << 17], 512L << 10, block, 0);
+        var second = OrtBackend.View(owner, 512L << 10, ShorokooTensorElementType.Float, [1L << 17], 512L << 10, block, 512L << 10);
+        second.Dispose();
+        Assert.Equal(512L << 10, block.HeldBytes);
+        first.Dispose();
+    }
+
+    [Fact]
+    public void TestASequenceThatFailsToTakeACopyOfAViewLetsGoOfTheCopiesItMade()
+    {
+        var (first, second, _, _) = Halved();
+        var backend = (OrtBackend)DefaultBackend.Instance;
+        var host = RuntimeAllocator.ForHost();
+        var account = host.Shared.Open("probe");
+        var a = (OrtTensorValue)((IOnnxData)first).Value;
+        var b = (OrtTensorValue)((IOnnxData)second).Value;
+        b.Dispose();
+        using (CachingAllocator.Charge(account, null))
+            Assert.ThrowsAny<Exception>(() => backend.CreateSequence([a, b]));
+        Assert.Equal(0L, host.Shared.Statistics(account).InUseBytes);
+        host.Shared.Close(account);
+    }
+
+    [Fact]
+    public void TestATensorStandingOnABlockMovesSavesLoadsAndJoinsASequenceAsItsOwnRange()
+    {
+        var (first, second, block, _) = Halved();
+        using var context = new ComputeContext();
+        Assert.Equal([5f, 6f, 7f, 8f], Floats(second.ToHost()));
+        Assert.Equal([5f, 6f, 7f, 8f], Floats(second.CopyTo(context)));
+        using var stream = new MemoryStream();
+        SafeTensorLoader.SaveSafeTensorsToStream(stream, [new("first", first, "F32", [4L]), new("second", second, "F32", [4L])]);
+        var path = Path.Combine(Path.GetTempPath(), $"halves-{Guid.NewGuid():N}.safetensors");
+        try
+        {
+            File.WriteAllBytes(path, stream.ToArray());
+            var loaded = SafeTensorLoader.LoadTensorDictionary(path);
+            Assert.Equal([1f, 2f, 3f, 4f], Floats(loaded["first"]));
+            Assert.Equal([5f, 6f, 7f, 8f], Floats(loaded["second"]));
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+        var backend = DefaultBackend.Instance;
+        using var sequence = backend.CreateSequence([OrtBackend.View((OrtTensorValue)((IOnnxData)first).Value, 8, ShorokooTensorElementType.Float, [2], 8, block, 8)]);
+        Assert.Equal(2, block.Leases);
+        Assert.Equal([3f, 4f], sequence.GetValue(0).GetTensorDataAsSpan<float>().ToArray());
+        first.Delete();
+        second.Delete();
+        Assert.True(block.IsReleased);
+        Assert.Equal([3f, 4f], sequence.GetValue(0).GetTensorDataAsSpan<float>().ToArray());
+    }
+
+    [Fact]
+    public void TestAnOutputWrittenIntoAConsumedTensorStandingOnABlockHoldsALeaseOnTheBlock()
+    {
+        var backend = DefaultBackend.Instance;
+        var owner = (OrtTensorValue)backend.CreateTensor((float[])[1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f], [8L]);
+        var block = new SharedBlock(32, () => backend.Release(owner));
+        var a = OrtBackend.View(owner, 0, ShorokooTensorElementType.Float, [4], 16, block, 0);
+        var second = TensorData.Create((long[])[4], DType.Float32, OrtBackend.View(owner, 16, ShorokooTensorElementType.Float, [4], 16, block, 16), backend);
+        using var session = Aliasing(backend, GraphOf("a:float[4] b:float[4]", "O:float[4]", Op("Sub", "a b", "O")));
+        var outputs = session.RunConsuming(
+            new Dictionary<string, IShorokooTensorValue> { ["a"] = a, ["b"] = DefaultBackend.Instance.CreateTensor((float[])[1f, 1f, 1f, 1f], [4L]) },
+            [a], ["O"], RunSettings.Default, out var aliased);
+        Assert.Equal(["a"], aliased);
+        second.Delete();
+        Assert.False(block.IsReleased);
+        Assert.Equal([0f, 1f, 2f, 3f], outputs[0].GetTensorDataAsSpan<float>().ToArray());
+        outputs[0].Dispose();
+        Assert.True(block.IsReleased);
+    }
+
+    // A[0:n], B[n:2n], and Concat(Fill(2) through Neg, Abs, Sigmoid; B's half) through Sigmoid, Neg, Abs.
+    internal static InternalComputationGraph TwoHalves(bool oneHalf = false)
+    {
+        var a = InputTensor<float32>("A", rank: 2);
+        var b = InputTensor<float32>("B", rank: 2);
+        var zero = OnnxOp.Constant((long[])[0L]);
+        var rows = OnnxOp.Shape(a, end: 1, start: 0);
+        var half = OnnxOp.Div(rows, OnnxOp.Constant((long[])[2L]));
+        var aHalf = OnnxOp.Slice(a, zero, half, zero);
+        var bHalf = OnnxOp.Slice(b, half, rows, zero);
+        var c = OnnxOp.ConstantOfShape(OnnxOp.Shape(aHalf), TensorAttribute.Create(new Shape(1L), (float[])[2f]));
+        var l0 = OnnxOp.Concat([OnnxOp.Sigmoid(OnnxOp.Abs(OnnxOp.Neg(c))), bHalf], 0);
+        var l = OnnxOp.Abs(OnnxOp.Neg(OnnxOp.Sigmoid(l0)));
+        return new InternalComputationGraph([a, b], oneHalf ? [l, aHalf] : [l, aHalf, bHalf]);
+    }
+
+    internal static (float[] A, float[] B, float[] L) TwoHalvesValues(int rows, int columns)
+    {
+        float[] a = [.. Enumerable.Range(0, rows * columns).Select(i => (i % 1013) * 0.001f)];
+        float[] b = [.. Enumerable.Range(0, rows * columns).Select(i => 0.5f - (i % 997) * 0.002f)];
+        static float Sigmoid(float x) => 1f / (1f + MathF.Exp(-x));
+        var half = rows / 2 * columns;
+        float[] l = [.. Enumerable.Range(0, rows * columns).Select(i => i < half ? Sigmoid(Sigmoid(2f)) : Sigmoid(b[i]))];
+        return (a, b, l);
+    }
+
+    [Fact]
+    public void TestTheTwoHalvesScenarioRunsWithNothingAllocatedBeyondWhatItConsumesAndItsOutputsOutliveTheSession()
+    {
+        const int Rows = 512, Columns = 1024;
+        var (a, b, l) = TwoHalvesValues(Rows, Columns);
+        NamedModelParam[] outputs = [];
+        using (var context = new ComputeContext())
+        {
+            var compiled = context.Compile(TwoHalves());
+            for (int run = 0; run < 3; run++)
+            {
+                outputs = compiled.Execute(TensorData([(long)Rows, Columns], a), TensorData([(long)Rows, Columns], b));
+                Assert.True(l.Zip(Floats(outputs[0].ToTensorData()), (x, y) => MathF.Abs(x - y) < 1e-5f).All(x => x));
+                Assert.Equal(a[..(Rows / 2 * Columns)], Floats(outputs[1].ToTensorData()));
+                Assert.Equal(b[(Rows / 2 * Columns)..], Floats(outputs[2].ToTensorData()));
+            }
+            var entry = Assert.Single(((OrtSession)compiled.Session).Placements!.Entries);
+            Assert.Equal(OrtPlacements.Stage.Adopted, entry.Stage);
+            Assert.True(entry.PlacedPeak < 1L << 20);
+            Assert.All(outputs, o => Assert.NotNull(o.ToTensorData().Block));
+            Assert.Same(outputs[1].ToTensorData().Block, outputs[2].ToTensorData().Block);
+        }
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        Assert.True(l.Zip(Floats(outputs[0].ToTensorData()), (x, y) => MathF.Abs(x - y) < 1e-5f).All(x => x));
+        Assert.Equal(b[(Rows / 2 * Columns)..], Floats(outputs[2].ToTensorData()));
+    }
+
+    // After the run and after each output's deletion: the session's use, the bytes still on a block
+    // (with firstPage for a block no output stands at the start of, which the allocator keeps), the books.
+    internal static ((long InUse, long OnBlocks, long Books)[] Stages, int MostOnABlock) OutputsOnBlocksEnding(
+        ComputeContext context, InternalComputationGraph graph, int rows, int columns, long firstPage)
+    {
+        var (a, b, _) = TwoHalvesValues(rows, columns);
+        var x = InputTensor<float32>("x", rank: 2);
+        var made = context.Compile(new InternalComputationGraph([x], [x + 1f]));
+        TensorData Made(float[] values)
+        {
+            var source = TensorData([(long)rows, columns], values).CopyTo(context);
+            var value = made.Execute(source.Shared()).Single().ToTensorData();
+            source.Delete();
+            return value;
+        }
+        var outputs = context.Compile(graph).Execute(Made(a), Made(b)).Select(o => o.ToTensorData()).ToList();
+        var most = outputs.Where(o => o.Block is not null).GroupBy(o => o.Block).Max(g => (int?)g.Count()) ?? 0;
+        List<(long, long, long)> stages = [];
+        void Stage()
+        {
+            var standing = outputs.Where(o => !o.IsDisposed && o.Block is not null).ToList();
+            var firstPages = standing.GroupBy(o => o.Block).Count(block => block.All(o => ((IOnnxData)o).Value.Range!.Value.Offset != 0)) * firstPage;
+            stages.Add((made.ReadArenaStatistics()!.Value.InUseBytes, standing.Sum(o => o.ByteCount) + firstPages, context.ReadDeviceMemoryUse().AttachedBytes));
+        }
+        Stage();
+        foreach (var output in outputs)
+        {
+            output.Delete();
+            Stage();
+        }
+        return ([.. stages], most);
+    }
+
+    [Fact]
+    public void TestOutputsOnOneBlockOfASessionsMemoryEachFreeTheirOwnPagesAndWhatNoneStandsOnGoesWithTheRun()
+    {
+        using var context = new ComputeContext();
+        var (both, together) = OutputsOnBlocksEnding(context, TwoHalves(), 1024, 1024, firstPage: 4L << 10);
+        var (one, _) = OutputsOnBlocksEnding(context, TwoHalves(oneHalf: true), 1024, 1024, firstPage: 4L << 10);
+        Assert.Equal(2, together);
+        Assert.True(one[0].OnBlocks > 0);
+        Assert.All(both, stage => Assert.Equal(stage.OnBlocks, stage.InUse - both[^1].InUse));
+        Assert.All(one, stage => Assert.Equal(stage.OnBlocks, stage.InUse - one[^1].InUse));
+    }
+
+    [Fact]
+    public void TestOutputsOnOneBlockOfAHostTensorMadeFromHostDataEachFreeTheirOwnPages()
+    {
+        const int Rows = 1024, Columns = 1024;
+        var (a, b, _) = TwoHalvesValues(Rows, Columns);
+        using var context = new ComputeContext();
+        var outputs = context.Compile(TwoHalves()).Execute(TensorData([(long)Rows, Columns], a), TensorData([(long)Rows, Columns], b))
+            .Select(o => o.ToTensorData()).ToList();
+        var block = outputs.Where(o => o.Block is not null).GroupBy(o => o.Block).Single(g => g.Count() == 2).Key!;
+        List<long> held = [block.HeldBytes];
+        foreach (var output in outputs.Where(o => o.Block == block))
+        {
+            output.Delete();
+            if (!block.IsReleased) held.Add(block.HeldBytes);
+        }
+        Assert.Equal([4L << 20, (2L << 20) + (4L << 10)], held);
+    }
+
+    // n floats of its own, added across each row of its consumed input past a Relu.
+    internal static (TensorData Output, OrtSession Session, float[] Expected) LargeModelRun(ComputeContext context, int n)
+    {
+        float[] b = [.. Enumerable.Range(0, n).Select(i => (i % 7) * 0.5f)];
+        float[] x = [.. Enumerable.Range(0, 2 * n).Select(i => (i % 5) - 2f)];
+        var input = InputTensor<float32>("x", rank: 2);
+        var compiled = context.Compile(new InternalComputationGraph(
+            [input], [OnnxOp.Add(OnnxOp.Relu(input), OnnxOp.Constant(TensorAttribute.Create(new Shape(1L, n), b)))]));
+        var output = compiled.Execute(TensorData([2L, n], x).CopyTo(context)).Single().ToTensorData();
+        return (output, (OrtSession)compiled.Session, [.. x.Select((v, i) => MathF.Max(v, 0f) + b[i % n])]);
+    }
+
+    [Fact]
+    public void TestAModelOverSixteenMebibytesPlacesARunsValuesWhereThatPays()
+    {
+        using var context = new ComputeContext();
+        var (output, session, expected) = LargeModelRun(context, 9 << 19);
+        var entry = Assert.Single(Assert.IsType<OrtPlacements>(session.Placements).Entries);
+        Assert.Equal(OrtPlacements.Stage.Adopted, entry.Stage);
+        Assert.NotNull(output.Block);
+        Assert.Equal(expected, Floats(output));
+    }
+
+    // y = -Relu(x) * x·W consuming x: the product reads x on a branch of its own, run first.
+    internal static (OrtPlacements.Entry Entry, float[] Output, float[] Expected) BranchesRun(IShorokooBackend backend)
+    {
+        const int N = 512;
+        var graph = GraphOf($"x:float[{N},{N}]", $"y:float[{N},{N}]",
+            Op("Relu", "x", "a"), Op("Neg", "a", "n"), Op("MatMul", "x W", "b"), Op("Mul", "n b", "y"));
+        float[] w = [.. Enumerable.Range(0, N * N).Select(i => (i * 7 % 3) - 1f)];
+        float[] x = [.. Enumerable.Range(0, N * N).Select(i => (i % 5) - 2f)];
+        var raw = new byte[w.Length * 4];
+        Buffer.BlockCopy(w, 0, raw, 0, raw.Length);
+        graph.Initializers.Add(new TensorProto { Name = "W", data_type = 1, Dims = [N, N], RawData = raw });
+        using var session = (OrtSession)backend.CreateSession(
+            ModelOf(graph), ShorokooGraphOptimization.EnableAll, ShorokooLogSeverity.Fatal, new DeviceMemorySettings(), DiagnosticSettings.Default);
+        var input = backend.CreateTensorInBackendMemory(ShorokooTensorElementType.Float, MemoryMarshal.AsBytes(x.AsSpan()).ToArray(), [N, N]);
+        var output = session.RunConsuming(new Dictionary<string, IShorokooTensorValue> { ["x"] = input }, [input], ["y"], RunSettings.Default, out _).Single();
+        var bytes = backend.CopyTensorToHost(output);
+        output.Dispose();
+        var expected = new float[N * N];
+        for (int i = 0; i < N; i++)
+            for (int k = 0; k < N; k++)
+            {
+                var xik = x[i * N + k];
+                for (int j = 0; j < N; j++) expected[i * N + j] += xik * w[k * N + j];
+            }
+        for (int i = 0; i < expected.Length; i++) expected[i] *= -MathF.Max(x[i], 0f);
+        return (Assert.Single(session.Placements!.Entries), MemoryMarshal.Cast<byte, float>(bytes).ToArray(), expected);
+    }
+
+    [Fact]
+    public void TestARunPlacesAValueOverAnInputABranchItNeedNotFollowReadsWhereTheSessionRunsThatBranchFirst()
+    {
+        var (entry, output, expected) = BranchesRun(DefaultBackend.Instance);
+        Assert.Equal(OrtPlacements.Stage.Adopted, entry.Stage);
+        Assert.Contains("a", entry.Plan.Select(p => p.Value));
+        Assert.Equal(expected, output);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static OrtValue InnerOnly(Func<OrtTensorValue> make) => make().Inner;
+
+    // What the block holds after a collection while only the ORT value inside the made value is kept.
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static long HeldWithOnlyTheInnerValueKept(Func<OrtTensorValue> make, SharedBlock block)
+    {
+        var inner = InnerOnly(make);
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        var held = block.HeldBytes;
+        GC.KeepAlive(inner);
+        return held;
+    }
+
+    // One of the two outputs a run places on one block, and the block; the other is dropped undeleted.
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static (TensorData Kept, SharedBlock Block) OneOfTwoOnABlock(ComputeContext context)
+    {
+        const int Rows = 1024, Columns = 1024;
+        var (a, b, _) = TwoHalvesValues(Rows, Columns);
+        var pair = context.Compile(TwoHalves()).Execute(TensorData([(long)Rows, Columns], a), TensorData([(long)Rows, Columns], b))
+            .Select(o => o.ToTensorData()).Where(o => o.Block is not null).GroupBy(o => o.Block).Single(g => g.Count() == 2);
+        return (pair.First(), pair.Key!);
+    }
+
+    [Fact]
+    public void TestATensorStandingOnABlockThatIsCollectedUndeletedHandsItsRangeBack()
+    {
+        var backend = DefaultBackend.Instance;
+        const long Floats = (1 << 18) + 1;
+        var owner = (OrtTensorValue)backend.CreateTensorInBackendMemory(ShorokooTensorElementType.Float, new byte[Floats * 4], [Floats]);
+        var block = OrtBackend.BlockOver(owner, Floats * 4, () => backend.Release(owner));
+        var first = OrtBackend.View(owner, 0, ShorokooTensorElementType.Float, [1L << 17], 512L << 10, block, 0);
+        Assert.Equal(Floats * 4, HeldWithOnlyTheInnerValueKept(
+            () => OrtBackend.View(owner, 512L << 10, ShorokooTensorElementType.Float, [1L << 17], 512L << 10, block, 512L << 10), block));
+        using var context = new ComputeContext();
+        var (kept, placed) = OneOfTwoOnABlock(context);
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        Assert.Equal(512L << 10, block.HeldBytes);
+        Assert.Equal(2L << 20, placed.HeldBytes);
+        first.Dispose();
+        kept.Delete();
+        Assert.True(block.IsReleased);
+        Assert.True(placed.IsReleased);
+    }
+
+    // Through delegates and the closures the compiler makes for them.
+    private static bool ClosuresHold(object? root, long bytes) => root switch
+    {
+        byte[] array => array.Length >= bytes,
+        Delegate made => made.GetInvocationList().Any(d => ClosuresHold(d.Target, bytes)),
+        { } closure when closure.GetType().IsDefined(typeof(CompilerGeneratedAttribute)) => closure.GetType()
+            .GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic).Any(f => ClosuresHold(f.GetValue(closure), bytes)),
+        _ => false,
+    };
+
+    private static object? Field(object owner, string name)
+        => owner.GetType().GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(owner);
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static (TensorData Output, WeakReference Placements) PlacedOutputOfADisposedSession()
+    {
+        using var context = new ComputeContext();
+        var (output, session, _) = LargeModelRun(context, 9 << 19);
+        return (output, new WeakReference(session.Placements));
+    }
+
+    [Fact]
+    public void TestAPlacingSessionKeepsNoCopyOfItsModelAndAPlacedOutputKeepsNothingOfItsSession()
+    {
+        using (var context = new ComputeContext())
+        {
+            var placements = LargeModelRun(context, 9 << 19).Session.Placements!;
+            Assert.False(ClosuresHold(Field(placements, "_build"), OrtPlacements.ModelBytesKept));
+            Assert.False(ClosuresHold(Field(placements, "_held"), OrtPlacements.ModelBytesKept));
+        }
+        var (output, placed) = PlacedOutputOfADisposedSession();
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        GC.Collect();
+        Assert.NotNull(output.Block);
+        Assert.False(placed.IsAlive);
+        output.Delete();
+    }
+
+    [Fact]
+    public void TestARunWhoseConsumedInputsAreEachUnderAMebibytePlansNothing()
+    {
+        using var context = new ComputeContext();
+        var x = InputTensor<float32>("x", rank: 2);
+        var compiled = context.Compile(new InternalComputationGraph([x], [OnnxOp.Neg(OnnxOp.Transpose(x, null))]));
+        compiled.Execute(TensorData([128L, 512L], new float[1 << 16]));
+        Assert.Empty(((OrtSession)compiled.Session).Placements!.Entries);
+    }
+
+    [Fact]
+    public void TestARunWhosePlanningRunsOutOfMemoryRunsAsUsualAndItsSessionPlansNoMore()
+    {
+        const int Rows = 1024, Columns = 1024;
+        var (a, b, l) = TwoHalvesValues(Rows, Columns);
+        using var context = new ComputeContext();
+        var compiled = context.Compile(TwoHalves());
+        OrtPlacements.PlanningFault = () => new OutOfMemoryException();
+        try
+        {
+            var outputs = compiled.Execute(TensorData([(long)Rows, Columns], a), TensorData([(long)Rows, Columns], b));
+            Assert.True(l.Zip(Floats(outputs[0].ToTensorData()), (x, y) => MathF.Abs(x - y) < 1e-5f).All(x => x));
+        }
+        finally
+        {
+            OrtPlacements.PlanningFault = null;
+        }
+        var (c, d, _) = TwoHalvesValues(Rows / 2, Columns);
+        compiled.Execute(TensorData([(long)Rows / 2, Columns], c), TensorData([(long)Rows / 2, Columns], d));
+        Assert.Equal(OrtPlacements.Stage.Refused, Assert.Single(((OrtSession)compiled.Session).Placements!.Entries).Stage);
+    }
+
+    [Fact]
+    public void TestASessionWhosePlanningRanOutOfMemoryStillPlacesTheSignaturesItAdopted()
+    {
+        var (a, b, l) = TwoHalvesValues(1024, 1024);
+        var (c, d, _) = TwoHalvesValues(512, 1024);
+        using var context = new ComputeContext();
+        var compiled = context.Compile(TwoHalves());
+        compiled.Execute(TensorData([1024L, 1024L], a), TensorData([1024L, 1024L], b));
+        OrtPlacements.PlanningFault = () => new OutOfMemoryException();
+        try
+        {
+            compiled.Execute(TensorData([512L, 1024L], c), TensorData([512L, 1024L], d));
+        }
+        finally
+        {
+            OrtPlacements.PlanningFault = null;
+        }
+        var outputs = compiled.Execute(TensorData([1024L, 1024L], a), TensorData([1024L, 1024L], b));
+        Assert.NotNull(outputs[0].ToTensorData().Block);
+        Assert.True(l.Zip(Floats(outputs[0].ToTensorData()), (x, y) => MathF.Abs(x - y) < 1e-5f).All(x => x));
+    }
+
+    [Fact]
+    public void TestPlanningTheFirstRunOfALargeModelCopiesNoneOfItIntoManagedMemory()
+    {
+        const int N = 9 << 19;
+        using var context = new ComputeContext();
+        var input = InputTensor<float32>("x", rank: 2);
+        var compiled = context.Compile(new InternalComputationGraph(
+            [input], [OnnxOp.Add(OnnxOp.Relu(input), OnnxOp.Constant(TensorAttribute.Create(new Shape(1L, N), new float[N])))]));
+        var x = TensorData([2L, N], new float[2 * N]).CopyTo(context);
+        var before = GC.GetAllocatedBytesForCurrentThread();
+        compiled.Execute(x);
+        Assert.InRange(GC.GetAllocatedBytesForCurrentThread() - before, 0, N);
+    }
+
+    [Fact]
+    public void TestAKeptModelFileOrFolderNoProcessHoldsIsSweptOnceStaleAndOneHeldOrFreshIsNot()
+    {
+        string Temp(string prefix, string suffix = "") => Path.Combine(Path.GetTempPath(), $"{prefix}{Guid.NewGuid():N}{suffix}");
+        string[] files = [Temp("shorokoo-model-", ".onnx"), Temp("shorokoo-model-", ".onnx"), Temp("shorokoo-model-", ".onnx")];
+        string[] folders = [Temp("shorokoo-runs-"), Temp("shorokoo-runs-")];
+        var (staleFile, heldFile, freshFile, staleFolder, heldFolder) = (files[0], files[1], files[2], folders[0], folders[1]);
+        var old = DateTime.UtcNow.AddDays(-2);
+        try
+        {
+            foreach (var file in files) File.WriteAllBytes(file, [1]);
+            foreach (var folder in folders)
+            {
+                Directory.CreateDirectory(folder);
+                File.WriteAllBytes(Path.Combine(folder, OrtPlacements.KeptLockFile), [1]);
+            }
+            using (File.Open(heldFile, FileMode.Open, FileAccess.Read, FileShare.Read))
+            using (File.Open(Path.Combine(heldFolder, OrtPlacements.KeptLockFile), FileMode.Open, FileAccess.Read, FileShare.Read))
+            {
+                File.SetLastWriteTimeUtc(staleFile, old);
+                File.SetLastWriteTimeUtc(heldFile, old);
+                Directory.SetLastWriteTimeUtc(staleFolder, old);
+                Directory.SetLastWriteTimeUtc(heldFolder, old);
+                OrtPlacements.SweepStale();
+            }
+            Assert.False(File.Exists(staleFile));
+            Assert.False(Directory.Exists(staleFolder));
+            Assert.True(File.Exists(heldFile));
+            Assert.True(File.Exists(freshFile));
+            Assert.True(Directory.Exists(heldFolder));
+        }
+        finally
+        {
+            foreach (var file in files) File.Delete(file);
+            foreach (var folder in folders.Where(Directory.Exists)) Directory.Delete(folder, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void TestTheFirstFileASessionsPlacementsKeepStartsTheSweepOfStaleOnesOnce()
+    {
+        var backend = DefaultBackend.Instance;
+        (bool Started, int Swept) Sweeping(Func<IShorokooSession> build)
+        {
+            var swept = 0;
+            var sweep = new OrtPlacements.StaleSweep(() => Interlocked.Increment(ref swept));
+            OrtPlacements.SweepOnThisThread = sweep;
+            try
+            {
+                using (build())
+                using (build()) { }
+            }
+            finally
+            {
+                OrtPlacements.SweepOnThisThread = null;
+            }
+            if (sweep.Started) sweep.Start().Wait();
+            return (sweep.Started, swept);
+        }
+        const int N = 5 << 20;
+        var large = GraphOf($"x:float[1,{N}]", $"y:float[1,{N}]", Op("Add", "x b", "y"));
+        large.Initializers.Add(new TensorProto { Name = "b", data_type = 1, Dims = [1, N], RawData = new byte[4 * N] });
+        Assert.Equal((true, 1), Sweeping(() => backend.CreateSession(
+            ModelOf(large), ShorokooGraphOptimization.EnableAll, ShorokooLogSeverity.Fatal, new DeviceMemorySettings(), DiagnosticSettings.Default)));
+        Assert.Equal((true, 1), Sweeping(() => Aliasing(backend, GraphOf("a:float[4] b:float[4]", "O:float[4]", Op("Sub", "a b", "O")))));
+    }
+
+    [Fact]
+    public void TestAFirstPlacedRunIsWeighedWithTheScratchItsKernelsTake()
+    {
+        var backend = DefaultBackend.Instance;
+        using var session = (OrtSession)backend.CreateSession(
+            ModelOf(GraphOf("a:float[1024,1024] b:float[1024,1024] c:bool[1024,1024]", "O:float[1024,1024]",
+                Op("Neg", "a", "n"), Op("Neg", "b", "m"), Op("Where", "c n m", "O"))),
+            ShorokooGraphOptimization.EnableAll, ShorokooLogSeverity.Fatal, new DeviceMemorySettings(), DiagnosticSettings.Default);
+        float[] ones = [.. Enumerable.Repeat(1f, 1 << 20)];
+        IShorokooTensorValue Ones() => backend.CreateTensorInBackendMemory(ShorokooTensorElementType.Float, MemoryMarshal.AsBytes(ones.AsSpan()).ToArray(), [1024, 1024]);
+        using var c = backend.CreateTensorInBackendMemory(ShorokooTensorElementType.Bool, [.. Enumerable.Repeat((byte)1, 1 << 20)], [1024, 1024]);
+        for (int run = 0; run < 2; run++)
+        {
+            var (a, b) = (Ones(), Ones());
+            using var output = session.RunConsuming(new Dictionary<string, IShorokooTensorValue> { ["a"] = a, ["b"] = b, ["c"] = c }, [a, b], ["O"], RunSettings.Default, out _).Single();
+            Assert.All(MemoryMarshal.Cast<byte, float>(backend.CopyTensorToHost(output)).ToArray(), v => Assert.Equal(-1f, v));
+        }
+        Assert.Equal(OrtPlacements.Stage.Adopted, Assert.Single(session.Placements!.Entries).Stage);
+    }
+
+    [Fact]
+    public void TestARunSaysItWroteAnOutputIntoAnInputExactlyWhereItDid()
+    {
+        var backend = DefaultBackend.Instance;
+        using var session = Aliasing(backend, GraphOf("a:float[1024,1024] b:float[1024,1024]", "O:float[1024,1024]", Op("Sub", "a b", "O")));
+        float[] ones = [.. Enumerable.Repeat(1f, 1 << 20)];
+        IShorokooTensorValue Ones() => backend.CreateTensorInBackendMemory(ShorokooTensorElementType.Float, MemoryMarshal.AsBytes(ones.AsSpan()).ToArray(), [1024, 1024]);
+        foreach (var consumingA in (bool[])[false, true, false, true])
+        {
+            var (a, b) = (Ones(), Ones());
+            var address = OrtBackend.AddressOf(((OrtTensorValue)a).Inner);
+            using var output = session.RunConsuming(new Dictionary<string, IShorokooTensorValue> { ["a"] = a, ["b"] = b },
+                consumingA ? [a, b] : [b], ["O"], RunSettings.Default, out var aliased).Single();
+            Assert.Equal(aliased.ElementAtOrDefault(0) is not null, OrtBackend.AddressOf(((OrtTensorValue)output).Inner) == address);
+            if (!consumingA) a.Dispose();
+        }
+    }
+
+    [Fact]
+    public void TestARunAskedToHandBackItsMemoryHandsBackWhatItConsumedAsWell()
+    {
+        var backend = DefaultBackend.Instance;
+        using var session = (OrtSession)backend.CreateSession(
+            ModelOf(GraphOf("x:float[1024,1024]", "y:float[1024,1024]", Op("Neg", "x", "y"))),
+            ShorokooGraphOptimization.EnableAll, ShorokooLogSeverity.Fatal, new DeviceMemorySettings(), DiagnosticSettings.Default);
+        ((IShorokooSession)session).StopPlacing();
+        var x = backend.CreateTensorInBackendMemory(ShorokooTensorElementType.Float, new byte[4 << 20], [1024, 1024]);
+        var made = ((IShorokooSession)session).Run(new Dictionary<string, IShorokooTensorValue> { ["x"] = x }, ["y"], RunSettings.Default).Single();
+        x.Dispose();
+        using var y = session.RunConsuming(new Dictionary<string, IShorokooTensorValue> { ["x"] = made }, [made], ["y"],
+            new RunSettings { ShrinkArenaAfterRun = true }, out _).Single();
+        var account = session.HostAccount;
+        var after = account.Allocator.Statistics(account);
+        account.Allocator.ReleaseCached(account);
+        Assert.Equal(after, account.Allocator.Statistics(account));
+    }
+
+    [Fact]
+    public void TestACancelledRunPlansNothingAndAFirstPlacedRunCancelledLeavesTheNextToBeMeasured()
+    {
+        var backend = DefaultBackend.Instance;
+        using var session = (OrtSession)backend.CreateSession(
+            ModelOf(GraphOf("x:float[1024,1024]", "y:float[1024,1024]", Op("Neg", "x", "t"), Op("Exp", "t", "y"))),
+            ShorokooGraphOptimization.EnableAll, ShorokooLogSeverity.Fatal, new DeviceMemorySettings(), DiagnosticSettings.Default);
+        using var stop = new CancellationTokenSource();
+        stop.Cancel();
+        var x = backend.CreateTensorInBackendMemory(ShorokooTensorElementType.Float, new byte[4 << 20], [1024, 1024]);
+        Assert.ThrowsAny<OperationCanceledException>(() => session.RunConsuming(
+            new Dictionary<string, IShorokooTensorValue> { ["x"] = x }, [x], ["y"], new RunSettings { CancellationToken = stop.Token }, out _));
+        Assert.Equal(OrtPlacements.Stage.Unplanned, Assert.Single(session.Placements!.Entries).Stage);
+
+        const int Rows = 1024, Columns = 1024;
+        var (a, b, _) = TwoHalvesValues(Rows, Columns);
+        using var context = new ComputeContext();
+        var compiled = context.Compile(TwoHalves());
+        var cancellations = 1;
+        OrtPlacements.PlacedRunFault = () => cancellations-- > 0 ? new OperationCanceledException() : null;
+        try
+        {
+            Assert.ThrowsAny<OperationCanceledException>(() => compiled.Execute(TensorData([(long)Rows, Columns], a), TensorData([(long)Rows, Columns], b)));
+            compiled.Execute(TensorData([(long)Rows, Columns], a), TensorData([(long)Rows, Columns], b));
+            Assert.True(Assert.Single(((OrtSession)compiled.Session).Placements!.Entries).PlacedPeak > 0);
+        }
+        finally
+        {
+            OrtPlacements.PlacedRunFault = null;
+        }
+    }
+
+    [Fact]
+    public void TestAProofOverAGraphRunInOrderKeepsNoAncestry()
+    {
+        var graph = GraphOf("a:float[128]", "v19999", [.. Enumerable.Range(0, 20000).Select(i => Op("Neg", i == 0 ? "a" : $"v{i - 1}", $"v{i}"))]);
+        var shapes = PlacementShapes.Evaluate(graph, new Dictionary<string, (long[], int)> { ["a"] = ([128], 1) });
+        var before = GC.GetAllocatedBytesForCurrentThread();
+        _ = new PlacementProof(graph, new Dictionary<string, long> { ["a"] = 512 }, shapes, runsInOrder: true);
+        Assert.InRange(GC.GetAllocatedBytesForCurrentThread() - before, 0, 16 << 20);
+    }
+
+    // A plain session and a variant built from the graph it wrote out: each provider's nodes as run and as written.
+    internal static List<(string[] Ran, string[] Written)> RunOrders(string family)
+    {
+        var backend = (OrtBackend)DefaultBackend.Instance;
+        var (_, modelOf, shape) = Benchmarks.MemoryPassBenchmarkTests.Suite.Single(s => s.Family == family);
+        var count = (int)shape.Aggregate(1L, (a, d) => a * d);
+        var sample = TensorData(shape, [.. Enumerable.Range(0, count).Select(i => (i % 101) / 101f - 0.5f)]);
+        using var context = new ComputeContext();
+        var model = ((OrtSession)context.Compile(modelOf().ToConcreteArchitecture([sample]).ToConcreteModel()).Session).Placements!.OriginalModel;
+        var stream = new MemoryStream();
+        ProtoBuf.Serializer.Serialize(stream, model);
+        var raw = MemoryMarshal.AsBytes(sample.As<float32>().AccessMemory<float>()).ToArray();
+        List<(string[], string[])> orders = [];
+        string[] directories = [.. Enumerable.Range(0, 2).Select(_ => Path.Combine(Path.GetTempPath(), $"run-order-{Guid.NewGuid():N}"))];
+        foreach (var directory in directories) Directory.CreateDirectory(directory);
+        try
+        {
+            for (int build = 0; build < 2; build++)
+            {
+                var built = backend.NewSession(
+                    build == 0 ? stream.ToArray() : File.ReadAllBytes(Path.Combine(directories[0], OrtBackend.OptimizedModelFile)),
+                    build == 0 ? ShorokooGraphOptimization.EnableAll : ShorokooGraphOptimization.DisableAll, ShorokooLogSeverity.Fatal,
+                    new DeviceMemorySettings(), new DiagnosticSettings { TraceNodePlacement = true }, directories[build], 0, [], PrecisionSettings.Default,
+                    externalDataDirectory: build == 0 ? null : directories[0]);
+                using var session = backend.Wrap(built, []);
+                var input = backend.CreateTensorInBackendMemory(ShorokooTensorElementType.Float, raw, shape);
+                foreach (var output in ((IShorokooSession)session).Run(
+                    new Dictionary<string, IShorokooTensorValue> { [model.Graph!.Inputs[0].Name] = input }, session.OutputNames, RunSettings.Default))
+                    output.Dispose();
+                input.Dispose();
+                using var profile = System.Text.Json.JsonDocument.Parse(File.ReadAllText(built.Session.EndProfiling()));
+                var ran = profile.RootElement.EnumerateArray()
+                    .Where(e => e.TryGetProperty("cat", out var cat) && cat.GetString() == "Node" && e.GetProperty("name").GetString()!.EndsWith("_kernel_time"))
+                    .Select(e => (Ts: e.GetProperty("ts").GetInt64(), Name: e.GetProperty("name").GetString()![..^"_kernel_time".Length],
+                        Provider: e.GetProperty("args").GetProperty("provider").GetString()!))
+                    .OrderBy(e => e.Ts).DistinctBy(e => e.Name).ToList();
+                using var written = File.OpenRead(Path.Combine(directories[build], OrtBackend.OptimizedModelFile));
+                var listed = ProtoBuf.Serializer.Deserialize<ModelProto>(written).Graph!.Nodes.Select(n => n.Name).ToList();
+                foreach (var provider in ran.Select(e => e.Provider).Distinct())
+                {
+                    var names = ran.Where(e => e.Provider == provider).Select(e => e.Name).ToHashSet();
+                    orders.Add(([.. ran.Where(e => e.Provider == provider).Select(e => e.Name)], [.. listed.Where(names.Contains)]));
+                }
+            }
+        }
+        finally
+        {
+            foreach (var directory in directories) Directory.Delete(directory, recursive: true);
+        }
+        return orders;
+    }
+
+    [Fact]
+    public void TestASessionRunsEachProvidersNodesInTheOrderOfTheGraphItWritesOutBuiltFromAModelOrFromAWrittenGraph()
+    {
+        foreach (var orders in ((string[])["encoder2", "attn-chunk4"]).Select(RunOrders))
+        {
+            Assert.NotEmpty(orders);
+            Assert.All(orders, order => Assert.Equal(order.Written, order.Ran));
+        }
     }
 
     [Fact]
@@ -936,29 +1836,39 @@ public class ComputeContextLifetimeCoverageTests
     }
 
     [Fact]
-    public void TestAnOutputTheRuntimeFoldsToAConstantIsMemoryOfItsOwnThatAWriteDoesNotCarryIntoAnotherRun()
+    public void TestAnOutputTheRuntimeFoldsToAConstantIsMemoryOfItsOwnOnEveryRun()
     {
         using var context = new ComputeContext();
         var x = InputVector<float32>("x");
-        float[] AfterAWrite(Variable output)
+        float[] ThreeRuns(Variable output)
         {
             var compiled = context.Compile(new InternalComputationGraph([x], [output]), [[4L]], trainingStep: false);
-            TensorData<float32> Run() => compiled.Execute(Sample())[0].ToTensorData().As<float32>();
-            var (first, second) = (Run(), Run());
-            first.WriteMemory<float>(written => written.Fill(9f));
-            return [.. second.CopyMemory<float>(), .. Run().CopyMemory<float>()];
+            TensorData[] runs = [.. Enumerable.Range(0, 3).Select(_ => compiled.Execute(Sample())[0].ToTensorData())];
+            Assert.False(SameMemory(runs[0], runs[1]) || SameMemory(runs[0], runs[2]) || SameMemory(runs[1], runs[2]));
+            return [.. runs.SelectMany(run => run.As<float32>().CopyMemory<float>())];
         }
 
-        Assert.Equal([1f, 1f, 1f, 1f, 1f, 1f, 1f, 1f],
-            AfterAWrite(OnnxOp.ConstantOfShape(OnnxOp.Shape(x), TensorData(DType.Float32, [1L], 1f).MoveToAttribute())));
-        Assert.Equal([1f, 2f, 3f, 4f, 1f, 2f, 3f, 4f], AfterAWrite(Vector(1f, 2f, 3f, 4f)));
-        Assert.Equal([1f, 2f, 3f, 4f, 1f, 2f, 3f, 4f], AfterAWrite(OnnxOp.Identity(Vector(1f, 2f, 3f, 4f), rank: 1)));
-        Assert.Equal([1f, 2f, 3f, 4f, 1f, 2f, 3f, 4f], AfterAWrite(OnnxOp.Reshape(Vector(1f, 2f, 3f, 4f), Vector(2L, 2L), allowZero: false)));
-        Assert.Equal([11f, 22f, 33f, 44f, 11f, 22f, 33f, 44f], AfterAWrite(Vector(1f, 2f, 3f, 4f) + Vector(10f, 20f, 30f, 40f)));
+        Assert.Equal(Enumerable.Repeat(1f, 12),
+            ThreeRuns(OnnxOp.ConstantOfShape(OnnxOp.Shape(x), TensorData(DType.Float32, [1L], 1f).MoveToAttribute())));
+        Assert.Equal(Thrice(1f, 2f, 3f, 4f), ThreeRuns(Vector(1f, 2f, 3f, 4f)));
+        Assert.Equal(Thrice(1f, 2f, 3f, 4f), ThreeRuns(OnnxOp.Identity(Vector(1f, 2f, 3f, 4f), rank: 1)));
+        Assert.Equal(Thrice(1f, 2f, 3f, 4f), ThreeRuns(OnnxOp.Reshape(Vector(1f, 2f, 3f, 4f), Vector(2L, 2L), allowZero: false)));
+        Assert.Equal(Thrice(11f, 22f, 33f, 44f), ThreeRuns(Vector(1f, 2f, 3f, 4f) + Vector(10f, 20f, 30f, 40f)));
+    }
+
+    private static float[] Thrice(params float[] values) => [.. values, .. values, .. values];
+
+    private static bool SameMemory(TensorData a, TensorData b)
+    {
+        var same = Unsafe.AreSame(
+            ref MemoryMarshal.GetReference(a.AccessRawMemory()), ref MemoryMarshal.GetReference(b.AccessRawMemory()));
+        GC.KeepAlive(a);
+        GC.KeepAlive(b);
+        return same;
     }
 
     /// <summary>The model a lowering hands a backend for <paramref name="graph"/>.</summary>
-    private static byte[] ModelOf(GraphProto graph)
+    internal static byte[] ModelOf(GraphProto graph)
     {
         var model = new ModelProto { IrVersion = 8, Graph = graph };
         model.OpsetImports.Add(new OperatorSetIdProto { Domain = "", Version = 17 });
@@ -972,7 +1882,7 @@ public class ComputeContextLifetimeCoverageTests
     internal static OrtSession Aliasing(IShorokooBackend backend, GraphProto graph)
         => (OrtSession)backend.CreateSession(
             ModelOf(graph), ShorokooGraphOptimization.EnableAll, ShorokooLogSeverity.Fatal,
-            new DeviceMemorySettings().Resolve(reusedAcrossShapes: false), DiagnosticSettings.Default,
+            new DeviceMemorySettings(), DiagnosticSettings.Default,
             [new OutputAlias("O", "a")]);
 
     [Fact]
@@ -989,7 +1899,7 @@ public class ComputeContextLifetimeCoverageTests
         using var x = Square(Diagonal(1f));
         using var y = Square(Diagonal(2f));
         var outputs = session.RunConsuming(new Dictionary<string, IShorokooTensorValue> { ["a"] = consumed, ["x"] = x, ["y"] = y },
-            [consumed], ["O", "Z"], ComputeContext.NoOutputsRetained, RunSettings.Default, out var aliased);
+            [consumed], ["O", "Z"], RunSettings.Default, out var aliased);
 
         Assert.True(Proves(graph));
         Assert.Empty(session.BindableAliases);
@@ -1008,7 +1918,7 @@ public class ComputeContextLifetimeCoverageTests
         ref var consumedMemory = ref MemoryMarshal.GetReference(a.GetTensorDataAsSpan<float>());
 
         using var o = session.RunConsuming(new Dictionary<string, IShorokooTensorValue> { ["a"] = a, ["b"] = b }, [a], ["O"],
-            ComputeContext.NoOutputsRetained, RunSettings.Default)[0];
+            RunSettings.Default)[0];
 
         Assert.Equal([9f, 18f, 27f, 36f], o.GetTensorDataAsSpan<float>().ToArray());
         Assert.True(Unsafe.AreSame(ref consumedMemory, ref MemoryMarshal.GetReference(o.GetTensorDataAsSpan<float>())));
@@ -1041,7 +1951,7 @@ public class ComputeContextLifetimeCoverageTests
             var a = backend.CreateTensor<float>([5f], [1L]);
             using var i = backend.CreateTensor<long>([0L], [1L]);
             using var o = session.RunConsuming(new Dictionary<string, IShorokooTensorValue> { ["a"] = a, ["i"] = i }, [a], ["O"],
-                ComputeContext.NoOutputsRetained, RunSettings.Default, out var aliased)[0];
+                RunSettings.Default, out var aliased)[0];
             return (backend.Builds, o.GetTensorDataAsSpan<float>()[0], aliased[0]);
         }
 
@@ -1069,10 +1979,10 @@ public class ComputeContextLifetimeCoverageTests
         internal ScriptedBackend(Action<int> build) : this([0], build) { }
 
         private ScriptedBackend(int[] builds, Action<int> build)
-            : base((_, _) => build(builds[0]++), ComputeDevice.Cpu, cudaDeviceId: null) => _builds = builds;
+            : base((_, _, _) => build(builds[0]++), ComputeDevice.Cpu, cudaDeviceId: null) => _builds = builds;
 
         private ScriptedBackend(int[] builds, Action<int> build, bool stockProvider)
-            : base((_, _) => build(builds[0]++), ComputeDevice.Cpu, cudaDeviceId: null, stockProvider) => _builds = builds;
+            : base((_, _, _) => build(builds[0]++), ComputeDevice.Cpu, cudaDeviceId: null, stockProvider) => _builds = builds;
 
         internal static ScriptedBackend Stock(Action<int> build) => new([0], build, stockProvider: true);
 
@@ -1245,7 +2155,7 @@ public class ComputeContextLifetimeCoverageTests
     {
         using var context = new ComputeContext();
 
-        var deleted = context.AllocateUninitialized<float32>((long[])[2L]);
+        var deleted = Sample().CopyTo(context);
         var moved = Sample().To(context);
         Assert.Contains(deleted, context.Tensors);
         Assert.Contains(moved, context.Tensors);
@@ -1258,31 +2168,28 @@ public class ComputeContextLifetimeCoverageTests
     }
 
     [Fact]
-    public void TestAnAllocatedTensorIsFilledInPlaceAndFeedsAsACopiedOneDoes()
+    public void TestATensorReadFromAStreamFeedsAsACopiedOneDoesAndOneWithNoFlatBufferIsRefused()
     {
         using var context = new ComputeContext();
         var graph = Doubling();
         float[] values = [1f, 2f, 3f, 4f];
 
-        var allocated = context.AllocateUninitialized<float32>((long[])[4L]);
-        values.CopyTo(allocated.AccessModifiableMemory<float>());
+        var read = context.ReadTensor(new Shape(4L), DType.Float32, new MemoryStream(MemoryMarshal.AsBytes(values.AsSpan()).ToArray()));
 
-        Assert.Contains(allocated, context.Tensors);
-        Assert.Same(DefaultBackend.Instance, allocated.AllocatingBackend);
-        Assert.Equal(values, Floats(allocated));
-        Assert.Equal(Floats(Sample().CopyTo(context)), Floats(allocated));
+        Assert.Contains(read, context.Tensors);
+        Assert.Same(DefaultBackend.Instance, read.AllocatingBackend);
+        Assert.Equal(values, Floats(read));
         Assert.Equal(
             Floats(context.Execute(graph, Sample().CopyTo(context))[0].ToTensorData()),
-            Floats(context.Execute(graph, allocated)[0].ToTensorData()));
+            Floats(context.Execute(graph, read)[0].ToTensorData()));
 
         long[] pair = [2L, 3L];
-        Assert.Equal(DType.Float32, context.AllocateUninitialized(pair, DType.Float32).DType);
-        Assert.Equal(new Shape(pair), context.AllocateUninitialized(pair, DType.Float32).Shape);
-        Assert.Equal(24, ComputeContext.Host.AllocateUninitialized(pair, DType.Float32).CopyRawMemory().Length);
-        Assert.Throws<NotSupportedException>(() => context.AllocateUninitialized(pair, DType.Utf8));
-        Assert.Throws<NotSupportedException>(() => context.AllocateUninitialized(pair, DType.Int4));
-        Assert.Throws<NotSupportedException>(() => ComputeContext.Host.AllocateUninitialized(pair, DType.UInt4));
-        Assert.Throws<ArgumentNullException>(() => context.AllocateUninitialized(pair, null!));
+        Assert.Equal(24, ComputeContext.Host.ReadTensor(pair, DType.Float32, new MemoryStream(new byte[24])).CopyRawMemory().Length);
+        Assert.Throws<EndOfStreamException>(() => context.ReadTensor(pair, DType.Float32, new MemoryStream(new byte[8])));
+        Assert.Throws<NotSupportedException>(() => context.ReadTensor(pair, DType.Utf8, Stream.Null));
+        Assert.Throws<NotSupportedException>(() => context.ReadTensor(pair, DType.Int4, Stream.Null));
+        Assert.Throws<NotSupportedException>(() => ComputeContext.Host.ReadTensor(pair, DType.UInt4, Stream.Null));
+        Assert.Throws<ArgumentNullException>(() => context.ReadTensor(pair, null!, Stream.Null));
 
         using var budgeted = new ComputeContext(new StubBackend(ComputeDevice.Cuda, 0))
         {
@@ -1290,7 +2197,7 @@ public class ComputeContextLifetimeCoverageTests
         };
         foreach (var complex in (DType[])[DType.Complex64, DType.Complex128])
             foreach (var where in (ComputeContext[])[context, ComputeContext.Host, budgeted])
-                Assert.Contains("complex", Assert.Throws<NotSupportedException>(() => where.AllocateUninitialized(pair, complex)).Message);
+                Assert.Contains("complex", Assert.Throws<NotSupportedException>(() => where.ReadTensor(pair, complex, Stream.Null)).Message);
     }
 
     /// <summary>Holds a run open once it has held its feeds and before it builds their values:
@@ -1310,7 +2217,7 @@ public class ComputeContextLifetimeCoverageTests
     /// <c>RunFeeds.Prepare</c>'s refusal is for.</summary>
     private sealed class UnlockableParam : NamedModelParam
     {
-        public override IShorokooTensorValue ToTensorValue() => throw new NotSupportedException();
+        internal override IShorokooTensorValue ToTensorValue() => throw new NotSupportedException();
         public override TensorData ToTensorData() => throw new NotSupportedException();
         public override TensorData<T> ToTensorData<T>() => throw new NotSupportedException();
         public override TensorDataSequence ToTensorDataSequence() => throw new NotSupportedException();

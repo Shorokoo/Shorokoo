@@ -100,8 +100,9 @@ are in [What a training step consumes](training.md#what-a-training-step-consumes
 
 ## 4. Checkpoint
 
-`StepToCheckpoint` takes one more step and brings the state back to the host as a
-`TrainingCheckpoint`. Save it as a `.skpt`, which carries everything needed to resume.
+`StepToCheckpoint` takes one more step and hands out the state as a `TrainingCheckpoint`,
+left where the step put it (on a GPU, the card's memory; the save writes it from there). Save it
+as a `.skpt`, which carries everything needed to resume.
 
 ```csharp
 var (lx, ly) = MakeBatch(99);
@@ -187,10 +188,9 @@ static (TensorData x, TensorData y) MakeBatch(long seed)
 
 None of these shows in a small first run. Each can end a long one.
 
-- **Checkpoint size.** A checkpoint over 2 GB (one `.skpt` data entry, or a flat safetensors
-  file) saves without error and cannot be loaded back
-  ([#48](https://github.com/Shorokoo/Shorokoo/issues/48)). See
-  [skpt-checkpoints.md](skpt-checkpoints.md).
+- **Checkpoint size.** A `.skpt` data entry of 2 GiB or more as stored, or an archive of 4 GiB or more,
+  is refused when saved; a Zstd entry may decompress to more. A flat safetensors file loads back whatever its size and the size of each tensor in
+  it. See [skpt-checkpoints.md](skpt-checkpoints.md).
 - **Save cost.** What a save allocates and how long it takes grow with the checkpoint:
   [What a save costs](training.md#what-a-save-costs).
 - **Out of memory.** A failed allocation arrives as `CR009` and says which pool ran out. On
@@ -200,6 +200,9 @@ None of these shows in a small first run. Each can end a long one.
 - **Device-memory readings.** They are one record for the whole process and read device 0 only,
   and this process's share of the card can be unavailable in a container:
   [limitations.md](limitations.md#device-memory-readings-are-process-wide-and-device-0s).
+- **Speed on a card.** `float32` is computed in full precision on a GPU too, which on a
+  convolutional network costs the step 2.3 to 2.6 times what TensorFloat-32 does. A context can
+  allow TensorFloat-32 for its runs: [Precision](inference.md#precision-gpu-backends).
 - **Reproducibility.** A fixed seed reproduces a run bit for bit on the CPU backend, including
   across a save and resume. On a GPU it does so only on the ONNX Runtime backends, and only on a
   context that asks for deterministic compute: [Seeding the run](training.md#seeding-the-run).

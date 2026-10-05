@@ -20,14 +20,17 @@ namespace Shorokoo.Jax;
 /// </summary>
 public sealed class JaxTensorValue : IShorokooTensorValue
 {
-    private readonly PyObject _value;
+    private PyObject _value;
     private readonly long[] _shape;
     private readonly IntPtr _address;
     private readonly long _byteCount;
     private readonly bool _isHost;
+    private readonly int _device;
     private int _released;
 
-    private JaxTensorValue(PyObject value, ShorokooTensorElementType elementType, long[] shape, bool isHost, IntPtr address, long byteCount)
+    private JaxTensorValue(
+        PyObject value, ShorokooTensorElementType elementType, long[] shape, bool isHost, IntPtr address, long byteCount,
+        int device)
     {
         _value = value;
         ElementType = elementType;
@@ -35,6 +38,7 @@ public sealed class JaxTensorValue : IShorokooTensorValue
         _isHost = isHost;
         _address = address;
         _byteCount = byteCount;
+        _device = device;
     }
 
     /// <summary>Wraps <paramref name="value"/>, taking over the reference, and reads what it is.
@@ -54,7 +58,8 @@ public sealed class JaxTensorValue : IShorokooTensorValue
         var shape = new long[(int)dims.Length()];
         for (int i = 0; i < shape.Length; i++) shape[i] = Item<long>(dims, i);
         return new JaxTensorValue(value, (ShorokooTensorElementType)code, shape,
-            Item<bool>(description, 3), new IntPtr(Item<long>(description, 4)), Item<long>(description, 5));
+            Item<bool>(description, 3), new IntPtr(Item<long>(description, 4)), Item<long>(description, 5),
+            Item<int>(description, 6));
     }
 
     private static T Item<T>(PyObject sequence, int index)
@@ -65,6 +70,17 @@ public sealed class JaxTensorValue : IShorokooTensorValue
 
     /// <summary>The Python object this wraps, refused once released.</summary>
     internal PyObject Value => Volatile.Read(ref _released) == 0 ? _value : throw Released();
+
+    /// <summary>Makes this device value hold <paramref name="array"/> — of its type and shape, in its
+    /// device's memory — taking over the reference, and releases the array it held: a device array
+    /// written into is the array the write made, which the one written into was given up to. Called
+    /// holding the interpreter lock.</summary>
+    internal void Hold(PyObject array)
+    {
+        var held = Value;
+        _value = array;
+        held.Dispose();
+    }
 
     private static ObjectDisposedException Released() => new(
         nameof(JaxTensorValue),
@@ -83,6 +99,17 @@ public sealed class JaxTensorValue : IShorokooTensorValue
         {
             if (Volatile.Read(ref _released) != 0) throw Released();
             return _isHost;
+        }
+    }
+
+    /// <summary>The id of the device this value's memory is on, or -1 for a value in host
+    /// memory.</summary>
+    internal int Device
+    {
+        get
+        {
+            if (Volatile.Read(ref _released) != 0) throw Released();
+            return _device;
         }
     }
 
@@ -107,6 +134,16 @@ public sealed class JaxTensorValue : IShorokooTensorValue
     {
         ThrowIfNotReadable<T>();
         return new Span<T>((void*)_address, checked((int)(_byteCount / sizeof(T))));
+    }
+
+    /// <summary>The <paramref name="count"/> bytes at <paramref name="byteOffset"/> into this
+    /// tensor's buffer, addressed from where the buffer starts, so a piece of a tensor longer than
+    /// any span is reached as one of a short tensor is.</summary>
+    unsafe Span<byte> IShorokooTensorValue.HostPiece(long byteOffset, int count)
+    {
+        ThrowIfNotReadable<byte>();
+        IShorokooTensorValue.PieceWithin(byteOffset, count, _byteCount);
+        return new Span<byte>((byte*)_address + byteOffset, count);
     }
 
     public IReadOnlyList<string> GetStringTensorData()

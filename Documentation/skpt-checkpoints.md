@@ -123,7 +123,7 @@ checkpoints:
 ```csharp
 using Shorokoo;   // Persistence, TrainingRig, TrainingCheckpoint
 
-// checkpoint: from rig.CreateInitialCheckpoint() / TrainStep(); it carries its rig.
+// checkpoint: from rig.CreateInitialCheckpoint() / TrainStep() / a resident run; it carries its rig.
 // (For a bare checkpoint, attach a rig first via rig.AdoptCheckpoint(checkpoint).)
 Persistence.SaveTrainingCheckpointToSkpt(checkpoint, "run.skpt");
 
@@ -132,6 +132,15 @@ var rig     = TrainingRig.FromScratch(modelGraph, lossGraph, optimizerGraph, sam
 var resumed = rig.LoadCheckpointFromSkpt("run.skpt");
 var next    = rig.TrainStep(resumed, inputBatch, targetBatch);   // trainstep compiled internally, cached per fed shape
 ```
+
+A checkpoint whose state is in device memory (one a resident run or `Fit` handed out on a GPU)
+is saved from there, each tensor written through one bounded host staging buffer, so the state is
+never whole in host memory — see [What a save costs](training.md#what-a-save-costs). Loading
+for a rig that trains on a device is the same in reverse: `LoadCheckpoint` and
+`LoadCheckpointFromSkpt` read the state from the file straight into the rig's device memory, a
+bounded piece at a time. An inference model loads onto a device with
+`context.LoadCompiled(path)` — see
+[Loading a saved model onto the device](inference.md#loading-a-saved-model-onto-the-device).
 
 Or resume from the file **alone**: the static `TrainingRig.Load` rebuilds the rig from
 the constituents the file carries and returns it with the loaded checkpoint:
@@ -328,6 +337,11 @@ PipelineState? state = info.Skpt!.GetUserData<PipelineState>();  // default when
   compressed by the option. The zip framing stays STORED; a compressed entry extracts to
   a `.zst`-decodable stream.
 - An entry whose bytes contradict its declared compression fails loudly on load.
+- A Zstd entry's frame header declares its decompressed size, which bounds the
+  tensors the entry may claim before any is allocated; a frame that declares none is
+  refused. An entry written in several frames — by `pzstd`, say — is read whole, bounded
+  by the sizes its frames declare between them. A `.zsafetensor` file is held to the same
+  rule.
 
 ## Named weight sets (default + ema)
 
@@ -528,7 +542,10 @@ Rules:
 - One **weight-bearing** model per file (the `model` entry), with any number of
   [named weight sets](#named-weight-sets-default--ema). A training checkpoint's extra
   `models/` entries bind no weights.
-- A single data entry must hold under 2 GB of tensor data, both stored and decompressed.
+- A single data entry holds at most `int.MaxValue` bytes (just under 2 GiB) as stored. A Zstd
+  entry may decompress to more: it is read a tensor at a time, and a tensor past what a managed
+  array holds is read into host memory of a backend (see
+  [training.md](training.md#what-a-save-costs)).
 - An archive holds under 4 GiB and at most 65,535 entries. A save that would exceed either
   limit, or put more than `int.MaxValue` bytes in one entry, is refused with
   `NotSupportedException` before anything is written, leaving any previous file intact.

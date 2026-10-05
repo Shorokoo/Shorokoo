@@ -90,8 +90,10 @@ Console.WriteLine(environment);             // "/home/me/.cache/shorokoo/python-
 | `Description.Device` / `MemorySpace` | `Cpu` / host | `Cuda` / `MemorySpace.Cuda(N)` |
 
 On CUDA, a tensor moved to the context (`TensorData.To(context)`) is on the card and read
-there. Outputs come back in host memory, except those a resident run keeps on the card
-(`TensorData.IsHostResident` is false) until copied home.
+there. Every input is placed on the card before a run, and every tensor output stays there
+(`TensorData.IsHostResident` is false): reading its values copies them to the host and leaves it
+there, and `ToHost()` makes a copy of it in host memory. String
+tensors and sequences are read and left in host memory.
 
 **One environment per process.** The process gets whichever environment the first torch
 backend started. The CUDA build of PyTorch also runs on the CPU; the CPU build cannot run on
@@ -112,6 +114,21 @@ A CUDA backend started in a process already running the CPU build fails with
 or one that sees no device, saying which. Starting the backend on such a machine fails with
 `PythonEnvironmentFailure.DeviceUnavailable` *before* anything is provisioned, so it never
 downloads the CUDA libraries for a card that is not there.
+
+**Beside an ONNX Runtime CUDA backend.** A process can run `TorchCudaBackend` together with
+`WinGpuBackend`, `LinuxGpuBackend` or a CUDA backend loaded through `IsolatedBackend`, whichever
+starts first: every CUDA backend runs on one pinned copy of cuDNN and cuBLAS, which is the release
+the CUDA environment's PyTorch carries — see
+[The NVIDIA libraries the CUDA backends run on](inference.md#the-nvidia-libraries-the-cuda-backends-run-on).
+When the CUDA environment is provisioned, or first used, its copies of those libraries become
+hard links to the shared cache's, filling the cache from them if it is empty, so nothing more is
+downloaded and PyTorch loads the very same files as the other backends. An environment you name
+is never modified: one whose PyTorch carries the pinned release runs beside another CUDA backend
+on its own copy of that release. On Windows, one whose PyTorch bundles another release cannot load
+it into a process that already holds the pinned one, and starting it there fails with
+`PythonEnvironmentFailure.CudaLibraryConflict`, naming the copies held; on Linux its PyTorch binds
+to the pinned copy already loaded, and runs where that release has everything PyTorch takes from
+it, and where it lacks something, starting it fails with `CudaLibraryConflict` too.
 
 ## The Python environment
 
@@ -168,6 +185,7 @@ whose message names what is missing:
 | `InterpreterFailed` | CPython itself would not start |
 | `DeviceUnavailable` | a CUDA backend, and no NVIDIA driver fit for CUDA 13, or PyTorch sees no such device |
 | `UnsupportedPlatform` | the machine is not Linux or Windows on x64, the platforms there are lock files for |
+| `CudaLibraryConflict` | PyTorch cannot load the CUDA libraries its environment ships, because the process already holds another release of them; the message names the copies held |
 
 ## Training
 
@@ -195,7 +213,7 @@ String tensors work, and always stay on the host; sequences of tensors work.
 
 Every output is memory of its own, even where the model returns an input or weight
 unchanged, except an output written into a *consumed* input
-([output aliasing](#runs)), which nothing else holds.
+([output aliasing and placement](#runs)), which no other value's range overlaps.
 
 ## Runs
 
@@ -203,26 +221,50 @@ What a run does with the settings every backend is handed, on each device:
 
 | | CPU | CUDA |
 |---|---|---|
-| **Output aliasing** (a run writing an output into a consumed input) | yes, for an output produced by `Add`/`Sub`/`Mul`/`Div` | the same on the card for an output kept there; any output fetched home is copied into a consumed host input |
-| **Resident runs** (`RunRetainingOutputs`) | nothing to retain: outputs are on the host | a kept tensor output stays on the card; inputs already there are read in place |
+| **Output aliasing** (a run writing an output into a consumed input) | yes, for an output produced by `Add`/`Sub`/`Mul`/`Div` | the same, on the card |
+| **Placement** (a run writing its values into ranges of consumed inputs) | yes: floating-point element-wise operators, matrix products, `Gemm`, `Softmax`, `LogSoftmax`, `Gelu`, `Clip` and the normalizations, fills, concatenations and copies of views; a convolution by a copy; not in a training step torch differentiates | the same, a convolution written into its range by cuDNN |
+| **Where inputs and outputs are** | host memory | the card for every tensor, the host for strings and sequences: every input is moved there before the run, and every output stays there |
 | **Cancellation** (`RunSettings.CancellationToken`) | stops before the next node | stops before the next node |
 | **`DeviceMemory.LimitBytes`** | ignored, as on every CPU backend | caps each run's allocations (see below) |
 | **`RunSettings.ShrinkArenaAfterRun`** | ignored | `torch.cuda.empty_cache()` after the run |
 | **Arena statistics** / `RunStats` | none | torch's caching allocator on the device |
 | **`TraceNodePlacement`** | every node on `cpu` | every node on `cuda:N` |
 | **`DeterministicCompute`** | not applied | not applied: torch's kernels run as they otherwise would |
+| **`Precision.AllowTensorFloat32`** | no effect: `float32` in full precision | off by default: each run sets `torch.backends.cuda.matmul.allow_tf32` and `torch.backends.cudnn.allow_tf32` off as it starts; on, it sets both on, and products, cuDNN convolutions and recurrent layers run in TensorFloat-32 |
 | **Log severity** | Python warnings a run raises are shown at `Warning` and below, not above | same |
 
 **Output aliasing.** An output paired with a consumed input (as the training rig pairs each
 updated parameter with the parameter) is written into the input's memory when it comes from
 `Add`, `Sub`, `Mul` or `Div`, so the optimizer's `p - lr * g` costs no memory. Other operators'
-pairs are not bound on the CPU; on CUDA an output fetched home is copied into the consumed host
-tensor. A write is declined where the input's memory may still be read through a view
-(`Transpose`, `Expand`, `Slice`, a same-type `Cast`).
+pairs are not bound. A write is declined where the input's memory may still be read through a
+view (`Transpose`, `Expand`, `Slice`, a same-type `Cast`).
 
-**Intermediate values.** A run releases each value after its last reader (in function, branch
-and loop bodies too), so its peak is what is live at once. In a training step whose gradient
-torch takes, autograd keeps what the backward pass needs until the gradient is taken.
+**Placement.** A run that consumes inputs writes its values of a mebibyte or more into ranges of
+their memory where the graph proves it safe ([A run that writes into what it
+consumed](inference.md#a-run-that-writes-into-what-it-consumed)): each with torch's own operator
+writing into the range — an element-wise operator's or a matrix product's `out=` form (on
+floating-point values), `Softmax`, `LogSoftmax` and `Gelu` through theirs, `Gemm` as a product
+written into the range and scaled and summed there, `Clip` and the normalizations computed step by
+step in the range, a fill, a concatenation part by part, or a copy of what a slice, reshape or
+transpose reads, which an output that views an input is copied out by anyway. A convolution is
+written into its range by cuDNN on a card; on the CPU, where torch's convolutions take no tensor to
+write into, it is computed and copied into the range, which allocates what an unplaced run
+allocates there and frees it at once. An operator with no such form is not placed. Each computes
+exactly what an unplaced run computes. Where the values go is planned per run signature, for up to
+8 of them, and not for a model over 16 MiB, a graph of over 20 000 nodes, or a run of a graph not
+compiled. Every output a run wrote into one input stands on that input's memory, which torch frees
+with the last of them.
+
+**Intermediate values.** A run computes the graph's nodes in the order ONNX Runtime would — the
+order a training step's memory-aware pass plans for — and reads each value's shape (`Shape`,
+`Size`) as soon as the value is made, so no value is held only for its shape. It releases each
+value after its last reader (in function, branch and loop bodies too), so its peak is what is
+live at once. Where nothing reads an operand after a node, the node's result is written over that
+operand rather than into memory of its own: an element-wise operator, `Clip`, `Gelu`, `Where`,
+`Softmax`, `LogSoftmax`, `LayerNormalization` or `BatchNormalization` over an operand of the
+result's type and shape that the run made itself, or that it consumed — a chain of such nodes
+holds one value at a time. In a training step whose gradient torch takes, autograd keeps what the
+backward pass needs until the gradient is taken, and nothing is written over.
 
 **Device memory on CUDA.** torch has one caching allocator per device for the whole process,
 so the per-session settings map only partly:
@@ -231,8 +273,7 @@ so the per-session settings map only partly:
   blocks are released first). A run that needs more fails with an `InvalidOperationException`
   naming the limit. The cap is process-wide, so other torch runs on that device wait for a
   capped run to finish.
-- `ArenaExtend` has no counterpart; configure torch's allocator with `PYTORCH_CUDA_ALLOC_CONF`
-  before the backend starts.
+- Configure torch's allocator itself with `PYTORCH_CUDA_ALLOC_CONF` before the backend starts.
 - `ReadArenaStatistics` reads `torch.cuda.memory_stats` for the whole device, not one session:
   `InUseBytes`, `MaxInUseBytes`, `TotalAllocatedBytes`, `AllocationCount`,
   `ArenaExtensionCount` (segments held), `ArenaShrinkageCount` (segments released),
@@ -242,6 +283,14 @@ so the per-session settings map only partly:
 
 **Cancellation** is checked before every node (once per iteration inside a `Loop`) and throws
 `OperationCanceledException` carrying the token. One long kernel is not interrupted.
+
+**Precision on CUDA.** `float32` is computed in full `float32` precision unless the context allows
+TensorFloat-32 ([Precision](inference.md#precision-gpu-backends)). torch's two switches for it are
+the whole process's, so a run sets them from its session as it starts — about 0.3 µs — whatever
+they were before, and runs of sessions that set them differently do not overlap: runs in one
+precision run on the cards beside one another, and a run in the other waits until they are done —
+runs arriving in the first precision meanwhile wait behind it, so neither keeps the other out. A
+run on the CPU sets neither.
 
 ## Limitations
 

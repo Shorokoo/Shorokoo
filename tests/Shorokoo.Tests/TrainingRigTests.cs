@@ -683,6 +683,156 @@ internal static class TrainingRigHelpers
 [Trait("Purpose", "Coverage")]
 public class TrainingRigFromScratchCoverageTests
 {
+    [Fact]
+    public void TestTheMemoryAwarePassTakesARecurrentStepOnnxRuntimeModelsBelowItsPeakComputingWhatItWasHanded()
+    {
+        using var context = new ComputeContext();
+        var step = RecurrentStep(context);
+        Assert.True(step.Chosen < step.Handed);
+        Assert.Equal(step.HandedComputes, step.ChosenComputes);
+    }
+
+    // The LSTM benchmark's step at four times its batch.
+    internal static (long Handed, long Chosen, float[][] HandedComputes, float[][] ChosenComputes) RecurrentStep(ComputeContext context)
+    {
+        long[] shape = [32L, 32L, 64L];
+        var sample = TensorData(shape, [.. Enumerable.Range(0, 32 * 32 * 64).Select(i => (i % 13) / 13f - 0.5f)]);
+        var rig = TrainingRig.FromScratch(Benchmarks.MemoryPassLstm.ComputationGraph, L2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph,
+            [sample], new AdamWOptimizerHyperparameters { LearningRate = 0.001f }, runtimeContext: context);
+        var result = rig.OptimizationResult;
+        var chosen = result.AllStrategies.Select(s => s.Graph).ToList().FindIndex(g => ReferenceEquals(g, result.OptimizedGraph));
+        TensorData[] feeds = [.. rig.OptimizationInputShapes.Select(s => s.DType == DType.Float32
+            ? (TensorData)TensorData([.. s.Shape.Dims.Select(d => (long)d)], [.. Enumerable.Range(0, (int)s.Shape.Count).Select(i => (i % 7) / 7f)])
+            : TensorData([.. s.Shape.Dims.Select(d => (long)d)], new long[s.Shape.Count]))];
+        float[][] Computes(ComputationGraph step) => [.. context.Execute(step, [.. feeds.Select(f => f.Shared())]).Select(o => o.ToTensorData())
+            .Where(t => t.DType == DType.Float32).Select(t => t.As<float32>().CopyMemory<float>())];
+        return (result.BackendPeakBytes![0], result.BackendPeakBytes[chosen], Computes(rig.PreOptimizationGraph), Computes(rig.TrainingStepPureGraph));
+    }
+
+    [Fact]
+    public void TestOnnxRuntimeOnTheHostIsModelledHoldingWhatItsRunOfATrainingStepHolds()
+    {
+        Assert.True(ModelledAgainstRun(Benchmarks.MemoryPassEncoder1.ComputationGraph, [8L, 128L, 128L]));
+        Assert.True(ModelledAgainstRun(SdpaMeanPoolModel.ComputationGraph, [2L, 4L, 256L, 32L]));
+        Assert.True(ModelledAgainstRun(Benchmarks.MemoryPassConv.ComputationGraph, [8L, 3L, 64L, 64L]));
+    }
+
+    [Fact]
+    public void TestOnnxRuntimesRunIsModelledWithItsViewsInPlaceActivationsKeptBuffersAndKernelScratch()
+    {
+        Assert.Equal(12288, OrtPeak("a:float[1024]", "O", true, [], Op("Exp", "a", "e"), Op("Neg", "e", "f"), Op("Add", "e f", "O")));
+        Assert.Equal(4096, OrtPeak("a:float[1024]", "O", true, [], Op("Exp", "a", "e"), Op("Relu", "e", "O")));
+        Assert.Equal(4096, OrtPeak("a:float[1024]", "O", true, [], Op("Exp", "a", "e"), Op("Unsqueeze", "e zero", "O")));
+        Assert.Equal(20484, OrtPeak("a:float[1024] b:float[2048]", "y z", true, [],
+            Op("Exp", "a", "e"), Op("ReduceSum", "e zero", "s"), Op("Exp", "b", "x"), Op("Neg", "x", "y"), Op("Add", "a s", "z")));
+        Assert.Equal(16388, OrtPeak("a:float[1024] b:float[2048]", "y z", true, [],
+            Op("Exp", "a", "e"), Op("ReduceSum", "e zero", "s"), Op("Exp", "b", "x"), Op("Neg", "x", "y"), Op("Shape", "a", "h"), Op("Expand", "s h", "z")));
+        Assert.Equal(0, OrtPeak("a:float[1024] b:float[1024]", "O", true, [new OutputAlias("O", "a")], Op("Add", "a b", "O")));
+        Assert.Equal(13312, OrtPeak("a:float[1024] c:float[1024]", "O", true, [], Op("Greater", "a c", "m"), Op("Where", "m a c", "O")));
+        Assert.Equal(5120, OrtPeak("a:float[1024] c:float[1024]", "O", false, [], Op("Greater", "a c", "m"), Op("Where", "m a c", "O")));
+        Assert.Equal(133120, OrtPeak("x:float[2,3,8,8] w:float[4,3,3,3]", "O", true, [], ComputeContextLifetimeCoverageTests.With(Op("Conv", "x w", "O"), "pads", 1, 1, 1, 1)));
+        Assert.Equal(2160, OrtPeak("x:float[1,4,4,4] w:float[4,3,3,3]", "O", true, [], Op("ConvTranspose", "x w", "O")));
+        Assert.Equal(1000, OrtPeak("x:float[4,2,3] w:float[1,20,3] r:float[1,20,5]", "O", true, [],
+            ComputeContextLifetimeCoverageTests.Op("LSTM", "x w r", "O", attribute: ("hidden_size", 5))));
+        Assert.Equal(8391776, OrtPeak("x:float[4,2,3] w:float[1,20,3] r:float[1,20,5]", "O", false, [],
+            ComputeContextLifetimeCoverageTests.Op("LSTM", "x w r", "O", attribute: ("hidden_size", 5))));
+        Assert.Equal(16896, OrtPeak("x:float[4,8,16,4]", "O", false, [], Op("Exp", "x", "e"), Op("ReduceMean", "e two", "O")));
+        Assert.Equal(10240, OrtPeak("x:float[4,8,16,4]", "O", false, [], Op("Exp", "x", "e"), Op("ReduceMean", "e three", "O")));
+        Assert.Equal(8704, OrtPeak("x:float[4,8,16,4]", "O", true, [], Op("Exp", "x", "e"), Op("ReduceMean", "e two", "O")));
+        Assert.Equal(768, OrtPeak("x:float[4,8]", "O", true, [], Op("SequenceEmpty", "", "s"),
+            ComputeContextLifetimeCoverageTests.Loop("three s", "S", ComputeContextLifetimeCoverageTests.GraphOf("i c t", "k u",
+                Op("Neg", "x", "n"), Op("SequenceInsert", "t n", "u"), Op("Identity", "c", "k"))),
+            ComputeContextLifetimeCoverageTests.Op("ConcatFromSequence", "S", "O", attribute: ("axis", 0))));
+        NodeProto[] listed = [Op("SequenceEmpty", "", "s"), ComputeContextLifetimeCoverageTests.Loop("three s", "S",
+            ComputeContextLifetimeCoverageTests.GraphOf("i c t", "k u", Op("Neg", "x", "n"), Op("SequenceInsert", "t n", "u"), Op("Identity", "c", "k"))),
+            Op("SequenceAt", "S zero", "O")];
+        Assert.Equal(384, OrtPeak("x:float[4,8]", "O", true, [], listed));
+        Assert.Equal(768, OrtPeak("x:float[4,8]", "O", false, [], listed));
+        NodeProto[] twoLists = [Op("SequenceEmpty", "", "s"), Op("SequenceEmpty", "", "r"), ComputeContextLifetimeCoverageTests.Loop("three s r", "S R",
+            ComputeContextLifetimeCoverageTests.GraphOf("i c t v", "k u w", Op("Neg", "x", "n"), Op("Exp", "x", "e"),
+                Op("SequenceInsert", "t n", "u"), Op("SequenceInsert", "v e", "w"), Op("Identity", "c", "k"))),
+            Op("SequenceAt", "S zero", "a"), Op("SequenceAt", "R zero", "b"), Op("Add", "a b", "O")];
+        Assert.Equal(768, OrtPeak("x:float[4,8]", "O", true, [], twoLists));
+        Assert.Equal(1536, OrtPeak("x:float[4,8]", "O", false, [], twoLists));
+    }
+
+    private static NodeProto Op(string op, string inputs, string outputs) => ComputeContextLifetimeCoverageTests.Op(op, inputs, outputs);
+
+    // With a zero, a two and a three as initializers the nodes may read.
+    private static long? OrtPeak(string inputs, string outputs, bool onHost, OutputAlias[] aliases, params NodeProto[] nodes)
+    {
+        var graph = ComputeContextLifetimeCoverageTests.WithInts(ComputeContextLifetimeCoverageTests.WithInts(ComputeContextLifetimeCoverageTests.WithInts(
+            ComputeContextLifetimeCoverageTests.GraphOf(inputs, outputs, nodes), "zero", 0), "two", 2), "three", 3);
+        var fed = graph.Inputs.ToDictionary(i => i.Name, i => ((long[])[.. i.Type.TensorType.Shape.Dims.Select(d => d.DimValue)], i.Type.TensorType.ElemType), StringComparer.Ordinal);
+        return Shorokoo.OnnxRuntime.OrtRunMemory.Peak(graph, fed, aliases, onHost);
+    }
+
+    // Within a thirty-second of the most the step's run asks of its session's account, every output held.
+    private static bool ModelledAgainstRun(ComputationGraph model, long[] shape)
+    {
+        using var context = new ComputeContext();
+        var sample = TensorData(shape, new float[shape.Aggregate(1L, (a, d) => a * d)]);
+        var rig = TrainingRig.FromScratch(model, Shorokoo.Modules.Losses.L2Loss.ComputationGraph,
+            Shorokoo.Modules.Optimizers.AdamWOptimizer.ComputationGraph, [sample],
+            new Shorokoo.Modules.Optimizers.AdamWOptimizerHyperparameters { LearningRate = 0.001f }, runtimeContext: context);
+        var step = Benchmarks.MemoryPassBenchmarkTests.RigModel(rig.TrainingStepPureGraph, rig.OptimizationInputShapes);
+        var modelled = context.ResolvedBackend.ModelledRunPeak(step, [], PrecisionSettings.Default);
+        var account = Shorokoo.OnnxRuntime.RuntimeAllocator.ForHost().Shared.Open("modelled-against-run");
+        try
+        {
+            using var stream = new MemoryStream();
+            ProtoBuf.Serializer.Serialize(stream, step);
+            using var options = new SessionOptions();
+            Shorokoo.OnnxRuntime.OrtBackend.Configure(options, ShorokooGraphOptimization.TrainingStep, ShorokooLogSeverity.Fatal);
+            options.AddSessionConfigEntry("session.use_env_allocators", "1");
+            InferenceSession session;
+            using (CachingAllocator.Charge(account, null))
+                session = new InferenceSession(stream.ToArray(), options);
+            using (session)
+            {
+                var shapes = rig.OptimizationInputShapes;
+                var feeds = Enumerable.Range(0, session.InputNames.Count).ToDictionary(i => session.InputNames[i], i => Utils.SyntheticFeed.Tensor(shapes[i].Shape, shapes[i].DType, i));
+                using var runOptions = new RunOptions();
+                void Run()
+                {
+                    using (CachingAllocator.Charge(account, null))
+                        foreach (var output in session.Run(runOptions, feeds, session.OutputNames)) output.Dispose();
+                }
+                Run();
+                account.BeginPeak();
+                Run();
+                foreach (var feed in feeds.Values) feed.Dispose();
+                return modelled is long m && Math.Abs(m - account.Peak) * 32 <= account.Peak;
+            }
+        }
+        finally
+        {
+            Shorokoo.OnnxRuntime.RuntimeAllocator.ForHost().Shared.Close(account);
+        }
+    }
+
+    [Fact]
+    public void TestTheMemoryAwarePassHandsAnOnnxRuntimeHostContextNoStepHoldingMoreThanTheStepItWasHanded()
+        => Assert.True(HostStepPeak(Benchmarks.MemoryPassConv.ComputationGraph, [8L, 3L, 64L, 64L], handed: false)
+                       <= HostStepPeak(Benchmarks.MemoryPassConv.ComputationGraph, [8L, 3L, 64L, 64L], handed: true));
+
+    private static long HostStepPeak(ComputationGraph model, long[] shape, bool handed)
+    {
+        using var context = new ComputeContext { Diagnostics = new DiagnosticSettings { CollectRunStatistics = true } };
+        var sample = TensorData(shape, new float[shape.Aggregate(1L, (a, d) => a * d)]);
+        var rig = TrainingRig.FromScratch(model, Shorokoo.Modules.Losses.L2Loss.ComputationGraph,
+            Shorokoo.Modules.Optimizers.AdamWOptimizer.ComputationGraph, [sample],
+            new Shorokoo.Modules.Optimizers.AdamWOptimizerHyperparameters { LearningRate = 0.001f }, runtimeContext: context);
+        if (handed)
+            typeof(TrainingRig).GetProperty(nameof(TrainingRig.TrainingStepPureGraph))!.SetValue(rig, rig.PreOptimizationGraph);
+        var input = rig.InputDef.FromOrderedData(sample);
+        var target = rig.TargetDef.FromOrderedData(TensorData([8L, 32L], new float[256]));
+        using var run = rig.BeginResidentRun(rig.CreateInitialCheckpoint());
+        run.Step(input.Shared(), target.Shared());
+        run.Step(input.Shared(), target.Shared());
+        return context.RunStats.PeakBytes;
+    }
+
     private static void CoverCheckpointRebind(
         ComputationGraph modelGraph,
         ComputationGraph lossGraph,
@@ -2225,6 +2375,38 @@ public class TrainingRigScheduleCoverageTests
     }
 
     [Fact]
+    public void TestAResidentRunHandsOverItsStateBetweenStepsWithoutStepping()
+    {
+        var (sample, input, target) = ScalarMultiplyBatches();
+        var rig = SgdRig(sample, Schedules.Linear(0.2f, 0f, 8));
+        var begun = rig.TrainStep(rig.CreateInitialCheckpoint(), input.Shared(), target.Shared());
+        var reference = rig.TrainStep(rig.TrainStep(begun.Shared(), input.Shared(), target.Shared()), input.Shared(), target.Shared());
+        static bool Whole(TrainingCheckpoint c) => c.TrainableParams.Fields.Values.OfType<TensorData>().All(t => !t.IsDisposed);
+
+        TrainingCheckpoint before, taken, again, after;
+        var run = rig.BeginResidentRun(begun);
+        using (run)
+        {
+            before = run.TakeCheckpoint();
+            run.Step(input.Shared(), target.Shared());
+            run.Step(input.Shared(), target.Shared());
+            taken = run.TakeCheckpoint();
+            again = run.TakeCheckpoint();
+            after = run.StepToCheckpoint(input.Shared(), target.Shared());
+        }
+        Assert.Same(begun, before);
+        Assert.True(Whole(begun));
+        AssertClose(reference, taken, 0f);
+        Assert.Equal(reference.Step, taken.Step);
+        Assert.Equal([0L, 1L, 2L], taken.History.Steps);
+        Assert.Same(taken.TrainableParams, again.TrainableParams);
+        Assert.True(Whole(taken));
+        Assert.Same(taken, taken.ToHost());
+        AssertClose(rig.TrainStep(taken.Shared(), input.Shared(), target.Shared()), after, 0f);
+        Assert.Throws<ObjectDisposedException>(() => run.TakeCheckpoint());
+    }
+
+    [Fact]
     public void TestAStepThatFailsReadingItsOutputsReleasesThemAndLosesOnlyStateItConsumedCoverage()
     {
         var (sample, input, target) = ScalarMultiplyBatches();
@@ -2987,6 +3169,107 @@ public class TrainingRigTrainingLoopCoverageTests
     }
 
     [Fact]
+    public void TestAFitStoppedBetweenStepsResumesToTheUninterruptedResult()
+    {
+        var rig = LoaderRig(batchSize: 2, features: 1);
+        var (inputs, targets) = IndexDataset(rig, n: 8, features: 1);
+        InMemoryDataLoader Loader() => new(inputs, targets, batchSize: 2, shuffle: true, seed: 777);
+        var reference = rig.Fit(Loader(), numEpochs: 2).FinalCheckpoint;
+
+        TrainingResult Stopped(int steps, bool cancel)
+        {
+            using var cts = new CancellationTokenSource();
+            int seen = 0;
+            return rig.Fit(Loader(), 2, null, r => { if (++seen == steps) { if (cancel) cts.Cancel(); else r.RequestStop(); } }, cts.Token);
+        }
+        float[] expected = FlattenStruct(reference.TrainableParams);
+        (TrainingStopReason, long, bool) StopAndResume(int steps, bool cancel)
+        {
+            var stopped = Stopped(steps, cancel);
+            var step = stopped.FinalCheckpoint.Step;
+            var resumed = rig.Fit(Loader(), numEpochs: 2 - steps / 4, stopped.FinalCheckpoint).FinalCheckpoint;
+            return (stopped.StopReason, step, expected.SequenceEqual(FlattenStruct(resumed.TrainableParams)));
+        }
+
+        Assert.Equal((TrainingStopReason.Cancelled, 1L, true), StopAndResume(1, cancel: true));
+        Assert.Equal((TrainingStopReason.Cancelled, 3L, true), StopAndResume(3, cancel: true));
+        Assert.Equal((TrainingStopReason.Cancelled, 4L, true), StopAndResume(4, cancel: true));
+        Assert.Equal((TrainingStopReason.StopRequested, 5L, true), StopAndResume(5, cancel: false));
+        Assert.Equal((TrainingStopReason.StopRequested, 7L, true), StopAndResume(7, cancel: false));
+        Assert.Equal(TrainingStopReason.Completed, Stopped(8, cancel: true).StopReason);
+        Assert.Equal(TrainingStopReason.Completed, Stopped(8, cancel: false).StopReason);
+        Assert.Equal(TrainingStopReason.Completed, rig.Fit([inputs], [targets], 2, onStep: r => { if (r.Step == 1) r.RequestStop(); }).StopReason);
+        Assert.Equal([2, 1], [Stopped(5, cancel: false).EpochLosses.Length, Stopped(3, cancel: false).EpochLosses.Length]);
+        Assert.All((int[])[1, 4, 5, 7], steps => Assert.Equal(expected,
+            FlattenStruct(rig.FitUntilEpoch(Loader(), 2, Stopped(steps, cancel: false).FinalCheckpoint).FinalCheckpoint.TrainableParams)));
+        TensorDataStruct[] xs = [.. ((int[])[2, 4, 6]).Select(n => IndexDataset(rig, n, features: 1).inputs)];
+        TensorDataStruct[] ys = [.. ((int[])[2, 4, 6]).Select(n => IndexDataset(rig, n, features: 1).targets)];
+        var whole = rig.Fit(xs, ys, 2).FinalCheckpoint;
+        Assert.Equal((1L, 2L), (whole.Epoch, whole.BatchIndex));
+        Assert.All((int[])[1, 3, 4, 5], steps => Assert.Equal(FlattenStruct(whole.TrainableParams), FlattenStruct(rig.Fit(xs, ys, 2 - steps / 3,
+            rig.Fit(xs, ys, 2, onStep: r => { if (r.Step == steps - 1) r.RequestStop(); }).FinalCheckpoint).FinalCheckpoint.TrainableParams)));
+        var finished = rig.FitUntilEpoch(Loader(), 2, reference);
+        Assert.Equal((TrainingStopReason.Completed, 0), (finished.StopReason, finished.EpochLosses.Length));
+        Assert.Same(reference, finished.FinalCheckpoint);
+        TrainingCheckpoint At(long epoch, long batch)
+        {
+            var initial = rig.CreateInitialCheckpoint();
+            return new() { TrainableParams = initial.TrainableParams, ModelState = initial.ModelState,
+                OptimizerState = initial.OptimizerState, Epoch = epoch, BatchIndex = batch };
+        }
+        Assert.All(((long Epoch, long Batch)[])[(0, 7), (0, 3), (0, -5), (-1, 0)],
+            p => Assert.Throws<ArgumentOutOfRangeException>(() => rig.Fit(xs, ys, 1, At(p.Epoch, p.Batch))));
+        Assert.Equal(1L, rig.Fit(xs, ys, 1, At(0, 2)).FinalCheckpoint.Epoch);
+    }
+
+    [Fact]
+    public void TestTheStepCallbackSeesEveryStepInOrderAndHoldsItsReportOnlyWhileItRuns()
+    {
+        var rig = LoaderRig(batchSize: 2, features: 1);
+        var (inputs, targets) = IndexDataset(rig, n: 8, features: 1);
+        List<TrainingStepReport> reports = [];
+        TrainingCheckpoint? taken = null;
+        var fit = rig.Fit(new InMemoryDataLoader(inputs, targets, batchSize: 2), 2,
+            onStep: r => { reports.Add(r); if (r.Step == 2) taken = r.TakeCheckpoint(); });
+
+        Assert.Equal(fit.FinalCheckpoint.History, reports.Select(r => r.Entry));
+        Assert.Equal([0L, 1L, 2L, 3L, 4L, 5L, 6L, 7L], reports.Select(r => r.Step));
+        Assert.Equal([0L, 0L, 0L, 0L, 1L, 1L, 1L, 1L], reports.Select(r => r.Epoch!.Value));
+        Assert.Equal([0L, 1L, 2L, 3L, 0L, 1L, 2L, 3L], reports.Select(r => r.BatchIndex!.Value));
+        Assert.True(reports.Zip(reports.Skip(1)).All(p => p.First.Elapsed <= p.Second.Elapsed));
+        Assert.Throws<InvalidOperationException>(() => reports[0].RequestStop());
+        Assert.Throws<InvalidOperationException>(() => reports[0].TakeCheckpoint());
+        Assert.Equal(3L, taken!.Step);
+        Assert.Equal(FlattenStruct(taken.TrainableParams),
+            FlattenStruct(rig.Fit(new InMemoryDataLoader(inputs, targets, batchSize: 2), 2, null, r => { if (r.Step == 2) r.RequestStop(); }).FinalCheckpoint.TrainableParams));
+
+        using var cancelled = new CancellationTokenSource();
+        cancelled.Cancel();
+        var initial = rig.CreateInitialCheckpoint();
+        var none = rig.Fit(new InMemoryDataLoader(inputs, targets, batchSize: 2), 2, initial, cancellationToken: cancelled.Token);
+        Assert.Equal((TrainingStopReason.Cancelled, 0, 0L), (none.StopReason, none.EpochLosses.Length, none.FinalCheckpoint.Step));
+        Assert.Same(initial, none.FinalCheckpoint);
+        Assert.Equal(TrainingStopReason.Cancelled, rig.Fit([], [], 2, cancellationToken: cancelled.Token).StopReason);
+
+        var keptLast = rig.Fit(new InMemoryDataLoader(inputs, targets, batchSize: 2), 2, onStep: r => { if (r.Step == 7) taken = r.TakeCheckpoint(); });
+        Assert.Same(taken, keptLast.FinalCheckpoint);
+        Assert.Null(keptLast.FinalCheckpoint.FeedMode);
+
+        var batches = rig.Fit([inputs, inputs], [targets, targets], 3, onStep: r => { if (r.Step == 2) r.RequestStop(); });
+        Assert.Equal((TrainingStopReason.StopRequested, 3L, 2), (batches.StopReason, batches.FinalCheckpoint.Step, batches.EpochLosses.Length));
+
+        var thrown = new InvalidOperationException();
+        void Throws(TrainingStepReport r) { if (r.Step == 2) throw thrown; }
+        var fromLoader = Assert.Throws<TrainingCallbackException>(() => rig.Fit(new InMemoryDataLoader(inputs, targets, batchSize: 2), 2, onStep: Throws));
+        var fromArrays = Assert.Throws<TrainingCallbackException>(() => rig.Fit([inputs, inputs], [targets, targets], 3, onStep: Throws));
+        Assert.Equal((thrown, thrown, 3L, 3L), (fromLoader.InnerException, fromArrays.InnerException, fromLoader.Checkpoint.Step, fromArrays.Checkpoint.Step));
+        Assert.Equal(FlattenStruct(fit.FinalCheckpoint.TrainableParams),
+            FlattenStruct(rig.Fit(new InMemoryDataLoader(inputs, targets, batchSize: 2), 2, fromLoader.Checkpoint).FinalCheckpoint.TrainableParams));
+        Assert.Equal(FlattenStruct(rig.Fit([inputs, inputs], [targets, targets], 3).FinalCheckpoint.TrainableParams),
+            FlattenStruct(rig.Fit([inputs, inputs], [targets, targets], 2, fromArrays.Checkpoint).FinalCheckpoint.TrainableParams));
+    }
+
+    [Fact]
     public void TestInferenceModelExtractionSingleAndMultiInputCoverage()
     {
         var (sample, input, target) = ScalarMultiplyBatches();
@@ -3325,7 +3608,7 @@ public class TrainingRigTrainingLoopCoverageTests
         Assert.Throws<OnnxRuntimeException>(() => run.Step(outOfRange.Shared(), target.Shared()));
         Assert.True(float.IsFinite(run.Step(input.Shared(), target.Shared())));
         Assert.Throws<OnnxRuntimeException>(() => run.Step(outOfRange.Shared(), target.Shared()));
-        Assert.Contains("the last checkpoint you took with StepToCheckpoint", Assert.Throws<InvalidOperationException>(
+        Assert.Contains("the last checkpoint you took with TakeCheckpoint() or StepToCheckpoint(...)", Assert.Throws<InvalidOperationException>(
             () => run.Step(input.Shared(), target.Shared())).Message);
         Assert.DoesNotContain(Tensors(published), t => t.IsDisposed);
     }
@@ -3518,29 +3801,19 @@ public class TrainingRigTrainingLoopCoverageTests
             () => run.Step(input.Shared(), target.Shared())).Message);
     }
 
-    // Retention is a backend capability, and this one has no memory but the host's. A provider
-    // wrongly reported as having its own would leave every checkpoint tensor unreadable, so the
-    // discovery must not misfire — and asking to retain must stay a no-op when there is nowhere to
-    // retain to.
     [Fact]
-    public void TestOnAHostOnlyBackendNothingIsRetainedAndEveryOutputStaysReadable()
+    public void TestOnAHostOnlyBackendEveryOutputAndEveryCheckpointAStepHandsBackIsInHostMemory()
     {
         var rig = AdamWScalarRig();
         var (input, target) = (InBatch(1f, 2f, 3f, 4f), TargetBatch(2f, 4f, 6f, 8f));
         var ckpt = rig.CreateInitialCheckpoint();
         var compiled = rig.RuntimeContext.Compile(rig.TrainingStepPureGraph);
-        Assert.False(compiled.HasDeviceMemory);
-
-        // A retention array of any other length is refused rather than half-applied.
-        Assert.Throws<InvalidTensorOperationException>(() => compiled.Execute(
-            ComputeContext.ExpandStructInputs([ckpt.TrainableParams.Shared(), ckpt.ModelState.Shared(), ckpt.OptimizerState.Shared(), input.Shared(), target.Shared()]),
-            [.. Enumerable.Repeat(true, compiled.OutputCount + 1)]));
 
         IData[] inputs = [ckpt.TrainableParams.Shared(), ckpt.ModelState.Shared(), ckpt.OptimizerState.Shared(), input.Shared(), target.Shared()];
-        var outputs = compiled.Execute(
-            ComputeContext.ExpandStructInputs(inputs),
-            [.. Enumerable.Repeat(true, compiled.OutputCount)]);
+        var outputs = compiled.Execute(ComputeContext.ExpandStructInputs(inputs));
         Assert.All(outputs, o => Assert.True(o.ToTensorData().IsHostResident));
+        var trained = rig.TrainStep(ckpt.Shared(), input.Shared(), target.Shared());
+        Assert.All(trained.TrainableParams.Fields.Values, f => Assert.True(((TensorData)f).IsHostResident));
 
         using var run = rig.BeginResidentRun(ckpt);
         run.Step(input.Shared(), target.Shared());
@@ -3856,6 +4129,28 @@ public class TrainingRigCheckpointCoverageTests
         for (int i = 0; i < 4; i++) cp = rig.TrainStep(cp.Shared(), input.Shared(), target.Shared());
         Assert.Equal(1, rig.ReclaimBudgetBytes);
         Assert.NotNull(cp);
+    }
+
+    [Fact]
+    public void TestAResidentRunCountsACheckpointItHandedOutOnceAStepHasMovedOnFromIt()
+    {
+        var rig = ShapeRig(ParamOrderAModel.ComputationGraph);
+        var input = rig.InputDef.FromOrderedData(TensorData([4L], [1f, 2f, 3f, 4f]));
+        var target = rig.TargetDef.FromOrderedData(TensorData([4L], [1f, 2f, 3f, 4f]));
+        static long Bytes(TrainingCheckpoint c) => ((TensorDataStruct[])[c.TrainableParams, c.ModelState, c.OptimizerState])
+            .SelectMany(s => s.Fields.Values.OfType<TensorData>()).Sum(t => t.ByteCount);
+
+        using var run = rig.BeginResidentRun();
+        run.Step(input.Shared(), target.Shared());
+        var handed = run.StepToCheckpoint(input.Shared(), target.Shared());
+        Assert.Equal(0, rig.SupersededStateBytesPending);
+        run.Step(input.Shared(), target.Shared());
+        Assert.Equal(Bytes(handed), rig.SupersededStateBytesPending);
+        run.Step(input.Shared(), target.Shared());
+        Assert.Equal(Bytes(handed), rig.SupersededStateBytesPending);
+        var taken = run.TakeCheckpoint();
+        run.Step(input.Shared(), target.Shared());
+        Assert.Equal(Bytes(handed) + Bytes(taken), rig.SupersededStateBytesPending);
     }
 
     /// <summary>A caller that keeps no checkpoint, and one that keeps a single older checkpoint,
@@ -4251,12 +4546,14 @@ public class TrainingRigCheckpointCoverageTests
         {
             void Zip(TrainingCheckpoint c) => Persistence.SaveTrainingCheckpointToSkpt(c, skpt);
             void Dir(TrainingCheckpoint c) => Persistence.ForTrainingCheckpoint(c).SaveAsDirectory(dir);
+            void Zstd(TrainingCheckpoint c) => Persistence.ForTrainingCheckpoint(c).WithZstdCompressedData().Save(skpt);
             void Model(ComputationGraph m) => Persistence.From(m).WithModel().WithWeights().Save(skpt);
             var wideModel = wide.ToInferenceModel();
             var narrowModel = narrow.ToInferenceModel();
 
             Assert.True(SaveAllocation(() => Zip(wide)) - SaveAllocation(() => Zip(narrow)) < stateBytes / 2);
             Assert.True(SaveAllocation(() => Dir(wide)) - SaveAllocation(() => Dir(narrow)) < stateBytes / 2);
+            Assert.True(SaveAllocation(() => Zstd(wide)) - SaveAllocation(() => Zstd(narrow)) < stateBytes / 2);
             Assert.True(SaveAllocation(() => Model(wideModel)) - SaveAllocation(() => Model(narrowModel)) < stateBytes / 6);
 
             Zip(wide);
@@ -6980,6 +7277,7 @@ public class TrainingRigNativeJaxCoverageTests : NativeTrainingParity<JaxCpuBack
 
 [Trait("Domain", "Training")]
 [Trait("Purpose", "Hardware")]
+[Collection(ProcessWideMemory.Name)]
 public class TrainingRigNativeTorchHardwareTests
 {
     [TorchCudaFact]

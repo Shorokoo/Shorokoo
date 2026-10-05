@@ -13,6 +13,15 @@ namespace Shorokoo.PythonTranslation;
 internal sealed record AliasSlot(string Output, string Input, int InputIndex, bool WrittenByTheGraph);
 
 /// <summary>
+/// A value of the top-level graph a run writes into a range of memory it is handed rather than into
+/// memory of its own: <see cref="Slot"/> numbers the range among the run's placements.
+/// <see cref="OwnMemory"/> marks a value whose operator may hand back its input's memory, which a
+/// run that does not write it into its range must copy into memory of its own all the same — the
+/// placement was proved with it out of its input's memory.
+/// </summary>
+internal readonly record struct PlacedValue(int Slot, bool OwnMemory);
+
+/// <summary>
 /// What the translation adds to every model for the runs of the session built from it, apart from
 /// what the model computes: a point to stop at before each node, and the writes of an output into a
 /// consumed input's memory. Both are calls the support package's <c>runtime</c> puts in the model's
@@ -39,6 +48,9 @@ internal sealed partial class OnnxToPythonTranslator
     };
 
     private AliasPlan? _aliasPlan;
+    private IReadOnlyDictionary<string, PlacedValue>? _placed;
+    private IReadOnlyDictionary<string, int>? _over;
+    private Scope? _mainScope;
 
     /// <summary>
     /// Translates <paramref name="model"/>, arranging for the runs of its session to write the outputs
@@ -49,16 +61,68 @@ internal sealed partial class OnnxToPythonTranslator
     /// <exception cref="NotSupportedException">The model uses something the backend cannot run: the
     /// dialect's own exception.</exception>
     public static TranslatedModel Translate(ModelProto model, IReadOnlyList<OutputAlias> outputAliases, PythonDialect dialect)
+        => Translate(model, outputAliases, dialect, null);
+
+    /// <summary>
+    /// <see cref="Translate(ModelProto, IReadOnlyList{OutputAlias}, PythonDialect)"/>, with each value
+    /// of the top-level graph <paramref name="placed"/> names written into the range of its slot
+    /// where a run hands one over (the support package's <c>_into</c>): a value whose operator is
+    /// translated as one plain call of a support function. Which ranges are safe to write is the
+    /// caller's to prove (<see cref="PlacementProof"/>); a run that hands over no range for a slot
+    /// computes the value as the plain translation does.
+    /// </summary>
+    /// <para>A node of the top-level graph <paramref name="over"/> names, with the operand slot it
+    /// gives, is written over that operand where a run computes without gradients (the support
+    /// package's <c>_over</c>): an element-wise operator whose operand nothing reads after it, which
+    /// the caller has made sure of.</para>
+    internal static TranslatedModel Translate(
+        ModelProto model, IReadOnlyList<OutputAlias> outputAliases, PythonDialect dialect,
+        IReadOnlyDictionary<string, PlacedValue>? placed, IReadOnlyDictionary<string, int>? over = null)
     {
         ArgumentNullException.ThrowIfNull(model);
         ArgumentNullException.ThrowIfNull(outputAliases);
         ArgumentNullException.ThrowIfNull(dialect);
         var graph = model.Graph ?? throw dialect.Unsupported(
             UnsupportedReason.UnsupportedModel, null, null, "The model has no graph.");
-        var plan = AliasPlan.For(graph, outputAliases);
-        var translator = new OnnxToPythonTranslator(dialect) { _aliasPlan = plan };
+        var plan = AliasPlan.For(graph, outputAliases, over);
+        var translator = new OnnxToPythonTranslator(dialect) { _aliasPlan = plan, _placed = placed, _over = over };
         var translated = translator.Run(model, graph);
         return translated with { Aliases = plan?.Slots(translated.InputNames) ?? [] };
+    }
+
+    /// <summary>
+    /// <paramref name="expression"/>, the call of <paramref name="function"/> a node of the top-level
+    /// graph evaluates to, as a write into its range where the node's one output is placed: the same
+    /// call made through <c>_into</c>, which writes the result into the range a run hands over for
+    /// the slot and returns it there, or computes it as the call does where none is. A call returning
+    /// a tuple of the node's outputs is placed where its first output is the one the node uses.
+    /// </summary>
+    private string Placed(NodeProto node, Scope scope, string? function, string expression)
+    {
+        if (_placed is null || !ReferenceEquals(scope, _mainScope) || function is null
+            || !expression.StartsWith(function + "(", StringComparison.Ordinal)
+            || node.Outputs.Count(o => o.Length > 0) != 1 || node.Outputs[0].Length == 0
+            || !_placed.TryGetValue(node.Outputs[0], out var placed))
+            return expression;
+        return $"_into({placed.Slot}, {(placed.OwnMemory ? "True" : "False")}, {function}, {expression[(function.Length + 1)..]}";
+    }
+
+    /// <summary>
+    /// <paramref name="expression"/>, the call of <paramref name="function"/> a node of the top-level
+    /// graph evaluates to, as a write over the operand <see cref="_over"/> names for the node's one
+    /// output: the same call made through <c>_over</c>, which writes the result over that operand
+    /// where torch can and the run computes no gradient, and computes it as the call does
+    /// elsewhere.
+    /// </summary>
+    private string Over(NodeProto node, Scope scope, string? function, string expression)
+    {
+        if (_over is null || !ReferenceEquals(scope, _mainScope) || function is null
+            || !expression.StartsWith(function + "(", StringComparison.Ordinal)
+            || node.Outputs.Count(o => o.Length > 0) != 1 || node.Outputs[0].Length == 0
+            || _placed?.ContainsKey(node.Outputs[0]) == true
+            || !_over.TryGetValue(node.Outputs[0], out var slot) || slot >= node.Inputs.Count || node.Inputs[slot].Length == 0)
+            return expression;
+        return $"_over({scope.Lookup(node.Inputs[slot], node)}, {function}, {expression[(function.Length + 1)..]}";
     }
 
     /// <summary>
@@ -119,6 +183,7 @@ internal sealed partial class OnnxToPythonTranslator
     {
         private readonly GraphProto _graph;
         private readonly List<(OutputAlias Alias, NodeProto? Writer)> _pairs;
+        private readonly IReadOnlyDictionary<string, int>? _over;
         private readonly Dictionary<NodeProto, PlannedWrite> _writes = new(ReferenceEqualityComparer.Instance);
         private readonly HashSet<string> _initializers = new(StringComparer.Ordinal);
 
@@ -126,10 +191,11 @@ internal sealed partial class OnnxToPythonTranslator
         // holds reads from outside itself.
         private readonly List<(NodeProto Node, HashSet<string> Reads)> _reads = [];
 
-        private AliasPlan(GraphProto graph, List<(OutputAlias Alias, NodeProto? Writer)> pairs)
+        private AliasPlan(GraphProto graph, List<(OutputAlias Alias, NodeProto? Writer)> pairs, IReadOnlyDictionary<string, int>? over)
         {
             _graph = graph;
             _pairs = pairs;
+            _over = over;
             foreach (var node in graph.Nodes)
             {
                 var reads = new HashSet<string>(node.Inputs.Where(input => input.Length > 0), StringComparer.Ordinal);
@@ -147,8 +213,9 @@ internal sealed partial class OnnxToPythonTranslator
         }
 
         /// <summary>The plan for the pairs of <paramref name="aliases"/> the graph proves, or null
-        /// where it proves none.</summary>
-        public static AliasPlan? For(GraphProto graph, IReadOnlyList<OutputAlias> aliases)
+        /// where it proves none, in a translation writing the nodes <paramref name="over"/> names over
+        /// their operands.</summary>
+        public static AliasPlan? For(GraphProto graph, IReadOnlyList<OutputAlias> aliases, IReadOnlyDictionary<string, int>? over)
         {
             if (aliases.Count == 0) return null;
             var proved = OutputAliasProof.Prove(graph, aliases);
@@ -165,7 +232,7 @@ internal sealed partial class OnnxToPythonTranslator
                 .. proved.Where(a => !strings.Contains(a.Output))
                     .Select(a => (a, producers.GetValueOrDefault(a.Output))),
             ];
-            return pairs.Count == 0 ? null : new AliasPlan(graph, pairs);
+            return pairs.Count == 0 ? null : new AliasPlan(graph, pairs, over);
         }
 
         /// <summary>Whether <paramref name="node"/> is one torch can be told to write into memory
@@ -181,7 +248,8 @@ internal sealed partial class OnnxToPythonTranslator
         /// The values already made when <paramref name="write"/>'s node runs that something still to
         /// come reads — a node not yet written, a subgraph one of those holds, or the graph's own
         /// outputs — and that could be the input's memory: the input itself, and anything made from
-        /// it by an operator not known to make memory of its own. What has been written is read off
+        /// it by an operator not known to make memory of its own, or written over it
+        /// (<see cref="MayShare"/>). What has been written is read off
         /// <paramref name="isBound"/>, the names the statements so far have given values, so that the
         /// answer holds whatever order the nodes are written in.
         /// </summary>
@@ -199,26 +267,34 @@ internal sealed partial class OnnxToPythonTranslator
         }
 
         /// <summary><paramref name="input"/>, and every value made from it — or from one of those —
-        /// by an operator not known to make memory of its own.</summary>
+        /// by an operator not known to make memory of its own, or by a node the translation writes
+        /// over it (the support package's <c>_over</c>), which hands its result back in the operand's
+        /// memory, an operator of fresh memory though it is.</summary>
         private HashSet<string> MayShare(string input)
         {
             // One pass in graph order is the whole closure: a graph's nodes come after what they read.
             var found = new HashSet<string>(StringComparer.Ordinal) { input };
             foreach (var (node, reads) in _reads)
             {
-                if (IsFresh(node) || !reads.Overlaps(found)) continue;
+                if (!reads.Overlaps(found) || (IsFresh(node) && !WrittenOver(node, found))) continue;
                 foreach (var output in node.Outputs)
                     if (output.Length > 0) found.Add(output);
             }
             return found;
         }
 
+        /// <summary>Whether the translation may write <paramref name="node"/> over an operand among
+        /// <paramref name="found"/>.</summary>
+        private bool WrittenOver(NodeProto node, HashSet<string> found)
+            => _over is not null && node.Outputs.Count > 0 && _over.TryGetValue(node.Outputs[0], out var slot)
+               && slot < node.Inputs.Count && found.Contains(node.Inputs[slot]);
+
         private static bool IsFresh(NodeProto node)
             => node.Domain is "" or "ai.onnx" ? FreshOutputs.Contains(node.OpType) : node.Domain == TrainingDomain;
 
         /// <summary>Adds to <paramref name="found"/> every name <paramref name="subgraph"/>, or a
         /// subgraph inside it, reads from outside itself.</summary>
-        private static void ReferencedFrom(GraphProto subgraph, HashSet<string> found)
+        internal static void ReferencedFrom(GraphProto subgraph, HashSet<string> found)
         {
             var defined = new HashSet<string>(StringComparer.Ordinal);
             foreach (var input in subgraph.Inputs) defined.Add(input.Name);

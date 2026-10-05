@@ -69,6 +69,9 @@ public abstract class JaxBackend : IShorokooBackend
 
     internal bool OnCuda => _cudaDeviceId is not null;
 
+    /// <summary>The CUDA device this backend runs on, or -1 on the CPU.</summary>
+    internal int CudaDeviceId => _cudaDeviceId ?? -1;
+
     /// <summary>
     /// Resolves the Python environment and starts JAX in it now, rather than on the first call that
     /// needs it, and returns the environment it runs in.
@@ -142,7 +145,7 @@ public abstract class JaxBackend : IShorokooBackend
         ShorokooGraphOptimization graphOptimization,
         ShorokooLogSeverity logSeverity,
         DeviceMemorySettings deviceMemory)
-        => JaxSession.Create(this, modelBytes, logSeverity, DiagnosticSettings.Default);
+        => JaxSession.Create(this, modelBytes, logSeverity, DiagnosticSettings.Default, PrecisionSettings.Default);
 
     /// <summary>The same session, recording which device ran each node where
     /// <paramref name="diagnostics"/> asks: every node runs on this backend's device.</summary>
@@ -152,7 +155,7 @@ public abstract class JaxBackend : IShorokooBackend
         ShorokooLogSeverity logSeverity,
         DeviceMemorySettings deviceMemory,
         DiagnosticSettings diagnostics)
-        => JaxSession.Create(this, modelBytes, logSeverity, diagnostics);
+        => JaxSession.Create(this, modelBytes, logSeverity, diagnostics, PrecisionSettings.Default);
 
     /// <summary>The same session: a JAX array is never written in place, so the session binds none
     /// of <paramref name="outputAliases"/> (<see cref="IShorokooSession.BindableAliases"/> is
@@ -166,7 +169,40 @@ public abstract class JaxBackend : IShorokooBackend
         IReadOnlyList<OutputAlias> outputAliases)
     {
         ArgumentNullException.ThrowIfNull(outputAliases);
-        return JaxSession.Create(this, modelBytes, logSeverity, diagnostics);
+        return JaxSession.Create(this, modelBytes, logSeverity, diagnostics, PrecisionSettings.Default);
+    }
+
+    /// <summary>
+    /// The same session, computing in <paramref name="precision"/>. XLA compiles the precision of
+    /// each product and convolution into the program: <c>HIGHEST</c>, full <c>float32</c> precision,
+    /// unless <see cref="PrecisionSettings.AllowTensorFloat32"/> allows TensorFloat-32 on a card, where
+    /// it is compiled at <c>HIGH</c>. XLA computes a <c>float32</c> product at <c>HIGH</c> in
+    /// TensorFloat-32 on a card that has it, and a convolution in TensorFloat-32 or in full precision,
+    /// whichever kernel its autotuner finds faster when it compiles the program.
+    /// On the CPU it is <c>HIGHEST</c> either way. JAX has no thread pool per session to size, so
+    /// <paramref name="intraOpThreads"/> is unused, and it takes no initializer as a value it already
+    /// holds.
+    /// </summary>
+    /// <exception cref="NotSupportedException"><paramref name="suppliedInitializers"/> names
+    /// any.</exception>
+    public IShorokooSession CreateSession(
+        ReadOnlyMemory<byte> modelBytes,
+        ShorokooGraphOptimization graphOptimization,
+        ShorokooLogSeverity logSeverity,
+        DeviceMemorySettings deviceMemory,
+        DiagnosticSettings diagnostics,
+        IReadOnlyList<OutputAlias> outputAliases,
+        int intraOpThreads,
+        IReadOnlyList<SuppliedInitializer> suppliedInitializers,
+        PrecisionSettings precision)
+    {
+        ArgumentNullException.ThrowIfNull(outputAliases);
+        ArgumentNullException.ThrowIfNull(suppliedInitializers);
+        ArgumentNullException.ThrowIfNull(precision);
+        if (suppliedInitializers.Count > 0)
+            throw new NotSupportedException(
+                $"{Description} cannot take a model's initializers as values it already holds.");
+        return JaxSession.Create(this, modelBytes, logSeverity, diagnostics, precision);
     }
 
     public IShorokooTensorValue CreateTensor<T>(T[] data, long[] shape) where T : unmanaged
@@ -197,15 +233,25 @@ public abstract class JaxBackend : IShorokooBackend
     /// array is never uninitialized.</summary>
     public IShorokooTensorValue CreateUninitializedTensorInBackendMemory(
         ShorokooTensorElementType elementType, long[] shape)
+        => Uninitialized(elementType, shape, DeviceName);
+
+    /// <summary>A tensor in host memory whatever this backend's device, of any size, whose contents
+    /// are unspecified: a numpy array of zeros, so no managed array of its contents is ever
+    /// made.</summary>
+    public IShorokooTensorValue CreateUninitializedHostTensor(
+        ShorokooTensorElementType elementType, long[] shape)
+        => Uninitialized(elementType, shape, "cpu");
+
+    private IShorokooTensorValue Uninitialized(ShorokooTensorElementType elementType, long[] shape, string device)
     {
         ArgumentNullException.ThrowIfNull(shape);
         RefuseStrings(elementType);
-        PythonElementTypes.ByteCount(elementType, shape);
+        PythonElementTypes.ByteLength(elementType, shape);
         var runtime = Runtime;
         using (PythonRuntime.Gil())
         {
             using var dims = Shape(shape);
-            var tensor = PyCall.Invoke(runtime.Empty, (int)elementType, dims, DeviceName);
+            var tensor = PyCall.Invoke(runtime.Empty, (int)elementType, dims, device);
             return JaxTensorValue.Wrap(runtime, tensor);
         }
     }
@@ -287,6 +333,73 @@ public abstract class JaxBackend : IShorokooBackend
             return host.GetTensorDataAsSpan<byte>().ToArray();
         }
     }
+
+    /// <summary>
+    /// Copies <paramref name="destination"/>'s length of bytes of <paramref name="value"/>,
+    /// <paramref name="byteOffset"/> bytes in, to <paramref name="destination"/>: out of the piece of
+    /// its buffer a host tensor addresses, and out of a device array by fetching the slice of it
+    /// covering those bytes, so a save streams a device array of any size through one bounded
+    /// buffer. False for a value of another runtime's that the host cannot read, and for a device
+    /// array no larger than that buffer (<see cref="ByPiece"/>).
+    /// </summary>
+    public unsafe bool TryCopyTensorRangeToHost(IShorokooTensorValue value, long byteOffset, Span<byte> destination)
+    {
+        ArgumentNullException.ThrowIfNull(value);
+        if (value.IsHostAccessible)
+        {
+            value.HostPiece(byteOffset, destination.Length).CopyTo(destination);
+            // The piece is the value's last read (Shorokoo/Shorokoo#178).
+            GC.KeepAlive(value);
+            return true;
+        }
+        if (ByPiece(value) is not { } jax) return false;
+        IShorokooTensorValue.PieceWithin(byteOffset, destination.Length, PythonElementTypes.ByteLength(jax.ElementType, jax.Shape));
+        var runtime = Runtime;
+        using (PythonRuntime.Gil())
+        fixed (byte* target = destination)
+            PyCall.Invoke(runtime.CopyRangeToHost, jax.Value, byteOffset, (long)target, destination.Length).Dispose();
+        GC.KeepAlive(jax);
+        return true;
+    }
+
+    /// <summary>
+    /// Copies <paramref name="source"/> into <paramref name="value"/>, <paramref name="byteOffset"/>
+    /// bytes in: into the piece of its buffer a host tensor addresses, and into a device array by
+    /// sending the slice of it covering those bytes to the device and writing it over the array in
+    /// place, so a load streams a device array of any size through one bounded buffer. The value then
+    /// holds the array the write made, the one it held given up to it. False where
+    /// <see cref="TryCopyTensorRangeToHost"/> is.
+    /// </summary>
+    public unsafe bool TryCopyHostToTensorRange(IShorokooTensorValue value, long byteOffset, ReadOnlySpan<byte> source)
+    {
+        ArgumentNullException.ThrowIfNull(value);
+        if (value.IsHostAccessible)
+        {
+            source.CopyTo(value.HostPiece(byteOffset, source.Length));
+            // The piece is the value's last read (Shorokoo/Shorokoo#178).
+            GC.KeepAlive(value);
+            return true;
+        }
+        if (ByPiece(value) is not { } jax) return false;
+        IShorokooTensorValue.PieceWithin(byteOffset, source.Length, PythonElementTypes.ByteLength(jax.ElementType, jax.Shape));
+        var runtime = Runtime;
+        using (PythonRuntime.Gil())
+        fixed (byte* bytes = source)
+            jax.Hold(PyCall.Invoke(runtime.CopyHostToRange, jax.Value, byteOffset, (long)bytes, source.Length));
+        return true;
+    }
+
+    /// <summary>
+    /// <paramref name="value"/> where it is a device array of this runtime's larger than the one
+    /// buffer a save or a load streams through (<see cref="StagedReadBack.StagingBytes"/>), and so
+    /// copied by the piece. One no larger is declined, for its caller to copy it whole: that holds no
+    /// more host memory than one piece does, compiles no program, and a gather reads it once rather
+    /// than once per run of rows.
+    /// </summary>
+    private static JaxTensorValue? ByPiece(IShorokooTensorValue value)
+        => value is JaxTensorValue jax && PythonElementTypes.ByteLength(jax.ElementType, jax.Shape) > StagedReadBack.StagingBytes
+            ? jax
+            : null;
 
     internal static PyList Shape(long[] shape)
     {

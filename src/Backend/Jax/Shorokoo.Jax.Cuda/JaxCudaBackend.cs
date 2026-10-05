@@ -6,8 +6,7 @@ namespace Shorokoo.Jax.Cuda;
 /// The Shorokoo backend that runs on an NVIDIA GPU through JAX, built for CUDA 13, on Linux (JAX's
 /// CUDA plugin is built for no other system). Each model is translated to Python calling
 /// <c>jax.numpy</c> and compiled by XLA for the card once per signature of input shapes; its
-/// tensors live on <c>cuda:N</c>, and a run hands outputs back in host memory unless it is asked to
-/// keep them on the card.
+/// tensors live on <c>cuda:N</c>, where a run reads its inputs and leaves its outputs.
 ///
 /// <para>Name it explicitly; it is never discovered:</para>
 /// <code>

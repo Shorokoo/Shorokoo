@@ -41,10 +41,15 @@ def _filled(data, dims, keepdims, value):
     return torch.full(shape, value, dtype=data.dtype, device=data.device)
 
 
-def _reduce(fn, empty_value, data, axes_input, axes, keepdims, noop_with_empty_axes, ordered=False):
+def _reduce(fn, empty_value, data, axes_input, axes, keepdims, noop_with_empty_axes, ordered=False, alone=False):
+    """`fn` over the axes the node names. Where it names none and asks for no reduction, each
+    element is a group of its own: a reduction whose answer for one element is that element
+    (`alone`) hands the data back as it is."""
     if ordered and data.dtype == torch.uint64:
         fn = _ordered_uint64(fn)
     dims = _dims(data, axes_input, axes, noop_with_empty_axes)
+    if not dims and alone:
+        return data
     work = data.to(torch.int64) if data.dtype in _NARROW_UNSIGNED else data
     if not dims:
         # No axis reduced: every element is a group of its own. Reducing a leading axis of one
@@ -76,22 +81,46 @@ def _mean(x, dims, keep):
     return torch.div(torch.sum(x, dims, keepdim=keep), count, rounding_mode="trunc")
 
 
+def _sum(x, dims, keep):
+    """torch.sum over `dims`. On a card, a sum over the leading axes of a contiguous floating-point
+    tensor leaving fewer values than each one adds up -- a bias's gradient, summed over the batch --
+    is taken in two stages: the rows cut into about the square root of their count of equal blocks
+    summed block onto block, then the rows of that sum, any rows the blocks leave over summed apart.
+    Summed at once, torch's kernel stages partial sums in a buffer twice the input's size. The
+    partial sums of a 16-bit type are kept in float32 and the total rounded once, as torch's own sum
+    accumulates."""
+    rows = math.prod(x.shape[:len(dims)])
+    columns = x.numel() // rows if rows else 0
+    if (x.is_cuda and x.is_floating_point() and dims == list(range(len(dims))) and x.is_contiguous()
+            and rows >= 1024 and 0 < columns < rows):
+        accumulate = torch.float32 if x.dtype in (torch.float16, torch.bfloat16) else x.dtype
+        flat = x.reshape(rows, columns)
+        blocks = math.isqrt(rows)
+        whole = rows - rows % blocks
+        total = flat[:whole].reshape(blocks, whole // blocks, columns).sum(0, dtype=accumulate).sum(0)
+        if whole < rows:
+            total = total + flat[whole:].sum(0, dtype=accumulate)
+        shape = ([1] * len(dims) if keep else []) + list(x.shape[len(dims):])
+        return total.to(x.dtype).reshape(shape)
+    return torch.sum(x, dims, keepdim=keep)
+
+
 def reduce_sum(data, axes_input=None, /, *, axes=None, keepdims=1, noop_with_empty_axes=0):
-    return _reduce(lambda x, d, k: torch.sum(x, d, keepdim=k), 0, data, axes_input, axes, keepdims, noop_with_empty_axes)
+    return _reduce(_sum, 0, data, axes_input, axes, keepdims, noop_with_empty_axes, alone=True)
 
 
 def reduce_mean(data, axes_input=None, /, *, axes=None, keepdims=1, noop_with_empty_axes=0):
-    return _reduce(_mean, math.nan, data, axes_input, axes, keepdims, noop_with_empty_axes)
+    return _reduce(_mean, math.nan, data, axes_input, axes, keepdims, noop_with_empty_axes, alone=True)
 
 
 def reduce_max(data, axes_input=None, /, *, axes=None, keepdims=1, noop_with_empty_axes=0):
     return _reduce(lambda x, d, k: torch.amax(x, d, keepdim=k), _lowest, data, axes_input, axes, keepdims, noop_with_empty_axes,
-                   ordered=True)
+                   ordered=True, alone=True)
 
 
 def reduce_min(data, axes_input=None, /, *, axes=None, keepdims=1, noop_with_empty_axes=0):
     return _reduce(lambda x, d, k: torch.amin(x, d, keepdim=k), _highest, data, axes_input, axes, keepdims, noop_with_empty_axes,
-                   ordered=True)
+                   ordered=True, alone=True)
 
 
 def reduce_prod(data, axes_input=None, /, *, axes=None, keepdims=1, noop_with_empty_axes=0):
@@ -99,7 +128,7 @@ def reduce_prod(data, axes_input=None, /, *, axes=None, keepdims=1, noop_with_em
         for d in sorted(dims, reverse=True):
             x = torch.prod(x, d, keepdim=keep)
         return x
-    return _reduce(prod, 1, data, axes_input, axes, keepdims, noop_with_empty_axes)
+    return _reduce(prod, 1, data, axes_input, axes, keepdims, noop_with_empty_axes, alone=True)
 
 
 def reduce_l1(data, axes_input=None, /, *, axes=None, keepdims=1, noop_with_empty_axes=0):

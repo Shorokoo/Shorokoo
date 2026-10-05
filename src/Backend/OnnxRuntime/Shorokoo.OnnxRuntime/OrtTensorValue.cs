@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Microsoft.ML.OnnxRuntime;
 using Shorokoo.Core.Backends;
@@ -28,6 +29,38 @@ internal sealed class OrtTensorValue : IShorokooTensorValue
 
     public OrtTensorValue(OrtValue inner) { _inner = inner; }
 
+    /// <summary>
+    /// A value over a range of a shared block (<see cref="SharedBlock"/>): <paramref name="inner"/>
+    /// is an ORT value over that memory, owning none of it, and <paramref name="range"/> where it
+    /// stands, with a lease the caller has taken for it, which this releases as it is released — or,
+    /// where it is collected without, as it is collected (<see cref="HeldLease"/>).
+    /// </summary>
+    public OrtTensorValue(OrtValue inner, BlockRange range)
+    {
+        _inner = inner;
+        _lease = new HeldLease(range);
+        LeasesOfInnerValues.Add(inner, _lease);
+    }
+
+    // The lease on the range this value stands on, or null for one that owns its memory whole.
+    private readonly HeldLease? _lease;
+
+    // Each lease kept reachable from the ORT value over the range as well as from this wrapper: a
+    // native call is handed the ORT value alone, and keeps that alive across the call, not this --
+    // and the lease of a value collected undeleted goes as it is collected, the range with it.
+    private static readonly ConditionalWeakTable<OrtValue, HeldLease> LeasesOfInnerValues = new();
+
+    /// <summary>Where this value stands on a block it shares, or null for one that owns its memory
+    /// whole.</summary>
+    internal BlockRange? Range => _lease?.Range;
+
+    BlockRange? IShorokooTensorValue.Range => Range;
+
+    /// <summary>Whether a part of this value's memory no value stands on any more goes back while the
+    /// rest is in use (<see cref="OrtBackend.RangesGoBack(OrtTensorValue)"/>), once asked: it holds
+    /// for the value's life.</summary>
+    internal bool? PartsGoBack { get; set; }
+
     private static ObjectDisposedException Released() => new(
         nameof(OrtTensorValue),
         "This runtime value has been released -- the tensor it belonged to was deleted, or consumed "
@@ -55,6 +88,14 @@ internal sealed class OrtTensorValue : IShorokooTensorValue
             return shape;
         }
     }
+
+    // The shape, read from ORT once: a value's shape never changes. One array for every caller,
+    // so only for one that reads it -- a run sizing an output from what it is fed every time.
+    private long[]? _readShape;
+
+    /// <summary><see cref="Shape"/>, read from ONNX Runtime the first time and the same array from
+    /// then on: nothing may write into it.</summary>
+    internal long[] ReadShape => Volatile.Read(ref _readShape) ?? (_readShape = Shape);
 
     // ORT names the allocator a value was made by on its memory info, and "Cpu" is the one
     // that names host memory -- every other name ("Cuda", "Hip", ...) is the provider's own.
@@ -149,6 +190,54 @@ internal sealed class OrtTensorValue : IShorokooTensorValue
         }
     }
 
+    /// <summary>ORT's name for a CUDA device's allocator.</summary>
+    internal const string CudaAllocatorName = "Cuda";
+
+    // Where this tensor's buffer is, as ORT names it: the allocator and the device id. Probed once,
+    // on first ask -- a value never moves -- since a session asks it of every value it is fed on
+    // every run. A reference, so a reader sees both halves or neither.
+    private sealed record Place(string Name, int Id);
+
+    private Place? _place;
+
+    private Place PlaceOf()
+    {
+        if (Volatile.Read(ref _place) is { } known) return known;
+        using var info = Inner.GetTensorMemoryInfo();
+        // After the reads, for the reason ProbeHostAccessible gives: the info points into the native
+        // value rather than owning anything.
+        var place = new Place(info.Name, info.Id);
+        GC.KeepAlive(Inner);
+        Volatile.Write(ref _place, place);
+        return place;
+    }
+
+    /// <summary>The CUDA device whose memory this tensor is in, or null for one in no card's.</summary>
+    internal int? CudaDevice => Inner.IsTensor && PlaceOf() is { Name: CudaAllocatorName } place ? place.Id : null;
+
+    /// <summary>Whether this is a tensor in the host's plain memory — not a provider's pinned
+    /// memory.</summary>
+    internal bool InHostMemory => Inner.IsTensor && PlaceOf().Name == CpuAllocatorName;
+
+    /// <summary>Whether this is a tensor in the memory of CUDA device <paramref name="device"/>.</summary>
+    internal bool IsOnCudaDevice(int device)
+    {
+        if (!Inner.IsTensor) return false;
+        var place = PlaceOf();
+        return place.Name == CudaAllocatorName && place.Id == device;
+    }
+
+    /// <summary>Where this tensor's buffer is, in the words a message uses.</summary>
+    internal string MemoryName
+    {
+        get
+        {
+            if (!Inner.IsTensor) return "no buffer of its own";
+            var place = PlaceOf();
+            return IsHostAllocator(place.Name) ? "host memory" : $"{place.Name} device {place.Id}'s memory";
+        }
+    }
+
     /// <summary>Refuses a span over memory the host cannot read. The span accessors hand out a
     /// pointer without checking where it points, so this is the difference between an exception
     /// and a wild read of a device address — and it belongs here rather than only on the tensor
@@ -166,12 +255,13 @@ internal sealed class OrtTensorValue : IShorokooTensorValue
         throw new InvalidOperationException(
             "This value's storage is the execution provider's own memory, not host memory, so "
             + "it cannot be read directly. A resident training run leaves its state there "
-            + "deliberately; ResidentTrainingRun.StepToCheckpoint is what brings it home.");
+            + "deliberately; TensorData.ToHost() or TrainingCheckpoint.ToHost() brings it home.");
     }
 
     public ReadOnlySpan<T> GetTensorDataAsSpan<T>() where T : unmanaged
     {
         ThrowIfNotHostAccessible();
+        if (BufferBytes > int.MaxValue) return WholeBuffer<T>();
         if (typeof(T) == typeof(ShoFloat16))
             return MemoryMarshal.Cast<OrtFloat16, T>(Inner.GetTensorDataAsSpan<OrtFloat16>());
         if (typeof(T) == typeof(ShoBFloat16))
@@ -182,11 +272,51 @@ internal sealed class OrtTensorValue : IShorokooTensorValue
     public Span<T> GetTensorMutableDataAsSpan<T>() where T : unmanaged
     {
         ThrowIfNotHostAccessible();
+        if (BufferBytes > int.MaxValue) return WholeBuffer<T>();
         if (typeof(T) == typeof(ShoFloat16))
             return MemoryMarshal.Cast<OrtFloat16, T>(Inner.GetTensorMutableDataAsSpan<OrtFloat16>());
         if (typeof(T) == typeof(ShoBFloat16))
             return MemoryMarshal.Cast<OrtBFloat16, T>(Inner.GetTensorMutableDataAsSpan<OrtBFloat16>());
         return Inner.GetTensorMutableDataAsSpan<T>();
+    }
+
+    // The buffer's length in bytes, read from ORT the first time: a value's size never changes.
+    // -1 until then.
+    private long _bufferBytes = -1;
+
+    private long BufferBytes
+    {
+        get
+        {
+            var bytes = Volatile.Read(ref _bufferBytes);
+            if (bytes >= 0) return bytes;
+            bytes = Inner.GetTensorSizeInBytes();
+            GC.KeepAlive(Inner);
+            Volatile.Write(ref _bufferBytes, bytes);
+            return bytes;
+        }
+    }
+
+    /// <summary>
+    /// A span over the whole of a buffer longer than a span of bytes can be, addressed from where it
+    /// starts. ORT's own spans cannot be used for one: each starts as a span of bytes over the whole
+    /// buffer, whose length ORT casts to <c>int</c> unchecked, so past 2 GiB it turns negative and
+    /// the span refuses it, and past 4 GiB it wraps round to a length that fits — a 4.5 GiB tensor
+    /// read as 0.5 GiB with nothing to say so. Here the elements are counted checked: as many as an
+    /// <c>int</c> counts, and <see cref="OverflowException"/> for more — a span of bytes among them —
+    /// rather than a span over less than the buffer.
+    /// </summary>
+    private unsafe Span<T> WholeBuffer<T>() where T : unmanaged
+        => new((void*)OrtBackend.AddressOf(Inner), checked((int)(BufferBytes / sizeof(T))));
+
+    /// <summary>The <paramref name="count"/> bytes at <paramref name="byteOffset"/> into this
+    /// tensor's buffer, addressed from where the buffer starts, so a piece of a tensor longer than
+    /// any span is reached as one of a short tensor is.</summary>
+    unsafe Span<byte> IShorokooTensorValue.HostPiece(long byteOffset, int count)
+    {
+        ThrowIfNotHostAccessible();
+        IShorokooTensorValue.PieceWithin(byteOffset, count, BufferBytes);
+        return new Span<byte>((byte*)OrtBackend.AddressOf(Inner) + byteOffset, count);
     }
 
     // Each of the four accessors below, and the four reads above them, hands ORT a bare handle off
@@ -244,6 +374,9 @@ internal sealed class OrtTensorValue : IShorokooTensorValue
     {
         if (Interlocked.Exchange(ref _released, 1) != 0) return;
         _inner.Dispose();
+        // After the value over the memory, which reads nothing once released: the lease may be the
+        // block's last, and letting it go frees the memory.
+        _lease?.Release();
     }
 
     /// <summary>

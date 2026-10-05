@@ -18,7 +18,8 @@ public readonly record struct DeviceMemoryReading(long UsedBytes, long FreeBytes
 
 /// <summary>
 /// Readings of the CUDA device's memory, for the GPU backends (<c>Shorokoo.LinuxGPU</c>,
-/// <c>Shorokoo.WinGPU</c>). It reports what is gone; it configures nothing.
+/// <c>Shorokoo.WinGPU</c>), and the one call that hands back what Shorokoo's allocators keep for
+/// reuse (<see cref="ReleaseCached"/>). It configures nothing.
 ///
 /// <para><see cref="Read"/> and <see cref="Sample"/> call the CUDA runtime's
 /// <c>cudaMemGetInfo</c> directly and return <c>null</c> when there is no CUDA runtime to
@@ -113,6 +114,23 @@ public static class DeviceMemory
     /// run held on the card": resident state and every arena together, and no other process.
     /// </summary>
     public static long PeakProcessBytes => Interlocked.Read(ref _peakProcessBytes);
+
+    /// <summary>
+    /// Hands back to the system everything Shorokoo's allocators keep for reuse — on the host and on
+    /// every card, for every session and for the tensors placed on a card — and answers how many
+    /// bytes that was. Nothing in use is touched: every tensor stays where it is, and every session
+    /// runs on, taking its blocks from the device again as its next runs ask for them.
+    ///
+    /// <para>The allocators keep a block that is let go of for the next request of its size, so a
+    /// loop's runs find their blocks waiting. Each session keeps no more than the most one of its runs
+    /// has used, and gives what it keeps back as it is disposed, or at the end of a run with
+    /// <see cref="RunSettings.ShrinkArenaAfterRun"/>; what the tensors placed on a card left kept
+    /// goes back at the end of such a run on that card. This is the way to give it all back with
+    /// no run to make: between phases of a long-lived program, say, or before handing the card to
+    /// another process. It covers the ONNX Runtime backends' memory; a PyTorch or JAX backend keeps
+    /// a cache of its own.</para>
+    /// </summary>
+    public static long ReleaseCached() => CachingAllocator.ReleaseEverywhere();
 
     /// <summary>Forgets both peaks, so the next <see cref="Sample"/> starts fresh ones.</summary>
     public static void ResetPeak()

@@ -32,6 +32,8 @@ internal sealed class JaxRuntime
         FromHost = runtime.GetAttr("from_host");
         Empty = runtime.GetAttr("empty");
         HostCopy = runtime.GetAttr("host_copy");
+        CopyRangeToHost = runtime.GetAttr("copy_range_to_host");
+        CopyHostToRange = runtime.GetAttr("copy_host_to_range");
         Describe = runtime.GetAttr("describe");
         Run = runtime.GetAttr("run");
         LoadModel = runtime.GetAttr("load_model");
@@ -59,6 +61,8 @@ internal sealed class JaxRuntime
     public PyObject FromHost { get; }
     public PyObject Empty { get; }
     public PyObject HostCopy { get; }
+    public PyObject CopyRangeToHost { get; }
+    public PyObject CopyHostToRange { get; }
     public PyObject Describe { get; }
     public PyObject Run { get; }
     public PyObject LoadModel { get; }

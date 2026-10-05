@@ -1,7 +1,10 @@
 """ONNX elementwise math and activations, over torch tensors.
 
-Every helper is functional -- it never writes into a tensor it is handed -- and takes the node's
-inputs positionally and its attributes as keywords named as ONNX names them, with ONNX's defaults.
+Every helper takes the node's inputs positionally and its attributes as keywords named as ONNX
+names them, with ONNX's defaults, and writes into no tensor it is handed but the `_out` a few take:
+clip, gelu, softmax and log_softmax write their result into `_out`, which a run hands them only
+while it computes no gradient -- a range of memory the run consumed, or an operand nothing reads
+after the node, their very input among them (the runtime's place_into and write_over).
 """
 
 import functools
@@ -226,9 +229,16 @@ def mean(*xs):
     return div(sum_(*xs), torch.tensor(len(xs), dtype=xs[0].dtype, device=xs[0].device))
 
 
-def clip(x, lo=None, hi=None, /, *, min=None, max=None):
-    """Clip, whose gradient is Shorokoo's rule: 1 where x lies within the bounds, the bounds
-    themselves included, 0 elsewhere, and none to the bounds."""
+def clip(x, lo=None, hi=None, /, *, min=None, max=None, _out=None):
+    """Clip as ONNX Runtime computes it: the lower bound where x lies below it, then the upper bound
+    where that lies above it -- so x itself, a zero's sign included, where it lies within the bounds
+    or is NaN, the lower of two bounds equal in value below them, and the upper bound everywhere a
+    lower bound lies above it. Its gradient is Shorokoo's rule: 1 where x lies within the bounds,
+    the bounds themselves included, 0 elsewhere, and none to the bounds.
+
+    Each step selects between two values it has, element by element, so `_out`, a tensor of the
+    result's type, shape and device, takes every step in place: the result is written there, with
+    nothing allocated but the masks the selections read."""
     if lo is None and min is not None:
         lo = torch.tensor(min, dtype=x.dtype, device=x.device)
     if hi is None and max is not None:
@@ -240,19 +250,18 @@ def clip(x, lo=None, hi=None, /, *, min=None, max=None):
         hi = None if hi is None else hi.view(torch.int64) ^ _SIGN_BIT
         return (clip(work, lo, hi) ^ _SIGN_BIT).view(torch.uint64)
     work = x.to(torch.int64) if x.dtype in _NARROW_UNSIGNED else x
-    inside = torch.ones_like(work, dtype=torch.bool)
-    result = work.detach()
+    if _out is not None and not _rt.writes_into(_out, work):
+        _out = None
+    result = work
     if lo is not None:
         lo = lo.detach().to(work.dtype)
-        inside = inside & ~(work < lo)
-        result = torch.maximum(result, lo)
+        result = torch.where(result < lo, lo, result, out=_out)
     if hi is not None:
-        # After the lower bound, so that a lower bound above the upper one yields the upper one,
-        # as ONNX specifies.
         hi = hi.detach().to(work.dtype)
-        inside = inside & ~(work > hi)
-        result = torch.minimum(result, hi)
-    return torch.where(inside, work, result).to(x.dtype)
+        result = torch.where(result > hi, hi, result, out=_out)
+    if result is work and _out is not None:
+        return _out.copy_(work)
+    return result.to(x.dtype)
 
 
 def cumsum(x, axis, /, *, exclusive=0, reverse=0):
@@ -340,7 +349,10 @@ def mish(x):
     return x * torch.tanh(softplus(x))
 
 
-def gelu(x, *, approximate="none"):
+def gelu(x, *, approximate="none", _out=None):
+    """Gelu; written into `_out` where it `writes_into` the result."""
+    if _out is not None and _rt.writes_into(_out, x):
+        return torch._C._nn.gelu(x, approximate=approximate, out=_out)
     return F.gelu(x, approximate=approximate)
 
 
@@ -359,29 +371,33 @@ def prelu(x, slope):
     return torch.where(x > 0, x, x * slope)
 
 
-def _flattened(fn, x, axis, opset):
-    """Softmax-like `fn` over `axis`: before opset 13 over the input coerced to 2D at `axis`
-    (default 1), from 13 over `axis` alone (default -1)."""
+def _flattened(fn, x, axis, opset, out=None):
+    """Softmax-like `fn(v, d, o)` over `axis`: before opset 13 over the input coerced to 2D at
+    `axis` (default 1), from 13 over `axis` alone (default -1). `fn` writes its result into `o`
+    where that is not None: `out`, where it `writes_into` the result -- of the input's type and
+    shape -- seen as the input is."""
+    if out is not None and not _rt.writes_into(out, x):
+        out = None
     if opset >= 13:
-        return fn(x, -1 if axis is None else axis)
+        return fn(x, -1 if axis is None else axis, out)
     axis = 1 if axis is None else axis
     if x.dim() == 0:
-        return fn(x.reshape(1, 1), 1).reshape(())
+        return fn(x.reshape(1, 1), 1, None if out is None else out.view(1, 1)).reshape(())
     axis = axis % x.dim()
     rows = math.prod(x.shape[:axis])
-    return fn(x.reshape(rows, -1), 1).reshape(x.shape)
+    return fn(x.reshape(rows, -1), 1, None if out is None else out.view(rows, -1)).reshape(x.shape)
 
 
-def softmax(x, *, axis=None, _opset):
-    return _flattened(lambda v, d: torch.softmax(v, d), x, axis, _opset)
+def softmax(x, *, axis=None, _opset, _out=None):
+    return _flattened(lambda v, d, o: torch.softmax(v, d, out=o), x, axis, _opset, _out)
 
 
-def log_softmax(x, *, axis=None, _opset):
-    return _flattened(lambda v, d: torch.log_softmax(v, d), x, axis, _opset)
+def log_softmax(x, *, axis=None, _opset, _out=None):
+    return _flattened(lambda v, d, o: torch.log_softmax(v, d, out=o), x, axis, _opset, _out)
 
 
 def hardmax(x, *, axis=None, _opset):
-    def one_hot_of_first_max(v, d):
+    def one_hot_of_first_max(v, d, _):
         index = torch.argmax(v, d, keepdim=True)
         return torch.zeros_like(v).scatter(d, index, torch.ones_like(index, dtype=v.dtype))
     return _flattened(one_hot_of_first_max, x, axis, _opset)

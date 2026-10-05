@@ -43,6 +43,8 @@ public class PyTorchBackendCoverageTests
         Assert.Equal(12, running.PythonVersion.Minor);
         Assert.True(File.Exists(running.LibPython));
         Assert.Equal(running.Directory, new TorchCpuBackend(new() { EnvironmentPath = running.Directory + Path.DirectorySeparatorChar }).Start().Directory);
+        Assert.Equal(OperatingSystem.IsWindows() ? Path.Combine(running.SitePackages, "torch", "lib")
+            : Directory.Exists(Path.Combine(running.SitePackages, "nvidia")) ? Path.Combine(running.SitePackages, "nvidia") : null, running.CudaLibraryDirectory);
     }
 
     [Fact]
@@ -72,6 +74,30 @@ public class PyTorchBackendCoverageTests
         {
             Directory.Delete(root, recursive: true);
         }
+    }
+
+    [Fact]
+    public void TestTheSharedCudaLibrariesAreTheReleasesTheCudaEnvironmentsPyTorchCarries()
+    {
+        var windows = CudaLibraryPins.ForPlatform("win-x64");
+        var linux = CudaLibraryPins.ForPlatform("linux-x64");
+        string Record(CudaLibraryFile file) => $"{file.FileName} {file.Sha256} {file.Size}";
+
+        Assert.Equal(["cudnn", "cublas"], windows.Libraries.Select(library => library.Name));
+        Assert.Equal(["cudnn", "cublas"], linux.Libraries.Select(library => library.Name));
+        Assert.All(windows.Libraries.Concat(linux.Libraries), library => Assert.Equal(13, library.CudaMajor));
+        Assert.Equal(windows.Libraries[0].Version, linux.Libraries[0].Version);
+        Assert.Equal(windows.Libraries.SelectMany(library => library.Files).Select(Record).Order(), windows.Bundled.Select(Record).Order());
+        Assert.Contains(windows.BundledWheelSha256!, LockedHashes("win-x64", windows.BundledBy!));
+        Assert.All(linux.Libraries, library => Assert.Contains(library.WheelSha256, LockedHashes("linux-x64", $"{library.Package}=={library.Version}")));
+    }
+
+    private static string[] LockedHashes(string platform, string requirement)
+    {
+        var lines = PythonEnvironmentLock.ForPlatform("cu13", platform).Requirements.Split('\n');
+        var at = Array.FindIndex(lines, line => line.StartsWith(requirement + " ", StringComparison.Ordinal));
+        return at < 0 ? [] : [.. lines.Skip(at + 1).Select(line => line.Trim().TrimEnd('\\').Trim())
+            .TakeWhile(line => line.StartsWith("--hash=sha256:", StringComparison.Ordinal)).Select(line => line["--hash=sha256:".Length..])];
     }
 
     [Fact]
@@ -257,6 +283,32 @@ public class PyTorchBackendCoverageTests
     }
 
     [Fact]
+    public void TestANoopSumOrMeanHandsBackEachElementAsItIsANegativeZeroIncludedOnTorchAsOnOnnxRuntime()
+    {
+        foreach (var backend in (IShorokooBackend[])[DefaultBackend.Instance, Torch])
+        {
+            Assert.Equal("-0 1 -2", NoopReduced(backend, "ReduceSum"));
+            Assert.Equal("-0 1 -2", NoopReduced(backend, "ReduceMean"));
+            Assert.Equal("-0 1 -2", NoopReduced(backend, "ReduceMax"));
+            Assert.Equal("+0 1 4", NoopReduced(backend, "ReduceSumSquare"));
+        }
+    }
+
+    // What op makes of -0, 1 and -2 reducing no axis with noop_with_empty_axes set, a zero with its sign.
+    private static string NoopReduced(IShorokooBackend backend, string op)
+    {
+        var graph = Graph(["x"], ["y"], Node(op, ["x", "axes"], ["y"], attributes: Int("noop_with_empty_axes", 1)));
+        graph.Inputs[0].Type = FloatTensor;
+        graph.Outputs[0].Type = FloatTensor;
+        graph.Initializers.Add(new TensorProto { Name = "axes", data_type = (int)TensorProto.DataType.Int64, Dims = [0] });
+        using var session = backend.CreateSession(Serialize(graph), default, default, DeviceMemorySettings.Default);
+        using var x = backend.CreateTensor([-0f, 1f, -2f], [3]);
+        using var y = session.Run(new Dictionary<string, IShorokooTensorValue> { ["x"] = x }, ["y"], RunSettings.Default)[0];
+        return string.Join(" ", MemoryMarshal.Cast<byte, float>(backend.CopyTensorToHost(y)).ToArray()
+            .Select(v => v == 0 ? (float.IsNegative(v) ? "-0" : "+0") : v.ToString(System.Globalization.CultureInfo.InvariantCulture)));
+    }
+
+    [Fact]
     public void TestANoopReductionReducesEachElementAloneOnTorch()
     {
         NoopReductionsReduceEachElementAlone(new ComputeContext(Torch));
@@ -266,6 +318,45 @@ public class PyTorchBackendCoverageTests
 
     [Fact]
     public void TestWhereSelectsOnEveryIntegerTypeAndBoolOnTorch() => WhereSelectsOnEveryIntegerTypeAndBool(new ComputeContext(Torch));
+
+    [Fact]
+    public void TestClipHandsBackAZeroInsideItsBoundsAndTheLowerOfTwoEqualZeroBoundsBelowThemSignAndAllOnTorchAsOnOnnxRuntime()
+    {
+        ClipKeepsTheSignOfAZero(DefaultBackend.Instance);
+        ClipKeepsTheSignOfAZero(Torch);
+    }
+
+    internal static void ClipKeepsTheSignOfAZero(IShorokooBackend backend)
+    {
+        Assert.Equal("+0", Clipped(backend, -1f, 0f, -0f));
+        Assert.Equal("-0", Clipped(backend, -1f, -0f, 0f));
+        Assert.Equal("-0", Clipped(backend, -0f, 0f, null));
+        Assert.Equal("+0", Clipped(backend, 0f, -0f, null));
+        Assert.Equal("+0", Clipped(backend, 0f, null, -0f));
+        Assert.Equal("-0", Clipped(backend, -0f, null, 0f));
+        Assert.Equal("+0", Clipped(backend, -0f, 1f, 0f));
+        Assert.Equal("-0", Clipped(backend, 0f, 1f, -0f));
+        Assert.Equal("2", Clipped(backend, 3f, 1f, 2f));
+        Assert.Equal("NaN", Clipped(backend, float.NaN, 1f, 2f));
+    }
+
+    // 67 elements fill a vectorized kernel's loop and leave a tail; each distinct result, a zero with its sign.
+    private static string Clipped(IShorokooBackend backend, float x, float? lo, float? hi)
+    {
+        string[] bounds = [lo is null ? "" : "lo", hi is null ? "" : "hi"];
+        var graph = Graph(["x", .. bounds.Where(b => b.Length > 0)], ["y"], Node("Clip", ["x", .. bounds], ["y"]));
+        foreach (var value in graph.Inputs.Concat(graph.Outputs)) value.Type = FloatTensor;
+        using var session = backend.CreateSession(Serialize(graph), default, default, DeviceMemorySettings.Default);
+        IShorokooTensorValue Tensor(float[] values, long[] shape)
+            => backend.CreateTensorInBackendMemory(ShorokooTensorElementType.Float, [.. MemoryMarshal.AsBytes<float>(values)], shape);
+        var feeds = new Dictionary<string, IShorokooTensorValue> { ["x"] = Tensor([.. Enumerable.Repeat(x, 67)], [67]) };
+        if (lo is { } l) feeds["lo"] = Tensor([l], []);
+        if (hi is { } h) feeds["hi"] = Tensor([h], []);
+        using var y = session.Run(feeds, ["y"], RunSettings.Default)[0];
+        foreach (var feed in feeds.Values) feed.Dispose();
+        return string.Join(" ", MemoryMarshal.Cast<byte, float>(backend.CopyTensorToHost(y)).ToArray()
+            .Select(v => v == 0 ? (float.IsNegative(v) ? "-0" : "+0") : v.ToString(System.Globalization.CultureInfo.InvariantCulture)).Distinct());
+    }
 
     internal static void NoopReductionsReduceEachElementAlone(ComputeContext c)
     {
@@ -516,17 +607,109 @@ public class PyTorchBackendCoverageTests
     }
 
     [Fact]
+    public void TestARunOnACardSetsTorchsTensorFloat32SwitchesFromItsSessionAndARunOnTheCpuSetsNeither()
+    {
+        var allowing = SideBySideModel.AllowingTensorFloat32;
+        using var session = Torch.CreateSession(Onnx("Neg", (int)ShorokooTensorElementType.Float), default, default, DeviceMemorySettings.Default);
+        using var x = Torch.CreateTensor([1f], [1]);
+        const string Switches = "(torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32)";
+        const string Set = "__import__('shorokoo_torch.runtime', fromlist=['runtime']).float32_precision";
+
+        Assert.Equal((false, false, true), (TorchSession.TensorFloat32(Torch, allowing), TorchSession.TensorFloat32(new TorchCudaBackend(), PrecisionSettings.Default),
+            TorchSession.TensorFloat32(new TorchCudaBackend(), allowing)));
+        Assert.Equal("(True, True)", Evaluated($"({Set}(True), {Switches})[1]"));
+        session.Run(new Dictionary<string, IShorokooTensorValue> { ["x0"] = x }, ["y"], RunSettings.Default)[0].Dispose();
+        Assert.Equal("(True, True)", Evaluated(Switches));
+        Assert.Equal("(False, False)", Evaluated($"({Set}(False), {Switches})[1]"));
+    }
+
+    [Fact]
+    public void TestRunsInOnePrecisionRunBesideOneAnotherAndRunsInTheOtherWaitTheirTurn()
+    {
+        Assert.True(Overlap(true, true));
+        Assert.True(Overlap(false, false));
+        Assert.False(Overlap(true, false));
+        Assert.False(Overlap(false, true));
+        Assert.False(JoinsPastAWaiter(true));
+        Assert.False(JoinsPastAWaiter(false));
+        Assert.True(BothEnterOnceAWaiterGivesUp(true, interrupted: true));
+        Assert.True(BothEnterOnceAWaiterGivesUp(false, interrupted: true));
+        Assert.True(BothEnterOnceAWaiterGivesUp(true, interrupted: false));
+        Assert.True(BothEnterOnceAWaiterGivesUp(false, interrupted: false));
+    }
+
+    internal static readonly TimeSpan Patience = TimeSpan.FromSeconds(30);
+
+    private static bool BothEnterOnceAWaiterGivesUp(bool held, bool interrupted)
+    {
+        var gate = new TorchPrecisionGate();
+        using var stop = new CancellationTokenSource();
+        gate.Enter(held);
+        var waiter = new Thread(() =>
+        {
+            try { gate.Enter(!held, stop.Token); gate.Exit(!held); }
+            catch (Exception ex) when (ex is ThreadInterruptedException or OperationCanceledException) { }
+        });
+        waiter.Start();
+        Assert.True(SpinWait.SpinUntil(() => gate.Waiting(!held) == 1, Patience));
+        if (interrupted) waiter.Interrupt();
+        else stop.Cancel();
+        Assert.True(waiter.Join(Patience));
+        gate.Exit(held);
+        return EntersAndLeaves(gate, held) && EntersAndLeaves(gate, !held);
+    }
+
+    private static bool Overlap(bool first, bool second)
+    {
+        var gate = new TorchPrecisionGate();
+        gate.Enter(first);
+        try { return Task.Run(() => EntersAndLeaves(gate, second)).Result; }
+        finally { gate.Exit(first); }
+    }
+
+    private static bool JoinsPastAWaiter(bool held)
+    {
+        var gate = new TorchPrecisionGate();
+        gate.Enter(held);
+        var waiter = Task.Run(() => EntersAndLeaves(gate, !held, wait: true));
+        Assert.True(SpinWait.SpinUntil(() => gate.Waiting(!held) == 1, Patience));
+        var joined = Task.Run(() => EntersAndLeaves(gate, held)).Result;
+        gate.Exit(held);
+        Assert.True(waiter.Result);
+        return joined;
+    }
+
+    private static bool EntersAndLeaves(TorchPrecisionGate gate, bool tensorFloat32, bool wait = false)
+    {
+        if (wait) gate.Enter(tensorFloat32);
+        else if (!gate.TryEnter(tensorFloat32)) return false;
+        gate.Exit(tensorFloat32);
+        return true;
+    }
+
+    [Fact]
+    public void TestAFailedImportIsACudaLibraryConflictWhereTheProcessHoldsAnotherReleaseAndAMissingPackageWhereNothingImports()
+    {
+        Assert.Equal(PythonEnvironmentFailure.CudaLibraryConflict, TorchRuntime.ImportFailure("ImportError", () => "cudnn64_9.dll", out _));
+        Assert.Equal(PythonEnvironmentFailure.CudaLibraryConflict, TorchRuntime.ImportFailure("OSError", () => "cudnn64_9.dll", out _));
+        Assert.Equal(PythonEnvironmentFailure.MissingPackage, TorchRuntime.ImportFailure("ModuleNotFoundError", () => "cudnn64_9.dll", out _));
+        Assert.Equal(PythonEnvironmentFailure.MissingPackage, TorchRuntime.ImportFailure("ImportError", () => null, out _));
+        Assert.Null(TorchRuntime.ImportFailure("OSError", () => null, out _));
+        Assert.Equal(PythonEnvironmentFailure.MissingPackage, TorchRuntime.ImportFailure("ImportError", () => throw new IOException("unreadable"), out _));
+    }
+
+    [Fact]
     public void TestEveryConsumedFeedIsReleasedExactlyOnceHoweverTheRunEnds()
     {
         using var session = Torch.CreateSession(Onnx("Neg", (int)ShorokooTensorElementType.Float), default, default, DeviceMemorySettings.Default);
         using var cancelled = new CancellationTokenSource();
         cancelled.Cancel();
 
-        Assert.Equal(1, ReleasesOf(feed => session.RunConsuming(Feeds(feed), [feed], ["y"], new HashSet<string>(), RunSettings.Default)));
-        Assert.Equal(1, ReleasesOf(feed => session.RunConsuming(Feeds(feed), [feed], ["nope"], new HashSet<string>(), RunSettings.Default)));
-        Assert.Equal(1, ReleasesOf(feed => session.RunConsuming(new Dictionary<string, IShorokooTensorValue>(), [feed], ["y"], new HashSet<string>(), RunSettings.Default)));
-        Assert.Equal(1, ReleasesOf(feed => session.RunConsuming(Feeds(feed), [feed], ["y"], new HashSet<string>(), new RunSettings { CancellationToken = cancelled.Token })));
-        Assert.Equal(1, ReleasesOf(feed => session.RunConsuming(Feeds(feed), [feed], ["y"], new HashSet<string>(), RunSettings.Default, out _)));
+        Assert.Equal(1, ReleasesOf(feed => session.RunConsuming(Feeds(feed), [feed], ["y"], RunSettings.Default)));
+        Assert.Equal(1, ReleasesOf(feed => session.RunConsuming(Feeds(feed), [feed], ["nope"], RunSettings.Default)));
+        Assert.Equal(1, ReleasesOf(feed => session.RunConsuming(new Dictionary<string, IShorokooTensorValue>(), [feed], ["y"], RunSettings.Default)));
+        Assert.Equal(1, ReleasesOf(feed => session.RunConsuming(Feeds(feed), [feed], ["y"], new RunSettings { CancellationToken = cancelled.Token })));
+        Assert.Equal(1, ReleasesOf(feed => session.RunConsuming(Feeds(feed), [feed], ["y"], RunSettings.Default, out _)));
     }
 
     [Fact]
@@ -683,9 +866,9 @@ public class PyTorchBackendCoverageTests
                 [torch.tensor(a, dtype=torch.float32, requires_grad=True) for a in ({string.Join(", ", arguments)},)])
             """).Trim('[', ']').Split(", ").Select(v => float.Parse(v, System.Globalization.CultureInfo.InvariantCulture))];
 
-    private static string Evaluated(string expression)
+    private static string Evaluated(string expression, TorchBackend? backend = null)
     {
-        Torch.Start();
+        (backend ?? Torch).Start();
         using (PythonRuntime.Gil())
         {
             using var scope = Py.CreateScope();
@@ -891,7 +1074,7 @@ public class PyTorchBackendCoverageTests
     }
 
     [Fact]
-    public void TestACpuSessionHasNoArenaFiguresRetainsNothingAndRunsEveryNodeOnTheHost()
+    public void TestACpuSessionHasNoArenaFiguresLeavesItsOutputsInHostMemoryAndRunsEveryNodeOnTheHost()
     {
         var graph = ComputeContextLifetimeCoverageTests.GraphOf("a:float[2] b:float[2]", "O:float[2]",
             ComputeContextLifetimeCoverageTests.Op("Sub", "a b", "t"), ComputeContextLifetimeCoverageTests.Op("Neg", "t", "O"));
@@ -900,9 +1083,8 @@ public class PyTorchBackendCoverageTests
         using var a = Torch.CreateTensor([5f, 7f], [2]);
         using var b = Torch.CreateTensor([1f, 2f], [2]);
         var feeds = new Dictionary<string, IShorokooTensorValue> { ["a"] = a, ["b"] = b };
-        using var kept = traced.RunRetainingOutputs(feeds, ["O"], new HashSet<string> { "O" }, RunSettings.Default)[0];
+        using var kept = traced.Run(feeds, ["O"], RunSettings.Default)[0];
 
-        Assert.False(traced.HasDeviceMemory);
         Assert.True(kept.IsHostAccessible);
         Assert.Equal([-4f, -5f], kept.GetTensorDataAsSpan<float>().ToArray());
         Assert.Null(traced.ReadArenaStatistics());
@@ -939,10 +1121,19 @@ public class PyTorchBackendCoverageTests
         Assert.Equal((null, "9 18 27 36"), Aliased("a:float[4] b:float[4]", "O:float[4]", [Op("Sub", "a b", "O")], consume: false));
         Assert.Equal((null, "0 0 0 0"), Aliased("a:float[4] b:float[4]", "O:float[4]", [Op("Sub", "a b", "O")], feedTwice: true));
         Assert.Equal((null, "20 40 60 80"), Aliased("a:float[4] b:float[4]", "O:float[4]", [Op("Add", "a a", "O")]));
+        Assert.Equal((null, "300"), Aliased("a:float[4] b:float[4]", "O", [Op("MatMul", "b a", "O")]));
         Assert.Equal((null, "-9 -18 -27 -36"), Aliased("a:float[4] b:float[4]", "O:float[4]", [Op("Sub", "a b", "t"), Op("Neg", "t", "O")]));
         Assert.Equal((null, "9 18 27 36"), Aliased("a:int64[4] b:int64[4]", "O:int64[4]", [Op("Sub", "a b", "O")], integers: true));
-        Assert.Equal((null, "0 -20 -60 -120 -10 -20 -30 -40"), Aliased("a:float[4] b:float[4]", "O:float[4] T:float[4]", [Op("Transpose", "a", "t"), Op("Mul", "t b", "m"), Op("Sub", "a m", "O"), Op("Neg", "t", "T")]));
+        Assert.Equal((null, "0 -20 -60 -120 -10 -20 -30 -40"), Aliased("a:float[4] b:float[4]", "O:float[4] T:float[4]", [Op("Transpose", "a", "t"), Op("Mul", "t b", "m"), Op("Neg", "t", "T"), Op("Sub", "a m", "O")]));
         Assert.Equal((null, "0 -20 -60 -120 10 20 30 40"), Aliased("a:float[4] b:float[4]", "O:float[4] T:float[4]", [Op("Transpose", "a", "T"), Op("Mul", "T b", "m"), Op("Sub", "a m", "O")]));
+    }
+
+    [Fact]
+    public void TestAnOutputIsNotWrittenIntoItsInputWhereAValueWrittenOverThatInputIsStillRead()
+    {
+        Assert.Equal((null, "9 38 87 156 35400"), Aliased("a:float[4] b:float[4]", "O:float[4] M", [Op("Mul", "a b", "t"), Op("ReduceSumSquare", "t", "M"), Op("Sub", "t b", "O")]));
+        Assert.Equal((null, "9 38 87 156 10 40 90 160"), Aliased("a:float[4] b:float[4]", "O:float[4] T:float[4]", [Op("Mul", "a b", "T"), Op("Sub", "T b", "O")]));
+        Assert.Equal(("a", "9 38 87 156"), Aliased("a:float[4] b:float[4]", "O:float[4]", [Op("Mul", "a b", "t"), Op("Sub", "t b", "O")]));
     }
 
     [Fact]
@@ -954,7 +1145,7 @@ public class PyTorchBackendCoverageTests
         using var b = Torch.CreateTensor([1f, 2f, 3f, 4f], [4]);
         ref var consumedMemory = ref MemoryMarshal.GetReference(a.GetTensorDataAsSpan<float>());
         var feeds = new Dictionary<string, IShorokooTensorValue> { ["a"] = a, ["b"] = b };
-        using var o = session.RunConsuming(feeds, [a], ["O"], ComputeContext.NoOutputsRetained, RunSettings.Default)[0];
+        using var o = session.RunConsuming(feeds, [a], ["O"], RunSettings.Default)[0];
 
         Assert.Equal([new OutputAlias("O", "a")], session.BindableAliases);
         Assert.Equal([9f, 18f, 27f, 36f], o.GetTensorDataAsSpan<float>().ToArray());
@@ -1008,6 +1199,450 @@ public class PyTorchBackendCoverageTests
     }
 
     [Fact]
+    public void TestTheTwoHalvesScenarioWritesEveryValueIntoTheMemoryItConsumesOnTorchAndItsOutputsOutliveTheSession()
+    {
+        const int Rows = 512, Columns = 1024;
+        var (a, b, l) = ComputeContextLifetimeCoverageTests.TwoHalvesValues(Rows, Columns);
+        NamedModelParam[] outputs = [];
+        using (var context = new ComputeContext(Torch))
+        {
+            var compiled = context.Compile(ComputeContextLifetimeCoverageTests.TwoHalves());
+            for (int run = 0; run < 2; run++)
+            {
+                outputs = compiled.Execute(TensorData([(long)Rows, Columns], a), TensorData([(long)Rows, Columns], b));
+                Assert.True(l.Zip(Floats(outputs[0]), (x, y) => MathF.Abs(x - y) < 1e-5f).All(x => x));
+                Assert.Equal(a[..(Rows / 2 * Columns)], Floats(outputs[1]));
+                Assert.Equal(b[(Rows / 2 * Columns)..], Floats(outputs[2]));
+            }
+            var entry = Assert.Single(((TorchSession)compiled.Session).Placements!.Entries);
+            Assert.Equal(10, entry.Plan.Count);
+            Assert.All(outputs, o => Assert.NotNull(o.ToTensorData().Block));
+            Assert.Same(outputs[1].ToTensorData().Block, outputs[2].ToTensorData().Block);
+        }
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        Assert.True(l.Zip(Floats(outputs[0]), (x, y) => MathF.Abs(x - y) < 1e-5f).All(x => x));
+        Assert.Equal(b[(Rows / 2 * Columns)..], Floats(outputs[2]));
+    }
+
+    private static float[] Floats(NamedModelParam value) => [.. value.ToTensorData().As<float32>().AccessMemory<float>()];
+
+    [Fact]
+    public void TestARunWritesAValueIntoTheMemoryItConsumesOnlyWhereItIsProvedFreeAndTorchCanWriteItThere()
+    {
+        Assert.Equal("O@a+0", Placed(Graph("O", Op("Neg", "a", "O"))));
+        Assert.Equal("O@-", Placed(Graph("O", Op("Neg", "a", "O")), consume: false));
+        Assert.Equal("O@-", Placed(Graph("O", Op("Neg", "a", "O")), feedTwice: true));
+        Assert.Equal("O@-", Placed(GraphOn("a:int64[131072] b:int64[131072]", "O", Op("Neg", "a", "O"))));
+        Assert.Equal("x@a+0 O@a+1048576", Placed(Halved("x O", Op("Slice", "a zero half zero", "x"), Op("Neg", "b", "n"), Op("Slice", "n zero half zero", "O"))));
+        Assert.Equal("x@a+1048576 O@a+0", Placed(Halved("x O", Op("Slice", "a half end zero", "x"), Op("Exp", "b", "e"), Op("Slice", "e zero half zero", "s"), Op("Neg", "s", "O"))));
+        Assert.Equal("O@- Z@-", Placed(GraphOn("a:float[262144]", "O Z", ComputeContextLifetimeCoverageTests.Op("Cast", "a", "y", attribute: ("to", 1)), Op("Neg", "y", "O"), Op("Exp", "y", "Z"))));
+        Assert.Equal("O@b+0", Placed(GraphOn("a:float[512,512] b:float[512,512]", "O", Op("Transpose", "a", "O"))));
+        Assert.Equal("O@b+0", Placed(GraphOn("a:float[512,512] b:float[512,512] w:float[512,512]", "O", Op("MatMul", "a w", "O"))));
+        Assert.Equal("O@a+0 Z@b+0", Placed(Graph("O Z", Op("Exp", "a", "e"), Op("Neg", "e", "O"), Op("Sigmoid", "b", "s"), Op("Add", "s e", "Z"))));
+        Assert.Equal("O@-", Placed(GraphOn("a:float[64] b:float[64]", "O", Op("Neg", "a", "t"), Op("Exp", "t", "u"), Op("Add", "u b", "O"))));
+        Assert.Equal("O@-", Placed(GraphOn("a:float[64] b:float[64]", "O", Op("Neg", "a", "t"), Op("Greater", "t b", "m"), Op("Where", "m b t", "O"))));
+        Assert.Equal("O@-", Placed(GraphOn("a:float[8,8] s:float[8]", "O", Op("Softmax", "a", "t"), Op("LayerNormalization", "t s", "O"))));
+    }
+
+    [Fact]
+    public void TestAValueTorchCannotWriteIntoARangeIsNotPlacedAndOneHandedARangeAnywayIsComputedAndCopiedThere()
+    {
+        Assert.Equal("O@-", Placed(GraphOn("a:float[262144] e:int64[262144]", "O", Op("Pow", "a e", "O"))));
+        Assert.Equal("O@-", Placed(GraphOn("a:float[262144,4] v:float[4] b:float[262144]", "O", Op("MatMul", "a v", "O"))));
+        Assert.Equal("(True, [8.0, 8.0, 8.0, 8.0])", PlacedInto("E.pow_, torch.full((4,), 2.0), torch.full((4,), 3)"));
+        Assert.Equal("(True, [2.0, 2.0, 2.0, 2.0])", PlacedInto("L.matmul, torch.ones(4, 2), torch.ones(2)"));
+    }
+
+    private static string PlacedInto(string call)
+        => Evaluated("(lambda rt, t: __import__('contextvars').copy_context().run(lambda: (rt._placing.set(rt._Placing([t], [t], [(0, 0, 16, 1, [4], -1)], torch.device('cpu'), [])), "
+                     + $"rt.place_into(0, False, {call}).data_ptr() == t.data_ptr(), t.tolist())[1:]))(__import__('shorokoo_torch.runtime', fromlist=['_']), torch.zeros(4))");
+
+    [Fact]
+    public void TestASessionStoppedFromPlacingWritesNothingOverTheInputsItsRunsConsumeAndOneBuiltForASingleRunStillDoes()
+    {
+        Assert.Equal([-1f, -2f, -3f, -4f], ConsumedAfterARun(null));
+        Assert.Equal([1f, 2f, 3f, 4f], ConsumedAfterARun(null, stopPlacing: true));
+        Assert.Equal([-1f, -2f, -3f, -4f], ConsumedAfterARun(new ComputeContext(Torch)));
+        Assert.Equal([-1f, -2f, -3f, -4f], ConsumedAfterARun(new ComputeContext(Torch), placing: false));
+        Assert.Equal([1f, 2f, 3f, 4f], ConsumedAfterARun(new ComputeContext(Torch) { ValuePlacement = false }));
+        Assert.Equal([1f, 2f, 3f, 4f], ConsumedAfterARun(new ComputeContext(Torch) { OutputAliasing = false }));
+    }
+
+    private static float[] ConsumedAfterARun(ComputeContext? context, bool placing = true, bool stopPlacing = false)
+    {
+        var model = Serialize(GraphOn("x:float[4]", "O", Op("Neg", "x", "O")));
+        using var owner = context;
+        using var session = context?.BuildSession(Torch, model, ShorokooGraphOptimization.EnableAll, DeviceMemorySettings.Default, placing: placing)
+            ?? Torch.CreateSession(model, default, default, DeviceMemorySettings.Default);
+        if (stopPlacing) session.StopPlacing();
+        var x = (TorchTensorValue)Torch.CreateTensor([1f, 2f, 3f, 4f], [4]);
+        TorchTensorValue seen;
+        using (PythonRuntime.Gil()) seen = TorchTensorValue.Wrap(Torch.Runtime, x.Value.InvokeMethod("detach"), ShorokooTensorElementType.Float);
+        using (seen)
+        {
+            session.RunConsuming(new Dictionary<string, IShorokooTensorValue> { ["x"] = x }, [x], ["O"], RunSettings.Default)[0].Dispose();
+            return seen.GetTensorDataAsSpan<float>().ToArray();
+        }
+    }
+
+    [Fact]
+    public void TestAShapeIsReadAsItsValueIsMadeSoThatTheValueIsHeldOnlyUntilItsContentsAreRead()
+    {
+        Assert.Equal("neg shape exp abs_ reshape", Calls(GraphOn("x:float[4]", "e", Op("Neg", "x", "b"), Op("Shape", "b", "s"), Op("Exp", "b", "c"), Op("Abs", "c", "d"), Op("Reshape", "d s", "e"))));
+        Assert.Equal("size neg", Calls(GraphOn("x:float[4]", "b s", Op("Neg", "x", "b"), Op("Size", "x", "s"))));
+        Assert.Equal("neg shape shape exp", Calls(GraphOn("x:float[4]", "c r", Op("Neg", "x", "b"), Op("Exp", "b", "c"), Op("Shape", "b", "s"), Op("Shape", "s", "r"))));
+        Assert.Equal("neg exp shape", Calls(GraphOn("x:float[4]", "c s", Op("Neg", "x", "b"), Op("Exp", "b", "c"), Op("Shape", "c", "s"))));
+    }
+
+    // In call order; "over:" marks a call written over an operand.
+    private static string Calls(GraphProto graph, bool over = false)
+    {
+        var model = ProtoBuf.Serializer.Deserialize<ModelProto>(new MemoryStream(Serialize(graph)));
+        var source = Shorokoo.PythonTranslation.OnnxToPythonTranslator.Translate(model, [], TorchDialect.Instance, null,
+            over ? TorchInPlace.Plan(model.Graph) : null).Source;
+        return string.Join(" ", System.Text.RegularExpressions.Regex.Matches(source, @"(_over\(\w+, )?ops_\w+\.(\w+)[(,]")
+            .Select(m => (m.Groups[1].Success ? "over:" : "") + m.Groups[2].Value));
+    }
+
+    [Fact]
+    public void TestTheMemoryAwarePassHandsATorchContextNoStepHoldingMoreThanTheStepItWasHanded()
+    {
+        Assert.True(PassHoldsNoMoreOnTorch(Benchmarks.MemoryPassConv.ComputationGraph, [8L, 3L, 64L, 64L]));
+        Assert.True(PassHoldsNoMoreOnTorch(Benchmarks.MemoryPassMlp.ComputationGraph, [64L, 256L]));
+        Assert.True(PassHoldsNoMoreOnTorch(ChunkedSdpaMeanPoolModel.ComputationGraph, [2L, 4L, 256L, 32L]));
+    }
+
+    [Fact]
+    public void TestTheMemoryAwarePassTakesATwoLayerEncodersStepOnATorchContextBelowTwoThirdsOfItsPeak()
+    {
+        using var context = new ComputeContext(Torch);
+        var sample = TensorData([16L, 128L, 128L], new float[16 * 128 * 128]);
+        var result = TrainingRig.FromScratch(Benchmarks.MemoryPassEncoder2.ComputationGraph, Shorokoo.Modules.Losses.L2Loss.ComputationGraph,
+            Shorokoo.Modules.Optimizers.AdamWOptimizer.ComputationGraph, [sample],
+            new Shorokoo.Modules.Optimizers.AdamWOptimizerHyperparameters { LearningRate = 0.001f }, runtimeContext: context).OptimizationResult;
+        Assert.True(3 * result.Evaluation.PeakMemoryBytes <= 2 * result.AllStrategies[0].Evaluation.PeakMemoryBytes);
+    }
+
+    [Fact]
+    public void TestTheMemoryAwarePassTakesATwoLayerEncodersStepAsLowAsTorchsModelOfACardRunSeesIt()
+    {
+        using var context = new ComputeContext(new JudgedAsOnACard());
+        var sample = TensorData([16L, 128L, 128L], new float[16 * 128 * 128]);
+        var result = TrainingRig.FromScratch(Benchmarks.MemoryPassEncoder2.ComputationGraph, Shorokoo.Modules.Losses.L2Loss.ComputationGraph,
+            Shorokoo.Modules.Optimizers.AdamWOptimizer.ComputationGraph, [sample],
+            new Shorokoo.Modules.Optimizers.AdamWOptimizerHyperparameters { LearningRate = 0.001f }, runtimeContext: context).OptimizationResult;
+        var chosen = result.AllStrategies.Select(s => s.Graph).ToList().FindIndex(g => ReferenceEquals(g, result.OptimizedGraph));
+        Assert.True(result.BackendPeakBytes![chosen] <= 111L << 18);
+    }
+
+    [Fact]
+    public void TestTheMemoryAwarePassTakesARecurrentStepTorchModelsBelowItsPeakComputingWhatItWasHanded()
+    {
+        using var context = new ComputeContext(Torch);
+        var step = TrainingRigFromScratchCoverageTests.RecurrentStep(context);
+        Assert.True(step.Chosen < step.Handed);
+        Assert.Equal(step.HandedComputes, step.ChosenComputes);
+    }
+
+    private sealed class JudgedAsOnACard() : TorchBackend(() => PythonEnvironmentLock.Cpu, null, cudaDeviceId: null), IShorokooBackend
+    {
+        long? IShorokooBackend.ModelledRunPeak(ModelProto model, IReadOnlyList<OutputAlias> outputAliases, PrecisionSettings precision)
+            => TorchRunMemory.Peak(model, outputAliases, onHost: false);
+    }
+
+    [Fact]
+    public void TestATorchRunIsModelledHoldingTheTemporariesItsKernelsMakeOnTheHost()
+    {
+        Assert.Equal(32768, RunPeak(GraphOn("x:float[64,64] s:float[64]", "O", Op("Exp", "x", "e"), Op("LayerNormalization", "e s", "O"))));
+        Assert.Equal(65536, RunPeak(GraphOn("x:float[64,64] s:float[64]", "P", Op("Exp", "x", "e"), Op("LayerNormalization", "e s", "O"), Op("Add", "e O", "P"))));
+        Assert.Equal(4096, RunPeak(GraphOn("x:float[2,3,8,8] w:float[4,3,3,3]", "O", ComputeContextLifetimeCoverageTests.With(Op("Conv", "x w", "O"), "pads", 1, 1, 1, 1))));
+        Assert.Equal(688, RunPeak(GraphOn("x:float[1,4,4,4] w:float[4,3,3,3]", "O", Op("ConvTranspose", "x w", "O"))));
+        Assert.Equal(7600, RunPeak(GraphOn("x:float[2,3,8,8] g:float[2,4,8,8]", "O", Op("Exp", "x", "a"), Op("Exp", "g", "b"),
+            ComputeContextLifetimeCoverageTests.With(Op("Transpose", "a", "at"), "perm", 1, 0, 2, 3), ComputeContextLifetimeCoverageTests.With(Op("Transpose", "b", "bt"), "perm", 1, 0, 2, 3),
+            ComputeContextLifetimeCoverageTests.With(Op("Conv", "at bt", "O"), "pads", 1, 1, 1, 1))));
+    }
+
+    [Fact]
+    public void TestATorchRunIsModelledHoldingTheCopiesItsMatMulMakesOfOperandsItCannotReadInPlace()
+    {
+        var rows = ComputeContextLifetimeCoverageTests.WithInts(GraphOn("x:float[16,1,8] w:float[8,4]", "O", Op("Exp", "x", "e"), Op("Expand", "e s", "r"), Op("MatMul", "r w", "O")), "s", 16, 32, 8);
+        Assert.Equal(25088, RunPeak(rows, onHost: false));
+        Assert.Equal(8704, RunPeak(rows, onHost: true));
+        var heads = GraphOn("x:float[2,8,4,4] w:float[2,4,4,8]", "O", Op("Exp", "x", "e"),
+            ComputeContextLifetimeCoverageTests.With(Op("Transpose", "e", "t"), "perm", 0, 2, 1, 3), Op("MatMul", "t w", "O"));
+        Assert.Equal(4096, RunPeak(heads, onHost: false));
+        Assert.Equal(4096, RunPeak(heads, onHost: true));
+        var folded = GraphOn("x:float[8,8,16] w:float[8,4]", "O", Op("Exp", "x", "e"),
+            ComputeContextLifetimeCoverageTests.With(Op("Transpose", "e", "t"), "perm", 1, 2, 0), Op("MatMul", "t w", "O"));
+        Assert.Equal(6144, RunPeak(folded, onHost: false));
+    }
+
+    [Fact]
+    public void TestATorchRunIsModelledLayingAnElementWiseResultOutAsItsOperandsAreLaidOut()
+    {
+        NodeProto Heads() => ComputeContextLifetimeCoverageTests.With(Op("Transpose", "e", "t"), "perm", 0, 2, 1, 3);
+        Assert.Equal(3072, RunPeak(ComputeContextLifetimeCoverageTests.WithInts(GraphOn("x:float[2,8,4,4] s:float[1]", "O", Op("Exp", "x", "e"), Heads(),
+            Op("Mul", "t s", "m"), Op("Reshape", "m k", "r"), Op("Reshape", "e k", "v"), Op("Add", "r v", "O")), "k", 2, 4, 32)));
+        Assert.Equal(3072, RunPeak(GraphOn("x:float[2,8,4,4] s:float[1]", "O", Op("Exp", "x", "e"), Heads(),
+            Op("Mul", "t s", "m"), Op("Neg", "m", "n"), Op("Add", "n t", "O"))));
+    }
+
+    [Fact]
+    public void TestATorchRunIsModelledHoldingWhatItsLoopsListsAndStacksHoldAndWhatItsRecurrentLayersStack()
+    {
+        Assert.Equal(768, RunPeak(ComputeContextLifetimeCoverageTests.WithInts(GraphOn("x:float[4,8]", "O", Op("SequenceEmpty", "", "s"),
+            Loop("m s", "S", GraphOn("i c t", "k u", Op("Neg", "x", "n"), Op("SequenceInsert", "t n", "u"), Op("Identity", "c", "k"))),
+            ComputeContextLifetimeCoverageTests.Op("ConcatFromSequence", "S", "O", attribute: ("axis", 0))), "m", 3)));
+        Assert.Equal(512, RunPeak(ComputeContextLifetimeCoverageTests.WithInts(GraphOn("x:float[4,8]", "O",
+            Loop("m", "O", GraphOn("i c", "k e", Op("Exp", "x", "e"), Op("Identity", "c", "k")))), "m", 2)));
+        Assert.Null(RunPeak(ComputeContextLifetimeCoverageTests.WithInts(GraphOn("x:float[4,8]", "O",
+            Loop("m x", "O", GraphOn("i c t", "k u", Op("Identity", "c", "k"), Op("Neg", "t", "u")))), "m", 50_000)));
+        Assert.Equal(256, RunPeak(GraphOn("x:float[4,2,3] w:float[1,16,3] r:float[1,16,4]", "Y",
+            ComputeContextLifetimeCoverageTests.Op("LSTM", "x w r", "Y", attribute: ("hidden_size", 4)))));
+        var branch = ComputeContextLifetimeCoverageTests.Op("If", "c", "O", body: GraphOn("", "t", Op("Neg", "x", "t")));
+        branch.Attributes.Add(new AttributeProto { Name = "else_branch", Type = AttributeProto.AttributeType.Graph, G = GraphOn("", "t", Op("Exp", "x", "t")) });
+        Assert.Null(RunPeak(GraphOn("x:float[4,8] c:bool[1]", "O", branch)));
+    }
+
+    [Fact]
+    public void TestATorchRunIsModelledHoldingTheResultOfEveryOperatorThatComputesOneOfItsOwn()
+    {
+        Assert.Equal(192, RunPeak(GraphOn("x:float[4,8] i:int64[2]", "O", Op("Exp", "x", "e"), Op("Gather", "e i", "O"))));
+        Assert.Equal(384, RunPeak(GraphOn("x:float[4,8]", "O", Op("Exp", "x", "e"), ComputeContextLifetimeCoverageTests.Op("Cast", "e", "O", attribute: ("to", 7)))));
+        Assert.Equal(256, RunPeak(GraphOn("x:float[4,8]", "O", Op("Exp", "x", "e"), ComputeContextLifetimeCoverageTests.Op("Cast", "e", "c", attribute: ("to", 1)), Op("Neg", "c", "O"))));
+    }
+
+    private static NodeProto Loop(string inputs, string outputs, GraphProto body) => ComputeContextLifetimeCoverageTests.Loop(inputs, outputs, body);
+
+    [Fact]
+    public void TestATorchRunIsModelledCopyingAReshapeOfAViewItsStridesCannotReshape()
+    {
+        Assert.Equal(4096, RunPeak(ComputeContextLifetimeCoverageTests.WithInts(GraphOn("x:float[4,8,16]", "O", Op("Exp", "x", "e"),
+            ComputeContextLifetimeCoverageTests.With(Op("Transpose", "e", "t"), "perm", 1, 0, 2), Op("Reshape", "t shape", "O")), "shape", 8, 64)));
+        Assert.Equal(2048, RunPeak(ComputeContextLifetimeCoverageTests.WithInts(GraphOn("x:float[4,8,16]", "O", Op("Exp", "x", "e"),
+            ComputeContextLifetimeCoverageTests.With(Op("Transpose", "e", "t"), "perm", 1, 0, 2), Op("Reshape", "t shape", "O")), "shape", 8, 4, 4, 4)));
+        Assert.Equal(2048, RunPeak(ComputeContextLifetimeCoverageTests.WithInts(GraphOn("x:float[4,8,16]", "O", Op("Exp", "x", "e"),
+            Op("Reshape", "e shape", "O")), "shape", 32, 16)));
+    }
+
+    [Fact]
+    public void TestATorchRunIsModelledFreeingEachValueAtItsLastReadWithItsViewsWritesOverDyingOperandsAndAliasedOutputsTakingNothing()
+    {
+        Assert.Equal(8192, RunPeak(GraphOn("a:float[1024]", "O", Op("Exp", "a", "e"), Op("Neg", "a", "f"), Op("Add", "e f", "O"))));
+        Assert.Equal(4096, RunPeak(GraphOn("a:float[1024]", "O", Op("Exp", "a", "e"), Op("Neg", "e", "O"))));
+        Assert.Equal(4096, RunPeak(GraphOn("a:float[32,32]", "O", Op("Exp", "a", "e"), Op("Transpose", "e", "O"))));
+        Assert.Equal(0, RunPeak(GraphOn("a:float[1024] b:float[1024]", "O", Op("Add", "a b", "O")), new OutputAlias("O", "a")));
+        Assert.Equal(4096, RunPeak(GraphOn("a:float[1024] b:float[1024]", "O", Op("Add", "a b", "O"))));
+        Assert.Equal(263168, RunPeak(ComputeContextLifetimeCoverageTests.WithInts(GraphOn("a:float[256,256]", "O",
+            Op("Exp", "a", "e"), Op("ReduceSum", "e axes", "s"), Op("Mul", "a s", "O")), "axes", 1)));
+    }
+
+    private static long? RunPeak(GraphProto graph, params OutputAlias[] aliases) => TorchRunMemory.Peak(new ModelProto { Graph = graph }, aliases);
+
+    private static long? RunPeak(GraphProto graph, bool onHost) => TorchRunMemory.Peak(new ModelProto { Graph = graph }, [], onHost);
+
+    private static bool PassHoldsNoMoreOnTorch(ComputationGraph model, long[] shape)
+    {
+        using var context = new ComputeContext(Torch);
+        var sample = TensorData(shape, new float[shape.Aggregate(1L, (a, d) => a * d)]);
+        var rig = TrainingRig.FromScratch(model, Shorokoo.Modules.Losses.L2Loss.ComputationGraph,
+            Shorokoo.Modules.Optimizers.AdamWOptimizer.ComputationGraph, [sample],
+            new Shorokoo.Modules.Optimizers.AdamWOptimizerHyperparameters { LearningRate = 0.001f }, runtimeContext: context);
+        var state = rig.UpdatedParamFieldCount + rig.UpdatedStateFieldCount + rig.UpdatedOptimizerStateFieldCount;
+        long Holds(ComputationGraph step)
+        {
+            var model = Benchmarks.MemoryPassBenchmarkTests.RigModel(step, rig.OptimizationInputShapes);
+            var graph = model.Graph!;
+            List<OutputAlias> written = [.. Enumerable.Range(0, state).Select(i => new OutputAlias(graph.Outputs[i].Name, graph.Inputs[i].Name))];
+            return TorchRunMemory.Peak(model, OutputAliasProof.Prove(graph, written))!.Value;
+        }
+        return Holds(rig.TrainingStepPureGraph) <= Holds(rig.PreOptimizationGraph);
+    }
+
+    [Fact]
+    public void TestAConvolutionOfTwoTransposedViewsIsComputedAsTheWeightGradientItIs()
+    {
+        Assert.Equal("True True", WeightGradient(batch: 4, sizes: 9, kernel: 3, stride: 1, dilation: 1, pad: 1));
+        Assert.Equal("True True", WeightGradient(batch: 4, sizes: 10, kernel: 3, stride: 2, dilation: 1, pad: 1));
+        Assert.Equal("True True", WeightGradient(batch: 2, sizes: 11, kernel: 3, stride: 2, dilation: 2, pad: 2));
+        Assert.Equal("True True", WeightGradient(batch: 3, sizes: 7, kernel: 5, stride: 3, dilation: 1, pad: 0));
+        Assert.Equal("True False", Evaluated("(lambda C, x: (str(C.conv(x, x).shape == (2, 2, 1, 1)) + ' ' + str(C._weight_gradient(x.transpose(0, 1).contiguous(), x, [1, 1], [0, 0], [1, 1], 1) is not None)))"
+                                             + "(__import__('shorokoo_torch.ops_conv_pool', fromlist=['_']), torch.ones(2, 2, 3, 3))"));
+    }
+
+    // The translation's weight gradient of a convolution, against torch's own.
+    internal static string WeightGradient(int batch, int sizes, int kernel, int stride, int dilation, int pad, TorchBackend? backend = null)
+        => Evaluated($$"""
+            (lambda C, F, x, w: (lambda g: str((C.conv(x.transpose(0, 1), g.transpose(0, 1), strides=[{{dilation}}] * 2, dilations=[{{stride}}] * 2, pads=[{{pad}}] * 4)
+                - F.conv2d(x.transpose(0, 1), g.transpose(0, 1), stride={{dilation}}, dilation={{stride}}, padding={{pad}})).abs().max().item() < 1e-12) + ' '
+                + str(C._weight_gradient(x.transpose(0, 1), g.transpose(0, 1), [{{dilation}}] * 2, [{{pad}}] * 2, [{{stride}}] * 2, 1) is not None))(
+                torch.randn(F.conv2d(x, w, stride={{stride}}, dilation={{dilation}}, padding={{pad}}).shape, dtype=torch.float64, device=x.device)))(
+                __import__('shorokoo_torch.ops_conv_pool', fromlist=['_']), __import__('torch.nn.functional', fromlist=['_']),
+                torch.randn({{batch}}, 3, {{sizes}}, {{sizes}}, dtype=torch.float64, device="{{(backend?.OnCuda == true ? "cuda" : "cpu")}}"),
+                torch.randn(5, 3, {{kernel}}, {{kernel}}, dtype=torch.float64, device="{{(backend?.OnCuda == true ? "cuda" : "cpu")}}"))
+            """.Replace("\n", " ").Replace("\r", " "), backend);
+
+    [Fact]
+    public void TestAnElementWiseNodeIsWrittenOverAnOperandNothingReadsAfterItAnInputOrAValueOfItsOwnMemory()
+    {
+        Assert.Equal("over:neg over:exp", Calls(GraphOn("x:float[4]", "c", Op("Neg", "x", "b"), Op("Exp", "b", "c")), over: true));
+        Assert.Equal("over:exp", Calls(GraphOn("x:float[4]", "c", Op("Exp", "x", "c")), over: true));
+        Assert.Equal("over:neg abs_ over:exp", Calls(GraphOn("x:float[4]", "c d", Op("Neg", "x", "b"), Op("Exp", "b", "c"), Op("Abs", "b", "d")), over: true));
+        Assert.Equal("over:neg exp", Calls(GraphOn("x:float[4]", "b c", Op("Neg", "x", "b"), Op("Exp", "b", "c")), over: true));
+        Assert.Equal("over:neg over:exp shape", Calls(GraphOn("x:float[4]", "c s", Op("Neg", "x", "b"), Op("Exp", "b", "c"), Op("Shape", "c", "s")), over: true));
+        Assert.Equal("neg over:add over:mul", Calls(GraphOn("x:float[4]", "d", Op("Neg", "x", "b"), Op("Add", "x b", "c"), Op("Mul", "c c", "d")), over: true));
+        Assert.Equal("over:neg over:softmax over:layer_normalization", Calls(GraphOn("x:float[4] s:float[4]", "d", Op("Neg", "x", "b"), Op("Softmax", "b", "c"), Op("LayerNormalization", "c s", "d")), over: true));
+        Assert.Equal("over:neg identity abs_ over:exp", Calls(GraphOn("x:float[4]", "c d", Op("Neg", "x", "b"), Op("Identity", "b", "r"), Op("Exp", "b", "c"), Op("Abs", "r", "d")), over: true));
+        Assert.Equal("over:neg transpose mul", Calls(GraphOn("x:float[2,2]", "c", Op("Neg", "x", "b"), Op("Transpose", "b", "t"), Op("Mul", "b t", "c")), over: true));
+        Assert.Equal("neg over:add", Calls(GraphOn("x:float[4]", "c", Op("Neg", "x", "b"), Op("Add", "b x", "c")), over: true));
+        Assert.Equal("over:neg greater over:where", Calls(GraphOn("x:float[4] y:float[4]", "c", Op("Neg", "x", "b"), Op("Greater", "b y", "m"), Op("Where", "m b y", "c")), over: true));
+        Assert.Equal("over:neg greater where over:add", Calls(GraphOn("x:float[4]", "d", Op("Neg", "x", "b"), Op("Greater", "b b", "m"), Op("Where", "m b b", "c"), Op("Add", "c b", "d")), over: true));
+    }
+
+    [Fact]
+    public void TestARunWritesSoftmaxesNormalizationsClipsConvolutionsAndGemmsIntoTheMemoryItConsumesComputingWhatAPlainRunComputes()
+        => SoftmaxesNormalizationsClipsConvolutionsAndGemmsArePlaced(Torch);
+
+    internal static void SoftmaxesNormalizationsClipsConvolutionsAndGemmsArePlaced(TorchBackend backend)
+    {
+        string Placed(GraphProto graph) => PlacedOn(backend, graph);
+        Assert.Equal("O@b+0", Placed(Graph("O", Op("Softmax", "a", "O"))));
+        Assert.Equal("O@b+0", Placed(Graph("O", Op("LogSoftmax", "a", "O"))));
+        Assert.Equal("O@b+0", Placed(GraphOn("a:float[512,512] b:float[262144]", "O", ComputeContextLifetimeCoverageTests.Op("Softmax", "a", "O", attribute: ("axis", 0)))));
+        Assert.Equal("O@a+0", Placed(Graph("O", Op("Gelu", "a", "O"))));
+        Assert.Equal("O@a+0", Placed(GraphOn("a:float[262144] lo:float[1] hi:float[1]", "O", Op("Clip", "a lo hi", "O"))));
+        Assert.Equal("O@a+0", Placed(GraphOn("a:float[262144] hi:float[1]", "O", Node("Clip", ["a", "", "hi"], ["O"]))));
+        Assert.Equal("O@b+0", Placed(GraphOn("a:float[512,512] b:float[512,512] s:float[512] c:float[512]", "O", Op("LayerNormalization", "a s c", "O"))));
+        Assert.Equal("O@b+0", Placed(GraphOn("x:float[4,64,32,32] b:float[4,64,32,32] s:float[64] c:float[64] m:float[64] v:float[64]", "O",
+            Op("Abs", "v", "w"), Op("BatchNormalization", "x s c m w", "O"))));
+        Assert.Equal("O@b+0", Placed(GraphOn("x:float[2,32,64,64] b:float[2,32,64,64] w:float[32,32,3,3]", "O",
+            ComputeContextLifetimeCoverageTests.With(Op("Conv", "x w", "O"), "pads", 1, 1, 1, 1))));
+        Assert.Equal("O@b+0", Placed(GraphOn("a:float[512,512] b:float[512,512] w:float[512,512] c:float[512]", "O", Op("Gemm", "a w c", "O"))));
+    }
+
+    [Fact]
+    public void TestAPlacedValueGivenNoRangeIsComputedAsItIsAndCopiedOutOfItsOperandsWhereItWasProvedOutOfThem()
+    {
+        Assert.Equal("False", Evaluated("(lambda t: __import__('shorokoo_torch.runtime', fromlist=['_']).place_into(0, True, S.identity, t).data_ptr() == t.data_ptr())(torch.ones(4))"));
+        Assert.Equal("True", Evaluated("(lambda t: __import__('shorokoo_torch.runtime', fromlist=['_']).place_into(0, False, S.identity, t).data_ptr() == t.data_ptr())(torch.ones(4))"));
+        Assert.Equal("[-1.0, -1.0] torch.float32", Evaluated("__import__('shorokoo_torch.runtime', fromlist=['_']).place_into(0, True, E.neg, torch.ones(2))"));
+    }
+
+    [Fact]
+    public void TestARunWritesIntoAConsumedInputOnlyWhereItsBytesAreItsOwnContiguousAndOnTheRunsDevice()
+    {
+        Assert.Equal("0", Blocks("[t, t[2:]]"));
+        Assert.Equal("1", Blocks("[t[:2], t[2:]]"));
+        Assert.Equal("0", Blocks("[t, t]"));
+        Assert.Equal("0", Blocks("[t.reshape(2, 2).t()]"));
+        Assert.Equal("0", Blocks("[t]", moved: "[t.clone()]"));
+        Assert.Equal("0", Blocks("[t]", constants: "[t.untyped_storage().data_ptr()]"));
+        Assert.Equal("1", Blocks("[t]"));
+    }
+
+    // args: the run's arguments over a tensor t of four floats; moved: the values it computes on.
+    private static string Blocks(string args, string moved = "a", string constants = "[]")
+        => Evaluated($"(lambda rt, t: (lambda a: len(rt._Placing(a, {moved}, [(0, 0, 8, 1, [2], -1)], torch.device('cpu'), {constants}).blocks))({args}))"
+                     + "(__import__('shorokoo_torch.runtime', fromlist=['_']), torch.zeros(4))");
+
+    private static GraphProto Graph(string outputs, params NodeProto[] nodes) => GraphOn("a:float[262144] b:float[262144]", outputs, nodes);
+
+    private static GraphProto GraphOn(string inputs, string outputs, params NodeProto[] nodes) => ComputeContextLifetimeCoverageTests.GraphOf(inputs, outputs, nodes);
+
+    private static GraphProto Halved(string outputs, params NodeProto[] nodes)
+        => ComputeContextLifetimeCoverageTests.WithInts(ComputeContextLifetimeCoverageTests.WithInts(ComputeContextLifetimeCoverageTests.WithInts(
+            GraphOn("a:float[524288] b:float[524288]", outputs, nodes), "zero", 0), "half", 262144), "end", 524288);
+
+    // Each output as O@a+16 (16 bytes into input a's memory) or O@- (memory of its own).
+    private static string Placed(GraphProto graph, bool consume = true, bool feedTwice = false) => PlacedOn(Torch, graph, consume, feedTwice);
+
+    // On a card, " allocating" follows where the consuming run did not allocate its outputs' bytes less.
+    internal static string PlacedOn(TorchBackend backend, GraphProto graph, bool consume = true, bool feedTwice = false)
+    {
+        using var session = backend.CreateSession(Serialize(graph), default, default, DeviceMemorySettings.Default, DiagnosticSettings.Default, []);
+        var names = graph.Outputs.Select(o => o.Name).ToArray();
+        (string[] Values, string Where, long Allocated, long Bytes) Run(bool consuming)
+        {
+            var feeds = new Dictionary<string, IShorokooTensorValue>(StringComparer.Ordinal);
+            foreach (var input in graph.Inputs.Where(i => i.Type?.TensorType is not null))
+                feeds[input.Name] = feedTwice && feeds.Count > 0 ? feeds.Values.First() : Pattern(backend, input, feeds.Count);
+            var fed = feeds.Values.Distinct().Cast<TorchTensorValue>().ToArray();
+            var at = feeds.ToDictionary(f => f.Key, f => (((TorchTensorValue)f.Value).Address, TorchPlacements.BytesOf((TorchTensorValue)f.Value)));
+            var fedBytes = fed.Select(value => Convert.ToBase64String(backend.CopyTensorToHost(value))).ToArray();
+            var before = CardAllocated(backend);
+            var results = session.RunConsuming(feeds, consuming ? fed : [], names, RunSettings.Default);
+            var allocated = CardAllocated(backend) - before;
+            if (!consuming)
+            {
+                Assert.Equal(fedBytes, fed.Select(value => Convert.ToBase64String(backend.CopyTensorToHost(value))));
+                foreach (var value in fed) value.Dispose();
+            }
+            var where = names.Select((name, i) => ((TorchTensorValue)results[i]).Range is null
+                ? $"{name}@-"
+                : at.Where(f => ((TorchTensorValue)results[i]).Address >= f.Value.Address && ((TorchTensorValue)results[i]).Address < f.Value.Address + (nint)f.Value.Item2)
+                    .Select(f => $"{name}@{f.Key}+{((TorchTensorValue)results[i]).Address - f.Value.Address}").Single());
+            string[] values = [.. results.Select(r => Convert.ToBase64String(backend.CopyTensorToHost(r)))];
+            var bytes = results.Sum(r => TorchPlacements.BytesOf((TorchTensorValue)r));
+            foreach (var result in results) result.Dispose();
+            return (values, string.Join(" ", where), allocated, bytes);
+        }
+        var plain = Run(consuming: false);
+        var placed = Run(consume);
+        Assert.Equal(plain.Values, placed.Values);
+        return placed.Where + (backend.OnCuda && placed.Allocated + placed.Bytes > plain.Allocated ? " allocating" : "");
+    }
+
+    internal static void ReleaseWhatEarlierTestsLeft()
+    {
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        GC.Collect();
+        using (PythonRuntime.Gil()) Finalizer.Instance.Collect();
+    }
+
+    internal static (long Peak, T Result) CardPeak<T>(Func<T> run)
+    {
+        ReleaseWhatEarlierTestsLeft();
+        long before;
+        using (PythonRuntime.Gil())
+        {
+            using var scope = Py.CreateScope();
+            scope.Exec("import torch\ntorch.cuda.synchronize()\ntorch.cuda.reset_peak_memory_stats()\nbefore = torch.cuda.memory_allocated()");
+            before = scope.Get<long>("before");
+        }
+        var result = run();
+        using (PythonRuntime.Gil())
+        {
+            using var scope = Py.CreateScope();
+            scope.Exec("import torch\ntorch.cuda.synchronize()\npeak = torch.cuda.max_memory_allocated()");
+            return (scope.Get<long>("peak") - before, result);
+        }
+    }
+
+    private static long CardAllocated(TorchBackend backend)
+    {
+        if (!backend.OnCuda) return 0;
+        using (PythonRuntime.Gil())
+        {
+            using var scope = Py.CreateScope();
+            scope.Exec("import torch\nallocated = torch.cuda.memory_stats().get('allocated_bytes.all.allocated', 0)");
+            return scope.Get<long>("allocated");
+        }
+    }
+
+    private static IShorokooTensorValue Pattern(TorchBackend backend, ValueInfoProto input, int seed)
+    {
+        var shape = input.Type.TensorType.Shape.Dims.Select(d => d.DimValue).ToArray();
+        var count = (int)shape.Aggregate(1L, (a, d) => a * d);
+        return input.Type.TensorType.ElemType == (int)TensorProto.DataType.Int64
+            ? backend.CreateTensorInBackendMemory(ShorokooTensorElementType.Int64,
+                [.. MemoryMarshal.AsBytes<long>([.. Enumerable.Range(0, count).Select(i => (long)((i * 7 + seed) % 1000))])], shape)
+            : backend.CreateTensorInBackendMemory(ShorokooTensorElementType.Float,
+                [.. MemoryMarshal.AsBytes<float>([.. Enumerable.Range(0, count).Select(i => ((i * 7 + seed) % 1000) * 0.001f - 0.4f)])], shape);
+    }
+
+    [Fact]
     public void TestAnInitializerWhoseRawDataIsNotItsShapesSizeIsRefusedAtSessionCreation()
     {
         Assert.Throws<TorchUnsupportedModelException>(() => Torch.CreateSession(RawInitialized(4), default, default, DeviceMemorySettings.Default));
@@ -1019,15 +1654,7 @@ public class PyTorchBackendCoverageTests
     [Fact]
     public void TestProvisioningInstallsTheLockByHashIntoItsOwnEnvironmentAndGivesUpOnAUvThatHangs()
     {
-        var installed = FakeUv("""
-            echo "$@" >> LOG
-            if [ "$1" = venv ]; then for last; do :; done; mkdir -p "$last"; fi
-            """, """
-            echo %*>>"LOG"
-            if not "%~1"=="venv" exit /b 0
-            for %%a in (%*) do set "last=%%~a"
-            mkdir "%last%"
-            """);
+        var installed = Installed();
         var hung = FakeUv("sleep 20; exit 1", "ping -n 21 127.0.0.1 >nul & exit /b 1", TimeSpan.FromSeconds(2));
         var install = installed.Log.Single(line => line.StartsWith("pip install", StringComparison.Ordinal)).Replace("\"", "");
 
@@ -1035,11 +1662,32 @@ public class PyTorchBackendCoverageTests
         Assert.Contains($"--python {installed.Directory}", install);
         Assert.Contains("--require-hashes", install);
         Assert.Equal(PythonEnvironmentFailure.ProvisioningTimedOut, hung.Failure);
-        Assert.True(hung.Took < TimeSpan.FromSeconds(15));
         Assert.Equal(["HOME", "HTTPS_PROXY", "SSL_CERT_FILE", "UV_CACHE_DIR", "UV_NATIVE_TLS", "UV_NO_PROGRESS"],
             PythonEnvironmentResolver.UvEnvironment(((string[])["HOME", "HTTPS_PROXY", "SSL_CERT_FILE", "UV_CACHE_DIR", "UV_NATIVE_TLS", "UV_SYSTEM_PYTHON",
                 "UV_EXTRA_INDEX_URL", "UV_INDEX_STRATEGY", "UV_PYTHON", "VIRTUAL_ENV", "CONDA_PREFIX", "PYTHONPATH"]).Select(name => KeyValuePair.Create(name, "x"))).Keys.Order());
     }
+
+    [Fact]
+    public void TestProvisioningLinksTheCudaLibrariesWithinWhatIsLeftOfItsTimeout()
+    {
+        var provisioned = Installed(TimeSpan.FromMinutes(10));
+
+        Assert.True(provisioned.LinkedWithin < TimeSpan.FromMinutes(10));
+        Assert.True(provisioned.LinkedWithin >= TimeSpan.FromMinutes(10) - provisioned.Took);
+    }
+
+    /// <summary>Provisioning with a uv that logs each step and makes the environment's folder, and
+    /// nothing in it.</summary>
+    private static (PythonEnvironmentFailure Failure, string[] Log, string Directory, TimeSpan Took, TimeSpan? LinkedWithin) Installed(TimeSpan? timeout = null)
+        => FakeUv("""
+            echo "$@" >> LOG
+            if [ "$1" = venv ]; then for last; do :; done; mkdir -p "$last"; fi
+            """, """
+            echo %*>>"LOG"
+            if not "%~1"=="venv" exit /b 0
+            for %%a in (%*) do set "last=%%~a"
+            mkdir "%last%"
+            """, timeout);
 
     [Fact]
     public void TestAProcessWithoutUvWaitsForAnotherThatIsProvisioningAndUsesWhatItProvisioned()
@@ -1121,6 +1769,115 @@ public class PyTorchBackendCoverageTests
         Assert.Throws<TorchUnsupportedModelException>(() => Torch.CreateSession(Typed(21, ["x"], ["y"], [Node("Constant", [], ["y"], attributes: new AttributeProto { Name = "value_string", Type = AttributeProto.AttributeType.String, S = [0xC3] })]), default, default, DeviceMemorySettings.Default));
     }
 
+    [Fact]
+    public void TestAHostTensorPastTwoGibibytesIsCopiedInAndOutByThePieceAndSavedFromItsAddress()
+        => Utils.OwnProcess.Run(typeof(PyTorchBackendCoverageTests), nameof(AHostTensorPastTwoGibibytesIsCopiedInAndOutByThePieceAndSavedFromItsAddress));
+
+    internal static void AHostTensorPastTwoGibibytesIsCopiedInAndOutByThePieceAndSavedFromItsAddress()
+    {
+        const long Elements = (1L << 30) + 2;
+        using var head = (TorchTensorValue)Torch.CreateTensor(new float[StagedReadBack.StagingBytes / 4], [StagedReadBack.StagingBytes / 4]);
+        TorchTensorValue large;
+        using (PythonRuntime.Gil())
+        {
+            using var description = HostFloats((long)head.Address, Elements);
+            large = TorchTensorValue.Wrap(head.Value.InvokeMethod("detach"), description, ShorokooTensorElementType.Float);
+        }
+        AssertAHostValuePastTwoGibibytesIsCopiedByThePiece(Torch, large, 4 * Elements);
+    }
+
+    [Fact]
+    public void TestAHostTensorPastTwoGibibytesIsReadIntoTorchsHostMemoryByThePiece()
+        => AssertAHostTensorPastTwoGibibytesIsReadByThePiece(Torch);
+
+    [Fact]
+    public void TestAHostTensorPastTwoGibibytesOfAnotherRuntimeIsCopiedOntoATorchContextByThePiece()
+    {
+        using var context = new ComputeContext(Torch);
+        CoreUtilsCoverageTests.AssertAHostTensorPastTwoGibibytesIsCopiedByThePiece(t => t.To(context));
+    }
+
+    internal static PyTuple HostFloats(long address, long elements)
+    {
+        PyObject[] dims = [elements.ToPython()];
+        PyObject[] fields =
+        [
+            0.ToPython(), ((int)ShorokooTensorElementType.Float).ToPython(), new PyList(dims), true.ToPython(),
+            address.ToPython(), (4 * elements).ToPython(), (-1).ToPython(),
+        ];
+        return new PyTuple(fields);
+    }
+
+    /// <summary>
+    /// <paramref name="large"/>, a host value of <paramref name="bytes"/> bytes of which only the first
+    /// <see cref="StagedReadBack.StagingBytes"/> are memory it holds: a piece copied in and out at an
+    /// offset within those, a piece past its end refused, and its save stopped once the first piece is
+    /// written. The value goes with the tensor saved.
+    /// </summary>
+    internal static void AssertAHostValuePastTwoGibibytesIsCopiedByThePiece(IShorokooBackend backend, IShorokooTensorValue large, long bytes)
+    {
+        byte[] piece = [1, 2, 3, 4];
+        var read = new byte[piece.Length];
+        Assert.True(backend.TryCopyHostToTensorRange(large, 5, piece));
+        Assert.True(backend.TryCopyTensorRangeToHost(large, 5, read));
+        Assert.Equal(piece, read);
+        Assert.Throws<ArgumentOutOfRangeException>(() => backend.TryCopyTensorRangeToHost(large, bytes - 2, read));
+
+        var tensor = TensorData.Create(new Shape([bytes / 4]), DType.Float32, large, backend);
+        var rows = new byte[8];
+        Assert.True(tensor.TryCopyRows([2, 1], 4, rows));
+        Assert.Equal([4, 0, 0, 0, 0, 1, 2, 3], rows);
+        var saved = new FirstWriteStream();
+        Assert.Same(FirstWriteStream.Stopped, Record.Exception(() => tensor.WriteContentTo(saved)));
+        tensor.Delete();
+        Assert.Equal(StagedReadBack.StagingBytes, saved.First.Length);
+        Assert.Equal(piece, saved.First[5..9]);
+    }
+
+    /// <summary>
+    /// Tensors read into <paramref name="backend"/>'s host memory a piece at a time, none larger
+    /// than <see cref="StagedReadBack.StagingBytes"/>: one of three pieces, read whole and written
+    /// back as it was read, and one past 2 GiB, read as far as a stream holding only those pieces
+    /// goes.
+    /// </summary>
+    internal static void AssertAHostTensorPastTwoGibibytesIsReadByThePiece(IShorokooBackend backend)
+    {
+        const long Small = StagedReadBack.StagingBytes / 2 + 3, Large = (1L << 29) + 2;
+        var (source, saved, cut) = (new PyTorchCudaHardwareTests.CountingStream(Small),
+            new PyTorchCudaHardwareTests.CountingStream(Small), new PyTorchCudaHardwareTests.CountingStream(Small));
+        var tensor = ComputeContext.ReadIntoHostMemoryOf(backend, new Shape([Small]), DType.Int32, 4 * Small, source);
+        var (host, allocator) = (tensor.IsHostResident, tensor.AllocatingBackend);
+        try { tensor.WriteContentTo(saved); }
+        finally { tensor.Delete(); }
+
+        Assert.IsType<EndOfStreamException>(Record.Exception(
+            () => ComputeContext.ReadIntoHostMemoryOf(backend, new Shape([Large]), DType.Int32, 4 * Large, cut)));
+        Assert.Equal((true, backend, true), (host, allocator, saved.Counted));
+        Assert.Equal((StagedReadBack.StagingBytes, StagedReadBack.StagingBytes, 4 * Small), (source.Largest, cut.Largest, cut.Position));
+    }
+
+    /// <summary>Keeps what the first write hands it, and stops the writer there.</summary>
+    private sealed class FirstWriteStream : Stream
+    {
+        internal static readonly IOException Stopped = new("Stopped after the first write.");
+        public byte[] First { get; private set; } = [];
+        public override void Write(ReadOnlySpan<byte> buffer)
+        {
+            First = buffer.ToArray();
+            throw Stopped;
+        }
+        public override void Write(byte[] buffer, int offset, int count) => Write(buffer.AsSpan(offset, count));
+        public override bool CanRead => false;
+        public override bool CanSeek => false;
+        public override bool CanWrite => true;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+    }
+
     private static PythonEnvironment Resolve(PythonEnvironmentOptions options, string variable)
         => PythonEnvironmentResolver.Resolve(PythonEnvironmentLock.Cpu, options,
             name => name == PythonEnvironmentResolver.EnvironmentVariable ? variable : null);
@@ -1178,7 +1935,7 @@ public class PyTorchBackendCoverageTests
         var a = Tensor([10f, 20f, 30f, 40f]);
         using var second = Tensor(b ?? [1f, 2f, 3f, 4f]);
         var feeds = new Dictionary<string, IShorokooTensorValue> { ["a"] = a, ["b"] = feedTwice ? a : second };
-        var results = session.RunConsuming(feeds, consume ? [a] : [], [.. graph.Outputs.Select(o => o.Name)], ComputeContext.NoOutputsRetained, RunSettings.Default, out var aliased);
+        var results = session.RunConsuming(feeds, consume ? [a] : [], [.. graph.Outputs.Select(o => o.Name)], RunSettings.Default, out var aliased);
         if (!consume) a.Dispose();
         float[] values = [.. results.SelectMany(r => integers ? r.GetTensorDataAsSpan<long>().ToArray().Select(v => (float)v) : r.GetTensorDataAsSpan<float>().ToArray())];
         foreach (var result in results) result.Dispose();
@@ -1190,7 +1947,7 @@ public class PyTorchBackendCoverageTests
         var feeds = graph.Inputs.ToDictionary(i => i.Name, i => Torch.CreateTensor(Enumerable.Repeat(i.Name switch { "a" => 1f, "b" => 10f, "c" => 100f, _ => 1f }, 3).ToArray(), [3]));
         using var kept = feeds["g"];
         var results = session.RunConsuming(feeds.ToDictionary(f => f.Key, f => (IShorokooTensorValue)f.Value), [.. feeds.Where(f => f.Key != "g").Select(f => f.Value)],
-            [.. graph.Outputs.Select(o => o.Name)], ComputeContext.NoOutputsRetained, RunSettings.Default, out var aliased);
+            [.. graph.Outputs.Select(o => o.Name)], RunSettings.Default, out var aliased);
         var values = string.Join(" ", results.SelectMany(r => r.GetTensorDataAsSpan<float>().ToArray()));
         foreach (var result in results) result.Dispose();
         return string.Join(",", results.Select((_, i) => aliased.Count == 0 ? "-" : aliased[i] ?? "-")) + " " + values;
@@ -1203,7 +1960,12 @@ public class PyTorchBackendCoverageTests
         return Serialize(graph);
     }
 
-    private static (PythonEnvironmentFailure Failure, string[] Log, string Directory, TimeSpan Took) FakeUv(string sh, string cmd, TimeSpan? timeout = null)
+    /// <summary>Provisioning into a folder of its own with a uv running <paramref name="sh"/> (or
+    /// <paramref name="cmd"/> on Windows), the CUDA library cache beside it: how it failed, what uv
+    /// logged, the environment's folder, how long it took and the timeout the linking of its CUDA
+    /// libraries was handed.</summary>
+    private static (PythonEnvironmentFailure Failure, string[] Log, string Directory, TimeSpan Took, TimeSpan? LinkedWithin) FakeUv(
+        string sh, string cmd, TimeSpan? timeout = null)
     {
         var root = Directory.CreateDirectory(Path.Combine(Path.GetTempPath(), "shorokoo-uv-" + Guid.NewGuid().ToString("N"))).FullName;
         var (uv, log) = (Path.Combine(root, OperatingSystem.IsWindows() ? "uv.cmd" : "uv"), Path.Combine(root, "log"));
@@ -1211,15 +1973,20 @@ public class PyTorchBackendCoverageTests
             ? "@echo off\r\n" + cmd.Replace("LOG", log).ReplaceLineEndings("\r\n") + "\r\n"
             : "#!/bin/sh\n" + sh.Replace("LOG", log) + "\n");
         if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(uv, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        TimeSpan? linkedWithin = null;
+        PythonEnvironmentResolver.LinkingHanded = handed => linkedWithin = handed;
         var clock = System.Diagnostics.Stopwatch.StartNew();
         try
         {
             var failure = Assert.Throws<PythonEnvironmentException>(() => PythonEnvironmentResolver.Resolve(PythonEnvironmentLock.Cpu,
-                new() { CacheDirectory = root, UvPath = uv, ProvisioningTimeout = timeout ?? TimeSpan.FromMinutes(1) }, _ => null)).Failure;
-            return (failure, File.Exists(log) ? File.ReadAllLines(log) : [], Path.Combine(root, PythonEnvironmentLock.Cpu.CacheKey), clock.Elapsed);
+                new() { CacheDirectory = root, UvPath = uv, ProvisioningTimeout = timeout ?? TimeSpan.FromMinutes(1) },
+                name => name is "LOCALAPPDATA" or "XDG_CACHE_HOME" ? root : null)).Failure;
+            var took = clock.Elapsed;
+            return (failure, File.Exists(log) ? File.ReadAllLines(log) : [], Path.Combine(root, PythonEnvironmentLock.Cpu.CacheKey), took, linkedWithin);
         }
         finally
         {
+            PythonEnvironmentResolver.LinkingHanded = null;
             Directory.Delete(root, recursive: true);
         }
     }

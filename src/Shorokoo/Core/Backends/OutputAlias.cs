@@ -76,13 +76,15 @@ public static class OutputAliasProof
     /// were given — see the class for the rule.
     /// </summary>
     /// <exception cref="ArgumentNullException">An argument is null.</exception>
+    /// <exception cref="ProtoBuf.ProtoException"><paramref name="model"/> is not a model protobuf reads:
+    /// malformed, or nested deeper than it reads.</exception>
     public static IReadOnlyList<OutputAlias> Prove(byte[] model, IEnumerable<OutputAlias> candidates)
     {
         ArgumentNullException.ThrowIfNull(model);
         ArgumentNullException.ThrowIfNull(candidates);
         ModelProto parsed;
         using (var stream = new MemoryStream(model, writable: false))
-            parsed = ProtoBuf.Serializer.Deserialize<ModelProto>(stream);
+            parsed = Shorokoo.Onnx.OnnxProtobuf.ReadModel(stream);
         return parsed.Graph is { } graph ? Prove(graph, candidates) : [];
     }
 
@@ -272,7 +274,7 @@ public static class OutputAliasProof
     /// given, and what <c>SequenceErase</c> leaves of a sequence the memory that sequence held.
     /// Named whatever their domain, which only ever widens what counts as a reader.
     /// </summary>
-    private static bool Shares(NodeProto node, int input, int output) => node.OpType switch
+    internal static bool Shares(NodeProto node, int input, int output) => node.OpType switch
     {
         "Identity" or "Reshape" or "Squeeze" or "Unsqueeze" or "Flatten" or "Dropout" or "ExpandDims"
             or "Optional" or "OptionalGetElement" => (input, output) is (0, 0),
@@ -285,20 +287,20 @@ public static class OutputAliasProof
 
     // Whether the node reads a tensor's shape and none of its memory: the standard Shape and Size,
     // and nothing else of those names -- an operator of another domain may read whatever it likes.
-    private static bool ReadsOnlyAShape(NodeProto node) => IsStandard(node) && node.OpType is "Shape" or "Size";
+    internal static bool ReadsOnlyAShape(NodeProto node) => IsStandard(node) && node.OpType is "Shape" or "Size";
 
     // The element-wise operators whose first operand the output may be written over: each element
     // is read before the same element of the output is written, and ONNX Runtime writes these in
     // place itself.
     private static readonly HashSet<string> InPlace = new(StringComparer.Ordinal) { "Add", "Sub", "Mul", "Div" };
 
-    private static bool IsStandard(NodeProto node) => node.Domain is "" or "ai.onnx";
+    internal static bool IsStandard(NodeProto node) => node.Domain is "" or "ai.onnx";
 
-    private static bool HoldsSubgraph(NodeProto node)
+    internal static bool HoldsSubgraph(NodeProto node)
         => node.Attributes.Any(a => a.G is not null || a.Graphs.Count > 0);
 
     /// <summary>One graph, indexed for the questions the proof asks of it.</summary>
-    private sealed class GraphIndex
+    internal sealed class GraphIndex
     {
         private readonly List<NodeProto> _nodes;
         private readonly Dictionary<string, int> _producer = new(StringComparer.Ordinal);
@@ -572,7 +574,7 @@ public static class OutputAliasProof
         /// <summary>Adds to <paramref name="found"/> every name <paramref name="subgraph"/> — and any
         /// subgraph inside it — reads from outside itself; with <paramref name="orderingOnly"/>,
         /// only those it reads other than through the standard <c>Shape</c> or <c>Size</c>.</summary>
-        private static void ReferencedFrom(GraphProto subgraph, HashSet<string> found, bool orderingOnly = false)
+        internal static void ReferencedFrom(GraphProto subgraph, HashSet<string> found, bool orderingOnly = false)
         {
             var defined = new HashSet<string>(StringComparer.Ordinal);
             foreach (var input in subgraph.Inputs) defined.Add(input.Name);

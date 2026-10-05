@@ -34,21 +34,13 @@ namespace Shorokoo
         }
 
         /// <summary>
-        /// A copy of <paramref name="value"/>'s elements, read back to the host first where it is not
-        /// host-readable. <paramref name="value"/> itself is left as it was.
+        /// A copy of <paramref name="value"/>'s elements, read from wherever it is.
+        /// <paramref name="value"/> itself is left as it was.
         /// </summary>
         internal static AppliedHyperparameter Of(TensorData value)
         {
             ArgumentNullException.ThrowIfNull(value);
-            var host = value.ToHost();
-            try
-            {
-                return new AppliedHyperparameter(value.DType, [.. value.Shape.Dims], host.CopyRawMemory());
-            }
-            finally
-            {
-                if (!ReferenceEquals(host, value)) host.Dispose();
-            }
+            return new AppliedHyperparameter(value.DType, [.. value.Shape.Dims], value.CopyRawMemory());
         }
 
         /// <summary>

@@ -26,6 +26,174 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
 
     private string P(string name) => Path.Combine(_tempDir, name);
 
+    [Fact]
+    public void TestASafeTensorsFilePastTwoGibibytesIsReadWithEachTensorAtItsOffset()
+    {
+        var path = SparseSafeTensors(P("large.safetensors"), ("a", 0, 2, [1f, 2f]), ("b", (1L << 31) + 8, 2, [3f, 4f]));
+        var loaded = SafeTensorLoader.LoadSafeTensors(path);
+
+        Assert.True(new FileInfo(path).Length > 1L << 31);
+        Assert.Equal((float[])[1f, 2f, 3f, 4f], loaded.SelectMany(t => t.Data.As<float32>().CopyMemory<float>()).ToArray());
+    }
+
+    [Fact]
+    public void TestATensorPastTwoGibibytesInASafeTensorsFileIsReadIntoHostMemory()
+    {
+        const int Elements = (1 << 29) + 2;
+        var path = SparseSafeTensors(P("one-large.safetensors"), ("w", 0, Elements, []));
+        using (var file = new FileStream(path, FileMode.Open, FileAccess.Write))
+        {
+            file.Position = file.Length - 4;
+            file.Write(BitConverter.GetBytes(5f));
+        }
+        var loaded = SafeTensorLoader.LoadSafeTensors(path).Single().Data;
+        try
+        {
+            Assert.True(loaded.IsHostResident);
+            Assert.Equal(4L * Elements, loaded.ContentByteLength);
+            Assert.Equal(5f, loaded.ValueAt<float>(Elements - 1));
+        }
+        finally
+        {
+            loaded.Delete();
+        }
+    }
+
+    [Fact]
+    public void TestASkptBindFailingAfterItReadATensorPastTwoGibibytesReleasesItBeforeItReturns()
+        => Utils.OwnProcess.Run(typeof(CompressedFormatUtilsCoverageTests), nameof(ASkptBindFailingAfterItReadATensorPastTwoGibibytesReleasesItBeforeItReturns));
+
+    internal static void ASkptBindFailingAfterItReadATensorPastTwoGibibytesReleasesItBeforeItReturns()
+    {
+        var dir = Directory.CreateTempSubdirectory("ShorokooLargeSkpt_").FullName;
+        try
+        {
+            var (model, _, _) = BuildCompressibleSkptModel();
+            var (path, large) = (Path.Combine(dir, "zstd.skpt"), Path.Combine(dir, "zstd-large.skpt"));
+            Persistence.From(model).WithModel().WithWeights().WithZstdCompressedData().Save(path);
+            var entries = ReadZipEntries(path);
+            var name = SafeTensorLoader.ParseSafeTensorBytes(CompressedFormatUtils.Decompress(entries[SkptFileFormat.WeightsEntryPath]))[0].Name;
+            var weights = ZstdFloatZeros(name, LargeElements);
+            var config = JsonNode.Parse(entries[SkptFileFormat.ConfigEntryName])!;
+            config["data"]!["weights"]!["sha256"] = SkptFileFormat.Sha256Hex(weights);
+            RewriteSkpt(large, [.. entries.Select(e => (e.Key,
+                e.Key == SkptFileFormat.ConfigEntryName ? System.Text.Encoding.UTF8.GetBytes(config.ToJsonString())
+                : e.Key == SkptFileFormat.WeightsEntryPath ? weights : e.Value))]);
+            var host = Core.Backends.CachingAllocator.ForHost().Placements;
+            var before = host.InUse;
+
+            Assert.IsType<InvalidDataException>(Record.Exception(() => Persistence.Load(large)));
+            Assert.Equal((before, true), (host.InUse, host.MaxInUse - before >= 4 * LargeElements));
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void TestAnImportRefusingATensorPastWhatAnAttributeHoldsCopiesNothingAndReleasesItBeforeItReturns()
+        => Utils.OwnProcess.Run(typeof(CompressedFormatUtilsCoverageTests), nameof(AnImportRefusingATensorPastWhatAnAttributeHoldsCopiesNothingAndReleasesItBeforeItReturns));
+
+    internal static void AnImportRefusingATensorPastWhatAnAttributeHoldsCopiesNothingAndReleasesItBeforeItReturns()
+    {
+        var dir = Directory.CreateTempSubdirectory("ShorokooLargeImport_").FullName;
+        try
+        {
+            var arch = FCLayer.ComputationGraph.ToConcreteArchitecture(
+                [TensorData(DType.Int64, [], 32769L), TensorDataWithSmallVals(DType.Float32, [1L, 16384L])]);
+            var infos = arch.GetConcreteModelParamInfos();
+            var scheme = ModuleParamSetNamingScheme.CreateShorokooNamingScheme(infos);
+            var path = SparseSafeTensors(Path.Combine(dir, "large.safetensors"), [.. infos.ParamInfos
+                .Where(p => !Core.Nodes.Processors.Fast.FastInjectRngDrawCounter.IsExecutionCounter(p.ParamIdentifier))
+                .Select(p => (scheme.ToName(p)!, p.Shape.Dims))]);
+            var host = Core.Backends.CachingAllocator.ForHost().Placements;
+            var before = host.InUse;
+
+            Assert.Throws<NotSupportedException>(() => Persistence.ImportSafeTensors(arch, path));
+            Assert.Equal((before, true, true), (host.InUse, host.MaxInUse - before >= 4 * 32769L * 16384L,
+                host.MaxInUse - before < 8 * 32769L * 16384L));
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    private const long LargeElements = (1L << 29) + 2;
+
+    // A single Zstd frame of a SafeTensors payload holding one float tensor of zeros.
+    private static byte[] ZstdFloatZeros(string name, long elements)
+    {
+        var header = System.Text.Encoding.UTF8.GetBytes(
+            $"{{\"{name}\":{{\"dtype\":\"F32\",\"shape\":[{elements}],\"data_offsets\":[0,{4 * elements}]}}}}");
+        var zeros = new byte[1 << 20];
+        using var frame = new MemoryStream();
+        CompressedFormatUtils.WriteZstdFrame(frame, 1, s =>
+        {
+            s.Write(BitConverter.GetBytes((long)header.Length));
+            s.Write(header);
+            for (long left = 4 * elements; left > 0; left -= zeros.Length) s.Write(zeros, 0, (int)Math.Min(left, zeros.Length));
+        });
+        return frame.ToArray();
+    }
+
+    // A SafeTensors file of float tensors of the shapes given, laid out one after another, every
+    // byte of them a hole that holds no disk space.
+    private static string SparseSafeTensors(string path, (string Name, long[] Shape)[] tensors)
+    {
+        long offset = 0;
+        var entries = tensors.Select(t =>
+        {
+            var start = offset;
+            offset += 4 * t.Shape.Aggregate(1L, (a, d) => a * d);
+            return $"\"{t.Name}\":{{\"dtype\":\"F32\",\"shape\":[{string.Join(",", t.Shape)}],\"data_offsets\":[{start},{offset}]}}";
+        }).ToList();
+        var header = System.Text.Encoding.UTF8.GetBytes("{" + string.Join(",", entries) + "}");
+        using var file = new FileStream(path, FileMode.CreateNew, FileAccess.ReadWrite);
+        if (OperatingSystem.IsWindows() && !DeviceIoControl(file.SafeFileHandle, 0x000900C4, IntPtr.Zero, 0, IntPtr.Zero, 0, out _, IntPtr.Zero))
+            throw new System.ComponentModel.Win32Exception();
+        file.Write(BitConverter.GetBytes((long)header.Length));
+        file.Write(header);
+        file.SetLength(8 + header.Length + offset);
+        return path;
+    }
+
+    [Fact]
+    public void TestATensorNoMemoryIsNamedForIsPassedOverAndTheTensorsAfterItAreReadAtTheirOffsets()
+    {
+        var path = SparseSafeTensors(P("subset.safetensors"),
+            ("a", 0, 2, [1f, 2f]), ("b", 8, 3, [3f, 4f, 5f]), ("z", 20, 0, []), ("c", 20, 2, [6f, 7f]));
+        var loaded = SafeTensorLoader.LoadSafeTensors(path, (name, _) => name is "b" or "z" ? null : ComputeContext.Host);
+
+        Assert.Equal(["a", "c"], loaded.Select(t => t.Name));
+        Assert.Equal((float[])[1f, 2f, 6f, 7f], loaded.SelectMany(t => t.Data.As<float32>().CopyMemory<float>()).ToArray());
+    }
+
+    // A SafeTensors file of float tensors at the data offsets given, each starting with the values
+    // given; every other byte is a hole that holds no disk space.
+    private static string SparseSafeTensors(string path, params (string Name, long Offset, long Elements, float[] Head)[] tensors)
+    {
+        var header = System.Text.Encoding.UTF8.GetBytes("{" + string.Join(",", tensors.Select(t =>
+            $"\"{t.Name}\":{{\"dtype\":\"F32\",\"shape\":[{t.Elements}],\"data_offsets\":[{t.Offset},{t.Offset + 4 * t.Elements}]}}")) + "}");
+        using var file = new FileStream(path, FileMode.CreateNew, FileAccess.ReadWrite);
+        if (OperatingSystem.IsWindows() && !DeviceIoControl(file.SafeFileHandle, 0x000900C4, IntPtr.Zero, 0, IntPtr.Zero, 0, out _, IntPtr.Zero))
+            throw new System.ComponentModel.Win32Exception();
+        file.Write(BitConverter.GetBytes((long)header.Length));
+        file.Write(header);
+        file.SetLength(8 + header.Length + tensors.Max(t => t.Offset + 4 * t.Elements));
+        foreach (var (_, offset, _, head) in tensors)
+        {
+            file.Position = 8 + header.Length + offset;
+            file.Write(System.Runtime.InteropServices.MemoryMarshal.AsBytes(head.AsSpan()));
+        }
+        return path;
+    }
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool DeviceIoControl(Microsoft.Win32.SafeHandles.SafeFileHandle device, uint code,
+        IntPtr input, int inputSize, IntPtr output, int outputSize, out int returned, IntPtr overlapped);
+
     private static void AssertInspection(ArtifactInspection result, ArtifactKind kind,
         params string[][] observationsContainingAll)
     {
@@ -367,6 +535,10 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
         FromBinary([], "empty");
         FromBinary(bareZstd, "not a Shorokoo .srk container");
         FromBinary(BuildRawSrkContainer("{not json", payload), "header");
+        byte[] nested = OnnxExternalDataTests.Nested([0x3A], [0x0A, 0x2A, 0x32], 101);
+        FromFile("nested.srk", BuildRawSrkContainer(
+            $"{{\"srkVersion\":1,\"stage\":\"concrete-architecture\",\"compression\":\"none\",\"payloadSha256\":\"{Sha256Hex(nested)}\"}}",
+            nested), "not a readable Shorokoo graph file");
         FromBinary(BuildRawSrkContainer(
             $"{{\"srkVersion\":3,\"stage\":\"concrete-architecture\",\"compression\":\"zstd\",\"payloadSha256\":\"{Sha256Hex(payload)}\"}}",
             payload), "version 3");
@@ -425,6 +597,22 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
     }
 
     [Fact]
+    public void TestZeroByteSafeTensorsLoadWhereverTheirOffsetsFall()
+    {
+        static long[][] Shapes(string headerJson) =>
+            [.. SafeTensorLoader.ParseSafeTensorBytes(BuildRawSafeTensors(headerJson, new byte[8]))
+                .OrderBy(t => t.Name, StringComparer.Ordinal).Select(t => t.Data.Shape.Dims.ToArray())];
+
+        long[][] expected = [[0L], [2L]];
+        Assert.Equal(expected, Shapes(
+            "{\"b\":{\"dtype\":\"F32\",\"shape\":[2],\"data_offsets\":[0,8]},\"a\":{\"dtype\":\"F32\",\"shape\":[0],\"data_offsets\":[0,0]}}"));
+        Assert.Equal(expected, Shapes(
+            "{\"b\":{\"dtype\":\"F32\",\"shape\":[2],\"data_offsets\":[0,8]},\"a\":{\"dtype\":\"F32\",\"shape\":[0],\"data_offsets\":[4,4]}}"));
+        Assert.Equal(expected, Shapes(
+            "{\"a\":{\"dtype\":\"F32\",\"shape\":[0],\"data_offsets\":[8,8]},\"b\":{\"dtype\":\"F32\",\"shape\":[2],\"data_offsets\":[0,8]}}"));
+    }
+
+    [Fact]
     public void TestSafeTensorTruncationAndMissingMetadataFailLoudly()
     {
         var tensors = new List<SafeTensor>
@@ -466,6 +654,11 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
         Assert.Equal(ErrorCodes.ST003, exZ.ErrorCode);
         Assert.Contains(zPath, exZ.Message);
         Assert.Contains("truncated", exZ.Message);
+
+        var cutPath = P("cut.zsafetensor");
+        File.WriteAllBytes(cutPath, CompressedFormatUtils.Compress(bytes)[..12]);
+        Assert.Contains(cutPath, Assert.Throws<InvalidDataException>(
+            () => CompressedFormatUtils.LoadCompressedSafeTensors(cutPath)).Message);
 
         static byte[] Build(string headerJson, int payloadBytes)
         {
@@ -1103,7 +1296,7 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
     }
 
     [Fact]
-    public void TestSkptEntryLargerThanTheReaderReadsIsRefusedAtSave()
+    public void TestSkptEntryLargerAsStoredThanTheReaderReadsIsRefusedAtSaveAndOneLargerOnlyDecompressedIsNot()
     {
         byte[] mebibyte = new byte[1 << 20];
         void TwoGibibytesAndOne(Stream s)
@@ -1113,6 +1306,8 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
 
         Assert.Throws<NotSupportedException>(() => SkptFileFormat.EntryPayload.Produced(TwoGibibytesAndOne));
         Assert.Throws<NotSupportedException>(() => SkptFileFormat.EntryPayload.ProduceBytes(TwoGibibytesAndOne));
+        Assert.True(SkptFileFormat.EntryPayload.Produced(s => CompressedFormatUtils.WriteZstdFrame(s, 1, TwoGibibytesAndOne)).Length
+            < SkptFileFormat.EntryPayload.MaxEntryLength);
     }
 
     [Fact]
@@ -1298,6 +1493,112 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
     }
 
     [Fact]
+    public void TestALoadedCompiledModelRunsAsTheLoadedGraphDoesWithItsLargeWeightsHandedToItsSession()
+    {
+        var numOut = TensorData(DType.Int64, [], 64L);
+        var input = TensorDataWithSmallVals(DType.Float32, [2L, 64L]);
+        var architecture = FCLayer.ComputationGraph.ToConcreteArchitecture([numOut, input]);
+        var model = architecture.ToConcreteModel();
+        var (zip, dir, zstd, weights) = (P("compiled.skpt"), P("compiled_dir"), P("compiled_zstd.skpt"), P("compiled.safetensors"));
+        var (onnx, onnxPair) = (P("compiled.onnx"), P("compiled_pair.onnx"));
+        Persistence.From(model).WithModel().WithWeights().Save(zip);
+        Persistence.From(model).WithModel().WithWeights().SaveAsDirectory(dir);
+        Persistence.From(model).WithModel().WithWeights().WithZstdCompressedData().Save(zstd);
+        Persistence.ExportSafeTensors(model, weights);
+        Persistence.ExportOnnx(model, onnx);
+        Persistence.ExportOnnx(model, onnxPair, new OnnxExternalDataOptions { SizeThreshold = 0 });
+        var expected = ExecuteToBytes(model, numOut, input);
+
+        using var context = new ComputeContext();
+        foreach (var load in (Func<CompiledGraph>[])[() => context.LoadCompiled(zip), () => context.LoadCompiled(dir),
+            () => context.LoadCompiled(zstd), () => context.LoadCompiled(architecture, weights),
+            () => context.ImportCompiledOnnx(onnx), () => context.ImportCompiledOnnx(onnxPair)])
+        {
+            var compiled = load();
+            var weight = Assert.Single(compiled.SuppliedTensors);
+            Assert.Equal([64L, 64L], weight.Shape.Dims);
+            Assert.Equal(expected, compiled.Execute(numOut.Shared(), input.Shared())[0].ToTensorData().AccessRawMemory().ToArray());
+            compiled.Dispose();
+            Assert.True(weight.IsDisposed);
+        }
+        var held = context.Tensors.ToList();
+        Assert.Throws<ArgumentException>(() => context.ImportCompiledOnnx(onnx, new Dictionary<string, long[]> { ["absent"] = [1L] }));
+        Assert.Equal(held, context.Tensors);
+    }
+
+    [Fact]
+    public void TestImportingAnOnnxHoldsEachWeightOnce()
+    {
+        long Import(long width, OnnxExternalDataOptions? externalData)
+        {
+            var numOut = TensorData(DType.Int64, [], width);
+            var model = FCLayer.ComputationGraph.ToConcreteArchitecture([numOut, TensorDataWithSmallVals(DType.Float32, [2L, width])]).ToConcreteModel();
+            var path = P($"held_{width}_{externalData is null}.onnx");
+            Persistence.ExportOnnx(model, path, externalData);
+            Persistence.ImportOnnx(path);
+            GC.Collect();
+            var before = GC.GetAllocatedBytesForCurrentThread();
+            Persistence.ImportOnnx(path);
+            return GC.GetAllocatedBytesForCurrentThread() - before;
+        }
+
+        const long Wide = 1024;
+        foreach (var externalData in (OnnxExternalDataOptions?[])[null, new OnnxExternalDataOptions { SizeThreshold = 0 }])
+            Assert.True(Import(Wide, externalData) - Import(64, externalData) < 4 * Wide * Wide * 3 / 2);
+    }
+
+    [Fact]
+    public async Task TestALoadedCompiledModelHoldsOnlyTheWeightsItsSessionReadsAndKeepsThemUntilDisposed()
+    {
+        var numOut = TensorData(DType.Int64, [], 64L);
+        var input = TensorDataWithSmallVals(DType.Float32, [2L, 64L]);
+        var model = FCLayer.ComputationGraph.ToConcreteArchitecture([numOut, input]).ToConcreteModel();
+        var ema = WeightDataByParam(model).ToDictionary(kv => kv.Key, kv => kv.Value.Shape.Count > 64
+            ? TensorData(kv.Value.Shape.Dims, Enumerable.Repeat(0.5f, (int)kv.Value.Shape.Count).ToArray())
+            : kv.Value.CopyToTensorData(), StringComparer.Ordinal);
+        var path = P("compiled-ema.skpt");
+        Persistence.From(model).WithModel().WithWeights().WithWeights("ema", ema).Save(path);
+        var expected = ExecuteToBytes(Persistence.Load(path, "ema"), numOut, input);
+
+        using var context = new ComputeContext();
+        var compiled = context.LoadCompiled(path, "ema");
+        var weight = Assert.Single(compiled.SuppliedTensors);
+        Assert.Equal([weight], context.Tensors);
+        var held = context.ReadDeviceMemoryUse();
+        Assert.Throws<InvalidOperationException>(weight.Delete);
+        Assert.False(weight.TryDelete());
+        Assert.Throws<InvalidOperationException>(() => context.Detach(weight));
+        Assert.False(await weight.DeleteAsync(TimeSpan.Zero));
+        Assert.Equal(held, context.ReadDeviceMemoryUse());
+        Assert.Equal(expected, compiled.Execute(numOut.Shared(), input.Shared())[0].ToTensorData().AccessRawMemory().ToArray());
+        compiled.Dispose();
+        Assert.True(((ILifetimeOwner)weight).Life.IsReleased);
+    }
+
+    [Fact]
+    public void TestDisposingAContextDisposesEveryLoadedGraphAndAWeightAnotherContextReadsGoesWhenThatReadEnds()
+    {
+        var numOut = TensorData(DType.Int64, [], 64L);
+        var model = FCLayer.ComputationGraph.ToConcreteArchitecture([numOut, TensorDataWithSmallVals(DType.Float32, [2L, 64L])]).ToConcreteModel();
+        var path = P("compiled-read-elsewhere.skpt");
+        Persistence.From(model).WithModel().WithWeights().Save(path);
+
+        var context = new ComputeContext();
+        using var other = new ComputeContext();
+        CompiledGraph[] loaded = [context.LoadCompiled(path), context.LoadCompiled(path)];
+        var read = Assert.Single(loaded[0].SuppliedTensors);
+
+        using (other.Lock(read))
+        {
+            context.Dispose();
+            Assert.All(loaded, graph => Assert.True(graph.IsDisposed));
+            Assert.All(loaded.SelectMany(graph => graph.SuppliedTensors), weight => Assert.True(weight.IsDisposed));
+            Assert.False(((ILifetimeOwner)read).Life.IsReleased);
+        }
+        Assert.True(((ILifetimeOwner)read).Life.IsReleased);
+    }
+
+    [Fact]
     public void TestSkptLoadValidationZstdDataAndCompressionFaults()
     {
         var (model, numOut, input) = BuildSkptModel();
@@ -1435,13 +1736,116 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
         RewriteWith(plainEntries, unknown.ToJsonString());
         RefusedLoad("lz4", "unsupported compression");
 
-        // A corrupt Zstd frame with a matching sha256: integrity passes, decompression fails loud.
+        // A Zstd frame cut short with a matching sha256: integrity passes, and the frame is refused.
         var truncated = storedWeights.Take(storedWeights.Length / 2).ToArray();
         Assert.True(SkptFileFormat.LooksLikeZstdFrame(truncated));
         var corrupt = JsonNode.Parse(zstdEntries[SkptFileFormat.ConfigEntryName])!;
         corrupt["data"]!["weights"]!["sha256"] = SkptFileFormat.Sha256Hex(truncated);
         RewriteWith(zstdEntries, corrupt.ToJsonString(), truncated);
-        RefusedLoad(SkptFileFormat.WeightsEntryPath, "Zstd-decompress");
+        RefusedLoad(SkptFileFormat.WeightsEntryPath, "cut short");
+    }
+
+    [Fact]
+    public void TestAZstdReadReportsItsFrameFailingAsCorruptionAndTheStreamUnderItFailingAsItself()
+    {
+        var random = new Random(7);
+        var payload = new byte[1 << 18];
+        random.NextBytes(payload);
+        var frame = CompressedFormatUtils.Compress(payload);
+        Exception? Read(Stream stored) => Record.Exception(() =>
+        {
+            using var decoded = new DecodingReadStream(
+                new ZstdSharp.DecompressionStream(stored), e => new InvalidDataException("corrupt", e));
+            decoded.CopyTo(Stream.Null);
+        });
+
+        var diskError = new IOException("The device is not ready.");
+        Assert.Same(diskError, Read(new FailingReadStream(frame, frame.Length / 2, diskError)));
+        Assert.IsType<InvalidDataException>(Read(new MemoryStream(frame[..(frame.Length / 2)])));
+        Assert.Null(Read(new MemoryStream(frame)));
+    }
+
+    /// <summary>Reads <c>bytes</c>, and fails with <c>failure</c> once a read reaches
+    /// <c>failAt</c>.</summary>
+    private sealed class FailingReadStream(byte[] bytes, int failAt, Exception failure) : Stream
+    {
+        private int _position;
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            if (_position + count > failAt) throw failure;
+            int n = Math.Min(count, bytes.Length - _position);
+            Array.Copy(bytes, _position, buffer, offset, n);
+            _position += n;
+            return n;
+        }
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => _position; set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
+
+    [Fact]
+    public void TestEveryZstdFrameReadMustDeclareItsSizeSoAnOversizedTensorIsRefusedUpFront()
+    {
+        var (model, numOut, input) = BuildCompressibleSkptModel();
+        var path = P("zstd-size.skpt");
+        var tamperedPath = P("zstd-size-tampered.skpt");
+        Persistence.From(model).WithModel().WithWeights().WithZstdCompressedData().Save(path);
+        var entries = ReadZipEntries(path);
+        var stored = entries[SkptFileFormat.WeightsEntryPath];
+        Assert.Equal((ulong)CompressedFormatUtils.Decompress(stored).Length,
+            ZstdSharp.Decompressor.GetDecompressedSize(stored));
+        Assert.Equal(ExecuteToBytes(model, numOut, input), ExecuteToBytes(Persistence.Load(path), numOut, input));
+
+        var huge = CompressedFormatUtils.Compress(BuildRawSafeTensors(
+            "{\"w\":{\"dtype\":\"F32\",\"shape\":[34359738368],\"data_offsets\":[0,137438953472]}}", new byte[8]));
+        var config = JsonNode.Parse(entries[SkptFileFormat.ConfigEntryName])!;
+        config["data"]!["weights"]!["sha256"] = SkptFileFormat.Sha256Hex(huge);
+        RewriteSkpt(tamperedPath, [.. entries.Select(e => (e.Key,
+            e.Key == SkptFileFormat.ConfigEntryName ? System.Text.Encoding.UTF8.GetBytes(config.ToJsonString())
+            : e.Key == SkptFileFormat.WeightsEntryPath ? huge : e.Value))]);
+        Assert.Equal(ErrorCodes.ST003, Assert.Throws<ModelException>(() => Persistence.Load(tamperedPath)).ErrorCode);
+
+        using var undeclaring = new ZstdSharp.Compressor(CompressedFormatUtils.DefaultCompressionLevel);
+        undeclaring.SetParameter(ZstdSharp.Unsafe.ZSTD_cParameter.ZSTD_c_contentSizeFlag, 0);
+        var unsized = undeclaring.Wrap(CompressedFormatUtils.Decompress(stored)).ToArray();
+        config["data"]!["weights"]!["sha256"] = SkptFileFormat.Sha256Hex(unsized);
+        RewriteSkpt(tamperedPath, [.. entries.Select(e => (e.Key,
+            e.Key == SkptFileFormat.ConfigEntryName ? System.Text.Encoding.UTF8.GetBytes(config.ToJsonString())
+            : e.Key == SkptFileFormat.WeightsEntryPath ? unsized : e.Value))]);
+        Assert.Contains(SkptFileFormat.WeightsEntryPath, Assert.Throws<InvalidDataException>(() => Persistence.Load(tamperedPath)).Message);
+        var unsizedSafeTensors = P("unsized.zsafetensor");
+        File.WriteAllBytes(unsizedSafeTensors, unsized);
+        Assert.Contains(unsizedSafeTensors, Assert.Throws<InvalidDataException>(() => CompressedFormatUtils.LoadCompressedSafeTensors(unsizedSafeTensors)).Message);
+    }
+
+    [Fact]
+    public void TestAZstdPayloadWrittenInSeveralFramesIsReadWhole()
+    {
+        var (model, numOut, input) = BuildCompressibleSkptModel();
+        var path = P("zstd-frames.skpt");
+        var framedPath = P("zstd-frames-framed.skpt");
+        Persistence.From(model).WithModel().WithWeights().WithZstdCompressedData().Save(path);
+        var entries = ReadZipEntries(path);
+        var payload = CompressedFormatUtils.Decompress(entries[SkptFileFormat.WeightsEntryPath]);
+        byte[] framed = [.. CompressedFormatUtils.Compress(payload[..(payload.Length / 3)]), .. CompressedFormatUtils.Compress(payload[(payload.Length / 3)..])];
+        var config = JsonNode.Parse(entries[SkptFileFormat.ConfigEntryName])!;
+        config["data"]!["weights"]!["sha256"] = SkptFileFormat.Sha256Hex(framed);
+        RewriteSkpt(framedPath, [.. entries.Select(e => (e.Key,
+            e.Key == SkptFileFormat.ConfigEntryName ? System.Text.Encoding.UTF8.GetBytes(config.ToJsonString())
+            : e.Key == SkptFileFormat.WeightsEntryPath ? framed : e.Value))]);
+        var (wholeSafeTensors, framedSafeTensors) = (P("whole.zsafetensor"), P("framed.zsafetensor"));
+        File.WriteAllBytes(wholeSafeTensors, entries[SkptFileFormat.WeightsEntryPath]);
+        File.WriteAllBytes(framedSafeTensors, framed);
+
+        Assert.Equal(ExecuteToBytes(model, numOut, input), ExecuteToBytes(Persistence.Load(framedPath), numOut, input));
+        Assert.Equal(CompressedFormatUtils.LoadCompressedSafeTensors(wholeSafeTensors).Select(t => t.Name),
+            CompressedFormatUtils.LoadCompressedSafeTensors(framedSafeTensors).Select(t => t.Name));
     }
 
     /// <summary>Every file of a .skpt checkpoint directory keyed by its manifest-style relative

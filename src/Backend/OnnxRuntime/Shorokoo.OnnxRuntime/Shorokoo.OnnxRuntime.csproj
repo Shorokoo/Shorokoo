@@ -34,6 +34,86 @@
     <ProjectReference Include="..\..\..\Shorokoo\Shorokoo.csproj" />
   </ItemGroup>
 
+  <!-- The native allocator every session allocates through (native/shorokoo_ort_allocator.cpp),
+       built with CMake for the platform the build runs on. It lands under runtimes/<rid>/native in
+       the output, beside where ONNX Runtime's own natives go, and is found there by
+       NativeAllocator.cs; the package carries it for every platform the backends target, under
+       the same path. -->
+  <PropertyGroup>
+    <ShorokooAllocatorRid Condition="$([MSBuild]::IsOSPlatform('Windows'))">win-x64</ShorokooAllocatorRid>
+    <ShorokooAllocatorRid Condition="$([MSBuild]::IsOSPlatform('Linux'))">linux-x64</ShorokooAllocatorRid>
+    <ShorokooAllocatorFile Condition="$([MSBuild]::IsOSPlatform('Windows'))">shorokoo_ort_allocator.dll</ShorokooAllocatorFile>
+    <ShorokooAllocatorFile Condition="$([MSBuild]::IsOSPlatform('Linux'))">libshorokoo_ort_allocator.so</ShorokooAllocatorFile>
+    <ShorokooAllocatorSource>$(MSBuildProjectDirectory)/native</ShorokooAllocatorSource>
+    <ShorokooAllocatorBuildDir>$([MSBuild]::NormalizeDirectory($(MSBuildProjectDirectory), $(BaseIntermediateOutputPath), 'native', 'build').TrimEnd('\/'))</ShorokooAllocatorBuildDir>
+    <ShorokooAllocatorOutDir>$([MSBuild]::NormalizeDirectory($(MSBuildProjectDirectory), $(BaseIntermediateOutputPath), 'native', $(ShorokooAllocatorRid)).TrimEnd('\/'))</ShorokooAllocatorOutDir>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(ShorokooAllocatorRid)' != ''">
+    <None Include="$(ShorokooAllocatorOutDir)/$(ShorokooAllocatorFile)"
+          Link="runtimes/$(ShorokooAllocatorRid)/native/$(ShorokooAllocatorFile)"
+          CopyToOutputDirectory="PreserveNewest" Visible="false"
+          Pack="true" PackagePath="runtimes/$(ShorokooAllocatorRid)/native/" />
+  </ItemGroup>
+
+  <!-- The other platform's library, built there, for the package: a folder holding
+       <rid>/<library>, as the release workflow assembles it. -->
+  <ItemGroup Condition="'$(ShorokooNativeAllocators)' != ''">
+    <None Condition="'$(ShorokooAllocatorRid)' != 'win-x64'"
+          Include="$(ShorokooNativeAllocators)/win-x64/shorokoo_ort_allocator.dll"
+          Visible="false" Pack="true" PackagePath="runtimes/win-x64/native/" />
+    <None Condition="'$(ShorokooAllocatorRid)' != 'linux-x64'"
+          Include="$(ShorokooNativeAllocators)/linux-x64/libshorokoo_ort_allocator.so"
+          Visible="false" Pack="true" PackagePath="runtimes/linux-x64/native/" />
+  </ItemGroup>
+
+  <!-- CMake: the one Visual Studio installs with its C++ tools where there is one, which knows that
+       Visual Studio's generator; otherwise whatever is on the PATH. -p:ShorokooCMake=&lt;path&gt; names one
+       outright. -->
+  <Target Name="LocateShorokooCMake" Condition="'$(ShorokooCMake)' == '' and '$(ShorokooAllocatorRid)' != ''">
+    <PropertyGroup>
+      <_ShorokooVsWhere>$(MSBuildProgramFiles32)\Microsoft Visual Studio\Installer\vswhere.exe</_ShorokooVsWhere>
+    </PropertyGroup>
+    <Exec Condition="$([MSBuild]::IsOSPlatform('Windows')) and Exists('$(_ShorokooVsWhere)')"
+          Command="&quot;$(_ShorokooVsWhere)&quot; -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -find Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe"
+          ConsoleToMSBuild="true" StandardOutputImportance="low" IgnoreExitCode="true">
+      <Output TaskParameter="ConsoleOutput" PropertyName="_ShorokooVsCMake" />
+    </Exec>
+    <PropertyGroup>
+      <ShorokooCMake Condition="'$(_ShorokooVsCMake)' != '' and Exists('$(_ShorokooVsCMake)')">$(_ShorokooVsCMake)</ShorokooCMake>
+      <ShorokooCMake Condition="'$(ShorokooCMake)' == ''">cmake</ShorokooCMake>
+    </PropertyGroup>
+  </Target>
+
+  <Target Name="BuildShorokooAllocator"
+          Condition="'$(ShorokooAllocatorRid)' != ''"
+          DependsOnTargets="LocateShorokooCMake"
+          BeforeTargets="BeforeBuild"
+          Inputs="$(ShorokooAllocatorSource)/shorokoo_ort_allocator.cpp;$(ShorokooAllocatorSource)/CMakeLists.txt"
+          Outputs="$(ShorokooAllocatorOutDir)/$(ShorokooAllocatorFile)">
+    <Exec Command="&quot;$(ShorokooCMake)&quot; --version" ConsoleToMSBuild="true" StandardOutputImportance="low"
+          IgnoreExitCode="true" IgnoreStandardErrorWarningFormat="true" EchoOff="true">
+      <Output TaskParameter="ExitCode" PropertyName="_ShorokooCMakeFound" />
+    </Exec>
+    <Error Condition="'$(_ShorokooCMakeFound)' != '0'"
+           Text="Shorokoo.OnnxRuntime builds a native library of its own, which takes CMake and a C++ compiler, and '$(ShorokooCMake)' did not run. On Windows, install Visual Studio (2019 or later, the Build Tools will do) with its C++ workload, which brings both; on Linux, install cmake and g++. Or name a CMake with -p:ShorokooCMake=&lt;path&gt;." />
+    <Exec Command="&quot;$(ShorokooCMake)&quot; -S &quot;$(ShorokooAllocatorSource)&quot; -B &quot;$(ShorokooAllocatorBuildDir)&quot; -DSHOROKOO_OUTPUT_DIR=&quot;$(ShorokooAllocatorOutDir)&quot;"
+          StandardOutputImportance="low" />
+    <Exec Command="&quot;$(ShorokooCMake)&quot; --build &quot;$(ShorokooAllocatorBuildDir)&quot; --config Release"
+          StandardOutputImportance="low" />
+  </Target>
+
+  <Target Name="RequireEveryShorokooAllocator" BeforeTargets="GenerateNuspec">
+    <PropertyGroup>
+      <_ShorokooAllocatorWin Condition="'$(ShorokooAllocatorRid)' == 'win-x64'">$(ShorokooAllocatorOutDir)/shorokoo_ort_allocator.dll</_ShorokooAllocatorWin>
+      <_ShorokooAllocatorWin Condition="'$(ShorokooAllocatorRid)' != 'win-x64'">$(ShorokooNativeAllocators)/win-x64/shorokoo_ort_allocator.dll</_ShorokooAllocatorWin>
+      <_ShorokooAllocatorLinux Condition="'$(ShorokooAllocatorRid)' == 'linux-x64'">$(ShorokooAllocatorOutDir)/libshorokoo_ort_allocator.so</_ShorokooAllocatorLinux>
+      <_ShorokooAllocatorLinux Condition="'$(ShorokooAllocatorRid)' != 'linux-x64'">$(ShorokooNativeAllocators)/linux-x64/libshorokoo_ort_allocator.so</_ShorokooAllocatorLinux>
+    </PropertyGroup>
+    <Error Condition="'$(ShorokooNativeAllocators)' == '' or !Exists('$(_ShorokooAllocatorWin)') or !Exists('$(_ShorokooAllocatorLinux)')"
+           Text="The Shorokoo.OnnxRuntime package carries its native allocator for win-x64 and for linux-x64, and a build makes only its own platform's. Build the other on its platform (cmake -S native -B build -DSHOROKOO_OUTPUT_DIR=&lt;folder&gt;/&lt;rid&gt;, then cmake --build build --config Release) and pack with -p:ShorokooNativeAllocators=&lt;folder&gt;." />
+  </Target>
+
   <!-- The arena-statistics binding reaches ONNX Runtime by reflection, so the guard that fails
        loudly on an ORT upgrade has to name the very strings the binding uses rather than a copy
        of them that could drift. -->

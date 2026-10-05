@@ -4,8 +4,9 @@ and Lp pools with their global forms, MaxUnpool and MaxRoiPool.
 torch's own kernels pad symmetrically and round a ceil-mode output differently, so every helper
 here pads explicitly (ONNX's pads may be asymmetric, and an auto_pad of SAME_UPPER or SAME_LOWER
 puts the odd element at a chosen end), then runs the kernel unpadded over exactly the windows ONNX
-defines. Every helper is functional and autograd-safe: no input is written to, and float data never
-leaves torch.
+defines. Every helper is autograd-safe: no input is written to, and float data never leaves torch.
+conv writes its result into the `_out` it takes, which a run hands it only while it computes no
+gradient: a range of memory the run consumed (the runtime's place_into).
 """
 
 import math
@@ -107,7 +108,8 @@ def _back(y, dtype):
 # ---- convolution -----------------------------------------------------------------------------
 
 def conv(x, w, b=None, /, *, auto_pad="NOTSET", dilations=None, group=1, kernel_shape=None, pads=None,
-         strides=None):
+         strides=None, _out=None):
+    """Conv; written into `_out` where `_cudnn_into` can write it there."""
     n = _rank_check(x, "Conv")
     x, dtype = _computable(x)
     w = w.to(x.dtype)
@@ -116,8 +118,75 @@ def conv(x, w, b=None, /, *, auto_pad="NOTSET", dilations=None, group=1, kernel_
     strides = list(strides) if strides else [1] * n
     dilations = list(dilations) if dilations else [1] * n
     begins, ends = _pads(list(x.shape[2:]), kernel, strides, dilations, pads, auto_pad)
-    y = _CONV[n](_pad_spatial(x, begins, ends), w, b, stride=strides, dilation=dilations, groups=group)
+    # Pads the same at both ends are the kernel's own, which pads without copying the input; others
+    # are made explicitly.
+    if begins == ends and min(begins, default=0) >= 0:
+        padded, padding = x, begins
+    else:
+        padded, padding = _pad_spatial(x, begins, ends), [0] * n
+    if b is None and dtype is None and (weights := _weight_gradient(padded, w, strides, padding, dilations, group)) is not None:
+        return weights
+    if _out is not None and dtype is None and _cudnn_into(padded, w, b, strides, padding, dilations, group, _out):
+        return _out
+    y = _CONV[n](padded, w, b, stride=strides, padding=padding, dilation=dilations, groups=group)
     return _back(y, dtype)
+
+
+def _weight_gradient(x, w, strides, padding, dilations, group):
+    """A convolution of `x` by `w` that is the gradient of another convolution's weights, as a
+    training step computes one -- `x` the other's input and `w` its output's gradient, each with its
+    batch and channel axes swapped -- computed as torch computes that gradient, or None where it is
+    not one: where the two are not views of tensors laid out with batch first, or no convolution
+    of that input by weights of the result's size, strided by `dilations` and dilated by `strides`,
+    makes an output of the gradient's size. Convolving by the output's gradient as a kernel takes
+    copies of both and a workspace the size of several activations; torch's gradient of the weights
+    takes neither. Not where torch records a gradient of this convolution itself."""
+    n = x.dim() - 2
+    if group != 1 or n < 1 or w.dim() != x.dim() or (torch.is_grad_enabled() and (x.requires_grad or w.requires_grad)):
+        return None
+    inputs, gradient = x.transpose(0, 1), w.transpose(0, 1)
+    if not (inputs.is_contiguous() and gradient.is_contiguous()) or x.dtype != w.dtype or x.device != w.device:
+        return None
+    sizes = list(inputs.shape[2:])
+    outputs = list(gradient.shape[2:])
+    kernel = [(size + 2 * p - d * (o - 1) - 1) // s + 1 for size, p, d, o, s in zip(sizes, padding, dilations, outputs, strides)]
+    if any(k < 1 for k in kernel):
+        return None
+    if [(size + 2 * p - s * (k - 1) - 1) // d + 1 for size, p, s, k, d in zip(sizes, padding, strides, kernel, dilations)] != outputs:
+        return None
+    weights = torch.empty((gradient.shape[1], inputs.shape[1], *kernel), dtype=x.dtype, device=x.device)
+    _, found, _ = torch.ops.aten.convolution_backward(
+        gradient, inputs, weights, None, dilations, padding, strides, False, [0] * n, 1, [False, True, False])
+    return found.transpose(0, 1)
+
+
+def _cudnn_into(x, w, b, strides, padding, dilations, group, out):
+    """Whether the convolution of `x` by `w` and `b`, padded by `padding` at both ends of each spatial
+    dimension, is written into `out` -- by cuDNN, as
+    torch's own convolution computes it where it picks cuDNN: torch writes cuDNN's result into a
+    given tensor only through its cuDNN entry, which its convolution calls, then adds the bias in
+    place. That is where torch would pick cuDNN for these operands, of 2 or 3 spatial dimensions
+    (1 it reshapes first), laid out contiguously as cuDNN is handed them, `out` of the result's
+    exact layout; nowhere else, and on the CPU never: its convolutions take no tensor to write into
+    but by computing the result and copying it."""
+    n = x.dim() - 2
+    if not x.is_cuda or n not in (2, 3) or not torch.backends.cudnn.enabled:
+        return False
+    if not (x.is_contiguous() and w.is_contiguous() and out.is_contiguous()):
+        return False
+    zeros = [0] * n
+    if torch._C._select_conv_backend(x, w, b, strides, padding, dilations, False, zeros, group, None) != torch._C._ConvBackend.Cudnn:
+        return False
+    sizes = [(size + 2 * p - ((k - 1) * d + 1)) // s + 1 for size, p, k, s, d in zip(x.shape[2:], padding, w.shape[2:], strides, dilations)]
+    if out.dtype != x.dtype or out.device != x.device or list(out.shape) != [x.shape[0], w.shape[0], *sizes]:
+        return False
+    cudnn = torch.backends.cudnn
+    torch.ops.aten.cudnn_convolution.out(
+        x, w, padding, strides, dilations, group, cudnn.benchmark,
+        cudnn.deterministic or torch.are_deterministic_algorithms_enabled(), cudnn.allow_tf32, out=out)
+    if b is not None:
+        out.add_(b.reshape([1, -1] + [1] * n))
+    return True
 
 
 def conv_integer(x, w, x_zero_point=None, w_zero_point=None, /, *, auto_pad="NOTSET", dilations=None,
@@ -182,6 +251,11 @@ def conv_transpose(x, w, b=None, /, *, auto_pad="NOTSET", dilations=None, group=
         begins, ends = [0] * n, [0] * n
     else:
         begins, ends = list(pads[:n]), list(pads[n:])
+    if begins == ends and min(begins, default=0) >= 0 and not any(extra):
+        # The kernel's own padding crops the same at both ends, without cropping a copy.
+        y = _CONV_TRANSPOSE[n](x, w, None if b is None else b.to(x.dtype), stride=strides, padding=begins,
+                               dilation=dilations, groups=group)
+        return _back(y, dtype)
     y = _CONV_TRANSPOSE[n](x, w, None, stride=strides, dilation=dilations, groups=group)
     y = _pad_spatial(y, [-p for p in begins], [e - p for e, p in zip(extra, ends)])
     if b is not None:

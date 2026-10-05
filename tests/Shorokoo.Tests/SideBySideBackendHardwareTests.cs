@@ -1,8 +1,10 @@
+using System.Diagnostics;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using Shorokoo.Core.Backends;
 using Shorokoo.Modules.Losses;
 using Shorokoo.Modules.Optimizers;
+using Shorokoo.PyTorch.Cuda;
 using Shorokoo.Runtime;
 
 namespace Shorokoo.Tests;
@@ -78,6 +80,12 @@ public class SideBySideBackendHardwareTests
             ProbeDirectory = CudaBackendDirectory,
         });
 
+    /// <summary>Whether the copy of the ONNX Runtime backend that built <paramref name="session"/>
+    /// made its runtime's environment with thread pools its sessions share.</summary>
+    private static bool SharesThreadPools(IShorokooSession session)
+        => (bool)session.GetType().Assembly.GetType("Shorokoo.OnnxRuntime.OrtEnvironment")!
+            .GetProperty("SharedThreadPools", BindingFlags.Static | BindingFlags.NonPublic)!.GetValue(null)!;
+
     [SideBySideCudaFact]
     public void TestOneModelRunsOnTheCpuAndOnTheCardInOneProcess()
     {
@@ -104,6 +112,8 @@ public class SideBySideBackendHardwareTests
         // A compiled session stays on the backend that built it, and re-runs there.
         var onCard = cuda.Compile(graph);
         Assert.Equal("cuda:0", onCard.Backend.Name);
+        Assert.True(SharesThreadPools(onCard.Session));
+        Assert.True(SharesThreadPools(cpu.Compile(graph).Session));
         Assert.Equal(expected, Floats(onCard.Execute(ta.Shared(), tb.Shared())[0]));
         Assert.Equal(expected, Floats(onCard.Execute(ta.Shared(), tb.Shared())[0]));
 
@@ -160,6 +170,19 @@ public class SideBySideBackendHardwareTests
     }
 
     [SideBySideCudaFact]
+    public void TestFloat32ProductsConvolutionsAndRecurrentLayersOnTheCardAreComputedInFullPrecisionUnlessTensorFloat32IsAllowed()
+    {
+        var host = SideBySideModel.LargeLayers(new ComputeContext());
+        var cuda = LoadCuda();
+        var strict = new ComputeContext(cuda);
+        var allowed = new ComputeContext(cuda) { Precision = SideBySideModel.AllowingTensorFloat32 };
+
+        SideBySideModel.AssertFullPrecision(host, SideBySideModel.LargeLayers(strict));
+        SideBySideModel.AssertTensorFloat32(host, SideBySideModel.LargeLayers(allowed));
+        SideBySideModel.AssertFullPrecision(host, SideBySideModel.LargeLayers(strict));
+    }
+
+    [SideBySideCudaFact]
     public void TestATensorLeftOnTheCardIsCopiedToHostMemoryAndRunsThere()
     {
         var a = InputVector<float32>("a");
@@ -172,13 +195,12 @@ public class SideBySideBackendHardwareTests
 
         var cuda = new ComputeContext(LoadCuda());
         var compiled = cuda.Compile(graph);
-        Assert.True(compiled.HasDeviceMemory);
 
-        // Left where the provider put it: this is the one kind of tensor the host cannot read.
-        var onCard = compiled.Execute([ta, tb.Shared()], [true])[0].ToTensorData();
+        // Left where the run put it, and read there through a host copy of its values.
+        var onCard = compiled.Execute(ta, tb.Shared())[0].ToTensorData();
         Assert.Equal(MemoryKind.Cuda, onCard.Space.Kind);
         Assert.False(onCard.IsHostResident);
-        Assert.Throws<InvalidOperationException>(() => onCard.As<float32>().AccessMemory<float>());
+        SideBySideModel.AssertAgree(expected, onCard.As<float32>().AccessMemory<float>().ToArray(), SideBySideModel.DeviceTolerance);
 
         // One call brings it home, through the backend that made the allocation, and leaves the
         // source where it was.
@@ -218,13 +240,11 @@ public class SideBySideBackendHardwareTests
                                TrainingRigHelpers.TargetBatch(2f, 4f, 6f, 8f));
 
         var compiled = rig.RuntimeContext.Compile(rig.TrainingStepPureGraph);
-        Assert.True(compiled.HasDeviceMemory);
 
         var retained = compiled.Execute(
             ComputeContext.ExpandStructInputs(
                 [checkpoint.TrainableParams.Shared(), checkpoint.ModelState.Shared(), checkpoint.OptimizerState.Shared(),
-                 input.Shared(), target.Shared()]),
-            [.. Enumerable.Repeat(true, compiled.OutputCount)]);
+                 input.Shared(), target.Shared()]));
 
         Assert.NotEmpty(retained);
         Assert.NotNull(cuda.Backend.CudaDeviceId);
@@ -242,15 +262,17 @@ public class SideBySideBackendHardwareTests
         Assert.Equal(MemorySpace.Host, home.Space);
         Assert.All(Floats(home), v => Assert.True(float.IsFinite(v)));
 
-        // And the loop built on all this still trains, publishing state the host can read.
+        // And the loop built on all this still trains, publishing its state where it is.
         using var run = rig.BeginResidentRun(checkpoint);
         run.Step(input.Shared(), target.Shared());
         var published = run.StepToCheckpoint(input, target);
 
         Assert.Equal(2, published.Step);
         Assert.All(published.TrainableParams.Fields.Values,
+            f => Assert.Equal(onCard, ((TensorData)f).Space));
+        Assert.All(published.ToHost().TrainableParams.Fields.Values,
             f => Assert.Equal(MemorySpace.Host, ((TensorData)f).Space));
-        Assert.NotEmpty(TrainingRigHelpers.FlattenStruct(published.TrainableParams));
+        Assert.NotEmpty(TrainingRigHelpers.FlattenStruct(published.ToHost().TrainableParams));
     }
 
     [SideBySideCudaFact]
@@ -273,7 +295,7 @@ public class SideBySideBackendHardwareTests
         Assert.Contains(onCard, cuda.Tensors);
         Assert.Same(onCard, onCard.To(cuda));
         Assert.False(onCard.IsHostResident);
-        Assert.Throws<InvalidOperationException>(() => onCard.As<float32>().AccessMemory<float>());
+        Assert.Equal(av, onCard.As<float32>().AccessMemory<float>().ToArray());
 
         // A copy onto the card, and the source untouched.
         Assert.False(onHost.IsDisposed);
@@ -339,7 +361,7 @@ public class SideBySideBackendHardwareTests
         Assert.NotNull(cuda.Description.CudaDeviceId);
         Assert.Equal(("Cuda", cuda.Description.CudaDeviceId!.Value), AllocatorOf(device));
 
-        Assert.True(FillOnDevice(device, written));
+        Assert.True(cuda.TryCopyHostToTensorRange(device, 0, written));
         var home = cuda.CopyTensorToHost(device);
         Assert.Equal(byteCount, home.Length);
         Assert.Equal(written, home);
@@ -378,14 +400,14 @@ public class SideBySideBackendHardwareTests
     }
 
     [SideBySideCudaFact]
-    public void TestASequenceOutputAskedToStayOnTheCardComesBackToTheHostWhereItsElementsAreRead()
+    public void TestASequenceOutputOfACardRunComesBackInHostMemoryWhereItsElementsAreRead()
     {
         var x = InputVector<float32>("x");
         var pair = new InternalComputationGraph([x], [OnnxOp.SequenceConstruct(x, x + x)]);
         using var cuda = new ComputeContext(LoadCuda());
 
         var sequence = cuda.Compile(pair)
-            .Execute([TensorData([2L], (float[])[1f, 2f])], [true])[0].ToTensorDataSequence();
+            .Execute(TensorData([2L], (float[])[1f, 2f]))[0].ToTensorDataSequence();
 
         Assert.Equal([1f, 2f], Floats(sequence[0]));
         Assert.Equal([2f, 4f], Floats(sequence[1]));
@@ -419,6 +441,110 @@ public class SideBySideBackendHardwareTests
         Assert.Equal([1f, 2f], element.GetTensorDataAsSpan<float>().ToArray());
     }
 
+    [SideBySideCudaFact]
+    public void TestTheOnnxRuntimeAndPyTorchCudaBackendsShareOneProcessWhicheverStartsFirst()
+    {
+        Assert.Equal(0, InAChildProcess([], "cuda-backends", "onnxruntime-first"));
+        Assert.Equal(0, InAChildProcess([], "cuda-backends", "pytorch-first"));
+    }
+
+    [SideBySideCudaFact]
+    public void TestAConvolutionOnTheCardEndsInAResultOrAnExceptionWithNoOtherCudaMajorOnThePath()
+    {
+        Assert.Equal(0, InAChildProcess(WithNoOtherCudaMajorOnThePathAndNoPythonEnvironment(), "onnxruntime-convolution"));
+    }
+
+    [SideBySideCudaFact]
+    public void TestACudaBackendStartedAfterTheProcessLoadedAnotherReleaseOfThePinnedCudnnRefusesNamingTheCopyHeld()
+    {
+        var other = Directory.CreateDirectory(Path.Combine(Path.GetTempPath(), "shorokoo-other-cudnn-" + Guid.NewGuid().ToString("N"))).FullName;
+        try
+        {
+            Assert.Equal(0, InAChildProcess([], "onnxruntime-convolution-after-another-cudnn", other));
+        }
+        finally
+        {
+            Directory.Delete(other, recursive: true);
+        }
+    }
+
+    /// <summary>What <c>dotnet Shorokoo.Tests.dll</c> runs: one case of a test that needs a process of
+    /// its own, because what it covers is which native libraries a process loads, and from where.</summary>
+    public static int Main(string[] args) => args switch
+    {
+        ["cuda-backends", var first] => BothCudaBackendsRun(pytorchFirst: first == "pytorch-first") ? 0 : 1,
+        ["onnxruntime-convolution"] => AConvolutionEndsInAResultOrAnException(),
+        ["onnxruntime-convolution-after-another-cudnn", var other] => AConvolutionAfterAnotherCudnnIsRefusedNamingIt(other),
+        ["cuda-wheel-download", var root, var url, var served] => SideBySideBackendCoverageTests.DownloadEndedWithItsProcess(root, url, served),
+        ["deep-model-routes", var path] => OnnxExternalDataTests.DeepModelRoutes(path),
+        [Utils.OwnProcess.Case, var type, var method] => Utils.OwnProcess.Child(type, method),
+        _ => 1,
+    };
+
+    internal static int InAChildProcess(Dictionary<string, string?> environment, params string[] args)
+    {
+        var dotnet = Path.Combine(RuntimeEnvironment.GetRuntimeDirectory(), "..", "..", "..", Windows ? "dotnet.exe" : "dotnet");
+        var start = new ProcessStartInfo(dotnet, [typeof(SideBySideBackendHardwareTests).Assembly.Location, .. args])
+            { RedirectStandardOutput = true, RedirectStandardError = true };
+        foreach (var (name, value) in environment) start.Environment[name] = value;
+        using var child = Process.Start(start)!;
+        child.BeginOutputReadLine();
+        child.BeginErrorReadLine();
+        child.WaitForExit();
+        return child.ExitCode;
+    }
+
+    private static Dictionary<string, string?> WithNoOtherCudaMajorOnThePathAndNoPythonEnvironment() => new()
+    {
+        ["PATH"] = string.Join(Path.PathSeparator, (Environment.GetEnvironmentVariable("PATH") ?? "")
+            .Split(Path.PathSeparator)
+            .Where(folder => !Directory.Exists(folder)
+                || !Directory.EnumerateFiles(folder, "cublasLt64_*.dll").Any(f => !f.EndsWith("_13.dll")))),
+        ["SHOROKOO_PYTHON_ENV"] = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString()),
+    };
+
+    private static bool ConvolutionRuns(IShorokooBackend backend)
+    {
+        var x = InputTensor<float32>("x", rank: 4);
+        var w = InputTensor<float32>("w", rank: 4);
+        var conv = new InternalComputationGraph([x, w], [OnnxOp.Conv(x, w, null!, AutoPad.NotSet,
+            dilations: [1L, 1L], group: 1, kernelShape: [3L, 3L], pads: [0L, 0L, 0L, 0L], strides: [1L, 1L])]);
+        float[] image = [.. Enumerable.Range(0, 16).Select(i => (float)i)];
+        return Floats(new ComputeContext(backend).Execute(conv,
+                TensorData([1L, 1L, 4L, 4L], image), TensorData([1L, 1L, 3L, 3L], Enumerable.Repeat(1f, 9).ToArray()))[0])
+            .Zip((float[])[45f, 54f, 81f, 90f]).All(p => Math.Abs(p.First - p.Second) < 1e-3f);
+    }
+
+    private static bool BothCudaBackendsRun(bool pytorchFirst)
+    {
+        IShorokooBackend[] inOrder = pytorchFirst ? [new TorchCudaBackend(), LoadCuda()] : [LoadCuda(), new TorchCudaBackend()];
+        return inOrder.All(ConvolutionRuns) && OneCopyOfEachCudaLibrary();
+    }
+
+    private static int AConvolutionEndsInAResultOrAnException()
+    {
+        try { return ConvolutionRuns(LoadCuda()) ? 0 : 1; }
+        catch (Exception) { return 0; }
+    }
+
+    private static int AConvolutionAfterAnotherCudnnIsRefusedNamingIt(string other)
+    {
+        var cudnn = CudaLibraryPins.Current!.Libraries.Single(pin => pin.Name == "cudnn");
+        var shim = cudnn.Files.Single(file => file.FileName is "cudnn64_9.dll" or "libcudnn.so.9").FileName;
+        var copy = Path.Combine(other, shim);
+        File.WriteAllBytes(copy, [.. File.ReadAllBytes(Path.Combine(CudaLibraryCache.DefaultRoot, cudnn.CacheKey, shim)), 0]);
+        NativeLibrary.Load(copy);
+        try { return ConvolutionRuns(LoadCuda()) ? 2 : 1; }
+        catch (InvalidOperationException refusal) when (refusal.Message.Contains(shim) && refusal.Message.Contains(other)) { return 0; }
+    }
+
+    private static bool OneCopyOfEachCudaLibrary()
+        => Process.GetCurrentProcess().Modules.Cast<ProcessModule>()
+            .Where(m => ((string[])["cublas", "cudnn", "libcublas", "libcudnn"])
+                .Any(family => m.ModuleName.StartsWith(family, StringComparison.OrdinalIgnoreCase)))
+            .GroupBy(m => m.ModuleName, StringComparer.OrdinalIgnoreCase)
+            .All(copies => copies.Select(m => m.FileName).Distinct().Count() == 1);
+
     /// <summary>The allocator ONNX Runtime made this value's buffer from, and the device it is on.
     /// Through the backend's own types, which an isolated backend loads privately, so the route to
     /// them is reflection rather than a cast.</summary>
@@ -432,26 +558,10 @@ public class SideBySideBackendHardwareTests
                 (int)info.GetType().GetProperty("Id")!.GetValue(info)!);
     }
 
-    /// <summary>Writes <paramref name="bytes"/> across the bus into the value's own allocation,
-    /// through the address and the copy the backend itself uses.</summary>
-    private static bool FillOnDevice(IShorokooTensorValue value, byte[] bytes)
-    {
-        var backend = value.GetType().Assembly;
-        var address = backend.GetType("Shorokoo.OnnxRuntime.OrtBackend")!
-            .GetMethod("DevicePointer", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [value])!;
-        var copied = (bool)backend.GetType("Shorokoo.OnnxRuntime.CudaInterop")!
-            .GetMethod("CopyHostToDevice", BindingFlags.Static | BindingFlags.Public)!
-            .Invoke(null, [bytes, address, bytes.Length])!;
-        GC.KeepAlive(value);
-        return copied;
-    }
-
     private static float[] Floats(TensorData data)
-        => [.. data.As<float32>().AccessMemory<float>()];
+        => data.As<float32>().CopyMemory<float>();
 
-    private static float[] Floats(NamedModelParam param)
-        => [.. param.ToTensorData().As<float32>().AccessMemory<float>()];
+    private static float[] Floats(NamedModelParam param) => Floats(param.ToTensorData());
 }
 
 /// <summary>

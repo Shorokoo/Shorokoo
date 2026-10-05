@@ -331,7 +331,14 @@ internal sealed class SessionCountingBackend(IShorokooBackend inner) : IShorokoo
     internal int Sessions;
     internal int SingleThreaded;
     internal int Disposed;
+    internal int ModelledPeaks;
     internal int Live => Sessions - Disposed;
+
+    long? IShorokooBackend.ModelledRunPeak(Shorokoo.Core.Factory.IR.ModelProto model, IReadOnlyList<OutputAlias> outputAliases, PrecisionSettings precision)
+    {
+        System.Threading.Interlocked.Increment(ref ModelledPeaks);
+        return null;
+    }
 
     public BackendDescription Description => inner.Description;
     public MemorySpace MemorySpace => inner.MemorySpace;
@@ -363,18 +370,11 @@ internal sealed class SessionCountingBackend(IShorokooBackend inner) : IShorokoo
     {
         public IReadOnlyList<string> InputNames => inner.InputNames;
         public IReadOnlyList<string> OutputNames => inner.OutputNames;
-        public bool HasDeviceMemory => inner.HasDeviceMemory;
 
         public IReadOnlyList<IShorokooTensorValue> Run(
             IReadOnlyDictionary<string, IShorokooTensorValue> inputs, IReadOnlyList<string> outputNames,
             RunSettings runSettings)
             => inner.Run(inputs, outputNames, runSettings);
-
-        public IReadOnlyList<IShorokooTensorValue> RunRetainingOutputs(
-            IReadOnlyDictionary<string, IShorokooTensorValue> inputs,
-            IReadOnlyList<string> outputNames, IReadOnlySet<string> retainedOutputNames,
-            RunSettings runSettings)
-            => inner.RunRetainingOutputs(inputs, outputNames, retainedOutputNames, runSettings);
 
         public void Dispose()
         {
@@ -393,6 +393,10 @@ internal sealed class SessionCountingBackend(IShorokooBackend inner) : IShorokoo
     public IShorokooTensorValue CreateSequence(IReadOnlyList<IShorokooTensorValue> values)
         => inner.CreateSequence(values);
     public byte[] CopyTensorToHost(IShorokooTensorValue value) => inner.CopyTensorToHost(value);
+    public bool TryCopyTensorRangeToHost(IShorokooTensorValue value, long byteOffset, Span<byte> destination)
+        => inner.TryCopyTensorRangeToHost(value, byteOffset, destination);
+    public bool TryCopyHostToTensorRange(IShorokooTensorValue value, long byteOffset, ReadOnlySpan<byte> source)
+        => inner.TryCopyHostToTensorRange(value, byteOffset, source);
     public IShorokooTensorValue CreateTensorInBackendMemory(
         ShorokooTensorElementType elementType, byte[] data, long[] shape)
         => inner.CreateTensorInBackendMemory(elementType, data, shape);

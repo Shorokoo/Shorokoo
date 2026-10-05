@@ -1,5 +1,10 @@
+using System.Diagnostics;
+using System.IO.Compression;
+using System.Net;
+using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Runtime.Loader;
+using System.Security.Cryptography;
 using Shorokoo.Core.Backends;
 using Shorokoo.Modules.Losses;
 using Shorokoo.Modules.Optimizers;
@@ -378,6 +383,11 @@ public class SideBySideBackendCoverageTests
 
         public byte[] CopyTensorToHost(IShorokooTensorValue value) => inner.CopyTensorToHost(value);
 
+        public bool TryCopyTensorRangeToHost(IShorokooTensorValue value, long byteOffset, Span<byte> destination)
+            => inner.TryCopyTensorRangeToHost(value, byteOffset, destination);
+        public bool TryCopyHostToTensorRange(IShorokooTensorValue value, long byteOffset, ReadOnlySpan<byte> source)
+            => inner.TryCopyHostToTensorRange(value, byteOffset, source);
+
         public IShorokooTensorValue CreateTensorInBackendMemory(
             ShorokooTensorElementType elementType, byte[] data, long[] shape)
             => inner.CreateTensorInBackendMemory(elementType, data, shape);
@@ -393,7 +403,6 @@ public class SideBySideBackendCoverageTests
     {
         public IReadOnlyList<string> InputNames => inner.InputNames;
         public IReadOnlyList<string> OutputNames => inner.OutputNames;
-        public bool HasDeviceMemory => inner.HasDeviceMemory;
 
         public IReadOnlyList<IShorokooTensorValue> Run(
             IReadOnlyDictionary<string, IShorokooTensorValue> inputs, IReadOnlyList<string> outputNames,
@@ -401,16 +410,6 @@ public class SideBySideBackendCoverageTests
         {
             fed.AddRange(inputs.Values);
             return inner.Run(inputs, outputNames, runSettings);
-        }
-
-        public IReadOnlyList<IShorokooTensorValue> RunRetainingOutputs(
-            IReadOnlyDictionary<string, IShorokooTensorValue> inputs,
-            IReadOnlyList<string> outputNames, IReadOnlySet<string> retainedOutputNames,
-            RunSettings runSettings)
-        {
-            fed.AddRange(inputs.Values);
-            return inner.RunRetainingOutputs(
-                inputs, outputNames, retainedOutputNames, runSettings);
         }
 
         public void Dispose() => inner.Dispose();
@@ -470,7 +469,7 @@ public class SideBySideBackendCoverageTests
         // inference.md promises users, and the message has to name the way home.
         var refused = Assert.Throws<InvalidOperationException>(
             () => BackendTransfer.CopyTo(target, new UnreadableValue()));
-        Assert.Contains("StepToCheckpoint", refused.Message);
+        Assert.Contains("ToHost()", refused.Message);
 
         // And a value that is neither a tensor nor a sequence has no contents to rebuild at all.
         Assert.Throws<InvalidOperationException>(
@@ -535,6 +534,432 @@ public class SideBySideBackendCoverageTests
         Assert.NotEmpty(mergeBackend.Sessions);
         Assert.NotEmpty(runtimeBackend.Sessions);
     }
+
+    [Fact]
+    public void TestAnInstalledCopyFillsTheCacheOnlyWhereEveryFileIsThePinnedOne()
+    {
+        using var scratch = new CudaScratch();
+        var pin = scratch.Pin("cudnn", 13, ("cudnn_graph64_9.dll", [1, 2, 3]), ("cudnn64_9.dll", [4, 5]));
+        var exact = scratch.Folder(("cudnn_graph64_9.dll", [1, 2, 3]), ("cudnn64_9.dll", [4, 5]));
+        var cuda12 = scratch.Folder(("cudnn_graph64_9.dll", [1, 2, 7]), ("cudnn64_9.dll", [4, 6]));
+        var otherRelease = scratch.Folder(("cudnn_graph64_9.dll", [1, 2, 3, 4]), ("cudnn64_9.dll", [4, 5]));
+        var incomplete = scratch.Folder(("cudnn_graph64_9.dll", [1, 2, 3]));
+        File.Delete(pin.Wheel.LocalPath);
+
+        Assert.True(CudaLibraryCache.MatchesExactly(exact, pin));
+        Assert.False(CudaLibraryCache.MatchesExactly(cuda12, pin));
+        Assert.False(CudaLibraryCache.MatchesExactly(otherRelease, pin));
+        Assert.False(CudaLibraryCache.MatchesExactly(incomplete, pin));
+        Assert.False(CudaLibraryCache.MatchesExactly(Path.Combine(scratch.Root, "none"), pin));
+        var filled = CudaLibraryCache.Provision(pin, scratch.Root, [cuda12, otherRelease, incomplete, exact], TimeSpan.FromSeconds(30));
+        Assert.Equal(Path.Combine(scratch.Root, "cudnn-1.0.0.0-cu13"), filled);
+        Assert.Equal([4, 5], File.ReadAllBytes(Path.Combine(filled, "cudnn64_9.dll")));
+        var cublas = scratch.Pin("cublas", 13, ("cublas64_13.dll", [9]));
+        File.Delete(cublas.Wheel.LocalPath);
+        var refused = Assert.Throws<InvalidOperationException>(
+            () => CudaLibraryCache.Provision(cublas, scratch.Root, [exact, cuda12], TimeSpan.FromSeconds(30)));
+        Assert.Contains("cublas 1.0.0.0 for CUDA 13 (cublas64_13.dll)", refused.Message);
+        Assert.Contains($"{cublas.WheelSize / (1024 * 1024)} MiB from {cublas.Wheel}", refused.Message);
+        Assert.Contains("CUDA 13 Python environments", refused.Message);
+        Assert.False(Directory.Exists(Path.Combine(scratch.Root, cublas.CacheKey)));
+    }
+
+    [Fact]
+    public void TestTheCacheIsFilledOnceUnderItsLockFromTheWheelAndAnInterruptedFillIsStartedOver()
+    {
+        using var scratch = new CudaScratch();
+        var pin = scratch.Pin("cublas", 13, ("cublasLt64_13.dll", [1, 2]), ("cublas64_13.dll", [3]));
+        var folder = Path.Combine(scratch.Root, pin.CacheKey);
+        Directory.CreateDirectory(folder);
+        File.WriteAllBytes(Path.Combine(folder, "cublasLt64_13.dll"), [1]);
+        File.WriteAllText(Path.Combine(folder, CudaLibraryCache.CompleteMarker), "another wheel");
+
+        Assert.Equal(folder, CudaLibraryCache.Provision(pin, scratch.Root, [], TimeSpan.FromSeconds(30)));
+        Assert.Equal([1, 2], File.ReadAllBytes(Path.Combine(folder, "cublasLt64_13.dll")));
+        Assert.Equal([3], File.ReadAllBytes(Path.Combine(folder, "cublas64_13.dll")));
+        Assert.True(CudaLibraryCache.IsComplete(folder, pin));
+        Assert.True(File.Exists(folder + ".lock"));
+        Assert.False(File.Exists(folder + ".wheel"));
+        File.Delete(pin.Wheel.LocalPath);
+        Assert.Equal(folder, CudaLibraryCache.Provision(pin, scratch.Root, [], TimeSpan.FromSeconds(30)));
+        var waiting = scratch.Pin("cudnn", 13, ("cudnn64_9.dll", [5]));
+        using (new FileStream(Path.Combine(scratch.Root, waiting.CacheKey) + ".lock", FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None))
+            Assert.Throws<TimeoutException>(() => CudaLibraryCache.Provision(waiting, scratch.Root, [], TimeSpan.FromMilliseconds(300)));
+        Assert.Equal([5], File.ReadAllBytes(Path.Combine(CudaLibraryCache.Provision(waiting, scratch.Root, [], TimeSpan.FromSeconds(30)), "cudnn64_9.dll")));
+    }
+
+    [Fact]
+    public void TestACacheFolderWhoseFileChangedSinceItWasFilledIsFilledAgain()
+    {
+        using var scratch = new CudaScratch();
+        var pin = scratch.Pin("cudnn", 13, ("cudnn_graph64_9.dll", [1, 2, 3]), ("cudnn64_9.dll", [4, 5]));
+        byte[] Refilled(Action<string> change)
+        {
+            var (root, installed) = (scratch.Folder(), scratch.Folder(("cudnn_graph64_9.dll", [1, 2, 3]), ("cudnn64_9.dll", [4, 5])));
+            CudaLibraryCache.Provision(pin, root, [installed], TimeSpan.FromSeconds(30));
+            change(Path.Combine(installed, "cudnn64_9.dll"));
+            return File.ReadAllBytes(Path.Combine(CudaLibraryCache.Provision(pin, root, [installed], TimeSpan.FromSeconds(30)), "cudnn64_9.dll"));
+        }
+
+        Assert.Equal([4, 5], Refilled(path => File.WriteAllBytes(path, [4, 6, 7])));
+        Assert.Equal([4, 5], Refilled(path => { File.WriteAllBytes(path, [4, 6]); File.SetLastWriteTimeUtc(path, DateTime.UtcNow.AddMinutes(1)); }));
+        File.Delete(pin.Wheel.LocalPath);
+        Assert.Equal([4, 5], Refilled(path => { File.SetLastWriteTimeUtc(path, DateTime.UtcNow.AddMinutes(1)); File.Delete(path); }));
+    }
+
+    [Fact]
+    public void TestAWheelDownloadThatStallsGivesUpWithinTheFillsTimeout()
+    {
+        using var scratch = new CudaScratch();
+        using var server = new StallingServer();
+        var pin = scratch.Pin("cudnn", 13, ("cudnn64_9.dll", [4, 5])) with { Wheel = server.Url };
+        TimeSpan? handed = null;
+        CudaLibraryCache.FetchHanded = timeout => handed = timeout;
+        try
+        {
+            Assert.IsType<TimeoutException>(Assert.Throws<InvalidOperationException>(
+                () => CudaLibraryCache.Provision(pin, scratch.Root, [], TimeSpan.FromSeconds(2))).InnerException);
+            Assert.True(handed <= TimeSpan.FromSeconds(2));
+            Assert.StartsWith("No byte", Assert.IsType<TimeoutException>(Assert.Throws<InvalidOperationException>(
+                () => CudaLibraryCache.Fetch(pin, scratch.Root, new MemoryStream(), TimeSpan.FromMinutes(1), stall: TimeSpan.FromSeconds(1))).InnerException).Message);
+        }
+        finally
+        {
+            CudaLibraryCache.FetchHanded = null;
+        }
+    }
+
+    [Fact]
+    public void TestAWheelThatCannotBeWrittenIsReportedAsTheDisksAndOneThatCannotBeReadAsTheNetworks()
+    {
+        using var scratch = new CudaScratch();
+        var pin = scratch.Pin("cudnn", 13, ("cudnn64_9.dll", [4, 5]));
+
+        Assert.Throws<IOException>(() => CudaLibraryCache.Fetch(pin, scratch.Root, new FullDisk()));
+        File.Delete(pin.Wheel.LocalPath);
+        Assert.Throws<InvalidOperationException>(() => CudaLibraryCache.Fetch(pin, scratch.Root, new MemoryStream()));
+    }
+
+    [Fact]
+    public void TestADownloadEndedWithItsProcessLeavesNoWheelBehind()
+    {
+        using var scratch = new CudaScratch();
+        var served = Path.Combine(scratch.Root, "served");
+        using var server = new StallingServer(served);
+
+        Assert.Equal(0, SideBySideBackendHardwareTests.InAChildProcess([], "cuda-wheel-download", scratch.Root, server.Url.ToString(), served));
+        Assert.All(Directory.GetFiles(scratch.Root, "*.wheel"), wheel => Assert.True(Gone(wheel)));
+    }
+
+    /// <summary>Whether the file at <paramref name="path"/> is gone or going: deleted, or marked for
+    /// deletion once another handle on it closes, which no open can get past.</summary>
+    private static bool Gone(string path)
+    {
+        try
+        {
+            File.OpenRead(path).Dispose();
+            return false;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return true;
+        }
+    }
+
+    /// <summary>What the child process of <see cref="TestADownloadEndedWithItsProcessLeavesNoWheelBehind"/>
+    /// runs: a fill of a cache folder under <paramref name="root"/> from the wheel at
+    /// <paramref name="url"/>, the process ended once <paramref name="served"/> says the download
+    /// is under way.</summary>
+    internal static int DownloadEndedWithItsProcess(string root, string url, string served)
+    {
+        var pin = new CudaLibraryPin("cudnn", "1.0.0.0", 13, "nvidia-cudnn", new Uri(url), "", 1 << 20, []);
+        new Thread(() =>
+        {
+            try { CudaLibraryCache.Provision(pin, root, [], TimeSpan.FromMinutes(1)); }
+            catch (Exception) { }
+        }) { IsBackground = true }.Start();
+        var clock = Stopwatch.StartNew();
+        while (!File.Exists(served) && clock.Elapsed < TimeSpan.FromSeconds(30)) Thread.Sleep(50);
+        Environment.Exit(File.Exists(served) ? 0 : 1);
+        return 1;
+    }
+
+    [Fact]
+    public void TestAnEnvironmentsCopyThatCannotBeReplacedIsNotReadAndOneThatIsTheCachesFileIsNotReadAgain()
+    {
+        using var scratch = new CudaScratch();
+        var cudnn = scratch.Pin("cudnn", 13, ("cudnn_graph64_9.dll", [1, 2, 3]), ("cudnn64_9.dll", [4, 5]));
+        var pins = new CudaLibraryPins([cudnn], null, null, []);
+        var environment = Directory.CreateDirectory(Path.Combine(scratch.Root, "env")).FullName;
+        var sitePackages = Path.Combine(environment, "site-packages");
+        var torchLib = Directory.CreateDirectory(Path.Combine(sitePackages, "torch", "lib")).FullName;
+        File.WriteAllBytes(Path.Combine(torchLib, "cudnn_graph64_9.dll"), [1, 2, 3]);
+        File.WriteAllBytes(Path.Combine(torchLib, "cudnn64_9.dll"), [4, 5]);
+        var cache = Path.Combine(scratch.Root, "cache");
+        bool Linked() => CudaLibraryCache.LinkEnvironment(environment, sitePackages, pins, cache, _ => [], TimeSpan.FromSeconds(30));
+        FileStream Held() => new(Path.Combine(torchLib, "cudnn64_9.dll"), FileMode.Open, FileAccess.Read, FileShare.None);
+
+        using (Held()) Assert.False(Linked());
+        Assert.True(Linked());
+        File.Delete(Path.Combine(environment, CudaLibraryCache.LinkedMarker));
+        using (Held()) Assert.True(Linked());
+    }
+
+    [Fact]
+    public void TestAnEnvironmentsCopiesBecomeLinksToTheCacheFilledFromThemAndAnotherReleaseIsLeftAlone()
+    {
+        using var scratch = new CudaScratch();
+        var cudnn = scratch.Pin("cudnn", 13, ("cudnn_graph64_9.dll", [1, 2, 3]), ("cudnn64_9.dll", [4, 5]));
+        var cublas = scratch.Pin("cublas", 13, ("cublas64_13.dll", [6]));
+        var pins = new CudaLibraryPins([cudnn, cublas], null, null, []);
+        File.Delete(cudnn.Wheel.LocalPath);
+        var environment = Directory.CreateDirectory(Path.Combine(scratch.Root, "env")).FullName;
+        var sitePackages = Path.Combine(environment, "site-packages");
+        var torchLib = Directory.CreateDirectory(Path.Combine(sitePackages, "torch", "lib")).FullName;
+        File.WriteAllBytes(Path.Combine(torchLib, "cudnn_graph64_9.dll"), [1, 2, 3]);
+        File.WriteAllBytes(Path.Combine(torchLib, "cudnn64_9.dll"), [4, 5]);
+        File.WriteAllBytes(Path.Combine(torchLib, "cublas64_13.dll"), [7]);
+        var cache = Path.Combine(scratch.Root, "cache");
+
+        Assert.True(CudaLibraryCache.LinkEnvironment(environment, sitePackages, pins, cache, _ => [], TimeSpan.FromSeconds(30)));
+        Assert.True(CudaLibraryCache.IsComplete(Path.Combine(cache, cudnn.CacheKey), cudnn));
+        Assert.Equal(pins.Identity, File.ReadAllText(Path.Combine(environment, CudaLibraryCache.LinkedMarker)));
+        Assert.Equal(["cublas64_13.dll", "cudnn64_9.dll", "cudnn_graph64_9.dll"], Directory.GetFiles(torchLib).Select(Path.GetFileName).Order(StringComparer.Ordinal));
+        File.AppendAllText(Path.Combine(cache, cudnn.CacheKey, "cudnn64_9.dll"), "+");
+        File.AppendAllText(Path.Combine(cache, cublas.CacheKey, "cublas64_13.dll"), "+");
+        Assert.Equal(3, new FileInfo(Path.Combine(torchLib, "cudnn64_9.dll")).Length);
+        Assert.Equal([7], File.ReadAllBytes(Path.Combine(torchLib, "cublas64_13.dll")));
+        Assert.True(CudaLibraryCache.LinkEnvironment(environment, sitePackages, pins, Path.Combine(scratch.Root, "elsewhere"), _ => [], TimeSpan.FromSeconds(30)));
+        Assert.False(Directory.Exists(Path.Combine(scratch.Root, "elsewhere")));
+    }
+
+    [Fact]
+    public void TestAProvisionedEnvironmentsCopiesFillTheCacheWithNoDownloadAndAnotherReleaseIsRefused()
+    {
+        using var scratch = new CudaScratch();
+        var pin = scratch.Pin("cudnn", 13, ("cudnn_graph64_9.dll", [1, 2, 3]), ("cudnn64_9.dll", [4, 5]));
+        File.Delete(pin.Wheel.LocalPath);
+        foreach (var windows in (bool[])[true, false])
+        {
+            string TorchLib(string home, string environment, byte last)
+            {
+                var sitePackages = windows
+                    ? Path.Combine(home, "shorokoo", "python-envs", environment, "Lib", "site-packages")
+                    : Path.Combine(home, "shorokoo", "python-envs", environment, "lib", "python3.12", "site-packages");
+                var torchLib = Directory.CreateDirectory(Path.Combine(sitePackages, "torch", "lib")).FullName;
+                File.WriteAllBytes(Path.Combine(torchLib, "cudnn_graph64_9.dll"), [1, 2, 3]);
+                File.WriteAllBytes(Path.Combine(torchLib, "cudnn64_9.dll"), [4, last]);
+                return torchLib;
+            }
+            IReadOnlyList<string> Candidates(string home)
+                => CudaLibraryCache.InstalledCandidates(pin, name => name == (windows ? "LOCALAPPDATA" : "XDG_CACHE_HOME") ? home : null, windows);
+            var matching = Path.Combine(scratch.Root, $"matching-{windows}");
+            var mismatched = Path.Combine(scratch.Root, $"mismatched-{windows}");
+            var torchLib = TorchLib(matching, "cu13-0123456789abcdef", 5);
+            TorchLib(matching, "cpu-0123456789abcdef", 5);
+            TorchLib(mismatched, "cu13-fedcba9876543210", 6);
+
+            Assert.Equal(torchLib, Assert.Single(Candidates(matching), folder => folder.StartsWith(matching) && Directory.Exists(folder)));
+            Assert.Throws<InvalidOperationException>(() => CudaLibraryCache.Provision(pin, Path.Combine(scratch.Root, $"refused-{windows}"), Candidates(mismatched), TimeSpan.FromSeconds(30)));
+            var cache = CudaLibraryCache.Provision(pin, Path.Combine(scratch.Root, $"cache-{windows}"), Candidates(matching), TimeSpan.FromSeconds(30));
+            File.AppendAllText(Path.Combine(cache, "cudnn64_9.dll"), "+");
+            Assert.Equal(3, new FileInfo(Path.Combine(torchLib, "cudnn64_9.dll")).Length);
+        }
+    }
+
+    [Fact]
+    public void TestAHardLinkIsMadeBetweenPathsLongerThanWindowsMaxPath()
+    {
+        using var scratch = new CudaScratch();
+        var deep = Directory.CreateDirectory(Path.Combine(scratch.Root, new string('d', 120), new string('e', 120))).FullName;
+        var existing = Path.Combine(deep, "cudnn64_9.dll");
+        File.WriteAllBytes(existing, [4, 5]);
+
+        Assert.True(CudaLibraryCache.TryCreateHardLink(Path.Combine(deep, "cudnn64_9.link.dll"), existing));
+        File.AppendAllText(existing, "+");
+        Assert.Equal(3, new FileInfo(Path.Combine(deep, "cudnn64_9.link.dll")).Length);
+    }
+
+    [Fact]
+    public void TestTheCacheAndTheCopiesLookedForAreWhereEachSystemKeepsThem()
+    {
+        var cudnn = new CudaLibraryPin("cudnn", "9.24.0.43", 13, "nvidia-cudnn-cu13", new Uri("https://example.invalid/cudnn.whl"), "", 0,
+            [new("nvidia/cudnn/lib/libcudnn.so.9", "", 0)]);
+        var cublas = cudnn with { Name = "cublas", Files = [new("nvidia/cu13/bin/x86_64/cublas64_13.dll", "", 0)] };
+        string? Linux(string name) => name switch { "LD_LIBRARY_PATH" => "/opt/a:/opt/b", "CUDNN_PATH" => "/opt/cudnn", "CUDA_PATH" => "/opt/cuda", "XDG_CACHE_HOME" => "/cache", _ => null };
+        string? Windows(string name) => name switch { "PATH" => @"C:\a;C:\b", "CUDNN_PATH" => @"C:\cudnn", "CUDA_PATH" => @"C:\cuda", "LOCALAPPDATA" => @"C:\local", _ => null };
+
+        Assert.Equal(Path.Combine("/cache", "shorokoo", "cuda"), CudaLibraryCache.Root(Linux, windows: false));
+        Assert.Equal(Path.Combine(@"C:\local", "shorokoo", "cuda"), CudaLibraryCache.Root(Windows, windows: true));
+        Assert.Equal(["/opt/a", "/opt/b", Path.Combine("/opt/cudnn", "lib"), Path.Combine("/opt/cudnn", "lib64"), "/usr/lib/x86_64-linux-gnu", "/usr/lib64", "/usr/local/cuda/lib64"],
+            CudaLibraryCache.InstalledCandidates(cudnn, Linux, windows: false));
+        Assert.Equal(["/opt/a", "/opt/b", Path.Combine("/opt/cuda", "lib64")], CudaLibraryCache.InstalledCandidates(cublas, Linux, windows: false).Take(3));
+        Assert.Equal([@"C:\a", @"C:\b", @"C:\cudnn", Path.Combine(@"C:\cudnn", "bin"), Path.Combine(@"C:\cudnn", "bin", "x64")],
+            CudaLibraryCache.InstalledCandidates(cudnn, Windows, windows: true));
+        Assert.Equal([@"C:\a", @"C:\b", Path.Combine(@"C:\cuda", "bin"), Path.Combine(@"C:\cuda", "bin", "x64")],
+            CudaLibraryCache.InstalledCandidates(cublas, Windows, windows: true));
+        Assert.Equal([Path.Combine("sp", "nvidia", "cudnn", "lib", "libcudnn.so.9"), Path.Combine("sp", "torch", "lib", "libcudnn.so.9")],
+            CudaLibraryCache.EnvironmentFiles("sp", cudnn.Files[0]));
+        Assert.Equal("cudnn-9.24.0.43-cu13", cudnn.CacheKey);
+    }
+
+    [Fact]
+    public void TestAnotherReleaseOfAPinnedLibraryTheProcessHoldsIsNamedAndTheSameFileElsewhereIsNot()
+    {
+        using var scratch = new CudaScratch();
+        var torchLib = scratch.Folder(("cudnn64_9.dll", [1]), ("cudnn_graph64_9.dll", [2]), ("zlibwapi.dll", [3]));
+        var sameRelease = scratch.Folder(("cudnn64_9.dll", [1]));
+        var otherRelease = scratch.Folder(("cudnn_graph64_9.dll", [9]), ("zlibwapi.dll", [8]));
+        string[] pinned = ["cudnn64_9.dll", "cudnn_graph64_9.dll"];
+        Func<string, string?> HeldIn(params string[] folders) => name => folders.Select(folder => Path.Combine(folder, name)).FirstOrDefault(File.Exists);
+
+        Assert.Null(CudaLibraries.Conflict(torchLib, pinned, HeldIn(torchLib, sameRelease)));
+        Assert.Equal($"cudnn_graph64_9.dll from '{otherRelease}'", CudaLibraries.Conflict(torchLib, pinned, HeldIn(sameRelease, otherRelease)));
+        Assert.Null(CudaLibraries.Conflict(Path.Combine(scratch.Root, "none"), pinned, HeldIn(otherRelease)));
+
+        var pin = scratch.Pin("cudnn", 13, ("cudnn_graph64_9.dll", [2]), ("cudnn64_9.dll", [1]));
+        var cache = CudaLibraryCache.Provision(pin, scratch.Root, [torchLib], TimeSpan.FromSeconds(30));
+        string? Held(params string[] copies) => CudaLibraries.OtherReleasesHeld(new CudaLibraryPins([pin], null, null, []), scratch.Root,
+            name => copies.FirstOrDefault(copy => Path.GetFileName(copy) == name));
+        Assert.Null(Held());
+        Assert.Null(Held(Path.Combine(cache, "cudnn64_9.dll"), Path.Combine(torchLib, "cudnn_graph64_9.dll")));
+        Assert.Null(Held(Path.Combine(sameRelease, "cudnn64_9.dll")));
+        Assert.Equal($"cudnn_graph64_9.dll from '{otherRelease}'", Held(Path.Combine(sameRelease, "cudnn64_9.dll"), Path.Combine(otherRelease, "cudnn_graph64_9.dll")));
+        Assert.NotNull(CudaLibraries.HeldUnder(OperatingSystem.IsWindows() ? "kernel32.dll" : "libc.so.6"));
+        Assert.Null(CudaLibraries.HeldUnder("shorokoo-nothing-of-this-name.dll"));
+    }
+
+    [Fact]
+    public void TestAnEnvironmentWhoseCudaLibrariesAreNvidiasWheelsNamesAnotherReleaseTheProcessHoldsOfThem()
+    {
+        using var scratch = new CudaScratch();
+        var environment = scratch.Folder();
+        var windows = OperatingSystem.IsWindows();
+        var home = Directory.CreateDirectory(Path.Combine(scratch.Root, "python", windows ? "" : "bin")).FullName;
+        File.WriteAllText(Path.Combine(environment, "pyvenv.cfg"), $"home = {home}\nversion_info = 3.12.0\n");
+        File.WriteAllBytes(windows ? Path.Combine(home, "python312.dll") : Path.Combine(Directory.CreateDirectory(Path.Combine(home, "..", "lib")).FullName, "libpython3.12.so"), [0]);
+        var opened = Shorokoo.PythonHost.PythonEnvironment.Open(environment, "3.12", Shorokoo.PythonHost.PythonEnvironmentSource.Explicit);
+        var nvidia = Path.Combine(opened.SitePackages, "nvidia");
+        File.WriteAllBytes(Path.Combine(Directory.CreateDirectory(Path.Combine(nvidia, "cudnn", "lib")).FullName, "libcudnn.so.9"), [1]);
+        File.WriteAllBytes(Path.Combine(Directory.CreateDirectory(Path.Combine(nvidia, "cu13", "lib")).FullName, "libcublas.so.13"), [5]);
+        var other = scratch.Folder(("libcudnn.so.9", [9]));
+        string[] pinned = ["libcudnn.so.9", "libcublas.so.13"];
+        Func<string, string?> Holding(params string[] copies) => name => copies.FirstOrDefault(copy => Path.GetFileName(copy) == name);
+
+        Assert.Equal(nvidia, opened.CudaLibraryDirectory);
+        Assert.Equal($"libcudnn.so.9 from '{other}'", CudaLibraries.Conflict(nvidia, pinned, Holding(Path.Combine(other, "libcudnn.so.9"), Path.Combine(nvidia, "cu13", "lib", "libcublas.so.13"))));
+        Assert.Null(CudaLibraries.Conflict(nvidia, pinned, Holding(Path.Combine(nvidia, "cudnn", "lib", "libcudnn.so.9"))));
+        var versioned = scratch.Folder(("libcublas.so.13.0.0.19", [6]));
+        Assert.Equal($"libcublas.so.13.0.0.19 from '{versioned}'", CudaLibraries.Conflict(nvidia, pinned, name => name == "libcublas.so.13" ? Path.Combine(versioned, "libcublas.so.13.0.0.19") : null));
+        Assert.Equal("/opt/cuda/lib/libcudnn.so.9", CudaLibraries.LoadedPath("lib/libcudnn.so.9", 0x7f0000001000,
+            () => "7f0000000000-7f0000002000 r-xp 00000000 08:01 12345    /opt/cuda/lib/libcudnn.so.9\n7f0000002000-7f0000003000 r--p 00002000 08:01 12345    /opt/cuda/lib/libcudnn.so.9\n"));
+        Assert.Equal("/usr/lib/libcudnn.so.9", CudaLibraries.LoadedPath("/usr/lib/libcudnn.so.9", 0, () => ""));
+    }
+
+    [Fact]
+    public void TestAFilesIdentityIsTheOneItsFileSystemGivesItInFull()
+    {
+        using var scratch = new CudaScratch();
+        var file = Path.Combine(scratch.Folder(("cudnn64_9.dll", [1])), "cudnn64_9.dll");
+        var stamp = CudaLibraryCache.StampOf(file)!.Value;
+
+        Assert.True(CudaLibraryCache.SameFile(file, file));
+        if (OperatingSystem.IsWindows()) Assert.Equal(FileIdOf(file), (stamp.Volume, (UInt128)stamp.Index));
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct FileIdInfo
+    {
+        public ulong VolumeSerialNumber, IdLow, IdHigh;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetFileInformationByHandleEx(Microsoft.Win32.SafeHandles.SafeFileHandle file, int infoClass, out FileIdInfo info, int size);
+
+    /// <summary>The volume and file IDs Windows gives the file at <paramref name="path"/> in full
+    /// (<c>FILE_ID_INFO</c>).</summary>
+    private static (ulong Volume, UInt128 Id) FileIdOf(string path)
+    {
+        using var handle = File.OpenHandle(path);
+        Assert.True(GetFileInformationByHandleEx(handle, 18, out var info, Marshal.SizeOf<FileIdInfo>()));
+        return (info.VolumeSerialNumber, ((UInt128)info.IdHigh << 64) | info.IdLow);
+    }
+
+    /// <summary>A folder of its own for one test's cache, its installed copies and the wheels its
+    /// pins name, deleted afterwards.</summary>
+    private sealed class CudaScratch : IDisposable
+    {
+        public string Root { get; } = Directory.CreateDirectory(Path.Combine(Path.GetTempPath(), "shorokoo-cuda-" + Guid.NewGuid().ToString("N"))).FullName;
+
+        public CudaLibraryPin Pin(string name, int cudaMajor, params (string File, byte[] Bytes)[] files)
+        {
+            var wheel = Path.Combine(Root, $"{name}-{Guid.NewGuid():N}.whl");
+            using (var archive = ZipFile.Open(wheel, ZipArchiveMode.Create))
+                foreach (var (file, bytes) in files)
+                    using (var entry = archive.CreateEntry($"nvidia/{name}/bin/{file}").Open())
+                        entry.Write(bytes);
+            var contents = File.ReadAllBytes(wheel);
+            return new(name, "1.0.0.0", cudaMajor, $"nvidia-{name}", new Uri(wheel), Convert.ToHexStringLower(SHA256.HashData(contents)), contents.Length,
+                [.. files.Select(f => new CudaLibraryFile($"nvidia/{name}/bin/{f.File}", CudaLibraryCache.Sha256Of(new MemoryStream(f.Bytes)), f.Bytes.Length))]);
+        }
+
+        public string Folder(params (string File, byte[] Bytes)[] files)
+        {
+            var folder = Directory.CreateDirectory(Path.Combine(Root, Guid.NewGuid().ToString("N"))).FullName;
+            foreach (var (file, bytes) in files) File.WriteAllBytes(Path.Combine(folder, file), bytes);
+            return folder;
+        }
+
+        public void Dispose() => Directory.Delete(Root, recursive: true);
+    }
+
+    /// <summary>A server on the loopback answering each request with a wheel's headers and its first
+    /// bytes, then nothing more for twenty seconds; once it has sent them it writes the file
+    /// <c>served</c> names, where it names one.</summary>
+    private sealed class StallingServer : IDisposable
+    {
+        private readonly TcpListener _listener = new(IPAddress.Loopback, 0);
+        private readonly CancellationTokenSource _stop = new();
+
+        public StallingServer(string? served = null)
+        {
+            _listener.Start();
+            Url = new Uri($"http://127.0.0.1:{((IPEndPoint)_listener.LocalEndpoint).Port}/nvidia_cudnn.whl");
+            _ = Task.Run(async () =>
+            {
+                while (!_stop.IsCancellationRequested)
+                    _ = Serve(await _listener.AcceptTcpClientAsync(_stop.Token), served);
+            });
+        }
+
+        private async Task Serve(TcpClient client, string? served)
+        {
+            using (client)
+            {
+                var stream = client.GetStream();
+                await stream.ReadAtLeastAsync(new byte[4096], 1, throwOnEndOfStream: false, _stop.Token);
+                await stream.WriteAsync((byte[])[.. "HTTP/1.1 200 OK\r\nContent-Length: 1048576\r\n\r\n"u8, .. new byte[16]], _stop.Token);
+                if (served is not null) File.WriteAllText(served, "");
+                await Task.Delay(TimeSpan.FromSeconds(20), _stop.Token);
+            }
+        }
+
+        public Uri Url { get; }
+
+        public void Dispose()
+        {
+            _stop.Cancel();
+            _listener.Stop();
+        }
+    }
+
+    /// <summary>A stream every write to fails as a full disk's does.</summary>
+    private sealed class FullDisk : MemoryStream
+    {
+        public override void Write(byte[] buffer, int offset, int count) => throw new IOException("There is not enough space on the disk.");
+
+        public override void Write(ReadOnlySpan<byte> buffer) => throw new IOException("There is not enough space on the disk.");
+    }
 }
 
 /// <summary>
@@ -562,7 +987,7 @@ internal static class SideBySideModel
     }
 
     internal static float[] Floats(NamedModelParam param)
-        => [.. param.ToTensorData().As<float32>().AccessMemory<float>()];
+        => param.ToTensorData().As<float32>().CopyMemory<float>();
 
     /// <summary>
     /// What two runtimes running on the <i>same</i> device may differ by, which is very little:
@@ -571,21 +996,16 @@ internal static class SideBySideModel
     internal const double RuntimeTolerance = AutoTest.Tolerance;
 
     /// <summary>
-    /// What the host and the card may differ by, which is a good deal more. An NVIDIA card from
-    /// Ampere on puts an fp32 MatMul through its tensor cores in TF32 unless told otherwise --
-    /// ten mantissa bits against fp32's twenty-three -- so its answer sits a long way from a CPU
-    /// that really did the sum in fp32, and no amount of correctness on either side closes that
-    /// gap.
+    /// What the host and the card may differ by. Both compute float32 in full float32 precision
+    /// (<see cref="Shorokoo.Core.Backends.PrecisionSettings"/>), so they differ only in the order
+    /// the card adds its terms up in.
     ///
-    /// <para>Measured rather than guessed: this model deviates by 8.3e-4 over one pass on an
-    /// RTX 4090, and by 2.5e-3 where a value the card produced is fed back through it, the input
-    /// error and the arithmetic error compounding. Running the same test under
-    /// <c>NVIDIA_TF32_OVERRIDE=0</c> brings every arm back inside
-    /// <see cref="RuntimeTolerance"/>, which is what identifies TF32 as the cause. The bound is
-    /// set clear of the worst of those with room to spare, and is still four orders of magnitude
-    /// tighter than a backend that had genuinely miscomputed the model would land.</para>
+    /// <para>Measured on an RTX 4090, the same on the ONNX Runtime, PyTorch and JAX CUDA backends:
+    /// this model deviates by 1.2e-7 over one pass, and by 3.6e-7 where a value one device produced
+    /// is fed back through the model on the other. On ONNX Runtime and PyTorch a card allowed
+    /// TensorFloat-32 lands at 8.3e-4 and 2.5e-3, so the bound sits well clear of both.</para>
     /// </summary>
-    internal const double DeviceTolerance = 5e-3;
+    internal const double DeviceTolerance = 2e-6;
 
     /// <summary>
     /// Asserts two backends answered alike, to <paramref name="tolerance"/> -- absolute near
@@ -598,4 +1018,55 @@ internal static class SideBySideModel
         foreach (var (want, got) in expected.Zip(actual))
             Assert.True(Math.Abs(want - got) <= tolerance * Math.Max(1.0, Math.Abs(want)));
     }
+
+    /// <summary>A float32 product of two 1024-square matrices, a 3×3 convolution of a 4×64×64×64 batch
+    /// with 64 filters, and an LSTM of 256 units over 16 steps of a batch of 32, on
+    /// <paramref name="context"/>: sums of 1024, 576 and 256 terms, large enough for a card to run them
+    /// on its tensor cores.</summary>
+    internal static float[][] LargeLayers(ComputeContext context)
+    {
+        var a = InputTensor<float32>("a", rank: 2);
+        var b = InputTensor<float32>("b", rank: 2);
+        var x = InputTensor<float32>("x", rank: 4);
+        var w = InputTensor<float32>("w", rank: 4);
+        var sequence = InputTensor<float32>("sequence", rank: 3);
+        var gates = InputTensor<float32>("gates", rank: 3);
+        var recurrence = InputTensor<float32>("recurrence", rank: 3);
+        var graph = new InternalComputationGraph([a, b, x, w, sequence, gates, recurrence],
+        [
+            OnnxOp.MatMul(a, b),
+            OnnxOp.Conv(x, w, null!, AutoPad.NotSet, dilations: [1L, 1L], group: 1, kernelShape: [3L, 3L], pads: [1L, 1L, 1L, 1L], strides: [1L, 1L]),
+            OnnxOp.Lstm(sequence, gates, recurrence, null, null, null, null, null, null, null, null, null, null, 256L, null, null).y,
+        ]);
+        static TensorData Waves(long[] shape, float frequency, float amplitude = 1f)
+            => TensorData(shape, [.. Enumerable.Range(0, (int)shape.Aggregate((p, d) => p * d)).Select(i => amplitude * MathF.Sin(frequency * i))]);
+        return [.. context.Execute(graph, Waves([1024L, 1024L], 0.37f), Waves([1024L, 1024L], 0.11f),
+            Waves([4L, 64L, 64L, 64L], 0.23f), Waves([64L, 64L, 3L, 3L], 0.71f),
+            Waves([16L, 32L, 256L], 0.29f), Waves([1L, 1024L, 256L], 0.13f, 0.0625f), Waves([1L, 1024L, 256L], 0.31f, 0.0625f)).Select(Floats)];
+    }
+
+    /// <summary>How far <paramref name="actual"/> is from <paramref name="expected"/>: the largest
+    /// difference, over the largest magnitude expected.</summary>
+    internal static double Deviation(float[] expected, float[] actual)
+        => expected.Zip(actual, (want, got) => Math.Abs((double)want - got)).Max() / expected.Max(v => Math.Abs((double)v));
+
+    /// <summary>What <see cref="LargeLayers"/> may deviate by from the host's where the card computes
+    /// float32 in full float32 precision, and so only adds its terms up in another order. Measured on an
+    /// RTX 4090 on every CUDA backend, Windows and Linux: at most 4.0e-6 for the product, 4.2e-6 for the
+    /// convolution and 1.1e-6 for the LSTM.</summary>
+    internal const double FullPrecisionTolerance = 2e-5;
+
+    /// <summary>What <see cref="LargeLayers"/> may deviate by from the host's where the card computes
+    /// float32 in TensorFloat-32, rounding each operand's significand to 11 bits. Measured on an RTX 4090,
+    /// Windows and Linux: at most 2.5e-3 for the product, 1.8e-3 for the convolution and 1.3e-3 for the
+    /// LSTM on ONNX Runtime and PyTorch, and 2.5e-3 for the product and 8.5e-4 for the LSTM on JAX.</summary>
+    internal const double TensorFloat32Tolerance = 1e-2;
+
+    internal static void AssertFullPrecision(float[][] host, float[][] card)
+        => Assert.All(host.Zip(card), pair => Assert.True(Deviation(pair.First, pair.Second) <= FullPrecisionTolerance));
+
+    internal static void AssertTensorFloat32(float[][] host, float[][] card)
+        => Assert.All(host.Zip(card), pair => Assert.InRange(Deviation(pair.First, pair.Second), FullPrecisionTolerance, TensorFloat32Tolerance));
+
+    internal static PrecisionSettings AllowingTensorFloat32 { get; } = new() { AllowTensorFloat32 = true };
 }

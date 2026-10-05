@@ -1,9 +1,8 @@
 namespace Shorokoo.Core.Backends;
 
 /// <summary>
-/// What a single execution of a compiled session runs with. ONNX Runtime reads these off the
-/// run, not the session, so they are settled per call: one run can shrink the arena it
-/// finished with while the next leaves it alone, on the same compiled graph and without
+/// What a single execution of a compiled session runs with, settled per call: one run can hand
+/// back the memory it finished with while the next keeps it, on the same compiled graph and without
 /// rebuilding anything.
 ///
 /// <para>A <see cref="Shorokoo.Runtime.ComputeContext"/> holds the instance its runs use when a
@@ -25,18 +24,21 @@ namespace Shorokoo.Core.Backends;
 public sealed record RunSettings
 {
     /// <summary>What a run gets when the call names nothing and its context holds no other
-    /// instance: the arena is left as the run found it.</summary>
+    /// instance: what the session keeps for its next runs is kept.</summary>
     public static RunSettings Default { get; } = new();
 
     /// <summary>
-    /// Whether to hand the arena's unused blocks back when this run finishes — ORT's
-    /// <c>memory.enable_memory_arena_shrinkage</c> run option. Off by default, since the blocks
-    /// then have to be re-allocated on the next run, which on a card costs a synchronizing
-    /// <c>cudaMalloc</c> per step. On, the arena stops being a ratchet: what the run did not
-    /// need stays available to the rest of the machine.
+    /// Whether to hand back to the device, when this run finishes, the blocks the session keeps
+    /// for its next runs. Off by default, since the blocks then have to be taken again on the next
+    /// run, which on a card costs a synchronizing <c>cudaMalloc</c> per step. On, what the session
+    /// keeps stops being a ratchet: what the run did not need stays available to the rest of the
+    /// machine.
     ///
-    /// <para>The arena is the one the run's intermediates live in: the card's on a CUDA backend,
-    /// the host's on a CPU one.</para>
+    /// <para>The memory is the one the run computes in: the card's on a CUDA backend, the host's
+    /// on a CPU one. On ONNX Runtime it is what Shorokoo's allocator keeps cached for the session,
+    /// and for the tensors placed on the device — which a run that hands its memory back hands back
+    /// too — while the blocks still in use, the session's weights and the outputs a caller keeps,
+    /// stay as they are.</para>
     /// </summary>
     public bool ShrinkArenaAfterRun { get; init; }
 

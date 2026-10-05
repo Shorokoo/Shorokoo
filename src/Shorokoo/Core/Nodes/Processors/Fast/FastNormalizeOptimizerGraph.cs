@@ -428,10 +428,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// from <paramref name="paramValue"/> one at a time: a session
         /// build per parameter would make rig construction cost a constant per parameter
         /// (Shorokoo/Shorokoo#404). The session runs unoptimized, as parameter initialization's
-        /// does, since each run computes its values once; each run hands its arena's unused blocks
-        /// back as it ends, and each result is copied off the session — the rig retains every value
-        /// this produces for its lifetime, the shape that makes a session-backed result cost its
-        /// session's whole arena (see <see cref="FastProcessorHelper.RehostOffSession"/>).</para>
+        /// does, since each run computes its values once, and each run hands its arena's unused
+        /// blocks back as it ends. The rig retains every value this produces for its lifetime, each
+        /// where its run left it: memory of its own, which keeps nothing of the session alive.</para>
         /// </summary>
         internal static TensorData[][] RunStateInitGraph(
             InternalComputationGraph stateInitGraph,
@@ -461,12 +460,13 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     var zeroGrad = TensorData.CreateFromRawBytes(
                         paramData.Shape, paramData.DType,
                         new byte[paramData.Shape.Count * (paramData.DType.EncodingBitCount / 8)]);
-                    // Every value goes in as a copy the run consumes: they are the caller's — the
-                    // rig's own initial values and hyperparameters, which are never fed, so none of
-                    // them ever holds a copy of itself in a runtime's memory.
-                    IData[] feeds = [.. hyperSeeds.Select(CopyOf), CopyOf(paramData), zeroGrad];
+                    // The values are the caller's — the rig's own initial values and hyperparameters —
+                    // so none of them is consumed, and none is left holding a copy of itself in a
+                    // runtime's memory: one the run can read where it is is read there, and any
+                    // other goes in as a copy in the context's memory that the run consumes.
+                    IData[] feeds = [.. hyperSeeds.Select(FeedOf), FeedOf(paramData), zeroGrad];
                     results[i] = [.. compiled.Execute(feeds, compiled.DefaultRunSettings with { ShrinkArenaAfterRun = true })
-                        .Select(r => FastProcessorHelper.RehostOffSession(r.ToTensorData()))];
+                        .Select(r => r.ToTensorData())];
                 }
             }
             finally
@@ -475,7 +475,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             }
             return results;
 
-            static IData CopyOf(TensorData t) => TensorData.CreateFromRawBytes(t.Shape, t.DType, t.CopyRawMemory());
+            IData FeedOf(TensorData t)
+                => t.FeedsInPlace(computeContext.ResolvedBackend) ? t.Shared() : t.CopyTo(computeContext);
         }
     }
 }

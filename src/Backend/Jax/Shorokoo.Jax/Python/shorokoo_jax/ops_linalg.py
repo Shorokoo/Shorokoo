@@ -1,8 +1,10 @@
 """ONNX matrix products and linear algebra: MatMul, Gemm, MatMulInteger, Einsum and Det.
 
-A floating-point product is computed in the operands' full precision (`runtime.PRECISION`). An
-integer product is exact, wrapping as the element type would: it is computed in int64, which XLA
-multiplies and sums exactly and wraps as the narrower types do once cast back.
+A floating-point product is computed in the session's precision (`runtime.precision()`: the
+operands' full precision unless TensorFloat-32 is allowed on a card). A determinant is factorized in
+the operands' full precision whatever it says. An integer product is exact, wrapping as the element
+type would: it is computed in int64, which XLA multiplies and sums exactly and wraps as the narrower
+types do once cast back.
 """
 
 import jax.numpy as jnp
@@ -23,7 +25,7 @@ def _product(fn, operands):
 def matmul(a, b):
     if _rt.xp(a, b) is np:
         return _product(np.matmul, [a, b])
-    return _product(lambda x, y: jnp.matmul(x, y, precision=_rt.PRECISION), [a, b])
+    return _product(lambda x, y: jnp.matmul(x, y, precision=_rt.precision()), [a, b])
 
 
 def gemm(a, b, c=None, /, *, alpha=1.0, beta=1.0, transA=0, transB=0):
@@ -49,7 +51,7 @@ def einsum(*inputs, equation):
     equation = equation.replace(" ", "")
     if _rt.xp(*inputs) is np:
         return _product(lambda *xs: np.einsum(equation, *xs), list(inputs))
-    return _product(lambda *xs: jnp.einsum(equation, *xs, precision=_rt.PRECISION), list(inputs))
+    return _product(lambda *xs: jnp.einsum(equation, *xs, precision=_rt.precision()), list(inputs))
 
 
 def det(x):

@@ -105,16 +105,20 @@ namespace Shorokoo
         /// One safetensors data entry of a <c>.skpt</c>, as it is stored. Uncompressed, it is
         /// produced straight out of the tensors' own storage as the archive is written, so writing
         /// it costs no managed copy of those tensors (Shorokoo/Shorokoo#402); the entry is aligned. With
-        /// a Zstd <paramref name="zstdLevel"/>, the safetensors bytes are built once and wrapped in
-        /// a single Zstd frame, and the entry skips the alignment a compressed entry cannot use.
+        /// a Zstd <paramref name="zstdLevel"/>, it is produced the same way through a compressor into a
+        /// single Zstd frame — compressed afresh on each of the archive writer's passes, which a
+        /// compressor fed the same bytes at the same level answers identically, so neither the entry
+        /// nor its compressed form is ever held whole (Shorokoo/Shorokoo#436) — and it skips the
+        /// alignment a compressed entry cannot use. The frame header declares the entry's
+        /// decompressed size, which a reader holds the entry's safetensors header to before it
+        /// allocates a tensor that header claims.
         /// </summary>
         internal static (SkptFileFormat.EntryPayload Stored, string Compression, bool Align) SafeTensorsDataEntry(
             List<SafeTensor> tensors, int? zstdLevel)
         {
             void Produce(Stream s) => SafeTensorLoader.SaveSafeTensorsToStream(s, tensors);
             return zstdLevel is int level
-                ? (SkptFileFormat.EntryPayload.Of(
-                       CompressedFormatUtils.Compress(SkptFileFormat.EntryPayload.ProduceBytes(Produce), level)),
+                ? (SkptFileFormat.EntryPayload.Produced(s => CompressedFormatUtils.WriteZstdFrame(s, level, Produce)),
                    SkptFileFormat.CompressionZstd, false)
                 : (SkptFileFormat.EntryPayload.Produced(Produce), SkptFileFormat.CompressionNone, true);
         }
@@ -144,6 +148,15 @@ namespace Shorokoo
         /// <see cref="CheckpointComponents.Loss"/> → a <c>null</c> loss,
         /// <see cref="CheckpointComponents.History"/> → an empty history); without a rig, an
         /// absent-but-expected kind fails loud.</para>
+        ///
+        /// <para>The state is read into <paramref name="destination"/>'s memory as it streams off
+        /// the file: on a card, through one bounded host buffer, so host memory never holds it
+        /// (Shorokoo/Shorokoo#436).</para>
+        ///
+        /// <para><paramref name="adopt"/>, when given, takes the checkpoint read (a rig adopting it),
+        /// and what it returns is the result. A load that fails — reading an entry, covering a def,
+        /// or the adoption — leaves nothing it read in <paramref name="destination"/>'s
+        /// memory.</para>
         /// </summary>
         internal static TrainingCheckpoint LoadTrainingCheckpointFromSkpt(
             string filePath,
@@ -151,7 +164,9 @@ namespace Shorokoo
             TensorStructDef modelStateDef,
             TensorStructDef optimizerStateDef,
             CheckpointComponents? components,
-            TrainingRig? rigForDefaults)
+            TrainingRig? rigForDefaults,
+            ComputeContext destination,
+            Func<TrainingCheckpoint, TrainingCheckpoint>? adopt = null)
         {
             if (trainableParamDef is null) throw new ArgumentNullException(nameof(trainableParamDef));
             if (modelStateDef is null) throw new ArgumentNullException(nameof(modelStateDef));
@@ -190,8 +205,33 @@ namespace Shorokoo
             var modelMapping = GetDefaultMappingTensors(manifest, SkptFileFormat.DefaultModelKey);
             var optimizerMapping = GetDefaultMappingTensors(
                 manifest, training.Rig?.OptimizerModel ?? SkptFileFormat.OptimizerModelKey);
-            var tensorsByDataKey = new Dictionary<string, OrderedDictionary<string, TensorData>>(StringComparer.Ordinal);
+            // State is read straight into the memory the rig trains in -- on a card, through one bounded
+            // buffer, never whole in host memory (Shorokoo/Shorokoo#436). The history is read on the
+            // host, where it is read back.
+            var tensorsByDataKey = new SkptDataEntries((dataKey, _) =>
+                dataKey == SkptFileFormat.HistoryDataKey ? ComputeContext.Host : destination);
+            try
+            {
+                var read = ReadTrainingCheckpointState(container, manifest, training, modelMapping, optimizerMapping,
+                    trainableParamDef, modelStateDef, optimizerStateDef, components, rigForDefaults,
+                    tensorsByDataKey, filePath);
+                return adopt is null ? read : adopt(read);
+            }
+            catch
+            {
+                // Nothing holds the entries read onto the card but the checkpoint that is not returned.
+                TrainingCheckpoint.DeleteReadOnto(destination, tensorsByDataKey.Values.SelectMany(entry => entry.Values));
+                throw;
+            }
+        }
 
+        private static TrainingCheckpoint ReadTrainingCheckpointState(
+            SkptContainer container, SkptManifest manifest, SkptTrainingInfo training,
+            Dictionary<string, SkptTensorRef>? modelMapping, Dictionary<string, SkptTensorRef>? optimizerMapping,
+            TensorStructDef trainableParamDef, TensorStructDef modelStateDef, TensorStructDef optimizerStateDef,
+            CheckpointComponents? components, TrainingRig? rigForDefaults,
+            SkptDataEntries tensorsByDataKey, string filePath)
+        {
             bool Want(CheckpointComponents c) => components is null || (components.Value & c) != 0;
 
             // Counters (step/epoch/batch) ride with the Counters component; the loss is its own
@@ -287,7 +327,7 @@ namespace Shorokoo
         private static (TensorDataStruct Trainable, TensorDataStruct ModelState) ReconstructArchOwnedState(
             SkptContainer container, SkptManifest manifest, IReadOnlyDictionary<string, SkptTensorRef>? mapping,
             TensorStructDef trainableParamDef, TensorStructDef modelStateDef,
-            Dictionary<string, OrderedDictionary<string, TensorData>> tensorsByDataKey, string filePath)
+            SkptDataEntries tensorsByDataKey, string filePath)
         {
             if (mapping is null)
             {
@@ -348,7 +388,7 @@ namespace Shorokoo
         private static TensorDataStruct ReconstructOptimizerState(
             SkptContainer container, SkptManifest manifest, IReadOnlyDictionary<string, SkptTensorRef>? mapping,
             TensorStructDef def,
-            Dictionary<string, OrderedDictionary<string, TensorData>> tensorsByDataKey, string filePath)
+            SkptDataEntries tensorsByDataKey, string filePath)
         {
             if (mapping is null)
             {
@@ -408,7 +448,7 @@ namespace Shorokoo
             SkptContainer container, SkptManifest manifest,
             Dictionary<string, (string Id, SkptTensorRef Ref)> byField,
             TensorStructDef def, string role, string mismatchHint,
-            Dictionary<string, OrderedDictionary<string, TensorData>> tensorsByDataKey, string filePath)
+            SkptDataEntries tensorsByDataKey, string filePath)
         {
             var fields = new List<KeyValuePair<string, IData>>(def.Fields.Length);
             foreach (var fieldDef in def.Fields)
@@ -724,9 +764,11 @@ namespace Shorokoo
             // by canonical identity. Sourcing it from the rig (not a re-supplied model graph +
             // example input) means the container's self-describing model and ToInferenceModel() can
             // never diverge. Each parameter is mapped below to its own per-kind data entry, so no
-            // weight bytes are duplicated.
+            // weight bytes are duplicated. The model written carries no weights, so it is bound from
+            // the weights' descriptions: no parameter is copied to the host to be stripped again,
+            // which for a checkpoint still on the training device would be the whole model.
             const string operation = "Persistence.SaveTrainingCheckpointToSkpt";
-            var source = _checkpoint.Rig!.BindInferenceWeights(_checkpoint);
+            var source = _checkpoint.Rig!.BindInferenceWeightDescriptions(_checkpoint);
             var weightNodes = CheckpointBuilder.CollectWeightNodes(source, operation);
 
             // Default weight mapping: each model parameter (keyed by its full identifier) points at

@@ -390,10 +390,14 @@ public class CoreUtilsCoverageTests
                 using var copied = backend.CreateTensorInBackendMemory(
                     elementType, new byte[Elements(shape) * sizeof(double)], shape);
                 using var fresh = backend.CreateUninitializedTensorInBackendMemory(elementType, shape);
+                using var host = backend.CreateUninitializedHostTensor(elementType, shape);
                 Assert.Equal(copied.ElementType, fresh.ElementType);
                 Assert.Equal(copied.Shape, fresh.Shape);
                 Assert.Equal(
                     copied.GetTensorDataAsSpan<byte>().Length, fresh.GetTensorDataAsSpan<byte>().Length);
+                Assert.Equal((copied.ElementType, copied.GetTensorDataAsSpan<byte>().Length, true),
+                    (host.ElementType, host.GetTensorDataAsSpan<byte>().Length, host.IsHostAccessible));
+                Assert.Equal(copied.Shape, host.Shape);
             }
 
         Assert.Equal(
@@ -413,6 +417,138 @@ public class CoreUtilsCoverageTests
             ShorokooTensorElementType.Complex64, [2L]));
         Assert.Throws<ArgumentNullException>(() => backend.CreateUninitializedTensorInBackendMemory(
             ShorokooTensorElementType.Float, null!));
+        Assert.Throws<NotSupportedException>(() => backend.CreateUninitializedHostTensor(
+            ShorokooTensorElementType.String, [2L]));
+        Assert.Throws<ArgumentNullException>(() => backend.CreateUninitializedHostTensor(
+            ShorokooTensorElementType.Float, null!));
+    }
+
+    [Fact]
+    public void TestAHostTensorPastTwoGibibytesIsWrittenAndReadAtItsOffsetsAndSavedByThePiece()
+    {
+        const long Length = (1L << 31) + 8;
+        var backend = DefaultBackend.Instance;
+        var value = backend.CreateUninitializedTensorInBackendMemory(ShorokooTensorElementType.UInt8, [Length]);
+        var tensor = TensorData.Create(new Shape([Length]), DType.UInt8, value, backend);
+        try
+        {
+            byte[] piece = [1, 2, 3, 4];
+            foreach (var offset in (long[])[5L, 1L << 31])
+            {
+                var read = new byte[piece.Length];
+                Assert.True(backend.TryCopyHostToTensorRange(value, offset, piece));
+                Assert.True(backend.TryCopyTensorRangeToHost(value, offset, read));
+                Assert.Equal(piece, read);
+            }
+
+            var saved = new FirstWriteStream();
+            Assert.Same(FirstWriteStream.Stopped, Record.Exception(() => tensor.WriteContentTo(saved)));
+            Assert.Equal(Length, tensor.ContentByteLength);
+            Assert.Equal(StagedReadBack.StagingBytes, saved.First.Length);
+            Assert.Equal(piece, saved.First[5..9]);
+        }
+        finally
+        {
+            tensor.Delete();
+        }
+    }
+
+    [Fact]
+    public void TestAHostTensorPastTwoGibibytesIsReadIntoOnnxRuntimesHostMemoryByThePiece()
+        => PyTorchBackendCoverageTests.AssertAHostTensorPastTwoGibibytesIsReadByThePiece(DefaultBackend.Instance);
+
+    [Fact]
+    public void TestAHostTensorPastTwoGibibytesIsCopiedIntoHostMemoryByThePiece()
+        => AssertAHostTensorPastTwoGibibytesIsCopiedByThePiece(t => t.CopyTo(ComputeContext.Host));
+
+    [Fact]
+    public void TestAHostTensorPastTwoGibibytesIsCopiedAsASequenceElementAndAcrossRuntimesByThePiece()
+    {
+        var backend = DefaultBackend.Instance;
+        AssertAHostTensorPastTwoGibibytesIsCopiedByThePiece(t => TensorData.Create(t.Shape, t.DType, t.HostCopyOn(backend), backend));
+        AssertAHostTensorPastTwoGibibytesIsCopiedByThePiece(
+            t => TensorData.Create(t.Shape, t.DType, BackendTransfer.CopyTo(backend, t.ToTensorValue(backend)), backend));
+    }
+
+    /// <summary>
+    /// A host tensor of 2 GiB + 8 bytes, its first and last four bytes set, copied by
+    /// <paramref name="copy"/> into a tensor of its own in host memory as long as it, holding them
+    /// where they were.
+    /// </summary>
+    internal static void AssertAHostTensorPastTwoGibibytesIsCopiedByThePiece(Func<TensorData, TensorData> copy)
+    {
+        const long Length = (1L << 31) + 8;
+        var backend = DefaultBackend.Instance;
+        var value = backend.CreateUninitializedTensorInBackendMemory(ShorokooTensorElementType.UInt8, [Length]);
+        var tensor = TensorData.Create(new Shape([Length]), DType.UInt8, value, backend);
+        var ends = new byte[8];
+        TensorData? copied = null;
+        try
+        {
+            Assert.True(backend.TryCopyHostToTensorRange(value, 0, [1, 2, 3, 4]));
+            Assert.True(backend.TryCopyHostToTensorRange(value, Length - 4, [5, 6, 7, 8]));
+            copied = copy(tensor);
+            Assert.NotSame(tensor, copied);
+            Assert.Equal((Length, true), (copied.ContentByteLength, copied.IsHostResident));
+            Assert.True(copied.TryCopyRows([0, (int)(Length / 4 - 1)], 4, ends));
+        }
+        finally
+        {
+            tensor.Delete();
+            copied?.Delete();
+        }
+        Assert.Equal((byte[])[1, 2, 3, 4, 5, 6, 7, 8], ends);
+    }
+
+    [Fact]
+    public void TestAHostTensorPastFourGibibytesIsMeasuredWholeAndNeverReadThroughATruncatedSpan()
+        => Utils.OwnProcess.Run(typeof(CoreUtilsCoverageTests), nameof(AHostTensorPastFourGibibytesIsMeasuredWholeAndNeverReadThroughATruncatedSpan));
+
+    internal static void AHostTensorPastFourGibibytesIsMeasuredWholeAndNeverReadThroughATruncatedSpan()
+    {
+        const long Elements = (1L << 30) + 2, Bytes = 4 * Elements;
+        var backend = DefaultBackend.Instance;
+        var head = GC.AllocateArray<float>(4, pinned: true);
+        var value = new OrtTensorValue(OrtValue.CreateTensorValueWithData(
+            OrtMemoryInfo.DefaultInstance, Microsoft.ML.OnnxRuntime.Tensors.TensorElementType.Float, [Elements],
+            Marshal.UnsafeAddrOfPinnedArrayElement(head, 0), Bytes));
+        var tensor = TensorData.Create(new Shape([Elements]), DType.Float32, value, backend);
+
+        Assert.Equal(Bytes, tensor.ContentByteLength);
+        Assert.Equal((int)Elements, tensor.As<float32>().AccessMemory().Length);
+        Assert.Equal((int)Elements, value.GetTensorDataAsSpan<float>().Length);
+        Assert.Equal((int)Elements, value.GetTensorMutableDataAsSpan<float>().Length);
+        Assert.Throws<OverflowException>(() => value.GetTensorDataAsSpan<byte>().Length);
+        Assert.Throws<NotSupportedException>(() => SkptFileFormat.EntryPayload.Produced(
+            s => SafeTensorLoader.SaveSafeTensorsToStream(s, [new SafeTensor("w", tensor, "F32", [Elements])])));
+        Assert.Throws<ArgumentException>(
+            () => backend.CreateTensorFromRawBytes(ShorokooTensorElementType.Float, new byte[16], [Elements]));
+        Assert.Throws<NotSupportedException>(() => tensor.MoveToAttribute());
+        Assert.False(tensor.IsDisposed);
+        tensor.Delete();
+        GC.KeepAlive(head);
+    }
+
+    // Keeps what the first write hands it, and stops the writer there.
+    private sealed class FirstWriteStream : Stream
+    {
+        internal static readonly IOException Stopped = new("Stopped after the first write.");
+        public byte[] First { get; private set; } = [];
+        public override void Write(ReadOnlySpan<byte> buffer)
+        {
+            First = buffer.ToArray();
+            throw Stopped;
+        }
+        public override void Write(byte[] buffer, int offset, int count) => Write(buffer.AsSpan(offset, count));
+        public override bool CanRead => false;
+        public override bool CanSeek => false;
+        public override bool CanWrite => true;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
     }
 
     [Fact]
@@ -425,6 +561,8 @@ public class CoreUtilsCoverageTests
         Assert.Equal(new byte[5], Zeroed<byte>(defaulting, ShorokooTensorElementType.UInt8, [5L]));
         Assert.Equal(new short[4], Zeroed<short>(defaulting, ShorokooTensorElementType.Int16, [2L, 2L]));
         Assert.Equal(new double[2], Zeroed<double>(defaulting, ShorokooTensorElementType.Double, [2L]));
+        Assert.Equal(new float[6], Zeroed<float>(defaulting, ShorokooTensorElementType.Float, [2L, 3L], host: true));
+        Assert.Equal(new long[3], Zeroed<long>(defaulting, ShorokooTensorElementType.Int64, [3L], host: true));
 
         Assert.Contains("CreateStringTensor", Assert.Throws<NotSupportedException>(
             () => defaulting.CreateUninitializedTensorInBackendMemory(
@@ -456,10 +594,12 @@ public class CoreUtilsCoverageTests
     }
 
     private static T[] Zeroed<T>(
-        IShorokooBackend backend, ShorokooTensorElementType elementType, long[] shape)
+        IShorokooBackend backend, ShorokooTensorElementType elementType, long[] shape, bool host = false)
         where T : unmanaged
     {
-        using var value = backend.CreateUninitializedTensorInBackendMemory(elementType, shape);
+        using var value = host
+            ? backend.CreateUninitializedHostTensor(elementType, shape)
+            : backend.CreateUninitializedTensorInBackendMemory(elementType, shape);
         Assert.Equal(elementType, value.ElementType);
         Assert.Equal(shape, value.Shape);
         return [.. value.GetTensorDataAsSpan<T>()];
@@ -578,24 +718,24 @@ public class CoreUtilsCoverageTests
 
     private sealed class CpuBackendProbe : OrtBackend
     {
-        public CpuBackendProbe() : base(static (_, _) => { }, ComputeDevice.Cpu, cudaDeviceId: null) { }
+        public CpuBackendProbe() : base(static (_, _, _) => { }, ComputeDevice.Cpu, cudaDeviceId: null) { }
     }
 
     private sealed class OtherDeviceBackendProbe : OrtBackend
     {
-        public OtherDeviceBackendProbe() : base(static (_, _) => { }, ComputeDevice.Other, cudaDeviceId: null) { }
+        public OtherDeviceBackendProbe() : base(static (_, _, _) => { }, ComputeDevice.Other, cudaDeviceId: null) { }
     }
 
     /// <summary>A CPU backend whose execution-provider step records the settings it is handed,
-    /// which is where a GPU backend would read the arena budget out of them.</summary>
+    /// which is where a GPU backend would read the arena budget and the precision out of them.</summary>
     private sealed class CapturingBackendProbe : OrtBackend
     {
-        public CapturingBackendProbe(List<DeviceMemorySettings> seen)
-            : base((_, mem) => seen.Add(mem), ComputeDevice.Cpu, cudaDeviceId: null) { }
+        public CapturingBackendProbe(List<(DeviceMemorySettings, PrecisionSettings)> seen)
+            : base((_, mem, precision) => { lock (seen) seen.Add((mem, precision)); }, ComputeDevice.Cpu, cudaDeviceId: null) { }
     }
 
-    /// <summary>Records the settings each run was handed. No outputs, so both run paths return
-    /// nothing and every overload can be driven without a model.</summary>
+    /// <summary>Records the settings each run was handed. No outputs, so every run returns nothing
+    /// and every overload can be driven without a model.</summary>
     private sealed class RunSettingsRecorder : IShorokooSession
     {
         public List<RunSettings> Seen { get; } = [];
@@ -611,75 +751,36 @@ public class CoreUtilsCoverageTests
             return [];
         }
 
-        public IReadOnlyList<IShorokooTensorValue> RunRetainingOutputs(
-            IReadOnlyDictionary<string, IShorokooTensorValue> inputs,
-            IReadOnlyList<string> outputNames,
-            IReadOnlySet<string> retainedOutputNames,
-            RunSettings runSettings)
-        {
-            Seen.Add(runSettings);
-            return [];
-        }
-
         public void Dispose() { }
     }
 
     [Fact]
-    public void TestDeviceMemorySettingsMapOntoTheCudaArenaOptions()
+    public void TestTheCudaProviderOptionsNameTheDeviceAndTensorFloat32OnlyWhereAllowedAndNothingOfItsMemory()
     {
-        var uncapped = OrtBackend.CudaProviderOptions(0, null, ArenaExtendStrategy.NextPowerOfTwo);
-        Assert.Equal("0", uncapped["device_id"]);
-        Assert.Equal("kNextPowerOfTwo", uncapped["arena_extend_strategy"]);
-        Assert.False(uncapped.ContainsKey("gpu_mem_limit"));
-
-        var budgeted = OrtBackend.CudaProviderOptions(
-            1, 16L * 1024 * 1024 * 1024, ArenaExtendStrategy.SameAsRequested);
-        Assert.Equal("1", budgeted["device_id"]);
-        Assert.Equal("kSameAsRequested", budgeted["arena_extend_strategy"]);
-        Assert.Equal("17179869184", budgeted["gpu_mem_limit"]);
-        Assert.Throws<ArgumentOutOfRangeException>(
-            () => OrtBackend.CudaProviderOptions(0, null, (ArenaExtendStrategy)7));
-
-        Assert.Equal("gpu:0", OrtBackend.ArenaShrinkageRunConfig(0, shrinkArenaAfterRun: true));
-        Assert.Equal("gpu:3", OrtBackend.ArenaShrinkageRunConfig(3, shrinkArenaAfterRun: true));
-        Assert.Null(OrtBackend.ArenaShrinkageRunConfig(0, shrinkArenaAfterRun: false));
-        Assert.Equal("cpu:0", OrtBackend.ArenaShrinkageRunConfig(null, shrinkArenaAfterRun: true));
-        Assert.Null(OrtBackend.ArenaShrinkageRunConfig(null, shrinkArenaAfterRun: false));
+        var tensorFloat32 = new PrecisionSettings { AllowTensorFloat32 = true };
+        Assert.Equal([("device_id", "0"), ("use_tf32", "0")], OrtBackend.CudaProviderOptions(0, PrecisionSettings.Default).Select(o => (o.Key, o.Value)));
+        Assert.Equal([("device_id", "3"), ("use_tf32", "0")], OrtBackend.CudaProviderOptions(3, new PrecisionSettings()).Select(o => (o.Key, o.Value)));
+        Assert.Equal([("device_id", "0"), ("use_tf32", "1")], OrtBackend.CudaProviderOptions(0, tensorFloat32).Select(o => (o.Key, o.Value)));
+        Assert.False(PrecisionSettings.Default.AllowTensorFloat32);
+        Assert.Equal(PrecisionSettings.Default, new ComputeContext().Precision);
+        Assert.Equal(tensorFloat32, new ComputeContext { Precision = tensorFloat32 }.Precision);
+        Assert.Throws<ArgumentNullException>(() => new ComputeContext { Precision = null! });
     }
 
-    /// <summary>
-    /// The shipped defaults, and the ORT options a GPU session built with them asks for. The
-    /// arena strategy is chosen per session rather than shipped as one value, and ORT is only
-    /// ever handed a strategy it has — an unresolved one is refused rather than guessed at.
-    /// </summary>
     [Fact]
-    public void TestDeviceMemoryDefaultsToAutoAndRejectsAnEmptyBudget()
+    public void TestDeviceMemoryDefaultsToNoBudgetAndRejectsAnEmptyOne()
     {
-        Assert.Equal(ArenaExtendStrategy.Auto, DeviceMemorySettings.Default.ArenaExtend);
         Assert.Null(DeviceMemorySettings.Default.LimitBytes);
         Assert.False(RunSettings.Default.ShrinkArenaAfterRun);
         Assert.Equal(DeviceMemorySettings.Default, new ComputeContext().DeviceMemory);
         Assert.Equal(RunSettings.Default, new ComputeContext().RunSettings);
 
-        var shipped = OrtBackend.CudaProviderOptions(
-            0,
-            DeviceMemorySettings.Default.LimitBytes,
-            DeviceMemorySettings.Default.Resolve(reusedAcrossShapes: false).ArenaExtend);
-        Assert.Equal("kSameAsRequested", shipped["arena_extend_strategy"]);
-        Assert.False(shipped.ContainsKey("gpu_mem_limit"));
-
-        Assert.Throws<ArgumentOutOfRangeException>(
-            () => OrtBackend.CudaProviderOptions(0, null, ArenaExtendStrategy.Auto));
-
         Assert.Throws<ArgumentOutOfRangeException>(() => new DeviceMemorySettings { LimitBytes = 0 });
         Assert.Throws<ArgumentOutOfRangeException>(() => new DeviceMemorySettings { LimitBytes = -1 });
-        Assert.Throws<ArgumentOutOfRangeException>(
-            () => new DeviceMemorySettings { ArenaExtend = (ArenaExtendStrategy)7 });
 
         // A refused assignment leaves the shared default as it was: a record cannot be edited in
         // place, so no caller can spoil it for another.
         Assert.Null(DeviceMemorySettings.Default.LimitBytes);
-        Assert.Equal(ArenaExtendStrategy.Auto, DeviceMemorySettings.Default.ArenaExtend);
 
         var capped = DeviceMemorySettings.Default with { LimitBytes = 4096 };
         Assert.Equal(4096L, capped.LimitBytes);
@@ -688,61 +789,12 @@ public class CoreUtilsCoverageTests
     }
 
     /// <summary>
-    /// Auto departs from exact-size extension only where Shorokoo knows a session is reused
-    /// across differing shapes; a session it knows nothing about keeps exact-size extension
-    /// rather than being guessed at. A named strategy is carried through untouched, and the
-    /// budget rides along either way.
-    /// </summary>
-    [Fact]
-    public void TestAutoTakesTheDoublingOnlyForASessionKnownToBeReusedAcrossShapes()
-    {
-        ArenaExtendStrategy Auto(bool reused) => DeviceMemorySettings.Default.Resolve(reused).ArenaExtend;
-
-        Assert.Equal(ArenaExtendStrategy.SameAsRequested, Auto(reused: false));
-        Assert.Equal(ArenaExtendStrategy.NextPowerOfTwo, Auto(reused: true));
-
-        var named = new DeviceMemorySettings { ArenaExtend = ArenaExtendStrategy.NextPowerOfTwo, LimitBytes = 4096 };
-        Assert.Same(named, named.Resolve(reusedAcrossShapes: false));
-        Assert.Same(named, named.Resolve(reusedAcrossShapes: true));
-
-        var budgeted = new DeviceMemorySettings { LimitBytes = 8192 };
-        Assert.Equal(
-            new DeviceMemorySettings { LimitBytes = 8192, ArenaExtend = ArenaExtendStrategy.SameAsRequested },
-            budgeted.Resolve(reusedAcrossShapes: false));
-    }
-
-    /// <summary>
-    /// The strategy a compiled graph really ends up with. A symbolic graph is not by itself
-    /// evidence that shapes vary — an ordinary compiled inference graph is symbolic and is the
-    /// case exact-size extension wins widest — so only the caller's own assertion moves it.
-    /// </summary>
-    [Fact]
-    public void TestOnlyAnAssertedShapeReuseMovesACompiledGraphOffExactSizeExtension()
-    {
-        var x = InputTensor<float32>("x", rank: 1);
-        var graph = new InternalComputationGraph([x], [x + x]);
-        var ctx = new ComputeContext();
-
-        ArenaExtendStrategy Compiled(IReadOnlyList<long[]?>? dims, bool trainingStep, bool reused)
-            => ctx.Compile(graph, dims, trainingStep, reused).DeviceMemory.ArenaExtend;
-
-        long[]?[] pinned = [[4L]];
-
-        Assert.Equal(ArenaExtendStrategy.SameAsRequested, Compiled(pinned, trainingStep: true, reused: false));
-        Assert.Equal(ArenaExtendStrategy.SameAsRequested, Compiled(null, trainingStep: true, reused: false));
-        Assert.Equal(ArenaExtendStrategy.SameAsRequested, Compiled(null, trainingStep: false, reused: false));
-        Assert.Equal(ArenaExtendStrategy.SameAsRequested, ctx.Compile(graph).DeviceMemory.ArenaExtend);
-        Assert.Equal(ArenaExtendStrategy.NextPowerOfTwo, Compiled(null, trainingStep: true, reused: true));
-    }
-
-    /// <summary>
-    /// The settings a session is built with reach the execution-provider step that configures its
-    /// arena, already resolved. Nothing else on a box without a card observes an arena at all, so
+    /// The settings a session is built with reach the execution-provider step. Nothing else on a box without a card observes an arena at all, so
     /// without this the whole per-session surface could be assembled, reported by
     /// <see cref="CompiledGraph.DeviceMemory"/>, and dropped on the way to ORT with the suite green.
     /// </summary>
     [Fact]
-    public void TestASessionsSettingsReachTheExecutionProviderStepResolved()
+    public void TestASessionsSettingsReachTheExecutionProviderStep()
     {
         var x = InputTensor<float32>("x", rank: 1);
         var proto = FastOnnxModelBuilder.BuildInternalOnnxModel(
@@ -750,21 +802,44 @@ public class CoreUtilsCoverageTests
         var model = new MemoryStream();
         ProtoBuf.Serializer.Serialize(model, proto);
 
-        var seen = new List<DeviceMemorySettings>();
+        var seen = new List<(DeviceMemorySettings, PrecisionSettings)>();
         var probe = new CapturingBackendProbe(seen);
-        var budget = new DeviceMemorySettings { LimitBytes = 8L << 30, ArenaExtend = ArenaExtendStrategy.NextPowerOfTwo };
+        var budget = new DeviceMemorySettings { LimitBytes = 8L << 30 };
+        var tensorFloat32 = new PrecisionSettings { AllowTensorFloat32 = true };
 
         using (probe.CreateSession(model.ToArray(), ShorokooGraphOptimization.EnableAll, ShorokooLogSeverity.Fatal, budget)) { }
-        Assert.Equal(budget, Assert.Single(seen));
-
-        seen.Clear();
-        using (probe.CreateSession(
-            model.ToArray(), ShorokooGraphOptimization.EnableAll, ShorokooLogSeverity.Fatal,
-            DeviceMemorySettings.Default.Resolve(reusedAcrossShapes: true))) { }
-        Assert.Equal(ArenaExtendStrategy.NextPowerOfTwo, Assert.Single(seen).ArenaExtend);
+        using (probe.CreateSession(model.ToArray(), ShorokooGraphOptimization.EnableAll, ShorokooLogSeverity.Fatal, budget,
+            DiagnosticSettings.Default, [], 0, [], tensorFloat32)) { }
+        Assert.Equal([(budget, PrecisionSettings.Default), (budget, tensorFloat32)], seen);
 
         Assert.Throws<ArgumentNullException>(() => probe.CreateSession(
             model.ToArray(), ShorokooGraphOptimization.EnableAll, ShorokooLogSeverity.Fatal, null!));
+    }
+
+    [Fact]
+    public void TestAContextsPrecisionReachesEverySessionItBuildsATrainingRigsStepsIncluded()
+    {
+        var tensorFloat32 = new PrecisionSettings { AllowTensorFloat32 = true };
+        List<(DeviceMemorySettings, PrecisionSettings)> strict = [], allowed = [];
+        using var strictContext = new ComputeContext(new CapturingBackendProbe(strict));
+        using var allowedContext = new ComputeContext(new CapturingBackendProbe(allowed)) { Precision = tensorFloat32 };
+        var x = InputVector<float32>("x");
+        var graph = new InternalComputationGraph([x], [x + x]);
+        var input = TrainingRigHelpers.Input([4L], 1f, 2f, 3f, 4f);
+        foreach (var context in (ComputeContext[])[strictContext, allowedContext])
+        {
+            context.Execute(graph, TensorData([2L], 1f, 2f));
+            context.Compile(graph).Execute(TensorData([2L], 1f, 2f));
+            var rig = TrainingRig.FromScratch(ScalarMultiplyModel.ComputationGraph, Shorokoo.Modules.Losses.L2Loss.ComputationGraph,
+                Shorokoo.Modules.Optimizers.SGDOptimizer.ComputationGraph, TrainingRigHelpers.SampleOf(input), [0.05f],
+                mergeContext: context, runtimeContext: context);
+            rig.TrainStep(rig.CreateInitialCheckpoint(), input.Shared(), TrainingRigHelpers.Target([4L], 2f, 4f, 6f, 8f));
+        }
+
+        Assert.True(strict.Count > 2);
+        Assert.Equal(strict.Count, allowed.Count);
+        Assert.All(strict, built => Assert.Equal(PrecisionSettings.Default, built.Item2));
+        Assert.All(allowed, built => Assert.Equal(tensorFloat32, built.Item2));
     }
 
     /// <summary>
@@ -776,7 +851,7 @@ public class CoreUtilsCoverageTests
     [Fact]
     public void TestSessionAndRunSettingsAreScopedToTheSessionAndTheRunAndNotToTheProcess()
     {
-        var budget = new DeviceMemorySettings { LimitBytes = 8L << 30, ArenaExtend = ArenaExtendStrategy.NextPowerOfTwo };
+        var budget = new DeviceMemorySettings { LimitBytes = 8L << 30 };
         var shrinking = new RunSettings { ShrinkArenaAfterRun = true };
         var configured = new ComputeContext { DeviceMemory = budget, RunSettings = shrinking };
 
@@ -796,8 +871,6 @@ public class CoreUtilsCoverageTests
 
         // Nothing a caller does afterwards can reach that session: the settings it was built with
         // are its own, and a differently configured context builds a differently configured one.
-        // A default context resolves Auto rather than carrying it into the session.
-        Assert.Equal(ArenaExtendStrategy.SameAsRequested, new ComputeContext().Compile(graph).DeviceMemory.ArenaExtend);
         Assert.Null(new ComputeContext().Compile(graph).DeviceMemory.LimitBytes);
 
         Assert.Throws<ArgumentNullException>(() => new ComputeContext { DeviceMemory = null! });
@@ -824,10 +897,8 @@ public class CoreUtilsCoverageTests
         compiled.Execute([], RunSettings.Default);
         compiled.Run();
         compiled.Run([], RunSettings.Default);
-        compiled.Execute([], []);
-        compiled.Execute([], [], RunSettings.Default);
 
-        RunSettings[] expected = [shrinking, RunSettings.Default, shrinking, RunSettings.Default, shrinking, RunSettings.Default];
+        RunSettings[] expected = [shrinking, RunSettings.Default, shrinking, RunSettings.Default];
         Assert.Equal(expected, session.Seen);
         Assert.Equal(shrinking, compiled.DefaultRunSettings);
     }
@@ -863,7 +934,6 @@ public class CoreUtilsCoverageTests
         Assert.Equal(expected, Doubled(compiled.Execute([input.Shared()], RunSettings.Default)));
         Assert.Equal(expected, Doubled(compiled.Execute([input.Shared()], watched)));
         Assert.Equal(expected, Doubled(compiled.Execute([input.Shared()], watched)));
-        Assert.Equal(expected, Doubled(compiled.Execute([input.Shared()], [false], watched)));
         unfired.Cancel();
 
         using var cancelled = new CancellationTokenSource();
@@ -872,8 +942,6 @@ public class CoreUtilsCoverageTests
         var refused = Assert.Throws<OperationCanceledException>(() => compiled.Execute([input], stopped));
         Assert.Equal(cancelled.Token, refused.CancellationToken);
         Assert.Null(refused.InnerException);
-        Assert.Throws<OperationCanceledException>(() => compiled.Execute([input], [false], stopped));
-        Assert.Throws<OperationCanceledException>(() => compiled.Execute([input], [true], stopped));
         Assert.Throws<OperationCanceledException>(() => compiled.Execute([wrongRank], stopped));
         Assert.IsType<OnnxRuntimeException>(
             Record.Exception(() => compiled.Execute([wrongRank], RunSettings.Default)));
@@ -963,23 +1031,423 @@ public class CoreUtilsCoverageTests
         Assert.Equal(0L, figures.MaxInUseBytes);
     }
 
+    [Fact]
+    public void TestTheOrtTensorAddressBindingStillResolvesAndAgreesWithTheSpan()
+    {
+        var api = typeof(OrtAllocator).Assembly.GetType(OrtArenaStats.ApiHolderTypeName)!
+            .GetField(OrtArenaStats.ApiFieldName, BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public)!
+            .GetValue(null)!;
+        foreach (var entry in OrtTensorAddress.ApiEntryPointNames)
+            Assert.Equal(typeof(IntPtr), api.GetType().GetField(entry)!.FieldType);
+        var handle = typeof(OrtValue).GetProperty(
+            OrtTensorAddress.HandlePropertyName, BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+        Assert.Equal(typeof(IntPtr), handle!.PropertyType);
+        Assert.True(OrtTensorAddress.IsBound);
+
+        using var value = OrtValue.CreateTensorValueFromMemory([1f, 2f, 3f], [3L]);
+        value.GetTensorMutableDataAsSpan<float>()[2] = 7f;
+        Assert.Equal(BitConverter.SingleToInt32Bits(7f), Marshal.ReadInt32(OrtTensorAddress.Read(value)!.Value, 8));
+    }
+
     /// <summary>
-    /// A session's own arena, read back through the public surface: zeroed before it has run, and
-    /// carrying what the run took afterwards. A backend answering the interface's default reports
-    /// nothing rather than zeroes, which is the difference between "no figures" and "no memory".
+    /// Shorokoo's allocator is registered with ONNX Runtime's environment through reflection as well
+    /// — the C API's <c>RegisterAllocator</c>, which the managed surface has no call for, the native
+    /// handles of the environment and of a memory info, and a managed allocator over a native one —
+    /// and a session that could not allocate through it would allocate in an arena again. The names
+    /// are asserted here so an ONNX Runtime upgrade that moves one fails loudly, and a tensor made
+    /// through the allocator holds the block it handed out.
     /// </summary>
+    [Fact]
+    public void TestTheOrtEnvironmentBindingStillResolves()
+    {
+        var api = typeof(OrtAllocator).Assembly.GetType(OrtArenaStats.ApiHolderTypeName)!
+            .GetField(OrtArenaStats.ApiFieldName, BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public)!
+            .GetValue(null)!;
+        foreach (var entry in OrtEnvironment.ApiEntryPointNames)
+            Assert.Equal(typeof(IntPtr), api.GetType().GetField(entry)!.FieldType);
+        const BindingFlags Instance = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
+        Assert.Equal(typeof(IntPtr), typeof(OrtEnv).GetProperty(OrtEnvironment.EnvHandleProperty, Instance)!.PropertyType);
+        Assert.Equal(typeof(IntPtr), typeof(OrtMemoryInfo).GetProperty(OrtEnvironment.MemoryInfoPointerProperty, Instance)!.PropertyType);
+        Assert.NotNull(typeof(OrtAllocator).GetConstructor(Instance, [typeof(IntPtr), typeof(bool)]));
+        Assert.True(OrtEnvironment.IsBound);
+        Assert.NotNull(NativeAllocator.Locate());
+
+        var host = RuntimeAllocator.ForHost();
+        var account = host.Shared.Open("probe");
+        long InUse() => host.Shared.Statistics(account).InUseBytes;
+        using (CachingAllocator.Charge(account, null))
+        {
+            using var value = OrtValue.CreateAllocatedTensorValue(host.Managed, Microsoft.ML.OnnxRuntime.Tensors.TensorElementType.Float, [1000L]);
+            Assert.Equal(CachingAllocator.SizeClass(4000), InUse());
+        }
+        Assert.Equal(0L, InUse());
+        host.Shared.Close(account);
+    }
+
+    [Fact]
+    public void TestAClosedAccountHandsBackWhatItKeptAndEachBlockItStillHadOutAsThatGoes()
+    {
+        var host = RuntimeAllocator.ForHost();
+        var account = host.Shared.Open("probe");
+        OrtValue kept;
+        using (CachingAllocator.Charge(account, null))
+        {
+            OrtValue.CreateAllocatedTensorValue(host.Managed, Microsoft.ML.OnnxRuntime.Tensors.TensorElementType.Float, [1000L]).Dispose();
+            kept = OrtValue.CreateAllocatedTensorValue(host.Managed, Microsoft.ML.OnnxRuntime.Tensors.TensorElementType.Float, [2000L]);
+        }
+        host.Shared.Close(account);
+        var closed = host.Shared.Statistics(account);
+        kept.Dispose();
+        var gone = host.Shared.Statistics(account);
+
+        Assert.Equal((1L, 1L), (closed.ArenaShrinkageCount, closed.ArenaExtensionCount));
+        Assert.Equal((2L, 0L, 0L), (gone.ArenaShrinkageCount, gone.ArenaExtensionCount, gone.TotalAllocatedBytes));
+    }
+
+    [Fact]
+    public void TestAnAccountWhoseCallsRepeatTakesNoBlockFromTheDeviceAfterItsFirstCall()
+    {
+        var host = RuntimeAllocator.ForHost();
+        var account = host.Shared.Open("probe");
+        (long, long) Call()
+        {
+            using (CachingAllocator.Charge(account, null))
+                foreach (var floats in (long[])[1L << 20, 3L << 18])
+                    OrtValue.CreateAllocatedTensorValue(host.Managed, Microsoft.ML.OnnxRuntime.Tensors.TensorElementType.Float, [floats]).Dispose();
+            var figures = host.Shared.Statistics(account);
+            return (figures.ArenaExtensionCount, figures.ArenaShrinkageCount);
+        }
+
+        var first = Call();
+        Call();
+        Assert.Equal(first, Call());
+        host.Shared.Close(account);
+    }
+
+    [Fact]
+    public void TestABlockHandsBackTheWholePagesOfAPartNothingReadsOnceAndTheRestWithItself()
+    {
+        const long MiB = 1L << 20, Page = 4L << 10;
+        var host = RuntimeAllocator.ForHost();
+        var account = host.Shared.Open("probe");
+        OrtValue Take(long floats)
+        {
+            using (CachingAllocator.Charge(account, null))
+                return OrtValue.CreateAllocatedTensorValue(host.Managed, Microsoft.ML.OnnxRuntime.Tensors.TensorElementType.Float, [floats]);
+        }
+        var value = Take(MiB);
+        var small = Take(1024);
+        var block = OrtBackend.AddressOf(value);
+        long[] figures =
+        [
+            host.Shared.Statistics(account).InUseBytes,
+            host.Shared.ReleaseRange(block, 100, 2 * Page, toTheEnd: false),
+            host.Shared.ReleaseRange(block, 0, 2 * Page, toTheEnd: false),
+            host.Shared.ReleaseRange(block, 0, 2 * Page, toTheEnd: false),
+            host.Shared.ReleaseRange(block, 3 * MiB, 0, toTheEnd: true),
+            host.Shared.ReleaseRange(OrtBackend.AddressOf(small), 0, Page, toTheEnd: true),
+            host.Shared.Statistics(account).InUseBytes,
+        ];
+        value.Dispose();
+        small.Dispose();
+        var again = Take(MiB);
+        var reused = OrtBackend.AddressOf(again) == block;
+        again.Dispose();
+        host.Shared.Close(account);
+
+        Assert.Equal([4 * MiB + 4096, Page, 0, 0, MiB, 0, 3 * MiB - Page + 4096], figures);
+        Assert.True(reused);
+        Assert.Equal(0L, host.Shared.Statistics(account).TotalAllocatedBytes);
+    }
+
+    [Fact]
+    public void TestABlockTheHostAllocatorHandsBackIsNoLongerTheProcesssMemory()
+    {
+        var host = RuntimeAllocator.ForHost();
+        bool HeldOnceHandedBack(long floats)
+        {
+            var account = host.Shared.Open("probe");
+            using var holdingTheArena = HostBlock(host, account, 16L << 10);
+            IntPtr address;
+            using (var value = HostBlock(host, account, floats))
+                address = OrtBackend.AddressOf(value);
+            host.Shared.Close(account);
+            return ProcessMemory.Holds(address);
+        }
+
+        Assert.Equal([false, false, false], ((long[])[1L << 20, 64L << 10, 16L << 10]).Select(HeldOnceHandedBack));
+    }
+
+    [Fact]
+    public void TestTheHostsOwnAccountHandsAMebibyteOrMoreBackAsItGoesAndKeepsLessForTheNextRequest()
+    {
+        var host = RuntimeAllocator.ForHost();
+        var account = host.Shared.Open("probe", keepsLargeBlocks: false);
+        IntPtr Made(long floats)
+        {
+            using var value = HostBlock(host, account, floats);
+            return OrtBackend.AddressOf(value);
+        }
+
+        bool[] held = [ProcessMemory.Holds(Made(1L << 18)), ProcessMemory.Holds(Made(1L << 16))];
+        host.Shared.Close(account);
+
+        Assert.Equal([false, true], held);
+        Assert.False(host.Shared.Placements.KeepsLargeBlocks);
+    }
+
+    [Fact]
+    public void TestASmallerHostRequestIsCarvedFromThePagesALargerBlockLeftAndNothingStaysOnceTheAccountCloses()
+    {
+        var host = RuntimeAllocator.ForHost();
+        var account = host.Shared.Open("probe");
+        var holdingTheArena = HostBlock(host, account, 16L << 10);
+        (IntPtr Address, long Held) Take(long floats)
+        {
+            using var value = HostBlock(host, account, floats);
+            return (OrtBackend.AddressOf(value), host.Shared.Statistics(account).TotalAllocatedBytes);
+        }
+
+        var large = Take(1L << 20);
+        var small = Take(64L << 10);
+        host.Shared.Close(account);
+        var held = ProcessMemory.Holds(large.Address);
+        holdingTheArena.Dispose();
+
+        Assert.Equal((large.Address, (4L << 20) + (64L << 10)), small);
+        Assert.Equal((false, 0L), (held, account.Arena!.ReservedBytes));
+    }
+
+    [Fact]
+    public void TestABlockCarvedAfterAnotherHandedBackItsFirstPagesNeverTakesThatBlocksAddress()
+    {
+        const long MiB = 1L << 20;
+        var host = new CachingAllocator(-1, HostMemory.Instance);
+        var account = host.Open("probe");
+        IntPtr first, second;
+        using (CachingAllocator.Charge(account, null))
+        {
+            first = host.Allocate(4 * MiB, out _);
+            host.ReleaseRange(first, 0, MiB, toTheEnd: false);
+            second = host.Allocate(MiB / 2, out _);
+            host.Free(first);
+            host.Free(second);
+        }
+        var inUse = host.Statistics(account).InUseBytes;
+        host.Close(account);
+
+        Assert.Equal((false, 0L), (second == first, inUse));
+    }
+
+    [Fact]
+    public void TestTheAllocatorOverACardWithNothingBehindIt()
+    {
+        const long G = FakeCard.GranuleBytes;
+        Assert.Equal((2 * G, false, 0L), ABlockHandsBackItsFirstGranulesMemoryButKeepsItsAddressUntilItGoes());
+        Assert.NotEqual(IntPtr.Zero, AFullCardTakesBackWhatTheAskingCallLetGoOfBeforeRefusing());
+        Assert.Equal((2, 3), ARuntimeThatRefusesTheAllocatorRefusesItAgainEachTimeItIsHandedIt());
+        Assert.Equal(KeptByCalls(overlapping: false), KeptByCalls(overlapping: true));
+        Assert.All((long[])[long.MaxValue, long.MaxValue - (1L << 20), (1L << 62) + 1], size => Assert.Equal(IntPtr.Zero, new FakeCard().Allocator.Allocate(size, out _)));
+        Assert.StartsWith("Failed to allocate", AnAllocationThatFailsInsideTheAllocatorIsRefusedWhateverTheFailureSays());
+        Assert.True(AnArenaCarvesFromCommittedMemoryWhereverItLiesInAFreeStretch());
+        Assert.IsType<InvalidOperationException>(ACardThatCannotBeWaitedForHandsBackNothingItsWorkMayStillRead());
+        Assert.Equal((IntPtr.Zero, 0, 2 * G), ARequestWhatALimitedAccountHasOutLeavesNoRoomForIsRefusedWithoutWaitingForTheCard());
+        Assert.Equal((2 * G, 3, 0), TheCardIsWaitedForOutsideTheAllocatorsLockAndOnlyForWhatTheAskingCallLetGoOf());
+        Assert.True(ReleasingWhatACardKeepsAnswersTheBytesItsMemoryShrankBy());
+        Assert.Equal((0L, 4 * G, 4 * G), MemoryTheSystemWouldNotTakeBackStaysCountedAsCommitted());
+    }
+
+    private static (long, bool, long) ABlockHandsBackItsFirstGranulesMemoryButKeepsItsAddressUntilItGoes()
+    {
+        const long G = FakeCard.GranuleBytes;
+        var card = new FakeCard();
+        var first = card.Allocator.Allocate(3 * G, out _);
+        card.Allocator.ReleaseRange(first, 0, 2 * G, toTheEnd: false);
+        var committed = card.Committed;
+        var second = card.Allocator.Allocate(G, out _);
+        card.Allocator.Free(first);
+        card.Allocator.Free(second);
+        return (committed, second == first, card.Allocator.Statistics(card.Allocator.Placements).InUseBytes);
+    }
+
+    private static IntPtr AFullCardTakesBackWhatTheAskingCallLetGoOfBeforeRefusing()
+    {
+        var card = new FakeCard(capacity: 20L << 20);
+        var account = card.Allocator.Open("probe");
+        using (CachingAllocator.Charge(null, account))
+        {
+            card.Allocator.Free(card.Allocator.Allocate(16L << 20, out _));
+            return card.Allocator.Allocate(18L << 20, out _);
+        }
+    }
+
+    private static (int Refusals, int Attempts) ARuntimeThatRefusesTheAllocatorRefusesItAgainEachTimeItIsHandedIt()
+    {
+        var allocator = new FakeCard().Allocator;
+        var attempts = 0;
+        void Refuse()
+        {
+            attempts++;
+            throw new InvalidOperationException();
+        }
+
+        var refusals = Enumerable.Range(0, 2).Count(_ => Record.Exception(() => allocator.HandTo(1, Refuse)) is InvalidOperationException);
+        allocator.HandTo(1, () => attempts++);
+        allocator.HandTo(1, () => attempts++);
+        return (refusals, attempts);
+    }
+
+    private static long KeptByCalls(bool overlapping)
+    {
+        var card = new FakeCard();
+        var account = card.Allocator.Open("probe");
+        var outer = overlapping ? CachingAllocator.Charge(null, account) : (CachingAllocator.ChargeScope?)null;
+        for (var granules = 1; granules <= 6; granules++)
+            using (CachingAllocator.Charge(null, account))
+                card.Allocator.Free(card.Allocator.Allocate(granules * FakeCard.GranuleBytes, out _));
+        outer?.Dispose();
+        return card.Allocator.Statistics(account).TotalAllocatedBytes;
+    }
+
+    private static string AnAllocationThatFailsInsideTheAllocatorIsRefusedWhateverTheFailureSays()
+    {
+        var card = new FakeCard { Failure = new UnreadableException() };
+        var reason = new byte[256];
+        return CachingAllocator.AllocateOrRefuse(card.Allocator.State, 4u << 20, reason) == IntPtr.Zero
+            ? System.Text.Encoding.UTF8.GetString(reason) : "";
+    }
+
+    private sealed class UnreadableException : Exception
+    {
+        public override string Message => throw new InvalidOperationException();
+    }
+
+    private static bool AnArenaCarvesFromCommittedMemoryWhereverItLiesInAFreeStretch()
+    {
+        var arena = new Arena(new FakeCard(), unit: FakeCard.GranuleBytes, chunkBytes: 16 * FakeCard.GranuleBytes);
+        IntPtr[] blocks = [.. Enumerable.Range(0, 3).Select(_ => arena.Carve(FakeCard.GranuleBytes, mayCommit: true))];
+        arena.Uncarve(blocks[0], FakeCard.GranuleBytes);
+        arena.Decommit(FakeCard.GranuleBytes, out _);
+        arena.Uncarve(blocks[1], FakeCard.GranuleBytes);
+        var commits = arena.Commits;
+        return (blocks[1], commits) == (arena.Carve(FakeCard.GranuleBytes, mayCommit: true), arena.Commits);
+    }
+
+    private static Exception? ACardThatCannotBeWaitedForHandsBackNothingItsWorkMayStillRead()
+    {
+        var card = new FakeCard { CanWait = false };
+        var account = card.Allocator.Open("probe");
+        using (CachingAllocator.Charge(null, account))
+        {
+            var block = card.Allocator.Allocate(3 * FakeCard.GranuleBytes, out _);
+            return Record.Exception(() => card.Allocator.ReleaseRange(block, FakeCard.GranuleBytes, 0, toTheEnd: true));
+        }
+    }
+
+    private static (IntPtr, int, long) ARequestWhatALimitedAccountHasOutLeavesNoRoomForIsRefusedWithoutWaitingForTheCard()
+    {
+        const long G = FakeCard.GranuleBytes;
+        var card = new FakeCard();
+        var account = card.Allocator.Open("probe");
+        account.Limit = 8 * G;
+        using (CachingAllocator.Charge(null, account))
+        {
+            var kept = card.Allocator.Allocate(6 * G, out _);
+            card.Allocator.Free(card.Allocator.Allocate(2 * G, out _));
+            var refused = (card.Allocator.Allocate(4 * G, out _), card.Waits, account.Held);
+            card.Allocator.Free(kept);
+            return refused;
+        }
+    }
+
+    private static (long, int, int) TheCardIsWaitedForOutsideTheAllocatorsLockAndOnlyForWhatTheAskingCallLetGoOf()
+    {
+        const long G = FakeCard.GranuleBytes;
+        var card = new FakeCard();
+        var account = card.Allocator.Open("probe");
+        using (CachingAllocator.Charge(null, account))
+            foreach (var block in Enumerable.Range(0, 4).Select(i => card.Allocator.Allocate(2 * G, out _)).ToList())
+                card.Allocator.Free(block);
+        account.Limit = 10 * G;
+        long kept;
+        using (CachingAllocator.Charge(null, account))
+        {
+            card.Allocator.Free(card.Allocator.Allocate(4 * G, out _));
+            kept = account.Cached;
+            var large = card.Allocator.Allocate(8 * G, out _);
+            card.Allocator.ReleaseRange(large, 2 * G, 0, toTheEnd: true);
+            card.Allocator.Free(large);
+        }
+        return (kept, card.Waits, card.WaitsUnderTheLock);
+    }
+
+    private static bool ReleasingWhatACardKeepsAnswersTheBytesItsMemoryShrankBy()
+    {
+        var card = new FakeCard();
+        var account = card.Allocator.Open("probe");
+        using (CachingAllocator.Charge(null, account))
+            foreach (var block in Enumerable.Range(0, 4).Select(i => card.Allocator.Allocate(512L << 10, out _)).ToList())
+                card.Allocator.Free(block);
+        var committed = card.Committed;
+        var released = card.Allocator.ReleaseEverythingCached();
+        return released == committed - card.Committed;
+    }
+
+    private static (long, long, long) MemoryTheSystemWouldNotTakeBackStaysCountedAsCommitted()
+    {
+        var card = new FakeCard();
+        var arena = new Arena(card, unit: FakeCard.GranuleBytes, chunkBytes: 16 * FakeCard.GranuleBytes);
+        arena.Uncarve(arena.Carve(4 * FakeCard.GranuleBytes, mayCommit: true), 4 * FakeCard.GranuleBytes);
+        card.CanDecommit = false;
+        return (arena.DecommitAll(out _), arena.CommittedBytes, card.Committed);
+    }
+
+    [Fact]
+    public void TestTheCudaRuntimeIsBoundOnceItCanBeLoadedWhateverEarlierAttemptsFound()
+    {
+        var attempts = 0;
+        var binding = new CudaRuntime.Binding<string>(() => ++attempts < 3 ? (false, null) : (true, "bound"));
+        Assert.Equal<string?>([null, null, "bound", "bound"], Enumerable.Range(0, 4).Select(_ => binding.Value));
+        Assert.Equal(3, attempts);
+    }
+
+    [Utils.LinuxFact]
+    public void TestHostMemoryHandedBackLeavesItsReservationOneMappingOnLinux()
+    {
+        const long Granule = 64L << 10;
+        var arena = new Arena(HostMemory.Instance, unit: Granule, chunkBytes: 64 * Granule);
+        var blocks = Enumerable.Range(0, 64).Select(_ => arena.Carve(Granule, mayCommit: true)).ToList();
+        foreach (var block in blocks.Where((_, i) => i % 2 == 0)) arena.Uncarve(block, Granule);
+        arena.DecommitAll(out _);
+        var mappings = File.ReadLines("/proc/self/maps").Select(line => line.Split(' ')[0].Split('-'))
+            .Count(range => Convert.ToInt64(range[0], 16) < blocks[0] + 64 * Granule && Convert.ToInt64(range[1], 16) > blocks[0]);
+        foreach (var block in blocks.Where((_, i) => i % 2 == 1)) arena.Uncarve(block, Granule);
+        arena.ReleaseEmptyChunks();
+
+        Assert.Equal(1, mappings);
+    }
+
+    private static OrtValue HostBlock(RuntimeAllocator host, CachingAllocator.Account account, long floats)
+    {
+        OrtValue value;
+        using (CachingAllocator.Charge(account, null))
+            value = OrtValue.CreateAllocatedTensorValue(host.Managed, Microsoft.ML.OnnxRuntime.Tensors.TensorElementType.Float, [floats]);
+        value.GetTensorMutableDataAsSpan<float>().Fill(1f);
+        return value;
+    }
+
     [Fact]
     public void TestAHostSessionReportsItsOwnArenaButNoPinnedOneAndABackendWithoutOneReportsNothing()
     {
         using var context = new ComputeContext();
-        var compiled = Doubling(context);
+        var compiled = ArenaProbeModels.MatMul(context);
 
         var before = Assert.IsType<ArenaStatistics>(compiled.ReadArenaStatistics());
         Assert.Equal(0L, before.MaxInUseBytes);
         Assert.Equal(0L, before.AllocationCount);
         Assert.Equal(-1L, before.LimitBytes);
 
-        compiled.Execute(ThreeFloats());
+        compiled.Execute(ArenaProbeModels.MatMulOperand(8), ArenaProbeModels.MatMulOperand(8));
         var after = Assert.IsType<ArenaStatistics>(compiled.ReadArenaStatistics());
         Assert.True(after.MaxInUseBytes > 0);
         Assert.True(after.AllocationCount > 0);
@@ -1001,11 +1469,6 @@ public class CoreUtilsCoverageTests
         Assert.Throws<ObjectDisposedException>(() => compiled.ReadNodePlacement());
     }
 
-    /// <summary>
-    /// A session's weights come out of the same arena these figures read, so a session is already
-    /// holding them before it has run anything and the first run's peak is weights plus whatever
-    /// that run added. The record carries the mark the run found, which is what separates the two.
-    /// </summary>
     [Fact]
     public void TestASessionHoldsItsWeightsInTheArenaBeforeItsFirstRunAndTheRecordSeparatesThem()
     {
@@ -1019,9 +1482,7 @@ public class CoreUtilsCoverageTests
         Assert.Equal(ArenaProbeModels.WeightBytes, built.MaxInUseBytes);
         Assert.Equal(ArenaProbeModels.WeightBytes, built.InUseBytes);
         Assert.Equal(ArenaProbeModels.WeightBytes, built.MaxAllocSizeBytes);
-        Assert.Equal(1L, built.AllocationCount);
-        Assert.Equal(1L, built.ReserveCount);
-        Assert.Equal(0L, built.ArenaExtensionCount);
+        Assert.Equal((1L, 0L, 1L), (built.AllocationCount, built.ReserveCount, built.ArenaExtensionCount));
 
         compiled.Execute(ArenaProbeModels.WeightedInput());
         var run = Assert.Single(context.RunStats.RecentRuns);
@@ -1030,6 +1491,118 @@ public class CoreUtilsCoverageTests
         Assert.True(run.PeakBytes > run.PriorPeakBytes);
         Assert.True(run.PeakBytes - run.PriorPeakBytes < ArenaProbeModels.WeightBytes / 16);
         Assert.Equal(run.PeakBytes, context.RunStats.PeakBytes);
+    }
+
+    [Fact]
+    public void TestAKeptOutputHoldsOnlyItsOwnBlockOfItsSessionsMemory()
+    {
+        using var context = new ComputeContext();
+        var filled = ArenaProbeModels.Filled(context);
+        var product = ArenaProbeModels.MatMul(context);
+        var spread = ArenaProbeModels.Spread(context);
+        (long, long, long) InUse() => (
+            Assert.IsType<ArenaStatistics>(filled.ReadArenaStatistics()).RequestedInUseBytes,
+            Assert.IsType<ArenaStatistics>(product.ReadArenaStatistics()).RequestedInUseBytes,
+            Assert.IsType<ArenaStatistics>(spread.ReadArenaStatistics()).RequestedInUseBytes);
+        var weights = InUse();
+
+        var sum = filled.Execute(ArenaProbeModels.FilledShape(1 << 20))[0].ToTensorData();
+        var negated = product.Execute(ArenaProbeModels.MatMulOperand(64), ArenaProbeModels.MatMulOperand(64))[0].ToTensorData();
+        var spreadSum = spread.Execute(ArenaProbeModels.Ones(1 << 20).Shared())[0].ToTensorData();
+        var kept = InUse();
+        Assert.Equal([1 << 20, 0f, -(1 << 20)], [sum.ValueAt<float>(0), negated.ValueAt<float>(4095), spreadSum.ValueAt<float>(999)]);
+        TensorData[] outputs = [sum, negated, spreadSum];
+        var bytes = outputs.Select(o => o.ByteCount).ToArray();
+        foreach (var output in outputs) output.Delete();
+
+        Assert.Equal((weights.Item1 + bytes[0], weights.Item2 + bytes[1], weights.Item3 + bytes[2]), kept);
+        Assert.Equal(weights, InUse());
+    }
+
+    [Fact]
+    public void TestASessionRunOverManyShapesKeepsNoMoreThanItsBusiestRunHadInUse()
+    {
+        using var context = new ComputeContext();
+        var filled = ArenaProbeModels.Filled(context);
+        foreach (var elements in (long[])[1L << 20, 3L << 18, 1L << 19, 3L << 17, 1L << 18])
+            ComputeContext.ReleaseOutputs(filled.Execute(ArenaProbeModels.FilledShape(elements)));
+        var held = Assert.IsType<ArenaStatistics>(filled.ReadArenaStatistics());
+        Assert.True(held.TotalAllocatedBytes <= held.MaxInUseBytes);
+    }
+
+    [Fact]
+    public void TestASessionWhoseRunsRepeatTakesNoBlockFromTheDeviceAfterItsFirstRun()
+    {
+        using var context = new ComputeContext();
+        var refilled = ArenaProbeModels.Refilled(context);
+        ArenaStatistics Run()
+        {
+            var outputs = refilled.Execute(ArenaProbeModels.FilledShape(1 << 20), ArenaProbeModels.FilledShape(3 << 18));
+            Assert.Equal(1048576f * 786432f, ArenaProbeModels.Sum(outputs));
+            ComputeContext.ReleaseOutputs(outputs);
+            return Assert.IsType<ArenaStatistics>(refilled.ReadArenaStatistics());
+        }
+        var runs = Enumerable.Range(0, 6).Select(_ => Run()).Select(r => (r.ArenaExtensionCount, r.ArenaShrinkageCount)).ToList();
+        Assert.Equal(runs[1], runs[^1]);
+    }
+
+    [Fact]
+    public void TestTheReuseScenarioTakesItsKnownBlocksAndNoMoreBeyondItsInputsAndWeights()
+    {
+        Assert.Equal((13L, 6L), ArenaProbeModels.ReuseRun(ArenaProbeModels.ReuseShapes.Computed));
+        Assert.Equal((11L, 6L), ArenaProbeModels.ReuseRun(ArenaProbeModels.ReuseShapes.Paired));
+        Assert.Equal((5L, 5L), ArenaProbeModels.ReuseRun(ArenaProbeModels.ReuseShapes.Static));
+        Assert.Equal((11L, 6L), ArenaProbeModels.ReuseRun(ArenaProbeModels.ReuseShapes.Tracked));
+    }
+
+    [Fact]
+    public void TestTheReuseScenarioTakesWhatOnnxRuntimesArenaIsAskedForAndHoldsNoMoreThanItAtOnce()
+    {
+        var arena = new OrtArenaHostBackend();
+        foreach (var shapes in Enum.GetValues<ArenaProbeModels.ReuseShapes>())
+        {
+            var (ours, theirs) = (ArenaProbeModels.ReuseRun(shapes), ArenaProbeModels.ReuseRun(shapes, arena));
+            Assert.Equal(theirs.Allocations, ours.Allocations);
+            Assert.True(ours.Halves <= theirs.Halves);
+        }
+    }
+
+    private sealed class OrtArenaHostBackend : OrtBackend
+    {
+        public OrtArenaHostBackend() => SessionsUseOrtArena = true;
+    }
+
+    [Fact]
+    public void TestASessionCyclingThroughShapesTakesNothingMoreFromTheDeviceAfterItsFirstCycle()
+    {
+        using var context = new ComputeContext();
+        var filled = ArenaProbeModels.Filled(context);
+        (long, long) Cycle()
+        {
+            foreach (var elements in (long[])[1L << 20, 4L << 20, 2L << 20, 3L << 20])
+                ComputeContext.ReleaseOutputs(filled.Execute(ArenaProbeModels.FilledShape(elements)));
+            var held = Assert.IsType<ArenaStatistics>(filled.ReadArenaStatistics());
+            return (held.ArenaShrinkageCount, held.TotalAllocatedBytes);
+        }
+
+        Cycle();
+        var second = Cycle();
+        Assert.Equal(second, Cycle());
+    }
+
+    [Fact]
+    public void TestAnOutputWhoseShapeTheRunLearnsIsTheBlockItsSessionWroteItInto()
+    {
+        using var context = new ComputeContext();
+        var learned = ArenaProbeModels.Learned(context);
+        long Requested() => Assert.IsType<ArenaStatistics>(learned.ReadArenaStatistics()).RequestedInUseBytes;
+        var before = Requested();
+
+        var indices = learned.Execute(ArenaProbeModels.Ones(1 << 20))[0].ToTensorData();
+        var (bytes, held) = (indices.ByteCount, Requested() - before);
+        indices.Delete();
+
+        Assert.Equal((bytes, before), (held, Requested()));
     }
 
     [Fact]
@@ -1062,8 +1635,9 @@ public class CoreUtilsCoverageTests
         {
             Diagnostics = new DiagnosticSettings { CollectRunStatistics = true },
         };
-        var compiled = Doubling(counting);
-        for (int run = 0; run < 3; run++) compiled.Execute(ThreeFloats());
+        var compiled = ArenaProbeModels.MatMul(counting);
+        IData[] Operands() => [ArenaProbeModels.MatMulOperand(8), ArenaProbeModels.MatMulOperand(8)];
+        for (int run = 0; run < 3; run++) compiled.Execute(Operands());
 
         var stats = counting.RunStats;
         Assert.Equal(3L, stats.RunCount);
@@ -1083,7 +1657,7 @@ public class CoreUtilsCoverageTests
             stats.RecentRuns.Select(run => run.PeakBytes));
 
         // The snapshot is one moment, not a live view of a context that keeps running.
-        compiled.Execute(ThreeFloats());
+        compiled.Execute(Operands());
         Assert.Equal(3L, stats.RunCount);
         Assert.Equal(4L, counting.RunStats.RunCount);
 
@@ -1152,7 +1726,6 @@ public class CoreUtilsCoverageTests
         var untraced = Doubling(plain);
         untraced.Execute(ThreeFloats());
         Assert.Equal(SessionOutputPlacement.Host, untraced.OutputPlacement);
-        Assert.False(untraced.HasDeviceMemory);
         Assert.Null(untraced.ReadNodePlacement());
 
         using var traced = new ComputeContext
@@ -1258,14 +1831,14 @@ public class CoreUtilsCoverageTests
     /// <summary>
     /// The settings are reachable from a GPU session, which no test on a CPU box can observe by
     /// running one. What it can observe is that the product still calls the wiring: a backend that
-    /// stopped passing its device id, stopped carrying the session's
-    /// <see cref="DeviceMemorySettings"/> into the provider options, or stopped putting the
-    /// shrinkage entry on its run options would leave every setting dead with every other test
-    /// still green. It also pins where those values come from — the parameter the session or run
+    /// stopped passing its device id, stopped building its sessions over Shorokoo's allocators with
+    /// the card's account held to the session's <see cref="DeviceMemorySettings"/>, or stopped having
+    /// a shrinking run hand back what they keep cached would leave every setting dead with every
+    /// other test still green. It also pins where those values come from — the parameter the session or run
     /// was given, never process-wide state.
     /// </summary>
     [Fact]
-    public void TestTheGpuBackendsStillCarryTheDeviceMemorySettingsIntoOrt()
+    public void TestTheGpuBackendsStillCarryTheDeviceMemorySettingsIntoTheirAllocator()
     {
         var backend = Path.Combine(ProductSourceRoot(), "Backend", "OnnxRuntime");
         string Source(params string[] parts) =>
@@ -1284,25 +1857,30 @@ public class CoreUtilsCoverageTests
         // reaches the session, not how many other things travel with it.
         Assert.Matches(@"new\s+OrtSession\s*\(\s*session\s*,\s*_cudaDeviceId\s*[,)]", source);
         Assert.Matches(@"AppendExecutionProvider_CUDA\s*\(\s*cuda\s*\)", source);
-        Assert.Matches(@"CudaProviderOptions\s*\(\s*deviceId\s*,\s*deviceMemory\.LimitBytes\s*,\s*deviceMemory\.ArenaExtend\s*\)", source);
-        Assert.Matches(@"_configureExecutionProvider\s*\(\s*options\s*,\s*deviceMemory\s*\)", source);
+        Assert.Matches(@"CudaProviderOptions\s*\(\s*deviceId\s*,\s*precision\s*\)", source);
+        Assert.Matches(@"card\.Limit\s*=\s*deviceMemory\.LimitBytes", source);
+        Assert.Matches(@"using\s*\(\s*CachingAllocator\.Charge\s*\(\s*host\s*,\s*card\s*\)\s*\)\s*session\s*=\s*(model\s+is\s+null\s*\?\s*new\s+InferenceSession\s*\([^;:]*:\s*)?new\s+InferenceSession", source);
+        Assert.Contains("\"session.use_env_allocators\", \"1\"", File.ReadAllText(
+            Path.Combine(backend, "Shorokoo.OnnxRuntime", "OrtBackend.cs")));
+        Assert.Matches(@"_configureExecutionProvider\s*\(\s*options\s*,\s*deviceMemory\s*,\s*precision\s*\)", source);
 
         var context = StripCommentsAndStrings(File.ReadAllText(
             Path.Combine(ProductSourceRoot(), "Shorokoo", "Core", "ComputeContext.cs")));
         Assert.Matches(@"BuildSession\s*\(\s*backend\s*,\s*modelData\s*,\s*optimization\s*,\s*deviceMemory\s*[,)]", context);
         Assert.Matches(@"backend\.CreateSession\s*\(\s*modelData\s*,\s*optimization\s*,\s*ShorokooLogSeverity\.Fatal\s*,\s*deviceMemory\s*,", context);
-        Assert.Matches(@"DeviceMemory\.Resolve\s*\(\s*reusedAcrossShapes\s*\)", context);
+        Assert.Matches(@"TryLimitDeviceMemory\s*\(\s*room\s*\)", context);
 
         var session = Source("Shorokoo.OnnxRuntime", "OrtSession.cs");
-        Assert.Contains("memory.enable_memory_arena_shrinkage", File.ReadAllText(
-            Path.Combine(backend, "Shorokoo.OnnxRuntime", "OrtSession.cs")));
-        Assert.Matches(@"ArenaShrinkageRunConfig\s*\(\s*_cudaDeviceId\s*,\s*runSettings\.ShrinkArenaAfterRun\s*\)", session);
-        Assert.Matches(@"AddRunConfigEntry\s*\(", session);
+        Assert.Matches(@"if\s*\(\s*runSettings\.ShrinkArenaAfterRun\s*\)", session);
+        Assert.Matches(@"ReleaseCached\s*\(\s*card\s*\)", session);
+        Assert.Matches(@"ReleaseCached\s*\(\s*_hostAccount\s*\)", session);
+        Assert.Matches(@"card\.Limit\s*=\s*limitBytes", session);
 
-        // Every path that runs the session has to apply it, not just one: the retaining path is
-        // the loop a GPU user is steered into, and it is where an unbounded arena costs most.
+        // Every path that runs the session has to charge its accounts, not just one: each runs
+        // inside the one member that does.
         var runPaths = Regex.Matches(session, @"_session\s*\.\s*Run\w*\s*\(").Count;
-        Assert.Equal(runPaths, Regex.Matches(session, @"ConfigureRun\s*\(\s*runOptions\s*,\s*runSettings\s*\)").Count);
+        Assert.Equal(runPaths, Regex.Matches(session, @"Invoke\s*\(\s*runSettings\s*,").Count);
+        Assert.Single(Regex.Matches(session, @"using\s+var\s+charge\s*=\s*CachingAllocator\.Charge\s*\(\s*_hostAccount\s*,\s*_cardAccount\s*\)"));
     }
 
     /// <summary>Two shapes the guard's exemptions once let through: a span consumed by a call
@@ -1475,13 +2053,13 @@ public class CoreUtilsCoverageTests
     // shape — the caller owns the lifetime from there. CopyMemory / CopyRawMemory / ValueAt do
     // the copy with the tensor kept alive, and are what a call site should reach for instead.
     // The leading `\.` is a real limitation, not an oversight: it keys on a receiver, so a span
-    // taken through an implicit `this` inside TensorData itself -- `write(AccessModifiableMemory
-    // <V>())` in WriteMemory -- is invisible to this guard. Relaxing the dot matches every
-    // declaration of those members too. Those helpers keep their tensor alive by convention and
+    // taken through an implicit `this` inside TensorData itself -- `AccessMemory<V>().ToArray()`
+    // in CopyMemory -- is invisible to this guard. Relaxing the dot matches every declaration of
+    // those members too. Those helpers keep their tensor alive by convention and
     // by review; removing a GC.KeepAlive(this) from one of them leaves the suite green.
     private static readonly Regex SpanOutOfTensor = new(
         @"\.\s*(GetTensorMutableRawData|GetTensorDataAsSpan|GetTensorMutableDataAsSpan"
-        + @"|AccessRawMemory|AccessModifiableRawMemory|AccessMemory|AccessModifiableMemory)"
+        + @"|AccessRawMemory|AccessMemory)"
         + @"\s*(<[^>()]*>)?\s*\(\s*\)", RegexOptions.Compiled);
 
     // The leading identifier of the receiver expression: `t`, `t.Field`, `run[0].ToTensorData()`.
@@ -1768,7 +2346,7 @@ public class CoreUtilsCoverageTests
             "byte[] M() { return v.GetTensorDataAsSpan<byte>().ToArray(); }",
             "long[] M() { return t.As<int64>().AccessMemory().ToArray(); }",
             "float M() { return t.AccessMemory<float>()[0]; }",
-            "void M() { var s = t.AccessModifiableRawMemory(); s[0] = 1; }",
+            "void M() { var s = t.AccessRawMemory(); Use(s[0]); }",
             "void M() { GC.KeepAlive(v); } void N() { var d = v.GetTensorMutableRawData(); b.CopyTo(d); }",
             "void M() { var a = x.AccessRawMemory().ToArray(); GC.KeepAlive(x); var b2 = y.AccessRawMemory().ToArray(); }",
             "void M() { GC.KeepAlive(v); var d = v.GetTensorMutableRawData(); b.CopyTo(d); }",
@@ -1778,7 +2356,7 @@ public class CoreUtilsCoverageTests
         [
             "ReadOnlySpan<T> M() => Inner.GetTensorDataAsSpan<T>();",
             "ReadOnlySpan<T> M() { return Inner.GetTensorDataAsSpan<T>(); }",
-            "Span<double> M(TensorData<float64> d) => d.AccessModifiableMemory<double>();",
+            "ReadOnlySpan<double> M(TensorData<float64> d) => d.AccessMemory<double>();",
             "byte[] M() { var a = v.GetTensorDataAsSpan<byte>().ToArray(); GC.KeepAlive(v); return a; }",
             "void M() { var d = v.GetTensorMutableRawData(); b.CopyTo(d); GC.KeepAlive(v); }",
             "void M() { using var v = Make(); var d = v.GetTensorMutableRawData(); b.CopyTo(d); }",
@@ -2264,7 +2842,7 @@ public class CoreUtilsCoverageTests
 
         Assert.DoesNotContain("Device:", Report(ArenaFailure, Facts(12, 128), "Shorokoo.LinuxCPU"));
 
-        Assert.Contains("arena is capped at 8 GiB", AllocationFailureReport.Render(
+        Assert.Contains("may allocate at most 8 GiB", AllocationFailureReport.Render(
             "the training step at step 1", AllocationPool.Device,
             new DeviceFacts(true, roomy, 8L << 30, "Shorokoo.WinGPU"), [],
             Facts(12, 128), ArenaFailure));
@@ -2533,6 +3111,108 @@ public class CoreUtilsCoverageTests
         finally { Directory.Delete(clean, recursive: true); }
     }
 
+    private enum Saver { File, Pair, Tree }
+
+    private enum Rename { Aside, In, Restore }
+
+    [Fact]
+    public void TestAtomicFileWriterRetriesATransientlyLockedRenameAndLeavesEveryTargetOldOrNew()
+    {
+        const int Sharing = unchecked((int)0x80070020), Lock = unchecked((int)0x80070021);
+        const int Denied = unchecked((int)0x80070005), Always = int.MaxValue;
+        (Saver Saver, Rename Rename, int HResult, int Times, string Expected)[] cases =
+        [
+            (Saver.File, Rename.In, Sharing, 3, "new ok 4 clean"),
+            (Saver.File, Rename.In, Lock, 3, "new ok 4 clean"),
+            (Saver.File, Rename.In, Sharing, Always, "old 80070020 6 clean"),
+            (Saver.File, Rename.In, Denied, 1, "old 80070005 1 clean"),
+            (Saver.Pair, Rename.Aside, Sharing, 3, "new new ok 4 clean"),
+            (Saver.Pair, Rename.In, Sharing, 3, "new new ok 4 clean"),
+            (Saver.Pair, Rename.In, Denied, 1, "old old 80070005 1 clean"),
+            (Saver.Pair, Rename.Restore, Sharing, 3, "old old 80131620 4 clean"),
+            (Saver.Tree, Rename.Aside, Sharing, 3, "new ok 4 clean"),
+            (Saver.Tree, Rename.In, Sharing, 3, "new ok 4 clean"),
+            (Saver.Tree, Rename.Restore, Sharing, 3, "old 80131620 4 clean"),
+        ];
+        string[] expected = [.. cases.Select(c => c.Expected)];
+        string[] actual = [.. cases.Select(c => AfterALockedRename(c.Saver, c.Rename, c.HResult, c.Times))];
+        Assert.Equal(expected, actual);
+    }
+
+    /// <summary>Saves "new" over "old" with the chosen rename of the first target failing
+    /// <paramref name="times"/> times with <paramref name="hResult"/> (a restore is reached by
+    /// crashing the commit after it), and reports what each target holds, what the save threw,
+    /// how many attempts that rename got, and whether any staged entry was left behind.</summary>
+    private static string AfterALockedRename(Saver saver, Rename rename, int hResult, int times)
+    {
+        var dir = NewScratchDir();
+        try
+        {
+            string[] targets = saver == Saver.Pair
+                ? [Path.Combine(dir, "a"), Path.Combine(dir, "b")]
+                : [Path.Combine(dir, "a")];
+            string Content(string target) => saver == Saver.Tree ? Path.Combine(target, "f") : target;
+            foreach (var target in targets)
+            {
+                if (saver == Saver.Tree) Directory.CreateDirectory(target);
+                File.WriteAllText(Content(target), "old");
+            }
+
+            string? aside = null;
+            int tries = 0;
+            string thrown = "ok";
+            try
+            {
+                AtomicFileWriter.RenameFaultInjection = (from, to) =>
+                {
+                    if (from == targets[0]) aside = to;
+                    bool hit = rename switch
+                    {
+                        Rename.Aside => from == targets[0],
+                        Rename.In => to == targets[0] && from != aside,
+                        _ => from == aside,
+                    };
+                    if (hit && tries++ < times) throw new IOException("simulated lock", hResult);
+                };
+                if (rename == Rename.Restore)
+                {
+                    AtomicFileWriter.CommitFaultInjection = temp =>
+                    {
+                        if (Path.GetFileName(temp).StartsWith(".tmp-b-", StringComparison.Ordinal))
+                            throw new IOException("simulated crash");
+                    };
+                    AtomicFileWriter.ReplaceFaultInjection = _ => throw new IOException("simulated crash");
+                }
+                switch (saver)
+                {
+                    case Saver.File:
+                        AtomicFileWriter.WriteFile(targets[0], s => s.Write("new"u8));
+                        break;
+                    case Saver.Pair:
+                        AtomicFileWriter.WriteFiles(
+                            [.. targets.Select(t => (t, (Action<Stream>)(s => s.Write("new"u8))))]);
+                        break;
+                    default:
+                        AtomicFileWriter.WriteDirectory(targets[0], d => File.WriteAllText(Path.Combine(d, "f"), "new"));
+                        break;
+                }
+            }
+            catch (Exception e) { thrown = $"{e.HResult:x8}"; }
+            finally
+            {
+                AtomicFileWriter.RenameFaultInjection = null;
+                AtomicFileWriter.CommitFaultInjection = null;
+                AtomicFileWriter.ReplaceFaultInjection = null;
+            }
+
+            string debris = Directory.GetFileSystemEntries(dir, ".tmp-*").Length == 0 ? "clean" : "debris";
+            string[] report = [.. targets.Select(t => File.Exists(Content(t)) ? File.ReadAllText(Content(t)) : "gone"),
+                thrown, $"{tries}", debris];
+            return string.Join(' ', report);
+        }
+        finally { Directory.Delete(dir, recursive: true); }
+    }
+
     [Fact]
     public void TestEveryDebugRequestPointProducesItsSnapshot()
     {
@@ -2608,6 +3288,39 @@ public class CoreUtilsCoverageTests
     }
 }
 
+[Trait("Domain", "Core")]
+[Trait("Purpose", "Coverage")]
+[Collection(ProcessWideMemory.Name)]
+public class ProcessAllocatorReleaseCoverageTests
+{
+    [Fact]
+    public void TestReleasingWhatTheAllocatorsKeepLeavesASessionHoldingWhatItUsesAndRunningOn()
+    {
+        using var context = new ComputeContext();
+        var filled = ArenaProbeModels.Filled(context);
+        ArenaStatistics Held() => Assert.IsType<ArenaStatistics>(filled.ReadArenaStatistics());
+        ComputeContext.ReleaseOutputs(filled.Execute(ArenaProbeModels.FilledShape(1 << 20)));
+        var kept = Held().TotalAllocatedBytes - Held().InUseBytes;
+
+        var released = DeviceMemory.ReleaseCached();
+
+        Assert.True(kept >= 4 << 20);
+        Assert.True(released >= kept);
+        Assert.Equal(Held().InUseBytes, Held().TotalAllocatedBytes);
+        Assert.Equal(1048576f, ArenaProbeModels.Sum(filled.Execute(ArenaProbeModels.FilledShape(1 << 20))));
+    }
+
+    [Fact]
+    public void TestARunAskingMoreThanTheHostHasFailsAsAHostAllocationFailureAndItsSessionRunsOn()
+    {
+        using var context = new ComputeContext();
+        var filled = ArenaProbeModels.Filled(context);
+        var failure = Assert.ThrowsAny<Exception>(() => filled.Execute(ArenaProbeModels.FilledShape(1L << 50)));
+        Assert.Equal(AllocationPool.Host, AllocationFailureReport.Classify(failure, gpuBackend: true));
+        Assert.Equal(1000f, ArenaProbeModels.Sum(filled.Execute(ArenaProbeModels.FilledShape(1000))));
+    }
+}
+
 /// <summary>
 /// The graphs the memory-statistics and placement checks are asked of, shared by the coverage
 /// tests above and by <see cref="GpuExecutionTests"/>, which asks the same questions of a card.
@@ -2616,7 +3329,8 @@ internal static class ArenaProbeModels
 {
     /// <summary>The weight's side, so that <see cref="Weighted"/> carries four mebibytes of
     /// parameter and nothing else of any size and an arena figure either side of construction is
-    /// unambiguous.</summary>
+    /// unambiguous. The product is negated so that a run puts something in the arena: the output
+    /// itself is memory of its own.</summary>
     internal const int WeightSide = 1024;
 
     /// <inheritdoc cref="WeightSide"/>
@@ -2628,7 +3342,7 @@ internal static class ArenaProbeModels
         var x = InputTensor<float32>("x", rank: 2);
         var w = Tensor([(long)WeightSide, WeightSide], new float[WeightSide * WeightSide]);
         return context.Compile(
-            new InternalComputationGraph([x], [(Tensor<float32>)OnnxOp.MatMul(x, w)]));
+            new InternalComputationGraph([x], [(Tensor<float32>)OnnxOp.Neg(OnnxOp.MatMul(x, w))]));
     }
 
     /// <inheritdoc cref="WeightSide"/>
@@ -2659,13 +3373,14 @@ internal static class ArenaProbeModels
     /// <inheritdoc cref="Partitioned"/>
     internal static TensorData<float32> Square() => TensorData([2L, 2L], 4f, 1f, 2f, 3f);
 
-    /// <summary>Both operands fed rather than one held as a weight, so nothing of the arena stays
-    /// in use between runs and a shrinking run has blocks to hand back.</summary>
+    /// <summary>Both operands fed rather than one held as a weight, and the product negated, so a
+    /// run leaves nothing of the arena in use but the output it hands back, and a shrinking run has
+    /// the product's blocks to hand back.</summary>
     internal static CompiledGraph MatMul(ComputeContext context)
     {
         var x = InputTensor<float32>("x", rank: 2);
         var w = InputTensor<float32>("w", rank: 2);
-        return context.Compile(new InternalComputationGraph([x, w], [OnnxOp.MatMul(x, w)]));
+        return context.Compile(new InternalComputationGraph([x, w], [OnnxOp.Neg(OnnxOp.MatMul(x, w))]));
     }
 
     /// <inheritdoc cref="MatMul"/>
@@ -2688,7 +3403,225 @@ internal static class ArenaProbeModels
     /// <inheritdoc cref="Filled"/>
     internal static TensorData<int64> FilledShape(long elements) => TensorData([1L], elements);
 
+    /// <summary>How the reuse scenario states the shapes of its inputs and halves.</summary>
+    internal enum ReuseShapes { Computed, Paired, Static, Tracked }
+
+    /// <summary>
+    /// The memory-reuse scenario: inputs A and B of <c>[2n, m]</c> floats, both consumed;
+    /// <c>A_half = A[0:n]</c> and <c>B_half = B[n:2n]</c>; C a fill of 2s the shape of a half through
+    /// <c>Neg</c>, <c>Abs</c>, <c>Sigmoid</c>; L the concatenation of C and B_half through
+    /// <c>Sigmoid</c>, <c>Neg</c>, <c>Abs</c>. Outputs L, A_half and B_half. <i>Computed</i> slices at
+    /// half of A's rows as the run reads them; <i>Paired</i> feeds <c>[2, n, m]</c> and slices the
+    /// leading dimension; <i>Static</i> is compiled for the sizes it is fed; <i>Tracked</i> is Paired
+    /// with the fill made as <c>A_half * 0 + 2</c>.
+    /// </summary>
+    internal static CompiledGraph Reuse(ComputeContext context, ReuseShapes shapes, long n, long m)
+    {
+        var paired = shapes is ReuseShapes.Paired or ReuseShapes.Tracked;
+        var a = InputTensor<float32>("A", rank: paired ? 3 : 2);
+        var b = InputTensor<float32>("B", rank: paired ? 3 : 2);
+        Variable aHalf, bHalf;
+        if (paired)
+        {
+            aHalf = OnnxOp.Slice(a, Vector(0L), Vector(1L), Vector(0L));
+            bHalf = OnnxOp.Slice(b, Vector(1L), Vector(2L), Vector(0L));
+        }
+        else
+        {
+            Variable rows = shapes == ReuseShapes.Static ? Vector(2 * n) : OnnxOp.Shape(a, end: 1, start: 0);
+            Variable half = shapes == ReuseShapes.Static ? Vector(n) : OnnxOp.Div(rows, Vector(2L));
+            aHalf = OnnxOp.Slice(a, Vector(0L), half, Vector(0L));
+            bHalf = OnnxOp.Slice(b, half, rows, Vector(0L));
+        }
+        var fill = shapes == ReuseShapes.Tracked
+            ? OnnxOp.Add(OnnxOp.Mul(aHalf, Scalar(0f)), Scalar(2f))
+            : OnnxOp.ConstantOfShape(OnnxOp.Shape(aHalf), TensorAttribute.Create(new Shape(1L), 2f));
+        var c = OnnxOp.Sigmoid(OnnxOp.Abs(OnnxOp.Neg(fill)));
+        var l = OnnxOp.Abs(OnnxOp.Neg(OnnxOp.Sigmoid(OnnxOp.Concat([c, bHalf], axis: 0))));
+        var graph = new InternalComputationGraph([a, b], [l, aHalf, bHalf]);
+        long[] whole = paired ? [2L, n, m] : [2 * n, m];
+        return shapes == ReuseShapes.Static ? context.Compile(graph, [whole, whole], trainingStep: false) : context.Compile(graph);
+    }
+
+    /// <summary>The halves' side of the reuse scenario as the tests run it: a half is 256 KiB.</summary>
+    internal const long ReuseSide = 256;
+
+    /// <summary>
+    /// The reuse scenario compiled on a context of <paramref name="backend"/> (the default where
+    /// null) and run twice, each run consuming inputs of its own: the second run's allocations, and
+    /// the most its session had in use beyond its weights, in whole halves of an input.
+    /// </summary>
+    internal static (long Allocations, long Halves) ReuseRun(ReuseShapes shapes, IShorokooBackend? backend = null)
+    {
+        using var context = backend is null ? new ComputeContext() : new ComputeContext(backend);
+        var compiled = Reuse(context, shapes, ReuseSide, ReuseSide);
+        var weights = Assert.IsType<ArenaStatistics>(compiled.ReadArenaStatistics()).InUseBytes;
+        ComputeContext.ReleaseOutputs(compiled.Execute(ReuseInput(shapes, ReuseSide, ReuseSide), ReuseInput(shapes, ReuseSide, ReuseSide)));
+        var before = Assert.IsType<ArenaStatistics>(compiled.ReadArenaStatistics());
+        ComputeContext.ReleaseOutputs(compiled.Execute(ReuseInput(shapes, ReuseSide, ReuseSide), ReuseInput(shapes, ReuseSide, ReuseSide)));
+        var after = Assert.IsType<ArenaStatistics>(compiled.ReadArenaStatistics());
+        return (after.AllocationCount - before.AllocationCount, (after.MaxInUseBytes - weights) / (ReuseSide * ReuseSide * sizeof(float)));
+    }
+
+    /// <summary>A or B of the reuse scenario, <paramref name="shapes"/> deciding its rank.</summary>
+    internal static TensorData<float32> ReuseInput(ReuseShapes shapes, long n, long m)
+        => TensorData(shapes is ReuseShapes.Paired or ReuseShapes.Tracked ? [2L, n, m] : [2 * n, m], new float[2 * n * m]);
+
+    /// <summary>
+    /// Two fills one after the other, of the sizes the two shapes it is fed ask for: the second
+    /// spreads the first's sum, so the first is freed before the second is made, and a run uses a
+    /// block of each size though it never has both in use at once.
+    /// </summary>
+    internal static CompiledGraph Refilled(ComputeContext context)
+    {
+        var first = InputVector<int64>("first");
+        var second = InputVector<int64>("second");
+        var sum = OnnxOp.ReduceSum(OnnxOp.Expand(Vector(1f), first), keepdims: false);
+        return context.Compile(new InternalComputationGraph(
+            [first, second], [OnnxOp.ReduceSum(OnnxOp.Expand(sum, second), keepdims: false)]));
+    }
+
+    /// <summary>
+    /// A graph whose output's shape its session settles when it is built and whose one large block
+    /// is an intermediate: what it is fed, negated and summed, the sum spread over a thousand
+    /// elements. The output is made after the negation is released, so an arena that serves it
+    /// carves it out of the block the negation was freed from.
+    /// </summary>
+    internal static CompiledGraph Spread(ComputeContext context)
+    {
+        var x = InputTensor<float32>("x", rank: 1);
+        var sum = OnnxOp.ReduceSum(OnnxOp.Neg(x), keepdims: false);
+        return context.Compile(new InternalComputationGraph([x], [OnnxOp.Expand(sum, Vector(1000L))]));
+    }
+
+    /// <inheritdoc cref="Spread"/>
+    internal static TensorData<float32> Ones(int elements) => TensorData([(long)elements], [.. Enumerable.Repeat(1f, elements)]);
+
+    /// <summary>
+    /// A graph whose output's shape only the run learns: the indices of what it is fed that is not
+    /// zero once negated, <c>[1, n]</c> of 64-bit integers for <see cref="Ones"/> of <c>n</c>.
+    /// </summary>
+    internal static CompiledGraph Learned(ComputeContext context)
+    {
+        var x = InputTensor<float32>("x", rank: 1);
+        return context.Compile(new InternalComputationGraph([x], [OnnxOp.NonZero(OnnxOp.Neg(x))]));
+    }
+
+    /// <summary>
+    /// <see cref="Filled"/>'s sum spread over a thousand elements: the output is made after the fill
+    /// is released, so an arena that serves it carves it out of the block the fill was freed from.
+    /// </summary>
+    internal static InternalComputationGraph Widened()
+    {
+        var shape = InputVector<int64>("shape");
+        var sum = OnnxOp.ReduceSum(OnnxOp.Expand(Vector(1f), shape), keepdims: false);
+        return new InternalComputationGraph([shape], [OnnxOp.Expand(sum, Vector(1000L))]);
+    }
+
     /// <summary>What a run of <see cref="Filled"/> summed.</summary>
     internal static float Sum(NamedModelParam[] outputs)
         => outputs[0].ToTensorData().As<float32>().ValueAt<float>(0);
+}
+
+/// <summary>
+/// A card with nothing behind it, and an allocator over it: address space from a range no memory is
+/// at, granules committed up to a capacity, and a wait for its work that answers as told.
+/// </summary>
+internal sealed class FakeCard : ArenaBacking
+{
+    internal const long GranuleBytes = 2L << 20;
+    private long _next = 1L << 44;
+
+    internal FakeCard(long capacity = 1L << 30)
+    {
+        Capacity = capacity;
+        Allocator = new CachingAllocator(99, this);
+    }
+
+    internal CachingAllocator Allocator { get; }
+    internal long Capacity { get; }
+    internal long Committed { get; private set; }
+    internal bool CanWait { get; init; } = true;
+    internal bool CanDecommit { get; set; } = true;
+    internal Exception? Failure { get; init; }
+    internal int Waits { get; private set; }
+    internal int WaitsUnderTheLock { get; private set; }
+
+    internal override long Granule => GranuleBytes;
+
+    internal override IntPtr Reserve(long bytes, out object? state)
+    {
+        state = null;
+        if (bytes > 1L << 40) return IntPtr.Zero;
+        var at = _next;
+        _next += bytes;
+        return (IntPtr)at;
+    }
+
+    internal override void Release(IntPtr @base, long bytes, object? state)
+    {
+    }
+
+    internal override bool Commit(IntPtr @base, object? state, long first, long count)
+    {
+        if (Failure is { } failure) throw failure;
+        if (Committed + count * GranuleBytes > Capacity) return false;
+        Committed += count * GranuleBytes;
+        return true;
+    }
+
+    internal override bool Decommit(IntPtr @base, object? state, long first, long count)
+    {
+        if (!CanDecommit) return false;
+        Committed -= count * GranuleBytes;
+        return true;
+    }
+
+    internal override bool AwaitDevice()
+    {
+        Waits++;
+        if (Allocator.Locked) WaitsUnderTheLock++;
+        return CanWait;
+    }
+}
+
+/// <summary>
+/// Whether the process holds the memory at an address: committed on Windows, resident on Linux.
+/// The system answers for whatever is at the address now, so the answer is about a block only
+/// while the address lies in address space the block's arena still holds reserved: address space
+/// handed back is the whole process's again, and anything running beside the caller may be given
+/// it and write there.
+/// </summary>
+internal static class ProcessMemory
+{
+    internal static bool Holds(IntPtr address)
+    {
+        if (OperatingSystem.IsWindows())
+            return VirtualQuery(address, out var info, (nuint)Marshal.SizeOf<MemoryBasicInformation>()) != 0
+                && info.State == MemCommit;
+        var page = (nint)Environment.SystemPageSize;
+        var resident = new byte[1];
+        return mincore(address & ~(page - 1), (nuint)page, resident) == 0 && (resident[0] & 1) != 0;
+    }
+
+    private const uint MemCommit = 0x1000;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MemoryBasicInformation
+    {
+        public IntPtr BaseAddress;
+        public IntPtr AllocationBase;
+        public uint AllocationProtect;
+        public ushort PartitionId;
+        public nuint RegionSize;
+        public uint State;
+        public uint Protect;
+        public uint Type;
+    }
+
+    [DllImport("kernel32")]
+    private static extern nuint VirtualQuery(IntPtr address, out MemoryBasicInformation info, nuint length);
+
+    [DllImport("libc")]
+    private static extern int mincore(IntPtr address, nuint length, byte[] pages);
 }

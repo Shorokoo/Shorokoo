@@ -196,57 +196,103 @@ already taken consumed. The arrangement in
 batch while the other device reads the last one, is where this is easy to hit.
 Give the concurrent run its own tensor (`CopyTo`) or wait for it to return.
 
-### A device-memory budget counts tensors, not arenas
+### A device-memory budget counts tensors, not what the allocator keeps
 
 A context's `DeviceMemorySettings.LimitBytes` counts the bytes of the tensors
-attached to it on the card, plus the arena limit of its executing run; see
+attached to it on the card, plus what the session of its executing run
+allocates; see
 [A context's device-memory budget](inference.md#a-contexts-device-memory-budget).
 That count is exact, but the card also holds:
 
-- **The allocator tensors are placed from.** Tensors put on a card (by `To`,
-  `CopyTo`, `AllocateUninitialized`, or a run copying a host input there) come from
-  one allocator per card and runtime, shared by every context over that runtime
-  and kept for the life of the process. It never shrinks: it keeps the most ever
-  allocated through it at once.
-- **What an arena keeps spare.** An arena holds blocks, and a partly used block
-  cannot be returned, so a session's arena can hold more than is in use.
+- **What the allocator keeps for reuse.** Every session on a card, whichever
+  runtime built it, and every tensor placed there, allocates through one
+  allocator, held for the life of the process. A block a live session lets go
+  of is kept for its next runs, and one a placed tensor lets go of for the next
+  tensor placed — each up to the most one of its runs has used — until a run
+  hands memory back (`ShrinkArenaAfterRun`, always on under a budget), the
+  program calls `DeviceMemory.ReleaseCached()`, or the card has no room for a
+  request. Between a budgeted context's runs that is what its tensors let go of
+  since the last one; an unbudgeted context's live sessions keep up to what
+  their busiest runs used.
+- **Rounding.** A block on a card is its request rounded up to a multiple of
+  512 bytes up to a mebibyte, and to whole 2 MiB pages above that — so a tensor
+  over a mebibyte holds up to just under 2 MiB more than its bytes. On a driver
+  without CUDA's virtual memory management a block over a mebibyte is rounded
+  to an eighth of the power of two below it instead, up to an eighth more. A
+  session's limit counts its blocks whole; the budget counts a tensor by its
+  bytes.
 - **A session's weights between its runs.** Each compiled graph's weights stay in
-  its session's arena and count only against that session's runs, so several
+  its session's memory and count only against that session's runs, so several
   compiled graphs hold all their weights at once while the budget sees one at a
-  time. A session rebuilt for a lower limit keeps its old arena alive while
-  outputs its runs left there are alive.
+  time.
 - **Memory a dead tensor still holds.** A tensor leaves the books when it dies,
   possibly before its memory returns: one deleted with `DeleteAsync` while a run
   reads it, or consumed by another context's run, holds its memory until that run
   finishes. A budgeted context's own runs cannot cause this; another context's run
   reading or consuming a tensor on this context's books can.
+- **What the CUDA runtime holds for itself**: each process's CUDA context, and
+  what the libraries the execution provider calls allocate on their own.
 
 Leave headroom, and read `DeviceMemory.Read()` for what the card is carrying.
 
-Two costs follow. A session's arena limit only decreases: after a context frees
-memory, its graphs keep the smaller arenas until recompiled. And a budgeted
-context does one thing at a time (a transfer onto it waits for its run in flight),
-so staging the next batch onto it from another thread does not overlap the
-current step. Staging through a second context over the same backend keeps the
-overlap.
+A budgeted context also does one thing at a time (a transfer onto it waits for
+its run in flight), so staging the next batch onto it from another thread does
+not overlap the current step. Staging through a second context over the same
+backend keeps the overlap.
 
-### A fed input's buffer is not recycled inside the run
+### A fed input's buffer is recycled only where the run consumed it
 
 ONNX Runtime never reuses a graph input's buffer for an intermediate, whatever the
-session or run options, so every fed input is resident for the whole run. This
-does not matter for a training step (its peak is intermediates, its output a
-scalar loss), but for a pipeline over a very large input with an input-shaped
-output, the unrecyclable buffer is the largest in the run.
+session or run options, so every fed input is resident for the whole run. A run
+that consumes an input — [fed as it is](inference.md#feeding-a-run-consumed-shared-or-tried)
+rather than `.Shared()` — writes its values into that input's memory where the
+graph proves it safe and it saves memory
+([A run that writes into what it consumed](inference.md#a-run-that-writes-into-what-it-consumed)).
+What that still leaves:
 
-[Feeding the input as it is](inference.md#feeding-a-large-input-without-a-second-copy)
-instead of `.Shared()` releases it when the run returns, and allocating on the
-context removes the managed copy; neither frees it for intermediates. A training
-step writes outputs into the state it replaces through ONNX Runtime's I/O binding
-([A run that writes an output into what it consumed](inference.md#a-run-that-writes-an-output-into-what-it-consumed)),
-saving one input-sized buffer per output that matches an input's dtype and
-shape where nothing reads the input afterwards. A graph you compile yourself
-marks no such outputs, so your pipeline holds its input beside its input-shaped
-output.
+- **A shared input** is resident for the whole run and written into by nothing.
+- **Values under a mebibyte** are left to the runtime.
+- **Order the graph does not state, on PyTorch.** A value goes into a range only
+  after everything reading what the range held, by the graph's own edges; two
+  independent branches never share a range. ONNX Runtime's own order is read from
+  the session that runs the graph, and a value goes in once the session has run
+  every reader.
+- **A node the card has no kernel for.** On a card, ONNX Runtime runs it on the
+  host, and its output is host memory: it is not written into an input on the card.
+- **The weights of a second session.** On ONNX Runtime the values are written by a
+  second session, which holds its own copy of the weights the model carries where
+  it cannot share them: a model's of 16 MiB or less, on the host as on a card, and
+  of a larger model on the host the packed copies ONNX Runtime makes of a
+  product's weights (it keeps a weight it is handed beside its packed copy, so
+  handing it one saves nothing). Placing pays only where it saves more than that
+  copy.
+- **A training step.** The state it consumes it already writes over
+  ([A step writes its state over the state it consumed](training.md#a-step-writes-its-state-over-the-state-it-consumed)),
+  and a batch it consumes is read by the backward pass as well as the forward one —
+  the first layer's weight gradient reads the input — so values go into its memory
+  only once that gradient is made, late in the step, and save at most the batch's
+  own size.
+
+### Some outputs written into one consumed input are freed together
+
+Outputs a run wrote into the memory of one input it consumed stand on that memory
+together. On ONNX Runtime, where the input was carved from Shorokoo's reserved
+memory, each frees its own pages as it ends; otherwise the memory is freed only
+when the last of them ends
+([Outputs on consumed memory](inference.md#a-run-that-writes-into-what-it-consumed)):
+
+- **On PyTorch** torch frees a tensor's storage whole, with the last tensor
+  reading it, and has no call that frees part of one.
+- **On a card without CUDA's virtual memory management** every block is a
+  `cudaMalloc` of its own, which `cudaFree` frees whole.
+- **On the host, an input under 64 KiB** is an allocation of the C runtime's
+  heap, freed whole; no value that small is written into anything.
+- **Pages are whole.** A page two outputs' ranges share — a 2 MiB page on a card,
+  a 4 KiB one on the host — is held until both have ended. CUDA maps a card's
+  memory 2 MiB at a time at the finest (the driver's minimum granularity for the
+  card).
+
+Copy an output out (`CopyTo`) to keep it apart from the others.
 
 ### A sequence's elements live in host memory
 
@@ -268,18 +314,18 @@ value it was given; the source tensor is untouched, so bring it home with
 `TensorData.ToHost()` and build the sequence again.
 
 Models whose *outputs* are sequences (`SequenceAt`, `SplitToSequence`, anything
-producing an ONNX sequence type) are unaffected: ONNX Runtime returns sequence
-outputs in host memory on every execution provider, including ones flagged in
-`Execute(inputs, retainOnDevice)`. They run on CUDA backends, including ones
-loaded through `IsolatedBackend.Load` or `BackendPackage.TryLoad`, and a sequence
-moves to another context element by element.
+producing an ONNX sequence type) are unaffected: a run leaves a sequence output in
+host memory on every execution provider, which is where a backend reads and leaves
+sequences. They run on CUDA backends, including ones loaded through
+`IsolatedBackend.Load` or `BackendPackage.TryLoad`, and a sequence moves to another
+context element by element.
 
 ### Device-memory readings are process-wide, and device 0's
 
 Device-memory configuration is per context, session and run
 (`ComputeContext.DeviceMemory`, `RunSettings`; see
 [Device memory](inference.md#device-memory-gpu-backends)), so two models on one
-host can have separate budgets and arena strategies.
+host can have separate budgets.
 
 Reporting is process-wide. `DeviceMemory.Read()` and `Sample()` query the CUDA
 device current for the calling thread (device 0, which the shipped GPU backends
@@ -287,9 +333,9 @@ use) and return the whole device's usage, including other processes, and this
 process's share of it (`ProcessBytes`). `PeakUsedBytes` and `PeakProcessBytes`
 are one record each for the process: two contexts training side by side in one
 process share them, and neither can be split between contexts.
-`CompiledGraph.ReadArenaStatistics()` reads one session's arena and
+`CompiledGraph.ReadArenaStatistics()` reads one session's allocator and
 `ComputeContext.ReadDeviceMemoryUse()` what a context holds against its budget
-(see [What one session's arena did](inference.md#what-one-sessions-arena-did)).
+(see [What one session's allocator did](inference.md#what-one-sessions-allocator-did)).
 
 ### Backprop through dynamic loops
 
@@ -341,12 +387,45 @@ backward pass, at a compute cost; see
 
 Building a training rig also runs an automatic memory-aware pass that reorders
 nodes and recomputes tensors where that improves a combined compute-and-memory
-objective. It is conservative and has no opt-out; use the attribute to force a
-trade it would not take. It cuts a step's peak memory by anywhere from nothing to
-about 25%, for at most a few percent more kernel time. A graph containing a scope (a
-recurrent op in its backward pass, or a forward `If`) gets only its checkpoint
-attributes applied. Separately, the training-step session is compiled for the
-shapes it is fed, which removes most shape arithmetic from the executed graph.
+objective. It charges a step's memory as the backend of the rig's runtime context
+lays a run out: ONNX Runtime's allocation plan, with the temporaries its CPU
+kernels hold beside their outputs on the host; on PyTorch, the translation's —
+each value freed after its last read, a view as its input's memory, a result
+written over a contiguous operand dying there. It judges its search by the
+backend's own model of a run: each strategy takes a step only where that model
+scores it better, and the strategies are chosen among by it, so that by that model
+the step it hands over holds no more there than the one it was handed. PyTorch's
+model is quick to ask, so the rematerializer also weighs by it the three candidates
+its own figures score best where they leave it nothing better to take; ONNX
+Runtime's builds a session each time it is asked, and is asked only about each
+strategy's steps. ONNX Runtime's model reads the
+graph ONNX Runtime optimizes and runs, in the order it runs it, with the buffers
+its allocation plan keeps for later values of the same shape and the scratch its
+kernels take: convolutions' and recurrent layers' working buffers on the host, and
+on a card a reduction over inner axes. PyTorch's adds to the translation's layout
+the temporaries of a layer normalization and, on the CPU, of a convolution, and the
+copies torch makes of a value whose strides a reshape or a matrix product cannot
+use as they lie — an element-wise result lies as its operands do, so a product of
+transposed attention heads is transposed too — and a recurrent layer's stacked
+outputs. Both run a loop's body once per iteration where its trip count follows
+from the shapes fed, and hold what a sequence holds for as long as the sequence
+lives. Where a model cannot tell a value's shape, the pass's own figures decide.
+It is conservative and has no
+opt-out; use the attribute to force a trade it would not take. It picks the
+tensors it recomputes, but not whole-module segments: checkpointing each layer of
+a two-layer transformer encoder holds a further 5–6% less than the pass alone on
+ONNX Runtime, for a tenth more step time or more, and up to 4% less on PyTorch. The
+pass cuts a step's peak memory by anywhere from nothing to about a third on ONNX
+Runtime, for at most a few percent more computation; on PyTorch it can trade more
+— a two-layer encoder's step holds over 40% less, for about a fifth more
+computation. A step containing a scope — a recurrent op's backward pass is a loop
+— is searched only where the backend's model answers for it, which it does for a
+loop whose trip count follows from the shapes fed, and for no branch (`If`); a
+one-layer LSTM's step then holds about a tenth less on PyTorch and a sixth to a
+fifth less on ONNX Runtime, by reordering alone. Any other step with a scope gets only
+its checkpoint attributes applied. Separately, the
+training-step session is compiled for the shapes it is fed, which removes most
+shape arithmetic from the executed graph.
 
 The `Shorokoo.Core.AutoDiffCheckpointing` namespace is internal despite being
 public in the assembly; no API returns its types, so do not build on them. Ten other

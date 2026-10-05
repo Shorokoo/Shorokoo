@@ -9,8 +9,7 @@ namespace Shorokoo
 {
     /// <summary>
     /// Who holds a reader lock taken outside any run, as a refusal of the tensor or sequence names
-    /// it: a copy being made out of its memory, or a write into it. Either way the memory may not
-    /// end while it is held.
+    /// it: a copy being made out of its memory, which may not end while it is held.
     /// </summary>
     internal sealed class OutsideARun
     {
@@ -19,8 +18,6 @@ namespace Shorokoo
         private OutsideARun(string what) => _what = what;
 
         internal static OutsideARun CopyingOut { get; } = new("a copy being made of its contents");
-
-        internal static OutsideARun Writing { get; } = new("a write into its contents");
 
         /// <inheritdoc/>
         public override string ToString() => _what;
@@ -113,6 +110,17 @@ namespace Shorokoo
             get { lock (this) return _released; }
         }
 
+        /// <summary>
+        /// Whether the memory is still the allocation's own and not yet released: while it lives,
+        /// and after a deletion or a retirement that is waiting for its last reader to stand down
+        /// before the memory goes. False once the memory is released, and once a take has handed
+        /// it to a caller that deals with it — a run that consumed it.
+        /// </summary>
+        internal bool HoldsItsMemory
+        {
+            get { lock (this) return !_taken && !_released; }
+        }
+
         /// <summary>Throws the refusal of an access to a dead allocation, naming why it died.</summary>
         /// <exception cref="ObjectDisposedException">The allocation is dead.</exception>
         internal void ThrowIfDead()
@@ -184,11 +192,12 @@ namespace Shorokoo
         }
 
         /// <summary>
-        /// Ends a copy its source no longer wants — the source was written to, or died. It is marked
-        /// dead with <paramref name="death"/> and its memory released now, or when the last reader
-        /// returns; unlike a deletion it asks no run to stop, since a run reading the old contents
-        /// is reading what it was fed. An allocation already dead is left as it is: whoever ended it
-        /// deals with its memory.
+        /// Ends an allocation its owner no longer wants — a copy whose source let its copies go or
+        /// died, or a compiled graph's weight as the graph is disposed. It is marked dead with
+        /// <paramref name="death"/> and its memory released now, or when the last reader returns;
+        /// unlike a deletion it asks no run to stop, since a run reading the old contents is reading
+        /// what it was fed. An allocation already dead is left as it is: whoever ended it deals with
+        /// its memory.
         /// </summary>
         internal void Retire(TensorDeath death)
         {

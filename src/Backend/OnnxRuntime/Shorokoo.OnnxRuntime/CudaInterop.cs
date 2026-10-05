@@ -7,10 +7,10 @@ namespace Shorokoo.OnnxRuntime;
 /// in either direction. ONNX Runtime's managed surface has no such call, and a value living on
 /// the card hands out a pointer with no way to read or fill it.
 ///
-/// <para>Both directions serve one promise apiece. Device-to-host reads back a tensor an
-/// execution provider left on the card; host-to-device is what puts a tensor into a CUDA
-/// context's memory in the first place, rather than leaving host bytes for the provider to copy
-/// over on every run.</para>
+/// <para>Both directions serve one promise apiece. Device-to-host reads back a tensor on the
+/// card — an output a run left there, or a tensor put there; host-to-device is what puts a tensor
+/// into the card's memory in the first place, which is where a CUDA session reads every tensor it
+/// is fed.</para>
 ///
 /// <para>Bound lazily and by name, so nothing here requires a CUDA machine to load — the copy
 /// simply reports failure when the runtime is absent, which is the right answer on a host-only
@@ -25,6 +25,12 @@ internal static class CudaInterop
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate int Memcpy(IntPtr destination, IntPtr source, nuint count, int kind);
 
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate int GetLastError();
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate int StreamSynchronize(IntPtr stream);
+
     private const int HostToDevice = 1;
     private const int DeviceToHost = 2;
 
@@ -33,8 +39,24 @@ internal static class CudaInterop
     private static bool _bound;
 
     public static bool CopyDeviceToHost(IntPtr source, byte[] destination)
-        => Copy(destination, (memcpy, pinned)
-            => memcpy(pinned, source, (nuint)destination.Length, DeviceToHost));
+        => CopyDeviceToHost(source, destination.AsSpan()) == 0;
+
+    /// <summary>
+    /// Fills <paramref name="destination"/> from the device allocation at
+    /// <paramref name="source"/> — any range of one, since the caller offsets the address. What
+    /// streams a tensor off the card through one reused buffer, a piece at a time. Answers the CUDA
+    /// runtime's error code, <c>0</c> on success, or <c>null</c> where there is no runtime to ask.
+    /// </summary>
+    public static unsafe int? CopyDeviceToHost(IntPtr source, Span<byte> destination)
+    {
+        var memcpy = Bind();
+        if (memcpy is null) return null;
+        if (destination.IsEmpty) return 0;
+        // Pinned for the length of the call, as Copy pins an array: the CUDA runtime knows nothing
+        // of the GC, and a span over managed memory is a moveable address until fixed.
+        fixed (byte* pinned = destination)
+            return memcpy((IntPtr)pinned, source, (nuint)destination.Length, DeviceToHost);
+    }
 
     /// <summary>
     /// Fills <paramref name="count"/> bytes of the device allocation at
@@ -44,6 +66,21 @@ internal static class CudaInterop
     /// </summary>
     public static bool CopyHostToDevice(byte[] source, IntPtr destination, int count)
         => Copy(source, (memcpy, pinned) => memcpy(destination, pinned, (nuint)count, HostToDevice));
+
+    /// <summary>
+    /// Fills the device allocation at <paramref name="destination"/> — any range of one, since the
+    /// caller offsets the address — from <paramref name="source"/>. What streams a tensor onto the
+    /// card through one reused buffer, a piece at a time. Answers as
+    /// <see cref="CopyDeviceToHost(IntPtr, Span{byte})"/> does.
+    /// </summary>
+    public static unsafe int? CopyHostToDevice(ReadOnlySpan<byte> source, IntPtr destination)
+    {
+        var memcpy = Bind();
+        if (memcpy is null) return null;
+        if (source.IsEmpty) return 0;
+        fixed (byte* pinned = source)
+            return memcpy(destination, (IntPtr)pinned, (nuint)source.Length, HostToDevice);
+    }
 
     /// <summary>
     /// Runs <paramref name="copy"/> over <paramref name="hostBuffer"/> pinned, once the runtime is
@@ -76,8 +113,30 @@ internal static class CudaInterop
             // Try rather than Load: both report a missing or unloadable CUDA runtime by returning
             // false, so there is nothing here to catch -- the caller reports the absence.
             if (NativeLibrary.TryLoad(LibraryName, out var handle)
-                && NativeLibrary.TryGetExport(handle, "cudaMemcpy", out var entry))
-                _memcpy = Marshal.GetDelegateForFunctionPointer<Memcpy>(entry);
+                && NativeLibrary.TryGetExport(handle, "cudaMemcpy", out var entry)
+                && NativeLibrary.TryGetExport(handle, "cudaGetLastError", out var lastError)
+                && NativeLibrary.TryGetExport(handle, "cudaStreamSynchronize", out var streamSync))
+            {
+                var memcpy = Marshal.GetDelegateForFunctionPointer<Memcpy>(entry);
+                var clear = Marshal.GetDelegateForFunctionPointer<GetLastError>(lastError);
+                var synchronize = Marshal.GetDelegateForFunctionPointer<StreamSynchronize>(streamSync);
+                // A failed copy leaves its error as the thread's last CUDA error, which the execution
+                // provider reads after its own next launch on this thread and reports as that run's
+                // failure. The copy's error is answered here, so it is cleared here.
+                _memcpy = (destination, source, count, kind) =>
+                {
+                    var status = memcpy(destination, source, count, kind);
+                    // From pageable host memory, cudaMemcpy may return once the bytes are staged,
+                    // before the DMA onto the card has landed, and the execution provider's
+                    // kernels run on streams of their own that nothing orders after that DMA. So a
+                    // copy onto the card waits on the stream it was made on (the legacy default
+                    // one) before it counts as done, and one that does not complete is a failed
+                    // copy.
+                    if (status == 0 && kind == HostToDevice) status = synchronize(IntPtr.Zero);
+                    if (status != 0) clear();
+                    return status;
+                };
+            }
             return _memcpy;
         }
     }

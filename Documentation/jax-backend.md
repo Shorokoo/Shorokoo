@@ -150,17 +150,20 @@ session binds no output aliases.
 | | CPU | CUDA |
 |---|---|---|
 | **Output aliasing** | none: nothing is written in place | none |
-| **Resident runs** (`RunRetainingOutputs`) | nothing to retain: outputs are on the host | a kept output stays on the card; inputs already there are read in place |
+| **Where inputs and outputs are** | host memory | the card: every input is placed there before the run, and every output stays there |
 | **Cancellation** (`RunSettings.CancellationToken`) | a run cancelled before it starts is refused; a run is one XLA program and is not stopped part way | same |
 | **`DeviceMemory.LimitBytes`** | ignored | ignored: JAX's allocator is the process's and takes no per-run limit |
 | **`RunSettings.ShrinkArenaAfterRun`** | ignored | ignored |
 | **Arena statistics** | none | JAX's allocator on the device (`Device.memory_stats`) |
 | **`TraceNodePlacement`** | every node on `cpu` | every node on `cuda:N` |
 | **`DeterministicCompute`** | not applied | not applied: XLA's kernels run as they otherwise would |
+| **`Precision.AllowTensorFloat32`** | no effect: `float32` in full precision | off by default: every product and convolution is compiled at `Precision.HIGHEST`; on, at `Precision.HIGH`: XLA computes products in TensorFloat-32, and each convolution in TensorFloat-32 or in full precision, whichever kernel its autotuner finds faster when it compiles the program |
 | **Log severity** | Python warnings a run raises are shown at `Warning` and below, not above | same |
 
-Floating-point products and convolutions run in the operands' full precision; `float32`
-operands are never rounded to TensorFloat-32.
+Floating-point products and convolutions run in the operands' full precision unless the context
+allows TensorFloat-32 ([Precision](inference.md#precision-gpu-backends)): the precision is compiled
+into each program, from the session's context, so sessions of either kind run side by side. A
+determinant (`Det`) and its gradient are factorized in full precision either way.
 
 ## Limitations
 

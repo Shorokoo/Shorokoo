@@ -14,6 +14,7 @@ using Shorokoo.Graph;
 using Shorokoo.Core.Nodes.OnnxNodes;
 using static Shorokoo.Globals;
 using Shorokoo.Core.Backends;
+using Shorokoo.Runtime;
 
 namespace Shorokoo.Onnx
 {
@@ -73,12 +74,23 @@ namespace Shorokoo.Onnx
         /// <param name="filePath">Path to the SafeTensor file</param>
         /// <returns>List of SafeTensor objects containing tensor data and metadata, in file order</returns>
         public static List<SafeTensor> LoadSafeTensors(string filePath)
+            => LoadSafeTensors(filePath, (_, _) => ComputeContext.Host);
+
+        /// <summary>
+        /// <see cref="LoadSafeTensors(string)"/>, putting each tensor where
+        /// <paramref name="placement"/> names for it: the file is read once, forward, each tensor's
+        /// bytes going straight into the memory it lives in — so host memory holds one bounded
+        /// buffer for a tensor loaded onto a device, never the file (Shorokoo/Shorokoo#436). A tensor
+        /// <paramref name="placement"/> names no memory for is passed over and not returned.
+        /// </summary>
+        internal static List<SafeTensor> LoadSafeTensors(string filePath, Func<string, long, ComputeContext?> placement)
         {
             if (!File.Exists(filePath))
                 throw new FileNotFoundException($"SafeTensor file not found: {filePath}");
 
-            var fileBytes = File.ReadAllBytes(filePath);
-            return ParseSafeTensorFile(fileBytes, filePath);
+            using var file = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read,
+                bufferSize: 1 << 16, FileOptions.SequentialScan);
+            return ReadSafeTensors(file, file.Length, placement, filePath);
         }
 
         /// <summary>
@@ -149,8 +161,8 @@ namespace Shorokoo.Onnx
                 var shape = st.Shape;
                 var dtype = st.DataType.ToUpperInvariant();
 
-                // The tensor's storage as raw bytes — measured, not copied.
-                int blobLength = st.RawBytes.Length;
+                // The tensor's storage as raw bytes — measured, not read, wherever it is.
+                long blobLength = st.ByteLength;
 
                 long startOffset = currentOffset;
                 long endOffset = startOffset + blobLength;
@@ -185,21 +197,22 @@ namespace Shorokoo.Onnx
             stream.Write(lengthBytes, 0, lengthBytes.Length);
             stream.Write(headerBytes, 0, headerBytes.Length);
 
+            // A stream that only counts what is written through it has no use for the payload, and
+            // reading a device-resident tensor to count it would bring the whole state off the card
+            // for nothing: it is told the payload's length instead.
+            if (stream is ILengthOnlyStream { IsLengthOnly: true } counter)
+            {
+                counter.Advance(currentOffset);
+                return;
+            }
+
             // Second pass: each tensor's payload goes from its own storage into the stream, in the
             // order the header's offsets were accumulated. Re-reading the storage is sound because a
             // tensor's byte length is fixed by the value it wraps and SafeTensor.Data is get-only, so
-            // the payload cannot disagree with the offsets already written.
-            //
-            // The span is a window onto storage the tensor owns and roots nothing itself, so the
-            // tensor is kept alive across the write: a local is retired at its LAST READ, which
-            // without the KeepAlive would be the call that produced the span, leaving the write
-            // reading memory a collection could already have freed (Shorokoo/Shorokoo#178).
+            // the payload cannot disagree with the offsets already written. A tensor in a device's
+            // memory is streamed through one bounded host buffer rather than copied whole.
             for (int i = 0; i < tensors.Count; i++)
-            {
-                var record = tensors[i];
-                stream.Write(record.RawBytes);
-                GC.KeepAlive(record);
-            }
+                tensors[i].WriteTo(stream);
         }
 
         /// <summary>
@@ -251,142 +264,213 @@ namespace Shorokoo.Onnx
         }
 
         /// <summary>
-        /// Parse SafeTensor file format and return list of SafeTensor objects. The declared
-        /// header length and every tensor's data_offsets range are validated against the actual
-        /// byte count up front, so a truncated file (interrupted download/copy, disk full, …)
-        /// fails with a <see cref="ModelException"/> naming truncation and the declared vs.
-        /// actual sizes instead of an incidental parse error.
+        /// Parse SafeTensor file format and return list of SafeTensor objects, in host memory —
+        /// <see cref="ReadSafeTensors"/> over the bytes, whose length is known up front.
         /// </summary>
-        /// <param name="fileBytes">Raw bytes of the SafeTensor file</param>
-        /// <param name="origin">Name used in error messages, typically the file path</param>
-        /// <returns>List of SafeTensor objects</returns>
         private static List<SafeTensor> ParseSafeTensorFile(byte[] fileBytes, string origin)
         {
-            if (fileBytes.Length < 8)
+            using var source = new MemoryStream(fileBytes, writable: false);
+            return ReadSafeTensors(source, fileBytes.Length, (_, _) => ComputeContext.Host, origin);
+        }
+
+        /// <summary>
+        /// Reads a SafeTensors payload from <paramref name="source"/> in one forward pass, putting
+        /// each tensor in the memory <paramref name="placement"/> names for it: host memory
+        /// (<see cref="ComputeContext.Host"/>), which the bytes are read into directly, or a
+        /// context's device memory, which they reach through one bounded buffer rather than a host
+        /// copy of the tensor (Shorokoo/Shorokoo#436). Tensors come back in the order their bytes
+        /// are laid out, which is the order they were written — not the order the JSON header lists
+        /// them in. Nothing past the last tensor's bytes is read. A tensor
+        /// <paramref name="placement"/> names no memory for (null) is passed over: its bytes are read
+        /// past, never into memory, and it is not returned.
+        ///
+        /// <para><paramref name="available"/> is the payload's length, known up front, and lets a
+        /// truncated file (interrupted download/copy, disk full, …) be refused before a byte of data
+        /// is read, with a <see cref="ModelException"/> naming the declared and actual sizes: no
+        /// header claiming more than the payload holds is believed. A decompressing stream passes the
+        /// size its frames declare. On any failure the tensors already read are
+        /// deleted.</para>
+        /// </summary>
+        internal static List<SafeTensor> ReadSafeTensors(
+            Stream source, long available, Func<string, long, ComputeContext?> placement, string origin)
+        {
+            var lengthField = new byte[8];
+            int got = source.ReadAtLeast(lengthField, 8, throwOnEndOfStream: false);
+            if (got < 8)
                 throw new ModelException(ErrorCodes.ST001, $"SafeTensor file '{origin}'",
-                    $"the file is only {fileBytes.Length} byte(s) — too short to hold the 8-byte " +
+                    $"the file is only {got} byte(s) — too short to hold the 8-byte " +
                     "SafeTensors header-length field. The file is truncated or not a SafeTensors file.");
 
-            // Read header length (first 8 bytes, little-endian)
-            long headerLength = BitConverter.ToInt64(fileBytes, 0);
-
+            long headerLength = BitConverter.ToInt64(lengthField, 0);
             if (headerLength <= 0)
                 throw new InvalidOperationException($"Invalid header length: {headerLength}");
-
-            if (headerLength > fileBytes.Length - 8)
+            if (headerLength > available - 8)
                 throw new ModelException(ErrorCodes.ST002, $"SafeTensor file '{origin}'",
                     $"truncated SafeTensor file — the header declares {headerLength} bytes of JSON header, " +
-                    $"but only {fileBytes.Length - 8} byte(s) follow the length field (the file has " +
-                    $"{fileBytes.Length} bytes). The file was likely cut short by an interrupted download or copy.");
+                    $"but only {available - 8} byte(s) follow the length field (the file has " +
+                    $"{available} bytes). The file was likely cut short by an interrupted download or copy.");
+            if (headerLength > int.MaxValue)
+                throw new ModelException(ErrorCodes.ST002, $"SafeTensor file '{origin}'",
+                    $"the header declares {headerLength} bytes of JSON header, more than any SafeTensors " +
+                    "header holds. The file is corrupt or not a SafeTensors file.");
 
-            // Read header JSON
             var headerBytes = new byte[headerLength];
-            Array.Copy(fileBytes, 8, headerBytes, 0, (int)headerLength);
-            var headerJson = System.Text.Encoding.UTF8.GetString(headerBytes);
+            try
+            {
+                source.ReadExactly(headerBytes);
+            }
+            catch (EndOfStreamException e)
+            {
+                throw new ModelException(ErrorCodes.ST002, $"SafeTensor file '{origin}'",
+                    $"truncated SafeTensor file — the header declares {headerLength} bytes of JSON header, " +
+                    "but the data ends before them. The file was likely cut short by an interrupted " +
+                    "download or copy.", e);
+            }
+            var metadata = JsonSerializer.Deserialize<Dictionary<string, object>>(System.Text.Encoding.UTF8.GetString(headerBytes))
+                ?? throw new InvalidOperationException("Failed to parse SafeTensor header JSON");
 
-            // Parse the JSON to get tensor metadata
-            var metadata = JsonSerializer.Deserialize<Dictionary<string, object>>(headerJson);
-
-            if (metadata == null)
-                throw new InvalidOperationException("Failed to parse SafeTensor header JSON");
-
-            // Ordered by where each tensor's bytes sit in the file, not by the order the JSON
-            // header's keys happen to enumerate: a Dictionary<string, object> does not promise
-            // insertion order, and the data region is laid out in the order the tensors were
-            // written. Callers that reconstruct a field list from a file therefore get the order
-            // it was written in, deterministically.
-            var parsed = new List<(long Start, SafeTensor Tensor)>();
-            long dataOffset = 8 + headerLength; // Start of tensor data
-
-            // Extract tensor information from metadata
+            long dataOffset = 8 + headerLength;
+            var entries = new List<HeaderEntry>();
             foreach (var kvp in metadata)
             {
-                if (kvp.Key == "__metadata__") continue; // Skip metadata section
-
-                var tensorName = kvp.Key;
-                var tensorMeta = kvp.Value;
-
+                if (kvp.Key == "__metadata__") continue;
                 try
                 {
-                    var safeTensor = ParseTensorMetadata(
-                        tensorName, tensorMeta, fileBytes, dataOffset, origin, out var startOffset);
-                    parsed.Add((startOffset, safeTensor));
+                    entries.Add(ParseHeaderEntry(kvp.Key, kvp.Value, dataOffset, available, origin));
                 }
                 catch (Exception ex) when (ex is not ShorokooException)
                 {
-                    throw new InvalidOperationException($"Failed to parse tensor '{tensorName}': {ex.Message}", ex);
+                    throw new InvalidOperationException($"Failed to parse tensor '{kvp.Key}': {ex.Message}", ex);
                 }
             }
 
             // OrderBy, not List.Sort: the sort has to be stable. A zero-element tensor occupies no
             // bytes, so it shares a start offset with whatever follows it, and an unstable sort would
             // order those two arbitrarily.
-            return [.. parsed.OrderBy(x => x.Start).Select(x => x.Tensor)];
-        }
-
-        /// <summary>
-        /// Parse metadata for a single tensor and create SafeTensor object
-        /// </summary>
-        private static SafeTensor ParseTensorMetadata(
-            string tensorName, object tensorMeta, byte[] fileBytes, long dataOffset, string origin,
-            out long startOffsetOut)
-        {
-            startOffsetOut = 0;
+            var tensors = new List<SafeTensor>(entries.Count);
             try
             {
-                // Parse the tensor metadata
-                var metaJson = JsonSerializer.Serialize(tensorMeta);
-                var metaDict = JsonSerializer.Deserialize<Dictionary<string, object>>(metaJson);
-
-                if (metaDict == null)
-                    throw new InvalidOperationException("Failed to parse tensor metadata");
-
-                // Extract shape
-                var shape = ExtractShape(metaDict);
-
-                // Extract data_offsets
-                var (startOffset, endOffset) = ExtractDataOffsets(metaDict);
-                startOffsetOut = startOffset;
-
-                // Extract dtype
-                var dtype = ExtractDataType(metaDict);
-
-                if (startOffset < 0 || endOffset < startOffset)
-                    throw new InvalidOperationException(
-                        $"Tensor '{tensorName}' has invalid data_offsets [{startOffset}, {endOffset})");
-
-                // Unsigned sum: both terms are non-negative longs, so this cannot overflow the
-                // way a signed dataOffset + endOffset could for an absurd corrupt endOffset.
-                ulong requiredBytes = (ulong)dataOffset + (ulong)endOffset;
-                if (requiredBytes > (ulong)fileBytes.Length)
-                    throw new ModelException(ErrorCodes.ST003, $"SafeTensor file '{origin}'",
-                        $"truncated SafeTensor file — tensor '{tensorName}' declares data_offsets " +
-                        $"[{startOffset}, {endOffset}), which requires the file to hold " +
-                        $"{requiredBytes} bytes, but the file has {fileBytes.Length} bytes. " +
-                        "The file was likely cut short by an interrupted download or copy.");
-
-                // Extract tensor data
-                var dataSize = (int)(endOffset - startOffset);
-                var tensorData = new byte[dataSize];
-                Array.Copy(fileBytes, dataOffset + startOffset, tensorData, 0, dataSize);
-
-                // Create TensorData based on dtype using the working Globals.TensorData methods
-                var tensorDataObj = CreateTensorFromRawBytes(dtype, shape, tensorData);
-
-                // Extract any additional metadata
-                var additionalMetadata = metaDict.Where(kvp =>
-                    kvp.Key != "shape" &&
-                    kvp.Key != "data_offsets" &&
-                    kvp.Key != "dtype")
-                    .ToDictionary(kvp => kvp.Key, kvp => kvp.Value);
-
-                return new SafeTensor(tensorName, tensorDataObj, dtype, shape, additionalMetadata);
+                long position = 0;
+                foreach (var entry in entries.OrderBy(e => e.Start))
+                {
+                    var onto = placement(entry.Name, entry.Elements);
+                    // Occupying no bytes, a zero-byte tensor overlaps nothing wherever its offsets
+                    // fall -- inside another tensor's range, or at a start a longer tensor shares --
+                    // and reading it consumes nothing, so the position stays where it is.
+                    if (entry.Start == entry.End)
+                    {
+                        if (onto is not null)
+                            tensors.Add(new SafeTensor(entry.Name,
+                                onto.ReadTensor(new Shape(entry.Shape), entry.DType, source),
+                                entry.DTypeName, entry.Shape, entry.Metadata));
+                        continue;
+                    }
+                    if (entry.Start < position)
+                        throw new InvalidOperationException(
+                            $"Tensor '{entry.Name}' has data_offsets [{entry.Start}, {entry.End}), which overlap " +
+                            "the bytes of the tensor before it; SafeTensors tensors do not share bytes.");
+                    if (onto is null)
+                    {
+                        Skip(source, entry.End - position, entry.Name, origin);
+                        position = entry.End;
+                        continue;
+                    }
+                    Skip(source, entry.Start - position, entry.Name, origin);
+                    TensorData data;
+                    try
+                    {
+                        data = onto.ReadTensor(new Shape(entry.Shape), entry.DType, source);
+                    }
+                    catch (EndOfStreamException e)
+                    {
+                        throw Truncated(entry.Name, origin, e);
+                    }
+                    tensors.Add(new SafeTensor(entry.Name, data, entry.DTypeName, entry.Shape, entry.Metadata));
+                    position = entry.End;
+                }
             }
-            catch (Exception ex) when (ex is not ShorokooException)
+            catch
             {
-                throw new InvalidOperationException($"Failed to parse tensor metadata for '{tensorName}': {ex.Message}", ex.InnerException ?? ex);
+                foreach (var t in tensors) t.Data.Delete();
+                throw;
+            }
+            return tensors;
+        }
+
+        private sealed record HeaderEntry(
+            string Name, string DTypeName, DType DType, long[] Shape, long Elements, long Start, long End,
+            Dictionary<string, object> Metadata);
+
+        /// <summary>One tensor's header entry, checked against what the payload can hold.</summary>
+        private static HeaderEntry ParseHeaderEntry(
+            string tensorName, object tensorMeta, long dataOffset, long available, string origin)
+        {
+            var metaDict = JsonSerializer.Deserialize<Dictionary<string, object>>(JsonSerializer.Serialize(tensorMeta))
+                ?? throw new InvalidOperationException("Failed to parse tensor metadata");
+            var shape = ExtractShape(metaDict);
+            var (startOffset, endOffset) = ExtractDataOffsets(metaDict);
+            var dtypeName = ExtractDataType(metaDict);
+
+            if (startOffset < 0 || endOffset < startOffset)
+                throw new InvalidOperationException(
+                    $"Tensor '{tensorName}' has invalid data_offsets [{startOffset}, {endOffset})");
+
+            // Unsigned sum: both terms are non-negative longs, so this cannot overflow the way a
+            // signed dataOffset + endOffset could for an absurd corrupt endOffset.
+            ulong requiredBytes = (ulong)dataOffset + (ulong)endOffset;
+            if (requiredBytes > (ulong)available)
+                throw new ModelException(ErrorCodes.ST003, $"SafeTensor file '{origin}'",
+                    $"truncated SafeTensor file — tensor '{tensorName}' declares data_offsets " +
+                    $"[{startOffset}, {endOffset}), which requires the file to hold " +
+                    $"{requiredBytes} bytes, but the file has {available} bytes. " +
+                    "The file was likely cut short by an interrupted download or copy.");
+
+            var dtype = SafeTensorDTypeToDType(dtypeName);
+            long elements = 1;
+            foreach (var d in shape)
+            {
+                if (d < 0)
+                    throw new InvalidOperationException(
+                        $"Tensor '{tensorName}' has a negative dimension in shape [{string.Join(", ", shape)}]");
+                elements = checked(elements * d);
+            }
+            long expected = checked(elements * (TensorData.StorageBits(dtype) / 8));
+            if (endOffset - startOffset != expected)
+                throw new InvalidOperationException(
+                    $"Tensor '{tensorName}' has data_offsets [{startOffset}, {endOffset}) covering " +
+                    $"{endOffset - startOffset} bytes, but a {dtypeName} tensor of shape " +
+                    $"[{string.Join(", ", shape)}] takes {expected}.");
+
+            var additionalMetadata = metaDict
+                .Where(kvp => kvp.Key != "shape" && kvp.Key != "data_offsets" && kvp.Key != "dtype")
+                .ToDictionary(kvp => kvp.Key, kvp => kvp.Value);
+            return new HeaderEntry(tensorName, dtypeName, dtype, shape, elements, startOffset, endOffset, additionalMetadata);
+        }
+
+        /// <summary>Reads past <paramref name="count"/> bytes no tensor claims.</summary>
+        private static void Skip(Stream source, long count, string nextTensor, string origin)
+        {
+            if (count == 0) return;
+            var scratch = new byte[(int)Math.Min(count, 64 * 1024)];
+            try
+            {
+                for (long left = count; left > 0;)
+                {
+                    int n = (int)Math.Min(left, scratch.Length);
+                    source.ReadExactly(scratch, 0, n);
+                    left -= n;
+                }
+            }
+            catch (EndOfStreamException e)
+            {
+                throw Truncated(nextTensor, origin, e);
             }
         }
+
+        private static ModelException Truncated(string tensorName, string origin, Exception inner)
+            => new(ErrorCodes.ST003, $"SafeTensor file '{origin}'",
+                $"truncated SafeTensor file — the data ends before the bytes of tensor '{tensorName}'. " +
+                "The file was likely cut short by an interrupted download or copy.", inner);
 
         /// <summary>
         /// Extract shape array from metadata dictionary. An empty array is the valid encoding of
@@ -441,52 +525,29 @@ namespace Shorokoo.Onnx
             throw new InvalidOperationException(
                 "Tensor metadata is missing a valid 'dtype' field — the header is corrupt or not SafeTensors.");
         }
-
-        /// <summary>
-        /// Create TensorData from raw bytes by converting to typed arrays and using working Globals.TensorData methods
-        /// </summary>
-        private static TensorData CreateTensorFromRawBytes(string safeTensorDType, long[] shape, byte[] rawData)
-        {
-            return safeTensorDType.ToUpperInvariant() switch
+        /// <summary>The Shorokoo element type a SafeTensors dtype string names.</summary>
+        private static DType SafeTensorDTypeToDType(string safeTensorDType)
+            => safeTensorDType.ToUpperInvariant() switch
             {
-                "BOOL" => (TensorData)Globals.TensorData(shape, ConvertRawBytes<bool>(rawData)),
-                "I8" => (TensorData)Globals.TensorData(shape, ConvertRawBytes<sbyte>(rawData)),
-                "I16" => (TensorData)Globals.TensorData(shape, ConvertRawBytes<short>(rawData)),
-                "I32" => (TensorData)Globals.TensorData(shape, ConvertRawBytes<int>(rawData)),
-                "I64" => (TensorData)Globals.TensorData(shape, ConvertRawBytes<long>(rawData)),
-                "U8" => (TensorData)Globals.TensorData(shape, ConvertRawBytes<byte>(rawData)),
-                "U16" => (TensorData)Globals.TensorData(shape, ConvertRawBytes<ushort>(rawData)),
-                "U32" => (TensorData)Globals.TensorData(shape, ConvertRawBytes<uint>(rawData)),
-                "U64" => (TensorData)Globals.TensorData(shape, ConvertRawBytes<ulong>(rawData)),
-                "F32" => (TensorData)Globals.TensorData(shape, ConvertRawBytes<float>(rawData)),
-                "F64" => (TensorData)Globals.TensorData(shape, ConvertRawBytes<double>(rawData)),
-                // F16/BF16 payloads are raw little-endian IEEE half / bfloat16 bit
-                // patterns (2 bytes per element) — exactly the in-memory layout of the
-                // ushort-backed Float16/BFloat16 structs, so the same memcpy path works.
-                "F16" => (TensorData)Globals.TensorData(shape, ConvertRawBytes<Float16>(rawData)),
-                "BF16" => (TensorData)Globals.TensorData(shape, ConvertRawBytes<BFloat16>(rawData)),
+                "BOOL" => DType.Bool,
+                "I8" => DType.Int8,
+                "I16" => DType.Int16,
+                "I32" => DType.Int32,
+                "I64" => DType.Int64,
+                "U8" => DType.UInt8,
+                "U16" => DType.UInt16,
+                "U32" => DType.UInt32,
+                "U64" => DType.UInt64,
+                "F32" => DType.Float32,
+                "F64" => DType.Float64,
+                // F16/BF16 payloads are raw little-endian IEEE half / bfloat16 bit patterns (2 bytes
+                // per element) — exactly the in-memory layout of the ushort-backed Float16/BFloat16
+                // structs.
+                "F16" => DType.Float16,
+                "BF16" => DType.BFloat16,
                 _ => throw new NotSupportedException(
                     $"Unsupported SafeTensor data type: {safeTensorDType}. " +
                     "Supported formats: BOOL, I8, I16, I32, I64, U8, U16, U32, U64, F16, BF16, F32, F64.")
             };
-        }
-
-        /// <summary>
-        /// Convert raw bytes to typed array
-        /// </summary>
-        private static unsafe T[] ConvertRawBytes<T>(byte[] rawData) where T : unmanaged
-        {
-            var elementSize = sizeof(T);
-            var elementCount = rawData.Length / elementSize;
-            var result = new T[elementCount];
-
-            fixed (byte* srcPtr = rawData)
-            fixed (T* dstPtr = result)
-            {
-                Buffer.MemoryCopy(srcPtr, dstPtr, rawData.Length, rawData.Length);
-            }
-
-            return result;
-        }
     }
 }

@@ -18,6 +18,13 @@ public class GraphOptimizationResult
     public required string StrategyName { get; init; }
 
     /// <summary>
+    /// What the backend the step runs on holds at the peak of a run of each strategy's graph, in
+    /// <see cref="AllStrategies"/>' order, where that backend models a run and the pass chose by
+    /// it; null where it chose by its own evaluation.
+    /// </summary>
+    internal IReadOnlyList<long>? BackendPeakBytes { get; init; }
+
+    /// <summary>
     /// The optimized <see cref="InternalComputationGraph"/> produced by the selected strategy.
     /// </summary>
     /// <summary>The winning strategy's rewritten graph. Internal: the rig freezes it
@@ -50,7 +57,8 @@ public class GraphOptimizationResult
 /// Optimizes a <see cref="InternalComputationGraph"/> for the compute–memory tradeoff by
 /// combining memory-aware scheduling (<see cref="MemoryAwareScheduler"/>) with
 /// rematerialization (<see cref="Rematerializer"/>). The optimizer evaluates two
-/// alternating strategies — <c>RematReorder</c> and <c>ReorderRemat</c> — and selects
+/// alternating strategies — <c>RematReorder</c> and <c>ReorderRemat</c> — and a third
+/// committing the rematerializer's batches whole (<see cref="UnprunedRematReorder"/>), and selects
 /// the one with the best combined metric
 /// (see <see cref="ComputeMemoryObjective"/>: both terms as ratios to the baseline graph).
 /// Where its evaluator carries a step's state written in place, both start from the graph with
@@ -113,24 +121,52 @@ internal class MemoryAwareGraphOptimizer
     /// </summary>
     public const string OrderedStateReads = "OrderedStateReads";
 
+    /// <summary>
+    /// The strategy alternating rematerialization and reordering as <c>RematReorder</c> does, with
+    /// a rematerializer that commits each batch that improves whole, rather than pruned to the
+    /// members that pay for themselves where the peak stands.
+    ///
+    /// <para>Pruning saves the compute of the members that ride along, but the graph it commits
+    /// can set the search on a path that ends higher: on a two-layer transformer encoder's step
+    /// charged as PyTorch's translation lays it out, the pruned search stops at 78% of the step's
+    /// peak for 4% more compute, and the whole batches reach 58% for 20% more, which scores better
+    /// by the objective both are judged by. Neither a larger evaluation budget nor retrying the
+    /// pruned members later reaches it. Where pruning does as well, it scores better, at less
+    /// compute, and is chosen.</para>
+    /// </summary>
+    public const string UnprunedRematReorder = "RematReorderUnpruned";
+
     private readonly GraphEvaluator _evaluator;
     private readonly ShapeInferenceInterpreter _shapeInference;
     private readonly double _computeFactor;
     private readonly double _memoryFactor;
+    private readonly Func<InternalComputationGraph, long?>? _backendPeak;
+    private readonly bool _weighPlateaus;
 
     /// <summary>
     /// A pass scoring every graph it considers — the baseline, each checkpoint segment, each
     /// rematerialization and each reordering — with <paramref name="evaluator"/>, the default
     /// evaluator when null. Give that evaluator the step's <see cref="StepState"/> and every
     /// candidate is scored with the state it will run with, written in place where the candidate
-    /// still proves it.
+    /// still proves it. Where <paramref name="backendPeak"/> answers — what the backend the step
+    /// runs on holds at the peak of a run of a graph (<see cref="Shorokoo.Core.Backends.IShorokooBackend"/>'s
+    /// modelled run peak) — the search is judged by that peak in place of the evaluator's
+    /// (<see cref="BackendJudge"/>): each strategy takes a step only where it scores better so, the
+    /// rematerializer weighs the trials its own figures leave on a plateau by it, and the strategies
+    /// are chosen among by it, so that the graph handed back holds no more on that backend than the
+    /// one handed over, at the same objective. A plateau's trials are weighed by it only where
+    /// <paramref name="weighPlateaus"/> says it is quick to ask.
     /// </summary>
     public MemoryAwareGraphOptimizer(
         double computeFactor = DefaultComputeWeight,
         double memoryFactor = DefaultMemoryWeight,
         GraphEvaluator? evaluator = null,
-        ShapeInferenceInterpreter? shapeInference = null)
+        ShapeInferenceInterpreter? shapeInference = null,
+        Func<InternalComputationGraph, long?>? backendPeak = null,
+        bool weighPlateaus = true)
     {
+        _backendPeak = backendPeak;
+        _weighPlateaus = weighPlateaus;
         _evaluator = evaluator ?? new GraphEvaluator();
         _shapeInference = shapeInference ?? new ShapeInferenceInterpreter();
         _computeFactor = computeFactor;
@@ -169,6 +205,7 @@ internal class MemoryAwareGraphOptimizer
         // The one objective every candidate is finally judged by, normalized to the graph we
         // started from so the weights behave identically at every model size.
         var selection = new ComputeMemoryObjective(_computeFactor, _memoryFactor, baselineEval);
+        var judge = _backendPeak is { } peakOf ? new BackendJudge(peakOf, _computeFactor, _memoryFactor, graph, baselineEval, _weighPlateaus) : null;
 
         // Doing nothing is always a candidate, so the pass can never return a graph that
         // scores worse than the one it was handed.
@@ -200,26 +237,23 @@ internal class MemoryAwareGraphOptimizer
                 strategies.Add((OrderedStateReads, startEval, start.Graph, start.ShapeInfo));
         }
 
-        // The evaluator walks a Loop/If body once, but ORT runs a Loop body per iteration and
+        // Below the threshold there is nothing worth buying, nor worth asking the backend about.
+        if (baselineEval.PeakMemoryBytes < MinimumPeakBytesToOptimize)
+            return Chosen(strategies, strategies.Count - 1, judge: null);
+
+        // The evaluator walks a Loop/If body once, but a backend runs a Loop body per iteration and
         // allocates per iteration; the pass would be optimizing a number that is not what runs.
-        // Measured on the LSTM training step, letting it act raised the real peak by a quarter
-        // while the model claimed a small saving. Until bodies are modelled per iteration, a
-        // graph with a scope is handed back as it came.
-        if (baselineEval.PeakMemoryBytes < MinimumPeakBytesToOptimize || graph.Nodes.Any(n => n.IsOpenNode()))
-        {
-            var kept = strategies[^1];
-            return new GraphOptimizationResult
-            {
-                StrategyName = kept.Name,
-                OptimizedGraph = kept.Graph,
-                ShapeInfo = kept.ShapeInfo,
-                Evaluation = kept.Evaluation,
-                AllStrategies = strategies.Select(s => (s.Name, s.Evaluation, s.Graph)).ToList(),
-            };
-        }
+        // Measured on the LSTM training step with no judge, letting it act raised ONNX Runtime's
+        // real peak by a quarter while the evaluator claimed a small saving. So a graph with a scope
+        // is handed back as it came, unless the backend's own model of a run answers for it -- one
+        // that runs each loop's body per iteration, as torch's does -- and then every step the
+        // search takes is judged by that model, and a step it cannot judge is not taken.
+        var scoped = graph.Nodes.Any(n => n.IsOpenNode());
+        if (scoped && judge?.Peak(graph) is null)
+            return Chosen(strategies, strategies.Count - 1, judge);
 
         var scheduler = new MemoryAwareScheduler();
-        var rematerializer = new Rematerializer(selection, _evaluator);
+        var rematerializer = new Rematerializer(selection, _evaluator, judge: judge);
 
         // Each pass carries shape info forward alongside the graph it produced. Rematerialization
         // mints new tensor keys, and evaluating against shape info that predates them prices the
@@ -232,11 +266,59 @@ internal class MemoryAwareGraphOptimizer
 
         Candidate Reorder(Candidate c) => new(scheduler.Reorder(c.Graph, c.ShapeInfo), c.ShapeInfo);
 
-        strategies.Add(RunAlternatingStrategy("RematReorder", selection, start, startEval, Remat, Reorder));
-        strategies.Add(RunAlternatingStrategy("ReorderRemat", selection, start, startEval, Reorder, Remat));
+        strategies.Add(RunAlternatingStrategy("RematReorder", selection, judge, scoped, start, startEval, Remat, Reorder));
+        strategies.Add(RunAlternatingStrategy("ReorderRemat", selection, judge, scoped, start, startEval, Reorder, Remat));
 
-        var best = strategies.OrderBy(s => selection.Score(s.Evaluation)).First();
+        var unpruned = new Rematerializer(selection, _evaluator, pruneBatches: false, judge: judge);
+        Candidate RematWhole(Candidate c)
+        {
+            var (g, si) = unpruned.Apply(c.Graph, c.ShapeInfo);
+            return new Candidate(g, si);
+        }
+        strategies.Add(RunAlternatingStrategy(UnprunedRematReorder, selection, judge, scoped, start, startEval, RematWhole, Reorder));
 
+        var best = Enumerable.Range(0, strategies.Count).MinBy(i => selection.Score(strategies[i].Evaluation));
+        return Chosen(strategies, best, judge);
+    }
+
+    /// <summary>
+    /// The result handing back <paramref name="strategies"/>' entry at <paramref name="chosen"/>,
+    /// the pass's own choice — or, where there is more than one and the backend the step runs on
+    /// models a run of every strategy's graph (<paramref name="judge"/>), the strategy scoring least
+    /// by the same objective with that backend's peaks, its first entry (the graph as handed over)
+    /// scoring the weights' sum: so the step handed back never holds more on that backend than the
+    /// one handed over, unless it buys that with less compute at the objective's rate. Where the pass kept the
+    /// graph with its state's updates ordered after their readers (<see cref="OrderedStateReads"/>),
+    /// that graph stands for the one handed over unless the backend's model has it holding more:
+    /// the ordering costs a few empty kernels and keeps state pairs written in place, which the run's
+    /// peak shows only where it falls at the updates.
+    /// </summary>
+    private GraphOptimizationResult Chosen(
+        List<(string Name, GraphEvaluationResult Evaluation, InternalComputationGraph Graph, ShapeInferenceResult ShapeInfo)> strategies,
+        int chosen, BackendJudge? judge)
+    {
+        List<long>? peaks = null;
+        List<double>? scores = null;
+        if (judge is not null && strategies.Count > 1)
+        {
+            (peaks, scores) = (new List<long>(strategies.Count), new List<double>(strategies.Count));
+            foreach (var strategy in strategies)
+            {
+                if (judge.Judge(strategy.Graph, strategy.Evaluation) is not { } judged)
+                {
+                    (peaks, scores) = (null, null);
+                    break;
+                }
+                peaks.Add(judged.Peak);
+                scores.Add(judged.Score);
+            }
+        }
+        if (peaks is not null && scores is not null)
+        {
+            var ordered = strategies.FindIndex(s => s.Name == OrderedStateReads);
+            chosen = Enumerable.Range(0, strategies.Count).Where(i => i != 0 || ordered < 0 || peaks[0] < peaks[ordered]).MinBy(i => scores[i]);
+        }
+        var best = strategies[chosen];
         return new GraphOptimizationResult
         {
             StrategyName = best.Name,
@@ -244,6 +326,7 @@ internal class MemoryAwareGraphOptimizer
             ShapeInfo = best.ShapeInfo,
             Evaluation = best.Evaluation,
             AllStrategies = strategies.Select(s => (s.Name, s.Evaluation, s.Graph)).ToList(),
+            BackendPeakBytes = peaks,
         };
     }
 
@@ -251,9 +334,18 @@ internal class MemoryAwareGraphOptimizer
     /// meaningful together: a pass that mints new tensor keys invalidates older info.</summary>
     private readonly record struct Candidate(InternalComputationGraph Graph, ShapeInferenceResult ShapeInfo);
 
+    /// <summary>
+    /// A strategy: <paramref name="firstPass"/> and <paramref name="secondPass"/> applied in turn
+    /// from <paramref name="initial"/>, each result taken where it scores better than the graph it
+    /// was made from — by <paramref name="judge"/> where the backend's model answers for both, else
+    /// by <paramref name="objective"/>, unless the graph holds a scope (<paramref name="judgedOnly"/>),
+    /// whose steps only the backend's model may take — until a pass's result is not taken.
+    /// </summary>
     private (string Name, GraphEvaluationResult Evaluation, InternalComputationGraph Graph, ShapeInferenceResult ShapeInfo) RunAlternatingStrategy(
         string name,
         ComputeMemoryObjective objective,
+        BackendJudge? judge,
+        bool judgedOnly,
         Candidate initial,
         GraphEvaluationResult initialEval,
         Func<Candidate, Candidate> firstPass,
@@ -263,14 +355,14 @@ internal class MemoryAwareGraphOptimizer
         var currentEval = initialEval;
         var currentMetric = objective.Score(currentEval);
 
-        TryApply(objective, firstPass, ref current, ref currentEval, ref currentMetric);
-        TryApply(objective, secondPass, ref current, ref currentEval, ref currentMetric);
+        TryApply(objective, judge, judgedOnly, firstPass, ref current, ref currentEval, ref currentMetric);
+        TryApply(objective, judge, judgedOnly, secondPass, ref current, ref currentEval, ref currentMetric);
 
         while (true)
         {
-            if (!TryApply(objective, firstPass, ref current, ref currentEval, ref currentMetric))
+            if (!TryApply(objective, judge, judgedOnly, firstPass, ref current, ref currentEval, ref currentMetric))
                 break;
-            if (!TryApply(objective, secondPass, ref current, ref currentEval, ref currentMetric))
+            if (!TryApply(objective, judge, judgedOnly, secondPass, ref current, ref currentEval, ref currentMetric))
                 break;
         }
 
@@ -279,6 +371,8 @@ internal class MemoryAwareGraphOptimizer
 
     private bool TryApply(
         ComputeMemoryObjective objective,
+        BackendJudge? judge,
+        bool judgedOnly,
         Func<Candidate, Candidate> pass,
         ref Candidate current,
         ref GraphEvaluationResult currentEval,
@@ -290,7 +384,12 @@ internal class MemoryAwareGraphOptimizer
 
         var candidateEval = _evaluator.Evaluate(candidate.Graph, candidate.ShapeInfo);
         var candidateMetric = objective.Score(candidateEval);
-        if (candidateMetric >= currentMetric)
+        if (judge?.Judge(candidate.Graph, candidateEval) is { } judged && judge.Judge(current.Graph, currentEval) is { } now)
+        {
+            if (judged.Score >= now.Score)
+                return false;
+        }
+        else if (judgedOnly || candidateMetric >= currentMetric)
             return false;
 
         current = candidate;

@@ -22,7 +22,15 @@ public static class TensorElementLayout
     /// <see cref="ShorokooTensorElementType.String"/> is variable-length, so
     /// <see cref="IShorokooBackend.CreateStringTensor"/> is what builds one — or is not
     /// one the byte-wise paths handle at all.</exception>
-    public static int ElementSizeInBytes(ShorokooTensorElementType elementType) => elementType switch
+    public static int ElementSizeInBytes(ShorokooTensorElementType elementType) => FixedElementSize(elementType) ?? (
+        elementType == ShorokooTensorElementType.String
+            ? throw new NotSupportedException(
+                "String tensors are variable-length and not byte-stride; use CreateStringTensor instead.")
+            : throw new NotSupportedException(
+                $"A {elementType} tensor has no fixed byte stride, so it cannot be built or read as bytes."));
+
+    /// <summary><see cref="ElementSizeInBytes"/>, or null for an element type it refuses.</summary>
+    internal static int? FixedElementSize(ShorokooTensorElementType elementType) => elementType switch
     {
         ShorokooTensorElementType.Int8 or ShorokooTensorElementType.UInt8
             or ShorokooTensorElementType.Bool => 1,
@@ -32,10 +40,7 @@ public static class TensorElementLayout
             or ShorokooTensorElementType.UInt32 => 4,
         ShorokooTensorElementType.Double or ShorokooTensorElementType.Int64
             or ShorokooTensorElementType.UInt64 => 8,
-        ShorokooTensorElementType.String => throw new NotSupportedException(
-            "String tensors are variable-length and not byte-stride; use CreateStringTensor instead."),
-        _ => throw new NotSupportedException(
-            $"A {elementType} tensor has no fixed byte stride, so it cannot be built or read as bytes."),
+        _ => null,
     };
 
     /// <summary>The bytes a tensor of <paramref name="elementType"/> and <paramref name="shape"/>
@@ -47,6 +52,15 @@ public static class TensorElementLayout
     /// <exception cref="OverflowException">The tensor covers more bytes than an <see cref="int"/>
     /// holds, which is more than any buffer here can address.</exception>
     public static int ByteCount(ShorokooTensorElementType elementType, long[] shape)
+        => checked((int)ByteLength(elementType, shape));
+
+    /// <summary><see cref="ByteCount"/> without its <see cref="int"/> ceiling: the bytes a tensor
+    /// covers as a <see cref="long"/>, for a path that moves them in pieces rather than into one
+    /// buffer, and so is not bounded by what one buffer can address.</summary>
+    /// <exception cref="ArgumentNullException"><paramref name="shape"/> is null.</exception>
+    /// <exception cref="NotSupportedException">The element type has no fixed byte stride, or
+    /// <paramref name="shape"/> has no known element count.</exception>
+    public static long ByteLength(ShorokooTensorElementType elementType, long[] shape)
     {
         ArgumentNullException.ThrowIfNull(shape);
         var elements = 1L;
@@ -64,6 +78,6 @@ public static class TensorElementLayout
                     + "run resolved.");
             elements *= dim;
         }
-        return checked((int)(elements * ElementSizeInBytes(elementType)));
+        return checked(elements * ElementSizeInBytes(elementType));
     }
 }

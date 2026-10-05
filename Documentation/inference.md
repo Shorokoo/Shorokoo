@@ -20,14 +20,24 @@ Related: [core-types.md](core-types.md) · [defining-models.md](defining-models.
 - **A tensor fed to a run as it is is consumed by that run.** Pass `.Shared()` to have the run
   only read it, or `.TryConsume()` to consume it only when nothing else is reading it —
   [Feeding a run: consumed, shared or tried](#feeding-a-run-consumed-shared-or-tried),
-  [A tensor's lifetime](#a-tensors-lifetime-locks-and-deletion),
-  [Feeding a large input without a second copy](#feeding-a-large-input-without-a-second-copy).
+  [A tensor's lifetime](#a-tensors-lifetime-locks-and-deletion).
 - A compute context keeps books on tensors and owns none; disposing it leaves every tensor
   alive — [Moving data between contexts](#moving-data-between-contexts).
-- On a GPU backend a context's `DeviceMemory` settings are a budget on what it holds on the card
-  and the arena settings of the sessions it compiles —
+- **A run's outputs are in the memory of the backend that ran it** — on a GPU backend, the
+  card's — and nothing moves them afterwards. Reading one's values copies them to the host and
+  leaves it there; fed to a run on another context, that run moves it there —
+  [Where a run's inputs and outputs are](#where-a-runs-inputs-and-outputs-are).
+- **A run may write its values into the memory of the inputs it consumes**, where the graph proves
+  it safe and it saves memory; its outputs then stand on that memory, each holding its own range of
+  it — [A run that writes into what it consumed](#a-run-that-writes-into-what-it-consumed).
+- On a GPU backend a context's `DeviceMemory` settings are a budget on what it holds on the card,
+  which the allocator its sessions allocate through holds each run to —
   [Device memory](#device-memory-gpu-backends). Diagnostics start at
-  [What one session's arena did](#what-one-sessions-arena-did).
+  [What one session's allocator did](#what-one-sessions-allocator-did).
+- **`float32` is computed in full `float32` precision on every backend and device.** A context
+  that sets `Precision = new PrecisionSettings { AllowTensorFloat32 = true }` lets a CUDA card
+  compute its `float32` products, convolutions and recurrent layers in TensorFloat-32 instead:
+  faster, and hundreds of times less precise — [Precision](#precision-gpu-backends).
 
 ## Workflow: one-shot evaluation
 
@@ -49,7 +59,8 @@ var features = Conv(input, w, b, AutoPad.NotSet,
 
 TensorData result = OnnxEngine.Eval(features);
 
-// Read the numbers out (see core-types.md):
+// Read the numbers out (see core-types.md). On a GPU backend the result is on the card, and
+// reading it copies its values to the host.
 float[] values = result.CopyMemory<float>();
 ```
 
@@ -301,10 +312,50 @@ var r2 = compiled.Execute(inputData2);             // reuses the session
 `Eval<T>(Tensor<T>)` returning `TensorData<T>`), `Execute(ComputationGraph graph, params IData[] inputs)`,
 `Run(ComputationGraph graph, params NamedModelParam[] inputs)`, and `ExecuteWithState(...)`
 (for stateful models). `TensorData` implements `IData`. `Execute`, `Run` and
-`CompiledGraph.Execute` return `NamedModelParam[]`; read each with `ToTensorData()` then
-`CopyMemory<V>()`, or `ValueAt<V>(i)`, V being the CLR storage type (`float` for `float32`).
+`CompiledGraph.Execute` return `NamedModelParam[]`, each in the memory of the context's backend;
+read each with `ToTensorData()` then `CopyMemory<V>()`, or `ValueAt<V>(i)`, V being the CLR
+storage type (`float` for `float32`), wherever it is.
 `ExecuteWithState` returns `(NamedModelParam[] regularOutputs, ComputationGraph updatedGraph)`
 — feed the updated graph to the next call. `Eval` returns `TensorData` (or `TensorData[]`).
+
+### Loading a saved model onto the device
+
+`ctx.Compile(Persistence.Load(path))` holds the weights in the graph, in host memory, and the
+session copies them onto the card as it is built — several host copies of the weights at that
+moment. `LoadCompiled` goes from the file to a compiled model instead, reading each weight straight
+into the context's memory through one bounded host buffer; the session reads the weights where they
+are, and they are never whole in host memory:
+
+```csharp
+using var cuda     = new ComputeContext(cudaBackend);
+using var compiled = cuda.LoadCompiled("model.skpt");                       // a .skpt checkpoint
+using var imported = cuda.LoadCompiled(architecture, "model.safetensors");  // or architecture + weights
+using var foreign  = cuda.ImportCompiledOnnx("model.onnx");                 // or an .onnx model
+var y = compiled.Execute(x);
+```
+
+- The weights belong to the compiled graph and are freed when it is disposed. There is no graph
+  with the weights to edit or save; load one with `Persistence.Load` for that.
+- A weight another context's run is reading through `.Shared()` when its graph is disposed is
+  deleted all the same, and its memory is freed when that run is done with it. While the graph
+  lives, `Delete` refuses its weights, `TryDelete` declines, and `DeleteAsync` deletes one and
+  counts it on the context's budget until the graph is disposed.
+- Weights of at most about a thousand elements stay in the graph on the host, where the compiler
+  reads such values.
+- The runtime does not fold or fuse over the weights it is handed, so results can round differently
+  in the last bits from the same model compiled from its graph.
+- On a backend that cannot use weights where they are (PyTorch, JAX), `LoadCompiled` is
+  `Compile(Persistence.Load(...))`.
+- A graph holds each of its weights in one managed array, so a weight of more bytes than one holds
+  (`Array.MaxLength`, just under 2 GiB) cannot be bound into a graph: `Persistence.Load`,
+  `Persistence.ImportOnnx`, `Persistence.ImportSafeTensors` and `LoadCompiled` on PyTorch or JAX
+  refuse it with `NotSupportedException`. `LoadCompiled` and `ImportCompiledOnnx` on an ONNX
+  Runtime context, CPU or CUDA, read it into the context's memory instead.
+- `ImportCompiledOnnx` imports the `.onnx` as `Persistence.ImportOnnx` does and refuses it
+  alike, with the same `namingScheme` and `inputShapes` overloads. Its weights are read from where
+  they lie in the file, inline in the protobuf or in an external-data side file alike, so the
+  protobuf is never held whole. A weight ONNX stores as varints (`int32_data`, `int64_data`,
+  `uint64_data`) has no bytes to read in place; it is decoded on the host and stays in the graph.
 
 ### Stopping a run
 
@@ -347,8 +398,10 @@ using var ctx = new ComputeContext(backend)
 var outputs = ctx.Execute(graph, inputs);   // stops when cts does
 ```
 
-Giving a training rig's `runtimeContext` one is how a long `Fit` is stopped — see
-[Compute contexts](training.md#compute-contexts-mergecontext-and-runtimecontext).
+Giving a training rig's `runtimeContext` one abandons the training step running, which consumes
+the run's state. To stop a `Fit` or `Train` between steps and keep what it trained, pass the
+`cancellationToken` parameter of `Fit` / `Train` instead — see
+[Stopping and watching a run](training.md#stopping-and-watching-a-run).
 
 ## Backend selection
 
@@ -379,6 +432,27 @@ Giving a training rig's `runtimeContext` one is how a long `Fit` is stopped — 
   never make discovery ambiguous. See [pytorch-backend.md](pytorch-backend.md) and
   [jax-backend.md](jax-backend.md).
 
+### What a backend provides
+
+`IShorokooBackend` is the interface every backend implements; its comments are the full
+contract. In short, a backend provides:
+
+- **Its run memory** — `RunMemoryOf(elementType)` for a tensor and `SequenceRunMemory` for a
+  sequence: where its sessions read their inputs and leave their outputs. The defaults are the
+  backend's own memory (`MemorySpace`) in its own runtime (`RuntimeIdentity`), and host memory
+  for strings and sequences.
+- **Sessions** (`CreateSession`) that read every input in the run memory, refuse any value
+  outside it with an exception, and leave every output there (`IShorokooSession`). A session
+  never moves a value.
+- **The moves**, as operations of their own, which Shorokoo calls to place an input before a run
+  and to bring a tensor home: into the backend's memory, `CreateTensorInBackendMemory`,
+  `CreateUninitializedTensorInBackendMemory` and `TryCopyHostToTensorRange`; out of it,
+  `CopyTensorToHost` and `TryCopyTensorRangeToHost`. Their defaults serve a backend whose memory
+  the host reads; a backend that computes in memory of its own overrides each of them.
+- **Values in its runtime's host memory** — `CreateTensor`, `CreateTensorFromRawBytes`,
+  `CreateUninitializedHostTensor` (one a later move fills, of any size), `CreateStringTensor`,
+  `CreateSequence` — and `Release`, the one path its memory goes back by.
+
 ### The backend types
 
 One backend per package, in a namespace equal to the package id. **The type name spells
@@ -400,6 +474,18 @@ CUDA provider on device 0, the CPU ones ORT's default provider.
 | `Shorokoo.PyTorch.Cuda` | `TorchCudaBackend` | `Shorokoo.PyTorch.Cuda.TorchCudaBackend` |
 | `Shorokoo.Jax.Cpu` | `JaxCpuBackend` | `Shorokoo.Jax.Cpu.JaxCpuBackend` |
 | `Shorokoo.Jax.Cuda` | `JaxCudaBackend` | `Shorokoo.Jax.Cuda.JaxCudaBackend` |
+
+The sessions of the four ONNX Runtime backends run their operators on ONNX Runtime's thread pools
+of the process, made with its environment when the first of these backends is built, rather than
+each on an intra-op pool of its own (`SessionsShareThreadPools`, true unless set otherwise:
+`new WinCpuBackend { SessionsShareThreadPools = false }`). A pool's threads spin for a while after a
+run, waiting for more work, so sessions with pools of their own run one after another contend: two
+compiled graphs run in turn, or a compiled graph whose runs consuming their inputs place values
+through a session of their own
+([A run that writes into what it consumed](#a-run-that-writes-into-what-it-consumed)). A session
+built with an intra-op thread count of its own (`CreateSession`'s `intraOpThreads`) keeps a pool of
+its own of that size; where something else made ONNX Runtime's environment first, every session
+keeps its own.
 
 ### Auto-discovery
 
@@ -497,8 +583,8 @@ native runtime.
 ### Feeding a run: consumed, shared or tried
 
 A tensor fed **as it is** is taken by the run when it starts — dead from then — and its memory
-is released before the call returns, or reused for an output
-([below](#a-run-that-writes-an-output-into-what-it-consumed)):
+is released before the call returns, or reused for the run's values
+([below](#a-run-that-writes-into-what-it-consumed)):
 
 ```csharp
 var result = compiled.Execute(batch)[0].ToTensorData();
@@ -547,38 +633,141 @@ A tensor fed as it is while another run reads it makes the call throw
   `graph.Run(p.Shared())` leaves `p` unchanged.
 
 **Memory the run cannot read in place** — every tensor built from a C# array, and one from
-another device or runtime — is fed through a copy in the run's memory:
+another device or runtime — is fed through a copy in the run's memory, which Shorokoo makes
+before the run with the backend's own move there
+([Where a run's inputs and outputs are](#where-a-runs-inputs-and-outputs-are)):
 
 - **Consumed**: the tensor is dead and its memory released at the feed; the run consumes the
-  copy. On a card, the contents go into the session's arena (except an input an output may be
-  written into, which is copied onto the card first).
+  copy. On a card, the copy is made on the card, outside what the session allocates, and a
+  budget counts it ([A context's device-memory budget](#a-contexts-device-memory-budget)).
 - **Read**: the copy is made on first read and kept — a `TensorData` held by the source,
   attached to the reading context (visible in `context.Tensors`), and reused by later shared
-  reads. Writing the source (`AccessModifiableMemory` and the like) retires it; so does
-  deleting or consuming the source.
+  reads for as long as the source lives. Deleting or consuming the source retires it, and so
+  does a training step letting go of the copies of the batch it read.
 
-### A run that writes an output into what it consumed
+### Where a run's inputs and outputs are
+
+Every backend has a **run memory**: the memory its sessions read their inputs in and leave
+their outputs in. On a CUDA backend it is that card's memory for every tensor but a string one;
+a string tensor and a sequence are in the host memory of the backend's runtime. On a CPU backend
+it is host memory. That memory belongs to the backend: two backends on one card share it only
+where they share a runtime.
+
+- **Inputs.** Shorokoo puts every input in the run memory before the run: a tensor there
+  already is handed over as it is, and any other — a C# array, a tensor of another device or
+  runtime, a card's output fed to a run on the host — through a copy made with the backend's own
+  moves. A session is handed nothing else; one handed a value outside its run memory refuses it
+  with an `InvalidOperationException` rather than copying it.
+- **Outputs.** Every output comes back in the run memory, as a new `TensorData` attached to the
+  context that ran it — on a GPU backend, on the card, `IsHostResident` false. Nothing moves it
+  afterwards. Reading its values copies them to the host and leaves it on the card; `ToHost()`
+  makes a copy of it in host memory, `To(context)` puts it on another context, and a run on
+  another context that is fed it moves it there as one of its inputs.
+- **An output holds nothing of the session's.** On ONNX Runtime a session allocates through an
+  allocator of Shorokoo's, and an output is the block its run wrote it into — or a range of the
+  memory of an input the run consumed, where the run wrote it there
+  ([below](#a-run-that-writes-into-what-it-consumed)). Keeping it keeps that memory and nothing else
+  of the session's alive — the session may run on, sit idle or be disposed — and nothing copies it
+  after the run. [Device memory](#device-memory-gpu-backends) says how blocks are laid out and what
+  the allocator keeps between runs.
+
+```csharp
+var compiled = cuda.Compile(graph);
+var y = compiled.Execute(x)[0].ToTensorData();     // on the card
+float[] values = y.CopyMemory<float>();            // one copy across the bus; y stays on the card
+var onCpu = cpu.Execute(graph, y.Shared());        // copied to the host as cpu's input
+var next = compiled.Execute(y);                    // read where it is, and consumed: nothing crosses
+```
+
+On a CUDA backend an operator the provider runs on the host reads its inputs from the card and
+writes its outputs back there ([Shorokoo/Shorokoo#493](https://github.com/Shorokoo/Shorokoo/issues/493)).
+On a CPU backend nothing of this is visible: its run memory is the host's.
+
+### A run that writes into what it consumed
 
 ONNX Runtime holds every input until the run ends, so a consumed input's memory cannot be
-freed mid-run. Instead a run can write an output **into** it (output aliasing), so the output
-needs no memory of its own. This happens only for outputs a lowering marks as safe; the only
-such lowering is the training rig's step, which pairs each updated state field with the one it
-replaces ([A step writes its state over the state it consumed](training.md#a-step-writes-its-state-over-the-state-it-consumed)).
-Graphs you compile yourself never alias. A marked output is written into an input only where:
+freed mid-run. Instead a run can write **into** it, so what it writes there needs no memory of its
+own. It does so two ways, both only into an input the run consumed — `.Shared()` memory is left as
+it was — and fed as no other input. Both inputs and outputs are in the backend's run memory, so
+where they are never stands in the way: a host tensor consumed by a card run is copied onto the
+card first, and written into as that copy.
 
-- **the run consumed that input** — `.Shared()` memory is left as it was;
-- **it was fed as no other input**;
-- **the output is produced in that memory**, with the input's element type and the shape the
-  session settled at build time. On a GPU backend, an output fetched back to the host is not.
+**Output aliasing.** An output a lowering marks as safe is written over the whole of an input of
+its element type and the shape the session settled at build time. The only such lowering is the
+training rig's step, which pairs each updated state field with the one it replaces
+([A step writes its state over the state it consumed](training.md#a-step-writes-its-state-over-the-state-it-consumed));
+a graph you compile yourself marks no output.
+
+**Placement.** For a compiled graph, a run's values of a mebibyte or more — outputs and
+intermediates alike — are written into ranges of the consumed inputs' memory where the graph the
+backend runs proves a range free for the value:
+
+- everything that reads what the range held runs before the value is written: by the graph's own
+  edges, or on ONNX Runtime in the order the session runs its nodes — one at a time, in the order
+  of the graph it writes out, which on a card holds for the nodes the CUDA provider runs;
+- nothing reads it after the run: an output, or a view of one, is never written over;
+- an operator that reads what it overwrites reads each element where it writes it — an
+  element-wise operator in place, a slice at its own offset, a part of a concatenation already in
+  its slot, a fused normalization's sum over its own input;
+- on a card, the value is computed on the card: a node the CUDA provider has no kernel for runs on
+  the host, and what it computes is not placed.
+
+Where the values go is planned the first time a run *signature* — which inputs are consumed, the
+shape of every input, the outputs asked for — runs, and kept for it.
+
+| | ONNX Runtime | PyTorch |
+|---|---|---|
+| **How** | a second session, its placed values bound to their ranges: over the model, where that keeps the first session's order and can bind every placed value, and otherwise over the graph ONNX Runtime runs, its fusions made | a translation writing each placed value with torch's own operator: an `out=` form, the steps of a composed operator (`Gemm`, `Clip`, a normalization) in the range, cuDNN's convolution on a card, a fill, a concatenation part by part, or a copy of what a view reads or of a CPU convolution's result |
+| **When it applies** | from the signature's first run, where placing saves — by a model of what the run holds at each node, in the order the second session runs them, less what that session holds of its own — more than the larger of a mebibyte and a sixty-fourth of the plain run. The first placed run is measured, and the runs after it run unplaced where it did not save that much, counting what the second session holds | from the first run: nothing placed allocates |
+| **Not used** | where the second session would run other operators than the first; on an execution provider other than ONNX Runtime's CPU and CUDA ones; past 8 signatures; in a run of a graph not compiled (`Execute` or `Run` on the context); for a graph of over 20 000 nodes | in a training step whose gradient torch takes; for a model over 16 MiB; past 8 signatures; in a run of a graph not compiled; for a graph of over 20 000 nodes |
+
+On ONNX Runtime a session keeps what it builds the second session from. A model of 16 MiB or less
+it keeps in memory; a larger one on the host, in a temporary file of its own, deleted with the
+session. On a card, a session over a model over 16 MiB reads the weights the model carries from
+copies in the card's memory, which the second session reads too, and keeps no model: it writes out
+the graph it runs, which the second session is built from, into a temporary folder kept for its
+life. A session whose outputs are written into its inputs, such as a training step's, also keeps
+the graph it runs, which it writes out to prove those outputs, in a temporary folder for its life,
+on the host and on a card. The second session reads the weights fed to the session from the context's
+memory as they are. Of the weights the model carries it holds a copy of its own for a model of
+16 MiB or less, on the host as on a card; for a larger one, on the host, only the packed copies
+ONNX Runtime makes of a product's weights, the rest mapped from the files the graph was written
+into, and on a card none.
+
+**Outputs on consumed memory.** An output written into an input stands on that input's memory —
+its **block** — as a `TensorData` of its own over its range, never overlapping another's. Several
+outputs of one run may stand on one block. How the block is freed depends on whose memory it is:
+
+- **On ONNX Runtime**, where the block is one Shorokoo's allocator carved from its reserved memory
+  — on the host a tensor of 64 KiB or more, made from your data or by a run; on a card any tensor,
+  where the driver offers CUDA's virtual memory management
+  ([Device memory](#device-memory-gpu-backends)): each output frees its own range as it ends, and
+  what of the block no output stands on is freed as the run ends. The whole pages inside a range go
+  back — 4 KiB on the host, 2 MiB on a card (512 bytes for a card block of a mebibyte or less) — to
+  the allocator, as a tensor's own memory does. All but the block's first page, which the allocator
+  knows the block by: it goes with the block's last output, and until then a block of a mebibyte or
+  less on a card, and one on the host, keeps it; a larger block on a card hands its memory back all
+  the same, keeping only its address.
+- **On PyTorch**, and on a card whose driver does not offer virtual memory management, the block is
+  freed when the last output on it ends, not before: torch frees a tensor's storage whole, and so
+  does `cudaFree` a block. A run places outputs in such a block only where they leave at most a
+  mebibyte of it unused.
+
+A device-memory budget counts a block once, for what of it is still held, for as long as any
+tensor on it is attached ([A tensor's lifetime](#a-tensors-lifetime-locks-and-deletion)).
 
 Otherwise nothing differs: outputs are new `TensorData` attached to the running context, and
 values are the same.
 
 ### A tensor's lifetime: locks and deletion
 
-A `TensorData` **is** its memory: one object per allocation. It records the backend that
-allocated it (`AllocatingBackend`), which releases it, and where it lives: `Space` (the
-device) and `Location` (device plus runtime). It does not know which contexts it is attached
+A `TensorData` **is** its memory: one object per allocation, or per range of a block several
+tensors stand on — the memory of an input a run consumed and wrote them into
+([A run that writes into what it consumed](#a-run-that-writes-into-what-it-consumed)). Ranges
+never overlap, and each tensor's range is freed with it, or the block with the last tensor
+standing on it ([Outputs on consumed memory](#a-run-that-writes-into-what-it-consumed)). A tensor records the
+backend that allocated it (`AllocatingBackend`), which releases it, and where it lives: `Space`
+(the device) and `Location` (device plus runtime). It does not know which contexts it is attached
 to — see [Moving data between contexts](#moving-data-between-contexts).
 
 **How a tensor ends** (disposing a context is not one of them):
@@ -590,7 +779,7 @@ to — see [Moving data between contexts](#moving-data-between-contexts).
 | **Moved into an attribute** | `MoveToAttribute()`, which takes its contents — see [core-types.md](core-types.md#the-two-conversions-and-which-one-spends-its-source). |
 
 A run's read-copy of a tensor ([above](#feeding-a-run-consumed-shared-or-tried)) ends when its
-source is written or ends, or releases its copies (as a training step does for its batch).
+source ends, or releases its copies (as a training step does for its batch).
 Elements a sequence owns end with the sequence, except one a run is reading on its own
 account; a sequence whose owned element a run is reading cannot be disposed.
 
@@ -601,16 +790,17 @@ consumed one, which run took it). `Shape`, `DType`, `ToString()`, `IsDisposed`,
 no-op, so double disposal is harmless.
 
 An unreferenced tensor is reclaimed by the GC through its backend; deleting only chooses
-*when*. Runtime-allocated buffers (run outputs, card copies, `AllocateUninitialized` on a real
-context) are native and freed at once; a tensor built from a C# array frees its native
-read-copies at once and leaves the array to the GC.
+*when*. Runtime-allocated buffers (run outputs, card copies) are native and freed at once — a
+tensor standing on a block with others frees the block when it is the last; a tensor built from a
+C# array frees its native read-copies at once and leaves the array to the GC.
 
 **What a run holds.** A run holds a reader lock on every tensor it reads until it returns; any
 number of runs may read one tensor. While locked, `Delete()` and `Dispose()` throw
 `InvalidOperationException` and `TryDelete()` declines. `ToHost()`, `CopyTo(...)`,
-`CopyMemory()`, `ValueAt()`, `CopyRawMemory()` and `MoveToAttribute()`'s copy take the same
-lock while copying. A span from `AccessMemory()` is not covered: keep the tensor alive and
-unfed while you hold one.
+`CopyMemory()`, `ValueAt()`, `CopyRawMemory()`, `MoveToAttribute()`'s copy, and the copy
+`AccessMemory()` makes of a tensor on a card take the same lock while copying. A span
+`AccessMemory()` hands out over host memory is not covered: keep the tensor alive and unfed while
+you hold one. One over a card tensor's host copy is valid on its own.
 
 Locks are taken inside the run, one feed at a time. A feed deleted from another thread while a
 run is starting makes `Execute` throw `ObjectDisposedException`, with any feeds already taken
@@ -638,6 +828,12 @@ is `HostBackend.Instance`, readable by every host backend. `ComputeContext.Host`
 memory as a target for `To` and `CopyTo`; `Compile`, `Execute`, `Run` and `Eval` on it refuse,
 and it cannot be disposed.
 
+The framework's own host memory is one managed array per tensor, which holds at most
+`Array.MaxLength` bytes (just under 2 GiB). A larger tensor loaded or copied into host memory goes
+into host memory of a backend instead, through one bounded buffer (8 MiB) a piece at a time, never
+whole in a managed array: of the target context's backend, and of the one `ComputeContext.Default`
+runs on for `ComputeContext.Host`, `ToHost()` and a load into host memory.
+
 A graph's literals are
 [`TensorAttribute`s](core-types.md#two-kinds-of-concrete-tensor-tensordata-and-tensorattribute),
 immutable and without lifetime.
@@ -650,16 +846,16 @@ A tensor's memory never moves. None of these changes the tensor it is called on:
 |---|---|
 | `t.To(context)` | `t` itself, if `context`'s backend can read its memory as it stands; otherwise a new copy in `context`'s memory. Either way attached to `context`. |
 | `t.CopyTo(context)` | Always a new, independent copy in `context`'s memory, attached to `context`. |
-| `t.ToHost()` | `t` itself, if the host can read its memory; otherwise a new copy in the framework's own host memory, attached to nothing. |
+| `t.ToHost()` | `t` itself, if the host can read its memory; otherwise a new copy in host memory, attached to nothing. |
 
 A backend reads memory in place only on **the same device and the same runtime**. Host memory
 from a C# array counts as every host backend's. Two backends over one ONNX Runtime share card
 allocations; a CPU backend reads them through a copy; two isolated runtimes on one card copy
-through the host. Run outputs come back on the host unless retained
-(`CompiledGraph.Execute(inputs, retainOnDevice)`).
+through the host. A run's outputs are in its backend's memory
+([Where a run's inputs and outputs are](#where-a-runs-inputs-and-outputs-are)).
 
 ```csharp
-var onCard = cuda.Compile(model).Execute([input], [true])[0].ToTensorData();  // device memory
+var onCard = cuda.Compile(model).Execute(input)[0].ToTensorData();  // device memory
 var onHost = onCard.To(cpu);        // one copy across the bus; onCard is untouched
 var same   = onHost.To(otherCpu);   // no copy: the very same object
 var mine   = onHost.CopyTo(cpu);    // always a copy
@@ -670,54 +866,14 @@ and `using var h = t.ToHost();` deletes `t`. Use `CopyTo` for an independent ten
 `.Shared()` to keep `t` past a run.
 
 **Attachment is bookkeeping, not ownership.** `context.Tensors` is a weak list of the context's
-run outputs, what its runs read, and what `To`, `CopyTo` and `AllocateUninitialized` placed. It
-never keeps a tensor alive or ends one. `context.Detach(t)` removes a tensor (refused while a
+run outputs, what its runs read, and what `To` and `CopyTo` placed. It never keeps a tensor alive
+or ends one. `context.Detach(t)` removes a tensor (refused while a
 run of that context reads it) without deleting it. Disposing a context releases its sessions
 and leaves every tensor. A budgeted context counts this list — see
 [A context's device-memory budget](#a-contexts-device-memory-budget).
 
 `TensorDataStruct` and `TensorDataSequence` take the same three operations. A struct comes back
 as itself where nothing was copied; a sequence is copied whole if any element must be.
-
-### Feeding a large input without a second copy
-
-Normally a feed exists twice: your managed array and the runtime's copy.
-`ComputeContext.AllocateUninitialized` gives you the runtime's buffer to fill in place:
-
-```csharp
-using var cpu = new ComputeContext(new LinuxCpuBackend());
-
-var batch = cpu.AllocateUninitialized<float32>(new Shape(64L, 3L, 224L, 224L));
-batch.WriteMemory<float>(ReadImagesInto);   // no managed array in between
-```
-
-`Shape` is a class, so write `new Shape(…)` or a `long[]`, not a `[…]` collection literal.
-
-**Fill it through `WriteMemory`, not a bare span.** The tensor alone keeps the runtime buffer
-alive, and taking a span is its last read, so
-
-```csharp
-ReadImagesInto(batch.AccessModifiableMemory<float>());   // wrong: nothing roots `batch`
-```
-
-lets the finalizer free the buffer while you write. `WriteMemory` keeps the tensor alive across
-the call.
-
-The buffer is uninitialized — fill all of it. The tensor is attached to the context like a
-`CopyTo` result. A `(shape, dtype)` overload takes a runtime element type. On a CUDA context the
-buffer is card memory the host cannot write (`TensorData.IsHostResident` is false); use
-`CopyTo` there.
-
-Then feed it **as it is**: the run uses the buffer in place and frees it as it returns:
-
-```csharp
-var loss = compiled.Execute(batch)[0].ToTensorData();
-// batch is consumed: reading it throws, and its buffer went back to the allocator with the run
-```
-
-A `.Shared()` feed is instead freed when you let go of it (for a per-step batch, at the next
-collection). Consuming does not let the run reuse the input for intermediates — ONNX Runtime
-never does that — only for [aliased outputs](#a-run-that-writes-an-output-into-what-it-consumed).
 
 ### One model, two devices
 
@@ -733,17 +889,19 @@ var cpu  = new ComputeContext(new LinuxCpuBackend());
 var cuda = new ComputeContext(new LinuxGpuBackend());
 
 var onHost = cpu.Execute(graph, input.Shared());   // the host, reading input and leaving it
-var onCard = cuda.Execute(graph, input);           // the same graph, the same input, the card
+var onCard = cuda.Execute(graph, input);           // the same graph, the same input, the card;
+                                                   // its outputs are on the card
 ```
 
 Both run the same model, one C# build; each context compiles its own session. `ComputeContext.Backend` and `CompiledGraph.Backend` name
 the backend. Tensors you build (allocating backend `HostBackend.Instance`) are tied to no
 runtime, so building and exporting needs none and either context accepts them. A tensor not
 readable in place is copied per run when consumed, or once per (tensor, runtime) when fed
-`.Shared()`, until written ([Feeding a run](#feeding-a-run-consumed-shared-or-tried)). A
-tensor left on the card (`TensorData.IsHostResident` false, e.g. by a
-[resident training run](training.md#keeping-training-state-on-the-device)) crosses via the
-host.
+`.Shared()`, for as long as it lives ([Feeding a run](#feeding-a-run-consumed-shared-or-tried)).
+A tensor on the card (`TensorData.IsHostResident` false) — every output of a run there, and the
+state a [training step](training.md#keeping-training-state-on-the-device) hands back — crosses
+via the host when it is fed to the CPU context or moved with `ToHost()`; reading its values
+copies them to the host and leaves it on the card.
 
 #### Deploying two backends
 
@@ -826,6 +984,12 @@ the core assembly and your model are shared, so contexts can exchange data.
 Sequence outputs work on any provider; ONNX Runtime materializes them in host memory — see
 [A sequence's elements live in host memory](limitations.md#a-sequences-elements-live-in-host-memory).
 
+#### Two CUDA backends in one process
+
+CUDA backends of different frameworks run side by side in one process, whichever starts first,
+because they run on one copy of cuDNN and cuBLAS — see
+[The NVIDIA libraries the CUDA backends run on](#the-nvidia-libraries-the-cuda-backends-run-on).
+
 #### Or keep it to two processes
 
 Two executables over a shared, backend-free model library suit separate jobs — a long training
@@ -859,21 +1023,208 @@ an executable carrying one — flows into both outputs and makes
 [auto-discovery](#auto-discovery) refuse. Keep backends in executables, and reference no
 executable.
 
+### The NVIDIA libraries the CUDA backends run on
+
+Every CUDA backend runs on the same release of cuDNN and cuBLAS (with cuBLASLt), CUDA 13 builds,
+pinned per platform beside the lock of the CUDA Python environment: the releases that
+environment's PyTorch carries.
+
+| | cuDNN | cuBLAS |
+|---|---|---|
+| Windows x64 | 9.24.0.43 — 393 MiB download, 542 MiB on disk | 13.0.0.19 — 382 MiB download, 504 MiB on disk |
+| Linux x64 | 9.24.0.43 — 528 MiB download, 921 MiB on disk | 13.1.1.3 — 404 MiB download, 568 MiB on disk |
+
+They live in a per-user cache, one folder per release: `%LOCALAPPDATA%\shorokoo\cuda\` on
+Windows, `$XDG_CACHE_HOME/shorokoo/cuda/` (or `~/.cache/shorokoo/cuda/`) on Linux, beside the
+Python environments — `cudnn-9.24.0.43-cu13\`, `cublas-13.0.0.19-cu13\`. A folder is filled once,
+the first time a CUDA backend needs it, under a lock file beside it, and marked complete only once
+every file is in place and checked; one left half-filled is filled again. It is filled from:
+
+1. **A copy that matches exactly**: every file of the release present, each with the SHA-256 its
+   PyPI wheel records. The provisioned CUDA Python environments beside the cache are looked in
+   first — `torch\lib` on Windows, the NVIDIA wheels' own folders on Linux — since their PyTorch
+   carries the pinned release byte for byte, whichever backend runs first. Then, on Windows, cuDNN
+   is looked for on `PATH`, in `%CUDNN_PATH%` and under `%ProgramFiles%\NVIDIA\CUDNN`, and cuBLAS
+   on `PATH`, in `%CUDA_PATH%` and in the CUDA 13 toolkits under
+   `%ProgramFiles%\NVIDIA GPU Computing Toolkit\CUDA`; on Linux, on `LD_LIBRARY_PATH`, in
+   `$CUDNN_PATH`, `$CUDA_PATH` and `$CUDA_HOME`, in the CUDA 13 toolkits under `/usr/local` and in
+   the system's library folders. The copy's files are hard-linked into the cache where the volume
+   allows, so nothing is downloaded or stored twice, and copied otherwise. Any other copy — another
+   release, a build for another CUDA major, a file that differs — is ignored, never mixed in.
+2. **Otherwise the release's wheel from PyPI**, checked against the SHA-256 the pin records. A
+   download through which no data arrives for a minute is given up, as is one not done within the
+   hour a fill may take; and a download ended with its process leaves no partial wheel behind.
+
+A filled folder is looked at again each time it is used, without reading its files: one whose
+size, or whose last write, has changed since the folder was filled — an installed copy it was
+linked to, written over in place, say — has the folder checked whole, file by file against the
+pin, and filled again where any file is no longer the pinned one. A folder copied from another
+machine, its files' times moved, passes that check and is kept.
+
+With neither available — offline, no copy that matches — the first CUDA session fails with an
+`InvalidOperationException` naming the library, where it looked and the size of the download. A
+cache folder that cannot be written — a full disk — fails it with an `IOException` instead. To
+run offline, fill the cache once while online, copy the folders from a machine that has them, or
+install exactly the pinned release. `CudaLibraries.Prepare()` (in
+`Shorokoo.Core.Backends`) fills the cache and loads the libraries at a moment of your choosing,
+at startup rather than on the first CUDA run; it is also what a backend of your own that loads
+CUDA libraries calls first.
+
+Within a process every CUDA backend binds to that one copy. The ONNX Runtime CUDA backend loads
+the cache's files by full path before its provider loads anything by name, so it never runs on
+the cuDNN or cuBLAS that `PATH` happens to offer. A provisioned
+[PyTorch CUDA environment](pytorch-backend.md#cpu-and-cuda)'s own copies — `torch\lib` on Windows,
+the `nvidia` wheels' folders on Linux — are made hard links to the cache's files when the
+environment is provisioned, or first used, so PyTorch loads the very same files. This is what
+lets an ONNX Runtime CUDA backend and a PyTorch one share a process in either order: a process
+holding two releases of cuDNN cannot run both, since cuDNN's libraries import one another's
+internal entry points by name and bind to whichever copy of a name was loaded first.
+
+So whatever else in the process loads cuDNN or cuBLAS has to do so once the pinned copies are
+loaded: a CUDA session of your own built on ONNX Runtime directly, say, calls
+`CudaLibraries.Prepare()` before it touches the CUDA provider at all — setting an
+`OrtCUDAProviderOptions`' options with `UpdateOptions` already loads the provider, and cuBLAS with
+it, as appending it to a session does. A process that already holds another
+release when the ONNX Runtime CUDA backend prepares the pinned one — any copy, under the name a
+pinned file is loaded by, that is not that file — is refused before anything is loaded: the
+backend's first session fails with an `InvalidOperationException` naming the copies held. Loading
+the pinned files beside them would not help, as what imports those names binds to the copies
+loaded first. A copy held that is the cache's own file — a provisioned PyTorch environment's,
+linked to it — is recognised at a glance; any other is read whole and checked against the pin,
+which for a PyTorch environment you named, its copies not linked to the cache, reads up to a
+gigabyte once per process.
+
+The other NVIDIA libraries both stacks load — the CUDA runtime, cuFFT, nvrtc, nvJitLink — are
+each backend's own: the ONNX Runtime backend and Shorokoo's allocator on the card load them by
+name, from the machine's CUDA 13 runtime or the copy the process already holds under that name,
+and PyTorch loads its environment's. Two copies of these run side by side: they call one another
+only through public, versioned entry points, and both work in the card's one context per process,
+so memory either one allocates is good to the other.
+
+### Precision (GPU backends)
+
+`float32` is computed in full `float32` precision on every backend and every device: a product, a
+convolution or a recurrent layer of `float32` operands is computed in `float32` throughout, so a
+model computes the same on a card as on the host, but for the order its sums are added in. Measured
+on an RTX 4090, a 1024-square `MatMul`, a 64-channel 3×3 `Conv` and a 256-unit `LSTM` land within
+5e-6 of the host's results (the largest difference over the largest value), on every CUDA
+backend.
+
+A card from NVIDIA's Ampere generation on can compute those operators faster in **TensorFloat-32**
+(TF32): on its tensor cores, with each operand's significand rounded from 24 bits to 11 and the sums
+kept in `float32`. A context asks for it with its `Precision`:
+
+```csharp
+using Shorokoo.Core.Backends;
+using Shorokoo.Runtime;
+
+var fast = new ComputeContext(new LinuxGpuBackend())
+{
+    Precision = new PrecisionSettings { AllowTensorFloat32 = true },
+};
+```
+
+The same three operators then land up to 2.5e-3 from the host's, some five hundred times further
+than in full precision. What full precision costs against it, measured on an RTX 4090: a 4096-square
+`MatMul` takes 1.57 times as long, and a convolutional network's training step 2.6 times as long
+on ONNX Runtime and 2.3 times on PyTorch; the training steps of the other model families measured
+were within their run-to-run noise.
+
+| Backend | By default | With `AllowTensorFloat32` |
+|---|---|---|
+| ONNX Runtime CUDA (`WinGpuBackend`, `LinuxGpuBackend`) | the CUDA provider's `use_tf32` is `0` | `use_tf32` is `1`: cuBLAS products and cuDNN convolutions and recurrent layers in TF32 |
+| [PyTorch](pytorch-backend.md#runs) CUDA | each run sets `torch.backends.cuda.matmul.allow_tf32` and `torch.backends.cudnn.allow_tf32` off as it starts | each run sets both on: products, cuDNN convolutions and recurrent layers in TF32 |
+| [JAX](jax-backend.md#runs) CUDA | every product and convolution is compiled at `Precision.HIGHEST` | compiled at `Precision.HIGH`: products and recurrent layers in TF32; each convolution in TF32 or in full precision, whichever kernel XLA's autotuner finds faster when it compiles the program |
+| every CPU backend | full precision | no effect: full precision |
+
+- **It is read when a session is built**, like [`DeviceMemory`](#device-memory-gpu-backends): a
+  graph compiled on the context keeps the precision the context carries, and a training rig's steps
+  compute in its `runtimeContext`'s. Set it on the context from the start.
+- **It allows TF32, and never requires it.** A backend uses it where its kernels choose to: XLA
+  puts a small product through a full-precision kernel all the same, and a convolution through
+  whichever kernel it timed fastest, which may be either.
+- **Only `float32` changes.** Products of `Float16`, `BFloat16` and `Double` operands compute as
+  they do either way.
+- **PyTorch's switches are the whole process's.** A run on a card sets them from its own session as
+  it starts, so a session's precision does not depend on what ran before it, nor on code of your own
+  that sets them. Runs of sessions that set them differently do not overlap: while a run that allows
+  TF32 is running, runs on the cards that do not wait, and the other way round.
+- **`NVIDIA_TF32_OVERRIDE=0`** in a process's environment turns TF32 off in cuBLAS and cuDNN for the
+  whole process, a context that allows it included.
+
 ### Device memory (GPU backends)
 
-ONNX Runtime allocates device memory from an arena that grows in blocks and, unless asked to
-shrink, never returns them. The *extend strategy* sets each block's size:
+On ONNX Runtime every session allocates through an allocator of Shorokoo's — one per device, the
+host or a card, for the whole process, whichever runtime or backend built the session — rather
+than through an arena of its own, and the tensors a context places on a card, and every tensor
+made in host memory outside a run, come from the same one. A session's blocks are carved from address space reserved for it with no memory behind it:
+memory is committed under a block as it is carved, and handed back to the system as the session
+lets it go. Each request is rounded up and served by its size:
 
-- **`NextPowerOfTwo`** (ORT's default) grows by at least the arena's current size — good for
-  unpredictable allocation sizes, wasteful once sizes settle.
-- **`SameAsRequested`** grows by exactly the request — tight when sizes settle, but a session
-  whose input shapes keep growing strands every region it outgrows.
+- **On the host**, a block under 64 KiB is an allocation of its own from the C runtime's heap,
+  which may keep its pages for the process's next allocations; a larger one is a whole number of
+  4 KiB pages, its memory committed 64 KiB at a time (`VirtualAlloc` on Windows, `mmap` and
+  `mprotect` on Linux) and handed back the same way (`VirtualFree`, `madvise`).
+- **On a card**, a block of up to a mebibyte is carved from memory every session on the card
+  shares, packed into the card's 2 MiB pages as the CUDA runtime packs small allocations; a larger
+  one is a whole number of 2 MiB pages of its own, mapped into one contiguous range with CUDA's
+  virtual memory management (`cuMemCreate`, `cuMemMap`). Where the driver does not offer it, every
+  block is a `cudaMalloc` of its own, a multiple of 512 bytes up to a mebibyte and of an eighth of
+  the power of two below it above that.
 
-`ArenaExtend` defaults to `Auto`: `SameAsRequested`, except for a session Shorokoo knows is
-fed differing shapes — a training rig's shared fallback step, used once it has seen more
-distinct input shapes than its per-shape limit — which gets `NextPowerOfTwo`. **If your own
-session is fed growing shapes, set `NextPowerOfTwo`.** Settings apply to the sessions the
-context compiles; `CompiledGraph.DeviceMemory` reports what a graph got:
+So a block holds its own memory: on a card a block over a mebibyte has its pages to itself, and
+a smaller one shares a page with other small blocks; on the host a block shares at most the
+64 KiB at each of its ends with its neighbours.
+
+- **What a session lets go of is kept for its next runs**, so a loop's runs find their blocks
+  waiting. A request no kept block serves is carved from the memory the session has committed,
+  whichever block it last belonged to, so a session fed one shape after another reuses its warm
+  memory as an arena does rather than taking each new size from the system. A session never holds
+  more than the most one of its runs has used — what it had in use as the run began, and every
+  block the run was handed, each counted once: where a request would take it past that mark, the
+  smallest larger block it keeps serves it, or the blocks it kept longest give way to it, and what
+  is still over the mark goes back to the system — on the host at once, on a card as the run ends.
+  So a loop whose runs repeat finds every block it needs, and a session fed varied shapes holds
+  what its busiest run used, not a block of every size it has seen. What the tensors placed on a
+  card let go of is kept the same way, for the next tensor placed there, counting what is placed
+  between two runs on the card as one run; so is what a tensor made in host memory outside a run
+  lets go of under a mebibyte, while from a mebibyte its memory goes back to the system as it goes,
+  as the C runtime's heap hands back a block that large: nothing says another of its size follows.
+  The small blocks every session on the card shares keep no more memory committed than they had in
+  use at their busiest.
+- **What is kept goes back to the system**:
+  - at the end of a run that asks for it (`RunSettings.ShrinkArenaAfterRun`, always on under a
+    budget): what its session keeps, and what the placed tensors left on that device;
+  - as a session is disposed, or collected undisposed: everything it keeps, and each block it
+    still has out — an output a caller keeps — as that goes;
+  - before a session's budget, or the device itself, would refuse a request for want of room;
+  - when the program calls `DeviceMemory.ReleaseCached()`: everything kept on every device, for
+    every session and every placed tensor, with no run to make. It returns the bytes it handed back.
+
+  Nothing else returns it. A long-lived program doing varied work holds, besides what is in use,
+  up to the busiest run of each session it keeps alive and of the tensors it placed on each device,
+  and nothing of a session it disposed.
+- **Sessions run without ONNX Runtime's memory pattern.** With it, a session's runs from the second
+  on take their planned tensors as one block laid out by the first run; that block came out larger
+  than what the runs have in use at once with a block per tensor on every graph measured — 33–50%
+  on a scenario of slices, fills and concatenations, 3–24% on training steps, 7–37% on inference —
+  for fewer allocations, which cost little: training steps measured without the pattern ran within
+  2% of their time with it on the host and on a card, the smallest, a 4×2 linear, within the 8% its
+  own runs vary by. So `AllocationCount` counts a run's tensors one by one.
+- **A request that cannot be served fails the call that made it**, as ONNX Runtime's own
+  allocators fail one: a block the budget leaves no room for, or one the device does not have,
+  fails the run — or the placing of the tensor — with an allocation failure, and leaves the
+  device as usable as it was for the next one. The text names the memory:
+
+  ```
+  [ErrorCode:RuntimeException] Non-zero status code returned while running Expand node. Name:'N3'
+  Status Message: Failed to allocate 4503599627370496 bytes on CUDA device 0: the card has no such
+  block free (CUDA refused it), with everything Shorokoo's cuda_allocator kept for reuse
+  handed back.
+  ```
+
+Settings apply to the sessions the context compiles; `CompiledGraph.DeviceMemory` reports what a
+graph got:
 
 ```csharp
 using Shorokoo.Core.Backends;
@@ -883,45 +1234,35 @@ var ctx = new ComputeContext
 {
     DeviceMemory = new DeviceMemorySettings
     {
-        ArenaExtend = ArenaExtendStrategy.NextPowerOfTwo,   // ORT's doubling
-        LimitBytes = 16L * 1024 * 1024 * 1024,              // a 16 GiB budget on what ctx holds on the card
+        LimitBytes = 16L * 1024 * 1024 * 1024,   // a 16 GiB budget on what ctx holds on the card
     },
 };
 
 var compiled = ctx.Compile(graph);
 compiled.Execute([batch1]);
 
-Console.WriteLine(compiled.DeviceMemory.ArenaExtend);              // what this session was built with
-Console.WriteLine(compiled.DeviceMemory.LimitBytes);               // the arena limit the budget left it
+Console.WriteLine(compiled.DeviceMemory.LimitBytes);   // what the budget left the session's last run
 ```
 
-| setting | on | ORT option | default | read |
+| setting | on | what it does | default | read |
 |---|---|---|---|---|
-| `LimitBytes` | `DeviceMemorySettings` | each session's `gpu_mem_limit` is the budget less what the context holds on the card | `null` — no budget | on every transfer onto the context and every run of it — see [A context's device-memory budget](#a-contexts-device-memory-budget) |
-| `ArenaExtend` | `DeviceMemorySettings` | `arena_extend_strategy` | `Auto` — `SameAsRequested`, except ORT's `NextPowerOfTwo` for a session Shorokoo knows is reused across differing shapes | when a session is built |
-| `ShrinkArenaAfterRun` | `RunSettings` | `memory.enable_memory_arena_shrinkage` | `false` — and forced on under a budget | on every run |
+| `LimitBytes` | `DeviceMemorySettings` | the most the context holds on the card; a run's session may allocate the budget less what the context holds there | `null` — no budget | on every transfer onto the context and every run of it — see [A context's device-memory budget](#a-contexts-device-memory-budget) |
+| `ShrinkArenaAfterRun` | `RunSettings` | as the run ends, its session's allocator hands back to the device what it keeps for the session, and what it keeps of tensors that are gone | `false` — and forced on under a budget | on every run |
 
-- A training step's arena can take one large extra block after step 0 and keep it; on one
-  large model it grew 1.75–1.9x between steps 0 and 1 under either strategy. An arena limit
-  near the step's real use prevents that block, and the steps still fit in what the arena
-  already holds: size a context budget as what the step uses plus what the rig keeps on the
-  card.
-- `ShrinkArenaAfterRun` costs a synchronizing allocation every step; outside a budget, use it
-  only when the card is shared. On the CPU backend it shrinks the host arena the run's
-  intermediates live in, and the next run takes those blocks from the host again. ORT rejects it where the device has no arena (e.g.
-  `ORT_DISABLE_ARENA`), failing the run, so try it on a short run first.
-- `LimitBytes` is hard: exceeding work is refused or fails with ORT's `BFCArena ... Failed to
-  allocate memory for requested buffer`, so a figure set too low fails work that would fit.
-- `ArenaExtend` is read **when a session is built** (the first call, or a rig's first
-  `TrainStep` per input shape); `CompiledGraph.DeviceMemory` reports the resolved strategy,
-  not `Auto`. Context settings are `init`-only. `CompiledGraph.Execute` / `Run` can override
+- `ShrinkArenaAfterRun` makes the next run commit its memory again — on a card mapping each 2 MiB
+  page anew, which costs tens of microseconds a block on Windows — so outside a budget use it only
+  when the card is shared. On the CPU backend it hands the session's host memory back the same
+  way, and the next run's pages are each zeroed by the system as they are first touched.
+- `LimitBytes` is hard: a run that needs more fails with an allocation failure naming the limit,
+  so a figure set too low fails work that would fit.
+- Context settings are `init`-only. `CompiledGraph.Execute` / `Run` can override
   `ShrinkArenaAfterRun` per call on an unbudgeted context; the context's one-shot entry points
   and a rig's `TrainStep` use the context's.
-- **Scope is the context, never the process.** Each session keeps its arena settings for life;
-  two contexts may differ and never affect each other's sessions. To use different settings,
-  compile on another context — e.g. one for a training loop, one for variable-shape inference.
-  Tensors a context places on the card come from a separate per-card, per-runtime allocator
-  held for the process's life; the budget counts them by attachment.
+- **Scope is the context, never the process.** Two contexts may have different budgets and never
+  affect each other's sessions; to use different settings, compile on another context — e.g. one
+  for a training loop, one for variable-shape inference. Every session on a card, and every tensor
+  placed there, allocates through that card's allocator, held for the process's life; each
+  session's figures and limit are its own, and the budget counts placed tensors by attachment.
 
 The static `DeviceMemory` class reports what the card is doing:
 
@@ -942,7 +1283,7 @@ Console.WriteLine($"the card at its peak {DeviceMemory.PeakUsedBytes / (1024 * 1
 
 - `UsedBytes`, `FreeBytes` and `TotalBytes` are the **device's**, including other processes.
 - `ProcessBytes` is **this process's** share: everything it holds on the card — weights and
-  optimizer state, every session's arena, the CUDA context and its libraries' workspaces — and
+  optimizer state, every session's memory, the CUDA context and its libraries' workspaces — and
   nothing another process holds. `PeakProcessBytes` is therefore the one figure for "the most this
   run held on the card". It is the figure Task Manager shows per process on Windows, and
   `nvidia-smi` lists per process where it can.
@@ -965,7 +1306,7 @@ Console.WriteLine($"the card at its peak {DeviceMemory.PeakUsedBytes / (1024 * 1
 
 `DeviceMemorySettings.LimitBytes`, on a context whose memory is a card's, budgets
 **everything that context holds there**: its attached tensors in card memory and, during a run,
-that run's arena. It is per context, not per arena or process:
+what that run's session allocates. It is per context, not per session or process:
 
 ```csharp
 using var ctx = new ComputeContext(gpu)
@@ -978,14 +1319,17 @@ var use = ctx.ReadDeviceMemoryUse();
 Console.WriteLine($"{use.AttachedBytes} of {use.LimitBytes} bytes attached, {use.AvailableBytes} left");
 ```
 
-**What it counts.** Tensors placed by `To`, `CopyTo` or `AllocateUninitialized`, read or
-copied there by the context's runs, or left there as outputs (`Execute(inputs, retainOnDevice)`).
+**What it counts.** Tensors placed by `To` or `CopyTo`, read or
+copied there by the context's runs, or left there as its runs' outputs — every output of a run
+on the card, until it is deleted, collected or detached.
 `ReadDeviceMemoryUse()` reports `AttachedBytes`, `AttachedTensors` and `LimitBytes` (`null`
-with no budget, or for a host context). A tensor on two contexts counts on both; dead,
-collected or `Detach`ed tensors drop out.
+with no budget, or for a host context). A tensor on two contexts counts on both; collected or
+`Detach`ed tensors drop out, and so do dead ones once their memory is released. A tensor deleted
+with `DeleteAsync` while a run, or the session of a graph loaded with `LoadCompiled`, still reads
+it keeps counting until that reader stands down, since its memory is still on the card until then.
 
-**A transfer it cannot take is refused before allocating** — `To`, `CopyTo`,
-`AllocateUninitialized`, a run's card copy of a tensor it cannot read in place, and a `To` that
+**A transfer it cannot take is refused before allocating** — `To`, `CopyTo`, a run's card copy
+of a tensor it cannot read in place, and a `To` that
 merely attaches a tensor already on the card. Structs and sequences are checked whole (a
 run-produced sequence per element as copied), and a failure undoes what was placed. The refusal
 is an `InvalidOperationException`:
@@ -998,47 +1342,51 @@ context there, in 1 tensor(s), leaving 16777216. Delete what the context no long
 the context a larger budget.
 ```
 
-**A run's arena gets what the context leaves it.** A session's `gpu_mem_limit` is the budget
-less the *discount*: what the context holds on the card outside the arena during the run —
-attached tensors, and those the run reads or copies there (for a tensor another runtime holds
-on the same card, both it and its copy). A tensor already on the card is read in place and
-never enters the arena. A host tensor fed to a card run:
+**A run's session gets what the context leaves it.** What a run's session may allocate on the
+card is the budget less the *discount*: what the context holds on the card apart from the session
+for the length of the run — attached tensors, and those the run reads or copies there (for a
+tensor another runtime holds on the same card, both it and its copy). A tensor already on the card
+is read in place and never counts against the session. A host tensor fed to a card run is copied
+onto the card before the run, outside the session, and counted in the discount:
 
-- `.Shared()`: copied onto the card before the run, kept for later reads, counted in the
-  discount;
-- consumed: copied into the arena, counting against the session's limit instead, so a loop
-  feeding fresh host batches keeps its session (except an input an output may be written into,
-  copied like a shared one).
+- `.Shared()`: the copy is kept for later reads;
+- consumed: the copy is the run's, and goes when the run no longer reads it. A tensor fed to
+  several inputs is copied once, and counted once.
 
-A run whose discount leaves its arena nothing, or less than the consumed inputs it must copy in, is refused before taking anything; one whose arena
-needs more than it was left fails with ORT's `BFCArena` error.
+What the session allocates is its weights, everything the run computes, and the run's outputs
+until it returns. From then on every output on the card is counted with the attached tensors, in
+the discount of every later run until it goes, so delete each output once you are done with it.
+Outputs [written into consumed memory](#a-run-that-writes-into-what-it-consumed) count that
+memory once, for what of it is still held, while any of them is attached.
 
-**When a session is rebuilt.** The limit is fixed when a session is built, and building is
-costly for large graphs, so a session is built with the budget less the discount, rounded up
-to the next sixty-fourth of the budget, and rebuilt (before taking anything) only when the
-discount grows past that. So:
+A run whose discount leaves its session nothing is refused before taking anything; one whose
+session needs more than it was left fails with an allocation failure naming the limit:
 
-- the limit only comes down — at most sixty-four times over a compiled graph's life, plus once
-  each time the remainder halves within its last sixty-fourth; a loop holding the same things
-  never rebuilds;
-- releasing what the context held does not restore room; compile the graph again;
-- `CompiledGraph.DeviceMemory.LimitBytes` is the current limit, and `ReadArenaStatistics()` and
-  `ReadNodePlacement()` restart for a rebuilt session;
-- a rig's step can rebuild in its first steps as state arrives on the card.
+```
+[ErrorCode:RuntimeException] Non-zero status code returned while running Expand node. Name:'N3'
+Status Message: Failed to allocate 167772160 bytes on CUDA device 0: Shorokoo's cuda_allocator may
+hold 163577848 bytes there for this session, what the device-memory budget
+(DeviceMemorySettings.LimitBytes) leaves its run, and it holds 512.
+```
 
-An output retained in a session's own arena and fed back to the same graph is inside its limit,
-not discounted. An output [written into consumed memory](#a-run-that-writes-an-output-into-what-it-consumed)
-is counted once, where that memory is: in later discounts if it was outside the arena, inside
-the arena if it was that session's own earlier output.
+**The limit follows the discount, run by run.** On ONNX Runtime a session's allocator holds it to
+its limit as each block is asked for, so the session takes the limit each run is left without
+being built again, and what the context frees is the next run's room.
+`CompiledGraph.DeviceMemory.LimitBytes` is the limit its last run was given. A backend whose
+sessions take a limit only when they are built (PyTorch) builds one with the budget less the
+discount, rounded up to the next sixty-fourth of the budget, and builds it again, before taking
+anything, only when the discount grows past that: at most sixty-four times over a compiled
+graph's life, plus once each time the remainder halves within its last sixty-fourth. Its limit
+only comes down, until the graph is compiled again, and its statistics restart with each build.
 
 **One at a time.** Under a budget the context's runs, transfers onto it and compiles on it are
-serialized, and every run returns its arena's unused blocks as it ends, whatever
-`ShrinkArenaAfterRun` says. None of this applies without `LimitBytes`.
+serialized, and every run hands back what its session's allocator keeps for it as it ends,
+whatever `ShrinkArenaAfterRun` says. None of this applies without `LimitBytes`.
 
 What the budget does *not* count is in
-[Known limitations](limitations.md#a-device-memory-budget-counts-tensors-not-arenas).
+[Known limitations](limitations.md#a-device-memory-budget-counts-tensors-not-what-the-allocator-keeps).
 
-### What one session's arena did
+### What one session's allocator did
 
 To read **one session's own allocator** (CPU or GPU), ask the compiled graph:
 
@@ -1049,26 +1397,31 @@ using Shorokoo.Runtime;
 var compiled = ctx.Compile(graph);
 compiled.Execute(inputs);
 
-if (compiled.ReadArenaStatistics() is { } arena)
-    Console.WriteLine($"{arena.InUseBytes} in use, {arena.MaxInUseBytes} at its highest, "
-                    + $"{arena.TotalAllocatedBytes} taken from the device");
+if (compiled.ReadArenaStatistics() is { } allocated)
+    Console.WriteLine($"{allocated.InUseBytes} in use, {allocated.MaxInUseBytes} at its highest, "
+                    + $"{allocated.TotalAllocatedBytes} taken from the device");
 ```
 
 `ArenaStatistics` has ten figures: `InUseBytes`, `RequestedInUseBytes`, `MaxInUseBytes`,
-`MaxAllocSizeBytes`, `TotalAllocatedBytes`, `LimitBytes` (the session's arena limit; `-1` with
-no budget), `AllocationCount`, `ArenaExtensionCount`, `ArenaShrinkageCount` and
+`MaxAllocSizeBytes`, `TotalAllocatedBytes`, `LimitBytes` (the most the session may allocate; `-1`
+with no budget), `AllocationCount`, `ArenaExtensionCount`, `ArenaShrinkageCount` and
 `ReserveCount`. It is `null` on a backend that reports none.
 
+- On ONNX Runtime they are the session's own figures in the allocator it allocates through: on the
+  card for a CUDA session, in host memory otherwise. `ArenaExtensionCount` is the blocks the
+  session holds from the device now, in use or kept, and falls as they go back;
+  `ArenaShrinkageCount` is the blocks it has handed back; `ReserveCount` is zero.
 - `RequestedInUseBytes` is the part of `InUseBytes` the callers asked for; the rest is what the
-  arena added to round each allocation up to its block sizes. A backend whose allocator does not
+  allocator added to round each request up to its size class. A backend whose allocator does not
   report what was requested (JAX) reports `InUseBytes` here, rounding included.
-- `TotalAllocatedBytes` is not a bound on card usage — it can exceed the card's capacity; use
-  `DeviceMemory.Read()` for that.
-- `MaxInUseBytes` is a lifetime high-water mark; it cannot be reset and shrinkage does not
-  lower it. For per-run figures use [`RunStats`](#per-run-statistics-on-the-context).
-- A session's weights live in this arena, so it is non-zero before the first run, and the first
-  run's peak includes them. `ReserveCount` and `ArenaExtensionCount` do not compare across
-  devices.
+- `TotalAllocatedBytes` is what the session holds from the device, in use or kept for its next
+  runs. It is not a bound on card usage; use `DeviceMemory.Read()` for that.
+- `MaxInUseBytes` is a lifetime high-water mark; it cannot be reset and handing memory back does
+  not lower it. For per-run figures use [`RunStats`](#per-run-statistics-on-the-context).
+- A session's weights are among what it allocates, so it is non-zero before the first run, and the
+  first run's peak includes them.
+- A run's outputs are blocks of their session's: `InUseBytes` after a run is the weights and the
+  outputs a caller still holds, and an output's block leaves it when the output goes.
 
 ### What crossed the bus
 
@@ -1100,11 +1453,11 @@ for (int step = 0; step < steps; step++)
 
 var stats = ctx.RunStats;
 Console.WriteLine($"{stats.RunCount} runs, peak {stats.PeakBytes / (1024 * 1024)} MiB, "
-                + $"{stats.ArenaExtensionCount} arena extensions");
+                + $"{stats.ArenaExtensionCount} blocks taken from the device");
 
 foreach (var run in stats.RecentRuns.TakeLast(5))
     Console.WriteLine($"run {run.RunNumber}: {run.PeakBytes} ({run.PeakKind}), "
-                    + $"arena stood at {run.PriorPeakBytes} before it");
+                    + $"its session stood at {run.PriorPeakBytes} before it");
 ```
 
 `RunStats` covers every run of the context across **all** its sessions.
@@ -1113,13 +1466,13 @@ foreach (var run in stats.RecentRuns.TakeLast(5))
   `AllocationCount`, `ArenaExtensionCount`, `ArenaShrinkageCount`, `LargestAllocationBytes` and
   `ArenaBytes` cover the whole history. `RecentRuns` keeps the last
   `DiagnosticSettings.RecentRunCapacity` records (1000 by default; zero keeps none).
-- **`PeakKind`**: a run that raised the arena's high-water mark is
+- **`PeakKind`**: a run that raised its session's high-water mark is
   `MemoryFigureKind.Measured`; one that stayed below an earlier mark is
   `MemoryFigureKind.UpperBound` (it used at most that).
 - **`PriorPeakBytes`** is the mark the run found. On the first run it is the weights, so
   `PeakBytes - PriorPeakBytes` is the run's own use; later it is how far the run exceeded the
   record (zero for `UpperBound` runs).
-- `PeakBytes` is the largest mark of any one arena, not a sum across sessions.
+- `PeakBytes` is the largest mark of any one session, not a sum across sessions.
 - `ArenaBytes` (taken from the device) is usually above `PeakBytes`, but shrinking runs —
   every run under a budget — can leave it below; compare ordering, not figures.
   `ArenaExtensionCount` counts blocks held, so it undercounts after shrinkage.
@@ -1138,10 +1491,11 @@ switch (compiled.OutputPlacement)
 }
 ```
 
-`OutputPlacement` is free. A CPU session reports `Host`. On a card, a graph run wholly by CUDA
+`OutputPlacement` is free, and says where the outputs are **computed**; every tensor output but
+a string one comes back on the card whatever it says. A CPU session reports `Host`. On a card, a graph run wholly by CUDA
 reports `Device`; one with an unsupported operator (e.g. `Det`) reports `Mixed` or `Host`
-depending on where its outputs end up. An output the host consumed after the card computed it
-counts as host memory, in the pinned arena.
+depending on where its outputs are computed. An output the host consumed after the card computed
+it counts as host memory, in the pinned arena.
 
 For **which** nodes fell back, trace them. This turns on ONNX Runtime's profiler for every run
 of the session, so keep it to diagnosis:
@@ -1173,10 +1527,10 @@ second read returns the same trace. `Nodes` is in execution order; inserted `Mem
 | what | where | cost | null / none when |
 |---|---|---|---|
 | `DeviceMemory.Read()` | static, the whole card, and this process's share of it | about a microsecond through DXGI; about 120 microseconds through NVML | no CUDA runtime; `ProcessBytes` alone is null where the driver attributes no memory to this process |
-| `CompiledGraph.ReadArenaStatistics()` | one session's allocator | a call into the backend | the backend reports no arena |
+| `CompiledGraph.ReadArenaStatistics()` | one session's allocator | a call into the backend | the backend reports none |
 | `CompiledGraph.ReadPinnedArenaStatistics()` | one session's pinned host arena | a call into the backend | the backend stages nothing (every CPU one) |
 | `ComputeContext.ReadDeviceMemoryUse()` | what the context holds in its memory, against its budget | a walk over its list | never null; `LimitBytes` is null with no budget in force |
-| `ComputeContext.RunStats` | every run of the context | two arena reads per run, once switched on | `CollectRunStatistics` is off |
+| `ComputeContext.RunStats` | every run of the context | two allocator reads per run, once switched on | `CollectRunStatistics` is off |
 | `CompiledGraph.OutputPlacement` | one session | nothing | the backend does not report it (`Unknown`) |
 | `CompiledGraph.ReadNodePlacement()` | one session, per node | a profiler on every run of that session | `TraceNodePlacement` is off |
 

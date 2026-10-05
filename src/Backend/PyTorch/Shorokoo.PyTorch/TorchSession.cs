@@ -20,9 +20,22 @@ namespace Shorokoo.PyTorch;
 /// <para>Every output is handed over as memory of its own — never an input's, a constant's or
 /// another output's, even where the model's graph returns one of those as it is (an
 /// <c>Identity</c>, a <c>Reshape</c> view), since the caller owns what it is handed and may write
-/// to it — with one exception, which is output aliasing: an output the session was built to write
-/// into an input's memory (<see cref="OutputAlias"/>), on a run that consumed that input. See
-/// <see cref="RunConsuming(IReadOnlyDictionary{string, IShorokooTensorValue}, IReadOnlyCollection{IShorokooTensorValue}, IReadOnlyList{string}, IReadOnlySet{string}, RunSettings, out IReadOnlyList{string?})"/>.</para>
+/// to it — with two exceptions, both on a run that consumed inputs: output aliasing, an output the
+/// session was built to write into an input's memory (<see cref="OutputAlias"/>); and placement, an
+/// output the run wrote into a range of a consumed input's memory proved free for it
+/// (<see cref="TorchPlacements"/>), handed over as a value standing on that memory. See
+/// <see cref="RunConsuming(IReadOnlyDictionary{string, IShorokooTensorValue}, IReadOnlyCollection{IShorokooTensorValue}, IReadOnlyList{string}, RunSettings, out IReadOnlyList{string?})"/>.</para>
+///
+/// <para><b>Precision.</b> Whether torch computes <c>float32</c> products in TensorFloat-32 on a card,
+/// and cuDNN convolutions and recurrent layers likewise, is decided by switches of the whole process
+/// (<c>torch.backends.cuda.matmul.allow_tf32</c>, <c>torch.backends.cudnn.allow_tf32</c>), which torch
+/// reads as it launches each kernel. So a run on a card sets both from its session's
+/// <see cref="PrecisionSettings"/> as it starts, under the interpreter lock: off, which is full
+/// <c>float32</c> precision, unless the session was built allowing TensorFloat-32. torch releases
+/// that lock inside each operator, so runs on cards that set the switches differently do not run at
+/// once: runs in one precision run beside one another, and a run in the other waits until they are
+/// done (<see cref="TorchPrecisionGate"/>), or until its <see cref="RunSettings.CancellationToken"/>
+/// is cancelled. A run on the CPU reads neither switch and sets neither.</para>
 /// </summary>
 internal sealed class TorchSession : IShorokooSession
 {
@@ -34,6 +47,7 @@ internal sealed class TorchSession : IShorokooSession
     private readonly Dictionary<string, int> _outputIndex;
     private readonly ShorokooLogSeverity _logSeverity;
     private readonly long? _limitBytes;
+    private readonly bool _tensorFloat32;
     private readonly NodePlacement? _nodePlacement;
     private readonly AliasSlot[] _aliases;
     private readonly bool[] _bindable;
@@ -44,6 +58,8 @@ internal sealed class TorchSession : IShorokooSession
     private readonly PyObject _constants;
     private readonly PyObject _constantStorages;
     private readonly PyObject _constantIds;
+    private TorchPlacements? _placements;
+    private int _stoppedPlacing;
     private int _disposed;
 
     // torch's CUDA caching allocator is the whole process's, so a cap on it is too: a run under a
@@ -51,10 +67,20 @@ internal sealed class TorchSession : IShorokooSession
     // one is held to another's; runs without one share it.
     private static readonly ConcurrentDictionary<int, ReaderWriterLockSlim> DeviceRuns = new();
 
+    // torch's TensorFloat-32 switches are the whole process's, so runs on cards that set them
+    // differently must not overlap, and runs that set them alike may. Taken before a device's lock,
+    // by every run on a card and no other.
+    internal static readonly TorchPrecisionGate Float32Runs = new();
+
+    /// <summary>Told of each run on a card once it holds <see cref="Float32Runs"/>, for a test to
+    /// read; null where nothing listens.</summary>
+    internal static Action<TorchSession>? HoldingPrecision;
+
     private TorchSession(
         TorchBackend backend, TorchRuntime runtime, TranslatedModel model, ShorokooLogSeverity logSeverity,
-        long? limitBytes, NodePlacement? nodePlacement, SessionOutputPlacement outputPlacement,
-        PyObject main, PyObject constants, PyObject constantStorages, PyObject constantIds)
+        long? limitBytes, bool tensorFloat32, NodePlacement? nodePlacement, SessionOutputPlacement outputPlacement,
+        PyObject main, PyObject constants, PyObject constantStorages, PyObject constantIds,
+        ModelProto proto, int modelBytes, IReadOnlyList<OutputAlias> outputAliases)
     {
         _backend = backend;
         _runtime = runtime;
@@ -65,39 +91,50 @@ internal sealed class TorchSession : IShorokooSession
         for (int i = 0; i < _outputNames.Length; i++) _outputIndex.TryAdd(_outputNames[i], i);
         _logSeverity = logSeverity;
         _limitBytes = limitBytes;
+        _tensorFloat32 = tensorFloat32;
         _nodePlacement = nodePlacement;
         OutputPlacement = outputPlacement;
         // Every slot of the translation's plan, in its numbering, which the translated code's writes
         // name; and of those, the pairs a run can bind at all: an output of the graph's own, by one of
-        // main's inputs. Written by the graph, a pair binds wherever the output ends up in the memory
-        // its input is in; copied home into it, only on a CUDA session, for an output fetched back.
+        // main's inputs, that the graph writes into the input's memory -- where both are, the run
+        // memory.
         _aliases = [.. model.Aliases];
         _bindable =
         [
             .. _aliases.Select(slot => slot.InputIndex >= 0 && _outputIndex.ContainsKey(slot.Output)
-                                       && (slot.WrittenByTheGraph || backend.OnCuda)),
+                                       && slot.WrittenByTheGraph),
         ];
         BindableAliases = [.. _aliases.Where((_, slot) => _bindable[slot]).Select(slot => new OutputAlias(slot.Output, slot.Input))];
         _main = main;
         _constants = constants;
         _constantStorages = constantStorages;
         _constantIds = constantIds;
+        _placements = TorchPlacements.For(proto, modelBytes, outputAliases, _inputNames, _outputIndex, runtime, constants, model.Constants.Count);
     }
+
+    /// <summary>Whether a session of <paramref name="backend"/> built with <paramref name="precision"/>
+    /// has its runs allow TensorFloat-32: on a card, where the settings allow it. A run on the CPU sets
+    /// neither of torch's switches, so there it is false whatever the settings say.</summary>
+    internal static bool TensorFloat32(TorchBackend backend, PrecisionSettings precision)
+        => backend.OnCuda && precision.AllowTensorFloat32;
 
     /// <summary>Translates <paramref name="modelBytes"/> and loads it.</summary>
     public static TorchSession Create(
         TorchBackend backend, ReadOnlyMemory<byte> modelBytes, ShorokooLogSeverity logSeverity,
-        DeviceMemorySettings deviceMemory, DiagnosticSettings diagnostics, IReadOnlyList<OutputAlias> outputAliases)
+        DeviceMemorySettings deviceMemory, DiagnosticSettings diagnostics, IReadOnlyList<OutputAlias> outputAliases,
+        PrecisionSettings precision)
     {
         ArgumentNullException.ThrowIfNull(deviceMemory);
         ArgumentNullException.ThrowIfNull(diagnostics);
         ArgumentNullException.ThrowIfNull(outputAliases);
+        ArgumentNullException.ThrowIfNull(precision);
         ModelProto proto;
         using (var stream = new MemoryStream(modelBytes.ToArray(), writable: false))
-            proto = ProtoBuf.Serializer.Deserialize<ModelProto>(stream);
+            proto = Shorokoo.Onnx.OnnxProtobuf.ReadModel(stream);
         // Translated before torch is started, so that a model this backend cannot run is refused
         // without first provisioning an environment to not run it in.
-        var model = OnnxToPythonTranslator.Translate(proto, outputAliases, TorchDialect.Instance);
+        var model = OnnxToPythonTranslator.Translate(proto, outputAliases, TorchDialect.Instance, null,
+            proto.Graph is { } graph ? TorchInPlace.Plan(graph) : null);
         // The translation's own hash names its compiled code: what it writes depends on the pairs the
         // session was asked for as well as on the model.
         var hash = Convert.ToHexStringLower(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(model.Source)))[..32];
@@ -116,8 +153,10 @@ internal sealed class TorchSession : IShorokooSession
                 }
                 var main = PyCall.Invoke(runtime.LoadModel, model.Source, $"<shorokoo-model-{hash}>", constants);
                 return new TorchSession(backend, runtime, model, logSeverity,
-                    backend.OnCuda ? deviceMemory.LimitBytes : null, placement, OutputPlacementOf(proto.Graph!, backend.OnCuda),
-                    main, constants, runtime.ConstantStorages.Invoke(constants), runtime.ConstantIds.Invoke(constants));
+                    backend.OnCuda ? deviceMemory.LimitBytes : null, TensorFloat32(backend, precision),
+                    placement, OutputPlacementOf(proto.Graph!, backend.OnCuda),
+                    main, constants, runtime.ConstantStorages.Invoke(constants), runtime.ConstantIds.Invoke(constants),
+                    proto, modelBytes.Length, outputAliases);
             }
             catch (PythonException ex)
             {
@@ -173,14 +212,32 @@ internal sealed class TorchSession : IShorokooSession
 
     public IReadOnlyList<string> OutputNames => _outputNames;
 
-    /// <summary>A CUDA session computes on the card, and can leave outputs there.</summary>
-    public bool HasDeviceMemory => _backend.OnCuda;
-
     public SessionOutputPlacement OutputPlacement { get; }
 
     public IReadOnlyList<OutputAlias> BindableAliases { get; }
 
     public NodePlacement? ReadNodePlacement() => _nodePlacement;
+
+    /// <summary>Where this session's consuming runs place their values; null where it places none.</summary>
+    internal TorchPlacements? Placements => _placements;
+
+    /// <summary>Stops placing values in consumed memory, and writing nodes over consumed inputs
+    /// (<see cref="TorchInPlace"/>): a consuming run then writes nothing into what it consumed but
+    /// the pairs it binds.</summary>
+    void IShorokooSession.StopPlacing()
+    {
+        Volatile.Write(ref _stoppedPlacing, 1);
+        ((IShorokooSession)this).StopPlanningPlacements();
+    }
+
+    /// <summary>Stops placing values in consumed memory, which plans and translates the model again
+    /// per run signature; nodes are still written over consumed inputs, which costs nothing to
+    /// arrange.</summary>
+    void IShorokooSession.StopPlanningPlacements()
+    {
+        _placements?.Dispose();
+        _placements = null;
+    }
 
     /// <summary>
     /// On CUDA, torch's caching allocator on this session's device, as <c>torch.cuda.memory_stats</c>
@@ -206,18 +263,14 @@ internal sealed class TorchSession : IShorokooSession
         }
     }
 
+    /// <summary>Runs the model on <paramref name="inputs"/>, every one of them where this backend's
+    /// runs read it, and leaves every output there: a tensor on this session's device, and a string
+    /// tensor or a sequence in host memory.</summary>
     public IReadOnlyList<IShorokooTensorValue> Run(
         IReadOnlyDictionary<string, IShorokooTensorValue> inputs,
         IReadOnlyList<string> outputNames,
         RunSettings runSettings)
-        => RunCore(inputs, null, outputNames, EmptySet, runSettings, out _);
-
-    public IReadOnlyList<IShorokooTensorValue> RunRetainingOutputs(
-        IReadOnlyDictionary<string, IShorokooTensorValue> inputs,
-        IReadOnlyList<string> outputNames,
-        IReadOnlySet<string> retainedOutputNames,
-        RunSettings runSettings)
-        => RunCore(inputs, null, outputNames, retainedOutputNames, runSettings, out _);
+        => RunCore(inputs, null, outputNames, runSettings, out _);
 
     /// <summary>The overload below, for a caller that does not ask which outputs went into consumed
     /// memory; a session built with pairs writes them there all the same.</summary>
@@ -225,9 +278,8 @@ internal sealed class TorchSession : IShorokooSession
         IReadOnlyDictionary<string, IShorokooTensorValue> inputs,
         IReadOnlyCollection<IShorokooTensorValue> consumed,
         IReadOnlyList<string> outputNames,
-        IReadOnlySet<string> retainedOutputNames,
         RunSettings runSettings)
-        => RunConsuming(inputs, consumed, outputNames, retainedOutputNames, runSettings, out _);
+        => RunConsuming(inputs, consumed, outputNames, runSettings, out _);
 
     /// <summary>
     /// Runs with <paramref name="consumed"/> handed over: each is released through the backend,
@@ -237,13 +289,17 @@ internal sealed class TorchSession : IShorokooSession
     /// (<see cref="BindableAliases"/>) is written there where the run consumed that input's value, fed
     /// it under no other name, and the value is a torch tensor of this runtime in memory of its own:
     /// by the node that produces it, when that is an <c>Add</c>, <c>Sub</c>, <c>Mul</c> or
-    /// <c>Div</c> of the value's floating-point type and shape on the device the output ends up on —
-    /// torch writing the result into the value rather than into memory it allocates, and so the
-    /// output costing no memory at all — or, on a CUDA session, by copying an output the run fetches
-    /// back into a consumed value in host memory rather than into host memory of its own. The node
-    /// declines where anything the rest of the run still reads could be the value under another
-    /// name: torch's views are more than ONNX Runtime's, and the proof behind the pair knows only
-    /// those. <paramref name="aliasedInputs"/> names, per output, the input it was written into.</para>
+    /// <c>Div</c> of the value's floating-point type and shape on the run's device — torch writing
+    /// the result into the value rather than into memory it allocates, and so the output costing no
+    /// memory at all. The node declines where anything the rest of the run still reads could be the
+    /// value under another name: torch's views are more than ONNX Runtime's, and the proof behind the
+    /// pair knows only those. <paramref name="aliasedInputs"/> names, per output, the input it was
+    /// written into.</para>
+    ///
+    /// <para>Values of the run are written into ranges of the consumed values' memory where the
+    /// graph proves those ranges free for them (<see cref="TorchPlacements"/>): an output written so
+    /// is handed over standing on the consumed value's memory, a <see cref="SharedBlock"/> it holds a
+    /// lease on, beside every other output of the run standing on it.</para>
     ///
     /// <para>The consumed values are released as the run returns. An output written into one is a
     /// value of its own holding a reference to the same tensor, so it outlives the release.</para>
@@ -252,14 +308,13 @@ internal sealed class TorchSession : IShorokooSession
         IReadOnlyDictionary<string, IShorokooTensorValue> inputs,
         IReadOnlyCollection<IShorokooTensorValue> consumed,
         IReadOnlyList<string> outputNames,
-        IReadOnlySet<string> retainedOutputNames,
         RunSettings runSettings,
         out IReadOnlyList<string?> aliasedInputs)
     {
         ArgumentNullException.ThrowIfNull(consumed);
         try
         {
-            return RunCore(inputs, consumed, outputNames, retainedOutputNames, runSettings, out aliasedInputs);
+            return RunCore(inputs, consumed, outputNames, runSettings, out aliasedInputs);
         }
         finally
         {
@@ -267,20 +322,16 @@ internal sealed class TorchSession : IShorokooSession
         }
     }
 
-    private static readonly IReadOnlySet<string> EmptySet = new HashSet<string>();
-
     private IReadOnlyList<IShorokooTensorValue> RunCore(
         IReadOnlyDictionary<string, IShorokooTensorValue> inputs,
         IReadOnlyCollection<IShorokooTensorValue>? consumed,
         IReadOnlyList<string> outputNames,
-        IReadOnlySet<string> retainedOutputNames,
         RunSettings runSettings,
         out IReadOnlyList<string?> aliasedInputs)
     {
         aliasedInputs = [];
         ArgumentNullException.ThrowIfNull(inputs);
         ArgumentNullException.ThrowIfNull(outputNames);
-        ArgumentNullException.ThrowIfNull(retainedOutputNames);
         ArgumentNullException.ThrowIfNull(runSettings);
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
         var token = runSettings.CancellationToken;
@@ -292,7 +343,6 @@ internal sealed class TorchSession : IShorokooSession
                 ? index
                 : throw new ArgumentException($"The model has no output '{outputNames[i]}'.", nameof(outputNames));
 
-        List<IShorokooTensorValue>? borrowed = null;
         var stop = IntPtr.Zero;
         CancellationTokenRegistration registration = default;
         try
@@ -302,17 +352,19 @@ internal sealed class TorchSession : IShorokooSession
             {
                 if (!inputs.TryGetValue(_inputNames[i], out var value))
                     throw new ArgumentException($"The model's input '{_inputNames[i]}' was not fed.", nameof(inputs));
-                if (value is TorchTensorValue own)
-                {
-                    feeds[i] = own;
-                    continue;
-                }
-                // A value of another runtime is rebuilt on this one for the run, and released after it.
-                var copy = (TorchTensorValue)BackendTransfer.CopyTo(_backend, value);
-                (borrowed ??= []).Add(copy);
-                feeds[i] = copy;
+                feeds[i] = Fed(_inputNames[i], value);
             }
-            var targets = AliasTargets(inputs, consumed, feeds, retainedOutputNames);
+            var targets = AliasTargets(inputs, consumed, feeds);
+            var entry = consumed is null || _placements is null
+                ? null
+                : _placements.EntryFor(feeds, TorchPlacements.Blocks(_inputNames, inputs, consumed, feeds, targets), outputNames);
+            if (entry?.Main is null) entry = null;
+            // The inputs the run consumed and holds alone, which an element-wise node may be written over
+            // (TorchInPlace) -- every one but those the plan places values in; none once the session
+            // has stopped placing.
+            int[] writable = consumed is null || Volatile.Read(ref _stoppedPlacing) != 0
+                ? []
+                : [.. TorchPlacements.Blocks(_inputNames, inputs, consumed, feeds, []).Except(entry?.Blocks ?? [])];
 
             // A flag in native memory the run reads before every node, and the token's callback
             // sets: it needs no interpreter lock to set, so a cancellation lands while the run holds
@@ -327,40 +379,74 @@ internal sealed class TorchSession : IShorokooSession
             var device = _backend.OnCuda
                 ? DeviceRuns.GetOrAdd(_backend.CudaDeviceId, static _ => new ReaderWriterLockSlim(LockRecursionPolicy.SupportsRecursion))
                 : null;
-            if (device is null) return Invoke(feeds, wanted, outputNames, retainedOutputNames, targets, stop, runSettings, out aliasedInputs);
-            var capped = _limitBytes is not null;
-            if (capped) device.EnterWriteLock();
-            else device.EnterReadLock();
+            if (device is null) return Invoke(feeds, wanted, outputNames, targets, entry, writable, stop, runSettings, out aliasedInputs);
+            Float32Runs.Enter(_tensorFloat32, token);
             try
             {
-                return Invoke(feeds, wanted, outputNames, retainedOutputNames, targets, stop, runSettings, out aliasedInputs);
+                HoldingPrecision?.Invoke(this);
+                var capped = _limitBytes is not null;
+                if (capped) device.EnterWriteLock();
+                else device.EnterReadLock();
+                try
+                {
+                    return Invoke(feeds, wanted, outputNames, targets, entry, writable, stop, runSettings, out aliasedInputs);
+                }
+                finally
+                {
+                    if (capped) device.ExitWriteLock();
+                    else device.ExitReadLock();
+                }
             }
             finally
             {
-                if (capped) device.ExitWriteLock();
-                else device.ExitReadLock();
+                Float32Runs.Exit(_tensorFloat32);
             }
         }
         finally
         {
             registration.Dispose();
             if (stop != IntPtr.Zero) Marshal.FreeHGlobal(stop);
-            if (borrowed is not null) foreach (var copy in borrowed) copy.Dispose();
         }
+    }
+
+    /// <summary>
+    /// <paramref name="value"/>, fed as input <paramref name="name"/>, where it is one of this
+    /// runtime's in the memory this session's runs read it in: a tensor on this session's device,
+    /// and a string tensor or a sequence in host memory. Refused otherwise, before the run starts:
+    /// nothing here moves a value, the framework placing every input there before it hands it over
+    /// (<see cref="IShorokooBackend.RunMemoryOf"/>).
+    /// </summary>
+    /// <exception cref="InvalidOperationException">The value is not this runtime's, or not where this
+    /// session's runs read it.</exception>
+    private TorchTensorValue Fed(string name, IShorokooTensorValue value)
+    {
+        if (value is TorchTensorValue own)
+        {
+            var hostRead = own.ValueType != ShorokooOnnxValueType.Tensor || own.ElementType == ShorokooTensorElementType.String;
+            if ((hostRead || !_backend.OnCuda) ? own.IsHostAccessible : own.CudaDevice == _backend.CudaDeviceId)
+                return own;
+        }
+        throw new InvalidOperationException(
+            $"Input '{name}' was handed to a session of {_backend.Description} as "
+            + (value is TorchTensorValue torch
+                ? $"a {torch.ValueType} of {torch.ElementType} in "
+                  + (torch.IsHostAccessible ? "host memory" : $"cuda:{torch.CudaDevice}'s memory")
+                : $"a {value.GetType().Name}, which is not a value of this runtime")
+            + ", outside the memory its runs read it in. A session takes only values its backend's runs "
+            + "read where they are, and moves none: place the input there first, through the backend's "
+            + "own moves (IShorokooBackend.CreateTensorInBackendMemory).");
     }
 
     /// <summary>
     /// Per slot of the translation's plan, the position of the input whose consumed value the output
     /// may be written into, or -1: where the session binds the slot's pair, the run consumed the very
-    /// value it is fed as that input, fed it under no other name, and it is a tensor of this runtime
-    /// — a copy made for the run from another runtime's value is not the value consumed. What else it
-    /// takes is settled in the run.
+    /// value it is fed as that input, fed it under no other name, and it is a tensor of this runtime.
+    /// What else it takes is settled in the run.
     /// </summary>
     private int[] AliasTargets(
         IReadOnlyDictionary<string, IShorokooTensorValue> inputs,
         IReadOnlyCollection<IShorokooTensorValue>? consumed,
-        TorchTensorValue[] feeds,
-        IReadOnlySet<string> retainedOutputNames)
+        TorchTensorValue[] feeds)
     {
         if (BindableAliases.Count == 0 || consumed is null || consumed.Count == 0) return [];
         var handed = new HashSet<IShorokooTensorValue>(consumed, ReferenceEqualityComparer.Instance);
@@ -381,8 +467,8 @@ internal sealed class TorchSession : IShorokooSession
     }
 
     private IReadOnlyList<IShorokooTensorValue> Invoke(
-        TorchTensorValue[] feeds, int[] wanted, IReadOnlyList<string> outputNames, IReadOnlySet<string> retainedOutputNames,
-        int[] targets, IntPtr stop, RunSettings runSettings, out IReadOnlyList<string?> aliasedInputs)
+        TorchTensorValue[] feeds, int[] wanted, IReadOnlyList<string> outputNames,
+        int[] targets, TorchPlacements.Entry? placing, int[] writable, IntPtr stop, RunSettings runSettings, out IReadOnlyList<string?> aliasedInputs)
     {
         aliasedInputs = [];
         using (PythonRuntime.Gil())
@@ -390,29 +476,27 @@ internal sealed class TorchSession : IShorokooSession
             using var args = new PyList();
             foreach (var feed in feeds) args.Append(feed.Value);
             using var wantedList = new PyList();
-            using var retainedList = new PyList();
-            foreach (var index in wanted)
-            {
-                PyCall.Append(wantedList, index);
-                PyCall.Append(retainedList, _backend.OnCuda && retainedOutputNames.Contains(_outputNames[index]));
-            }
+            foreach (var index in wanted) PyCall.Append(wantedList, index);
             using var aliases = new PyList();
             for (int slot = 0; slot < targets.Length; slot++)
             {
                 var alias = _aliases[slot];
                 using var output = new PyInt(_bindable[slot] ? _outputIndex[alias.Output] : -1);
                 using var target = new PyInt(targets[slot]);
-                using var retained = (_backend.OnCuda && retainedOutputNames.Contains(alias.Output)).ToPython();
-                using var entry = new PyTuple([output, target, retained]);
+                using var entry = new PyTuple([output, target]);
                 aliases.Append(entry);
             }
 
             PyObject results;
             try
             {
+                using var noPlacements = new PyList();
+                using var writes = new PyList();
+                foreach (var index in writable) PyCall.Append(writes, index);
                 results = PyCall.Invoke(_runtime.Run,
-                    _main, args, wantedList, retainedList, _backend.DeviceName, _constantStorages, _constantIds,
-                    stop.ToInt64(), (int)_logSeverity, aliases, _limitBytes ?? -1L, runSettings.ShrinkArenaAfterRun);
+                    placing?.Main ?? _main, args, wantedList, _backend.DeviceName, _constantStorages, _constantIds,
+                    stop.ToInt64(), (int)_logSeverity, aliases, _limitBytes ?? -1L, runSettings.ShrinkArenaAfterRun,
+                    _tensorFloat32, placing?.Slots ?? noPlacements, writes);
             }
             catch (PythonException ex) when (ex.Type.Name == TorchRuntime.RunStopped && runSettings.CancellationToken.IsCancellationRequested)
             {
@@ -440,6 +524,7 @@ internal sealed class TorchSession : IShorokooSession
             {
                 var outputs = new List<IShorokooTensorValue>(wanted.Length);
                 string?[]? aliased = null;
+                Dictionary<int, (SharedBlock Block, long Offset)>? blocks = null;
                 try
                 {
                     for (int i = 0; i < wanted.Length; i++)
@@ -447,8 +532,19 @@ internal sealed class TorchSession : IShorokooSession
                         using var triple = results[i];
                         using var description = triple[1];
                         using var written = triple[2];
-                        outputs.Add(TorchTensorValue.Wrap(triple[0], description, _outputSequenceTypes[wanted[i]]));
-                        if (written.IsTrue())
+                        var output = TorchTensorValue.Wrap(triple[0], description, _outputSequenceTypes[wanted[i]]);
+                        outputs.Add(output);
+                        if (PyTuple.IsTupleType(written))
+                        {
+                            using var slot = written[0];
+                            var placement = placing!.Plan[slot.As<int>()];
+                            var input = Array.IndexOf(_inputNames, placement.Block);
+                            blocks ??= [];
+                            if (!blocks.TryGetValue(input, out var block))
+                                blocks[input] = block = BlockOf(feeds[input]);
+                            output.StandOn(new BlockRange(block.Block, block.Offset + placement.Offset, placement.Bytes));
+                        }
+                        else if (written.IsTrue())
                             (aliased ??= new string?[wanted.Length])[i] = _aliases.Where((_, slot) => _bindable[slot]).First(a => a.Output == outputNames[i]).Input;
                     }
                 }
@@ -463,9 +559,21 @@ internal sealed class TorchSession : IShorokooSession
         }
     }
 
+    /// <summary>
+    /// The block the outputs a run placed in consumed value <paramref name="consumed"/> stand on, and
+    /// where its memory starts in it: the block the value itself stands on, where it does — its range
+    /// is that block's to give out again — or else a block of the value's own memory, which torch
+    /// frees once the last tensor reading it is gone, so letting go of the block has nothing to do.
+    /// </summary>
+    private static (SharedBlock Block, long Offset) BlockOf(TorchTensorValue consumed)
+        => consumed.Range is { } range
+            ? (range.Block, range.Offset)
+            : (new SharedBlock(TorchPlacements.BytesOf(consumed), static () => { }), 0);
+
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+        _placements?.Dispose();
         using (PythonRuntime.Gil())
         {
             _main.Dispose();

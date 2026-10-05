@@ -179,7 +179,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             for (int i = 0; i < spec.TensorAttributes.Length; i++)
             {
                 var mapping = spec.TensorAttributes[i];
-                var longs = resolved[i].As<int64>().CopyMemory<long>();
+                var longs = resolved[i];
                 newAttrs[mapping.AttributeName] = mapping.IsScalar
                     ? (object)(longs.Length > 0 ? longs[0] : 0L)
                     : longs;
@@ -198,7 +198,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             node.FullInputs = new Dictionary<string, List<FastTensorKey?>> { [""] = newSlots };
         }
 
-        private static TensorData[] ResolveKeys(
+        /// <summary>
+        /// The values of <paramref name="keys"/>, read from the tensors the strategies below resolve
+        /// them to, each released once read: every one is the pass's own.
+        /// </summary>
+        private static long[][] ResolveKeys(
             InternalComputationGraph graph,
             List<FastTensorKey> keys,
             IReadOnlyList<IData>? sampleInputs,
@@ -232,14 +236,21 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 }
             }
 
-            for (int i = 0; i < resolved.Length; i++)
-                if (resolved[i] is null)
-                    throw new InvalidOperationException(
-                        $"FastLowerAttributeTensorOps: could not resolve a tensor-attribute input of '{opCodeForError}' " +
-                        "to a constant value. Attribute-source inputs must be computable at lowering time " +
-                        "(compile-time constant, or derivable from the supplied sample inputs).");
+            try
+            {
+                for (int i = 0; i < resolved.Length; i++)
+                    if (resolved[i] is null)
+                        throw new InvalidOperationException(
+                            $"FastLowerAttributeTensorOps: could not resolve a tensor-attribute input of '{opCodeForError}' " +
+                            "to a constant value. Attribute-source inputs must be computable at lowering time " +
+                            "(compile-time constant, or derivable from the supplied sample inputs).");
 
-            return resolved!;
+                return [.. resolved.Select(static value => value!.As<int64>().CopyMemory<long>())];
+            }
+            finally
+            {
+                foreach (var value in resolved) value?.Dispose();
+            }
         }
 
         private static bool AnyUnresolved(TensorData?[] resolved)
@@ -283,9 +294,13 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             var results = (compute ?? ComputeContext.Default).Execute(
                 resolver, [.. samples.Select(static sample =>
                     sample is SharedInput ? sample : (IData)new SharedInput(sample, SharedInputMode.Shared))]);
+            // Each is read where the run's backend left it; one an earlier strategy resolved already
+            // is released unread.
             for (int i = 0; i < keys.Count; i++)
                 if (resolved[i] is null)
                     resolved[i] = results[i].ToTensorData();
+                else
+                    ComputeContext.ReleaseOutputs([results[i]]);
         }
 
         /// <summary>

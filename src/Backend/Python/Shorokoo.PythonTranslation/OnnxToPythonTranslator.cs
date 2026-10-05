@@ -219,7 +219,7 @@ internal sealed partial class OnnxToPythonTranslator
         Line($"def {name}({string.Join(", ", parameters)}):");
         _indent++;
         EndStatement(scope);
-        foreach (var node in function.Nodes)
+        foreach (var node in RunOrder(function.Nodes))
             EmitNode(attributes is null ? node : FunctionAttributes.Resolve(node, attributes), scope);
         Return(function.Outputs, scope);
         Release(scope);
@@ -272,7 +272,8 @@ internal sealed partial class OnnxToPythonTranslator
         EndStatement(scope);
         if (training is null)
         {
-            foreach (var node in graph.Nodes) EmitNode(node, scope);
+            if (parent is null && name == "main") _mainScope = scope;
+            foreach (var node in RunOrder(graph.Nodes)) EmitNode(node, scope);
             Return(graph.Outputs.Select(o => o.Name), scope);
         }
         else if (Dialect.Gradients == GradientStyle.Tape)
@@ -285,6 +286,115 @@ internal sealed partial class OnnxToPythonTranslator
         }
         Release(scope);
         _indent--;
+    }
+
+    /// <summary>
+    /// <paramref name="nodes"/> in the order a translation writes them, and so runs them: the order
+    /// ONNX Runtime runs them in (<see cref="InOnnxRuntimeOrder"/>) — the one Shorokoo's
+    /// memory-aware pass schedules a training step for, so that a translation holds what the pass
+    /// planned for — with each shape read as soon as its value is made (<see cref="ShapesFirst"/>).
+    /// </summary>
+    internal static IReadOnlyList<NodeProto> RunOrder(IReadOnlyList<NodeProto> nodes) => [.. ShapesFirst(InOnnxRuntimeOrder(nodes))];
+
+    /// <summary>
+    /// <paramref name="nodes"/> in the order ONNX Runtime's sequential executor runs a graph's nodes
+    /// in, which is the order Shorokoo's memory-aware pass schedules a training step for: every
+    /// <c>Constant</c> first, as ONNX Runtime holds them before the graph runs; then a depth-first
+    /// walk from the nodes whose outputs no node among them reads, all of them pushed in node order
+    /// so that the last is walked first, which reaches each node's producers highest index first and
+    /// writes each node once all of its producers are written. A value a node's subgraph reads from
+    /// outside it counts as read by the node.
+    /// </summary>
+    internal static IReadOnlyList<NodeProto> InOnnxRuntimeOrder(IReadOnlyList<NodeProto> nodes)
+    {
+        static bool Resident(NodeProto node) => node.Domain is "" or "ai.onnx" && node.OpType == "Constant";
+        var producer = new Dictionary<string, int>(StringComparer.Ordinal);
+        for (int n = 0; n < nodes.Count; n++)
+            foreach (var output in nodes[n].Outputs)
+                if (output.Length > 0) producer[output] = n;
+        var producers = new SortedSet<int>[nodes.Count];
+        var read = new bool[nodes.Count];
+        for (int n = 0; n < nodes.Count; n++)
+        {
+            var reads = new HashSet<string>(nodes[n].Inputs.Where(i => i.Length > 0), StringComparer.Ordinal);
+            foreach (var attribute in nodes[n].Attributes)
+            {
+                if (attribute.G is { } body) AliasPlan.ReferencedFrom(body, reads);
+                foreach (var each in attribute.Graphs) AliasPlan.ReferencedFrom(each, reads);
+            }
+            producers[n] = [];
+            foreach (var value in reads)
+                if (producer.TryGetValue(value, out var p) && p != n && !Resident(nodes[p])) producers[n].Add(p);
+            foreach (var p in producers[n]) read[p] = true;
+        }
+        var order = new List<NodeProto>(nodes.Count);
+        var visited = new bool[nodes.Count];
+        for (int n = 0; n < nodes.Count; n++)
+            if (Resident(nodes[n]))
+            {
+                visited[n] = true;
+                order.Add(nodes[n]);
+            }
+        var stack = new List<(int Node, bool Leave)>();
+        for (int n = 0; n < nodes.Count; n++)
+            if (!visited[n] && !read[n]) stack.Add((n, false));
+        while (stack.Count > 0)
+        {
+            var (n, leave) = stack[^1];
+            stack.RemoveAt(stack.Count - 1);
+            if (leave)
+            {
+                order.Add(nodes[n]);
+                continue;
+            }
+            if (visited[n]) continue;
+            visited[n] = true;
+            stack.Add((n, true));
+            foreach (var p in producers[n])
+                if (!visited[p]) stack.Add((p, false));
+        }
+        return order.Count == nodes.Count ? order : [.. nodes];
+    }
+
+    /// <summary>
+    /// <paramref name="nodes"/> in their own order, but with each node that reads only the shape of
+    /// its one input — a standard <c>Shape</c> or <c>Size</c> — written right after the node making
+    /// that input, or first where nothing among them makes it. A shape is
+    /// known as soon as its value is made and never changes after, so the node computes the same
+    /// there; read where the graph puts it — in a backward pass, say, long after the value's last
+    /// read of its contents — it would keep the whole value alive until then just to read its shape.
+    /// </summary>
+    internal static IEnumerable<NodeProto> ShapesFirst(IReadOnlyList<NodeProto> nodes)
+    {
+        static bool ReadsAShape(NodeProto node)
+            => node.Domain is "" or "ai.onnx" && node.OpType is "Shape" or "Size" && node.Inputs.Count == 1 && node.Inputs[0].Length > 0;
+        var made = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var node in nodes)
+            foreach (var output in node.Outputs)
+                if (output.Length > 0) made.Add(output);
+        var after = new Dictionary<string, List<NodeProto>>(StringComparer.Ordinal);
+        var first = new List<NodeProto>();
+        foreach (var node in nodes.Where(ReadsAShape))
+        {
+            if (!made.Contains(node.Inputs[0]))
+            {
+                first.Add(node);
+                continue;
+            }
+            if (!after.TryGetValue(node.Inputs[0], out var readers)) after[node.Inputs[0]] = readers = [];
+            readers.Add(node);
+        }
+        foreach (var node in first.Concat(nodes.Where(n => !ReadsAShape(n))))
+        {
+            var pending = new Queue<NodeProto>([node]);
+            while (pending.TryDequeue(out var next))
+            {
+                yield return next;
+                foreach (var output in next.Outputs)
+                    if (output.Length > 0 && after.Remove(output, out var readers))
+                        foreach (var reader in readers) pending.Enqueue(reader);
+            }
+        }
     }
 
     /// <summary>Writes a subgraph as a nested function where the current statement is about to be
@@ -393,6 +503,7 @@ internal sealed partial class OnnxToPythonTranslator
                     throw context.Unsupported($"its attribute '{attribute.Name}' names element type {(ShorokooTensorElementType)attribute.I}, and {why}");
             expression = entry.Emit(context);
             returnsTuple = entry.ReturnsTuple;
+            expression = Over(node, scope, entry.Function, Placed(node, scope, entry.Function, expression));
             if (returnsTuple) expression += $"[:{outputs.Count}]";
         }
         else

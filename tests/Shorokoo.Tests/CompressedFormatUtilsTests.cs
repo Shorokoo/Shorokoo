@@ -810,6 +810,41 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
     }
 
     [Fact]
+    public void TestAStreamedReadRefusesALengthItsSourceCannotHoldBeforeAllocatingIt()
+    {
+        const long Declared = 64L << 20;
+        static long[] Floats(params long[] dims) => dims;
+        AssertRefusedUnallocated(DeclaringRawData(Declared), compressed: false, heldPast: null);
+        AssertRefusedUnallocated(DeclaringRawData(Declared), compressed: true, heldPast: null);
+        AssertRefusedUnallocated(DeclaringRawData(Declared), compressed: false, heldPast: 1024);
+        AssertRefusedUnallocated(DeclaringRawData(Declared), compressed: true, heldPast: 1024);
+        Assert.IsType<InvalidDataException>(Record.Exception(() => ReadStreamed(OneTensorModel(
+            [0x08, .. Varint(unchecked((ulong)-1L)), 0x08, .. Varint(unchecked((ulong)-512L))], 2048), 1024)));
+        Assert.Equal(-1, Onnx.OnnxExternalData.TryGetExpectedByteLength(new TensorProto { data_type = (int)TensorProto.DataType.Float, Dims = Floats((1L << 59) + 512) }));
+        Assert.Equal(-1, Onnx.OnnxExternalData.TryGetExpectedByteLength(new TensorProto { data_type = (int)TensorProto.DataType.Float, Dims = Floats(-1, -512) }));
+    }
+
+    private static byte[] DeclaringRawData(long rawBytes)
+    {
+        static byte[] Head(int key, long length) => [.. Varint((ulong)key), .. Varint((ulong)length)];
+        byte[] tensor = [0x08, .. Varint((ulong)rawBytes), 0x10, 0x02, .. Head(0x4A, rawBytes)];
+        byte[] graph = Head(0x2A, tensor.Length + rawBytes);
+        return [0x08, 0x0A, .. Head(0x3A, graph.Length + tensor.Length + rawBytes), .. graph, .. tensor, .. new byte[16]];
+    }
+
+    private static void AssertRefusedUnallocated(byte[] model, bool compressed, long? heldPast)
+    {
+        var payload = compressed ? CompressedFormatUtils.Compress(model) : model;
+        var container = BuildRawSrkContainer(
+            $"{{\"srkVersion\":1,\"stage\":\"concrete-model\",\"compression\":\"{(compressed ? "zstd" : "none")}\",\"payloadSha256\":\"{Sha256Hex(payload)}\"}}", payload);
+        OnnxStreamingReader.HeldPayloadThresholdInjection = heldPast;
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        try { Assert.Throws<InvalidDataException>(() => CompressedFormatUtils.LoadFastGraphFromBinary(container)); }
+        finally { OnnxStreamingReader.HeldPayloadThresholdInjection = null; }
+        Assert.True(GC.GetAllocatedBytesForCurrentThread() - before < 1 << 20);
+    }
+
+    [Fact]
     public void TestAnSrkFileReadsAWeightPastWhatAnArrayHoldsIntoHostMemoryInEitherForm()
     {
         var model = FCLayer.ComputationGraph.ToConcreteArchitecture(

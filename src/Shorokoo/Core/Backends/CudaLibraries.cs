@@ -147,8 +147,8 @@ public static partial class CudaLibraries
                 if (((delegate* unmanaged<IntPtr, int, IntPtr*, int>)info)(handle, RtldDiLinkMap, &map) != 0) return null;
                 // A link_map's second field is the file's name, as it was found; its third, the
                 // address of the object's dynamic section, which lies in the object's mapping.
-                return Marshal.PtrToStringUTF8(Marshal.ReadIntPtr(map, IntPtr.Size)) is { Length: > 0 } name
-                    ? LoadedPath(name, (ulong)Marshal.ReadIntPtr(map, 2 * IntPtr.Size), () => File.ReadAllText("/proc/self/maps"))
+                return Marshal.PtrToStringUTF8(Marshal.ReadIntPtr(map, IntPtr.Size)) is { Length: > 0 } found
+                    ? LoadedPath(found, (ulong)Marshal.ReadIntPtr(map, 2 * IntPtr.Size), () => File.ReadAllText("/proc/self/maps"))
                     : null;
             }
             finally

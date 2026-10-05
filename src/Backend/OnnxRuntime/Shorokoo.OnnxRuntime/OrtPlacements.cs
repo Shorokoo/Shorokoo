@@ -769,7 +769,7 @@ internal sealed class OrtPlacements : IDisposable
         if (_model is not null)
         {
             using var stream = new MemoryStream(_model, writable: false);
-            return _original = ProtoBuf.Serializer.Deserialize<ModelProto>(stream);
+            return _original = Shorokoo.Onnx.OnnxProtobuf.ReadModel(stream);
         }
         using var file = File.OpenRead(_files.Model!);
         return _original = WithoutLargeTensorContents(file);
@@ -789,7 +789,7 @@ internal sealed class OrtPlacements : IDisposable
         var lean = new MemoryStream();
         CopyLean(source, source.Length, lean, Message.Model);
         lean.Position = 0;
-        return ProtoBuf.Serializer.Deserialize<ModelProto>(lean);
+        return Shorokoo.Onnx.OnnxProtobuf.ReadModel(lean);
     }
 
     /// <summary>The ONNX messages <see cref="CopyLean"/> looks into, on the way to tensors.</summary>
@@ -1045,7 +1045,7 @@ internal sealed class OrtPlacements : IDisposable
     internal static ModelProto ReadOptimized(string directory)
     {
         using var stream = File.OpenRead(Path.Combine(directory, OrtBackend.OptimizedModelFile));
-        var model = ProtoBuf.Serializer.Deserialize<ModelProto>(stream);
+        var model = Shorokoo.Onnx.OnnxProtobuf.ReadModel(stream);
         return model.Graph is null ? throw new InvalidOperationException("ONNX Runtime wrote out a model with no graph.") : model;
     }
 

@@ -76,13 +76,15 @@ public static class OutputAliasProof
     /// were given — see the class for the rule.
     /// </summary>
     /// <exception cref="ArgumentNullException">An argument is null.</exception>
+    /// <exception cref="ProtoBuf.ProtoException"><paramref name="model"/> is not a model protobuf reads:
+    /// malformed, or nested deeper than it reads.</exception>
     public static IReadOnlyList<OutputAlias> Prove(byte[] model, IEnumerable<OutputAlias> candidates)
     {
         ArgumentNullException.ThrowIfNull(model);
         ArgumentNullException.ThrowIfNull(candidates);
         ModelProto parsed;
         using (var stream = new MemoryStream(model, writable: false))
-            parsed = ProtoBuf.Serializer.Deserialize<ModelProto>(stream);
+            parsed = Shorokoo.Onnx.OnnxProtobuf.ReadModel(stream);
         return parsed.Graph is { } graph ? Prove(graph, candidates) : [];
     }
 

@@ -126,7 +126,7 @@ internal sealed class TorchSession : IShorokooSession
         ArgumentNullException.ThrowIfNull(precision);
         ModelProto proto;
         using (var stream = new MemoryStream(modelBytes.ToArray(), writable: false))
-            proto = ProtoBuf.Serializer.Deserialize<ModelProto>(stream);
+            proto = Shorokoo.Onnx.OnnxProtobuf.ReadModel(stream);
         // Translated before torch is started, so that a model this backend cannot run is refused
         // without first provisioning an environment to not run it in.
         var model = OnnxToPythonTranslator.Translate(proto, outputAliases, TorchDialect.Instance, null,

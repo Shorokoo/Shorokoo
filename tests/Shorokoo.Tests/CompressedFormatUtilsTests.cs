@@ -367,7 +367,7 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
         FromBinary([], "empty");
         FromBinary(bareZstd, "not a Shorokoo .srk container");
         FromBinary(BuildRawSrkContainer("{not json", payload), "header");
-        byte[] nested = OnnxExternalDataTests.Nested([0x3A], [0x0A, 0x2A, 0x32], 100);
+        byte[] nested = OnnxExternalDataTests.Nested([0x3A], [0x0A, 0x2A, 0x32], 101);
         FromFile("nested.srk", BuildRawSrkContainer(
             $"{{\"srkVersion\":1,\"stage\":\"concrete-architecture\",\"compression\":\"none\",\"payloadSha256\":\"{Sha256Hex(nested)}\"}}",
             nested), "not a readable Shorokoo graph file");
@@ -1566,13 +1566,13 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
         RewriteWith(plainEntries, unknown.ToJsonString());
         RefusedLoad("lz4", "unsupported compression");
 
-        // A corrupt Zstd frame with a matching sha256: integrity passes, decompression fails loud.
+        // A Zstd frame cut short with a matching sha256: integrity passes, and the frame is refused.
         var truncated = storedWeights.Take(storedWeights.Length / 2).ToArray();
         Assert.True(SkptFileFormat.LooksLikeZstdFrame(truncated));
         var corrupt = JsonNode.Parse(zstdEntries[SkptFileFormat.ConfigEntryName])!;
         corrupt["data"]!["weights"]!["sha256"] = SkptFileFormat.Sha256Hex(truncated);
         RewriteWith(zstdEntries, corrupt.ToJsonString(), truncated);
-        RefusedLoad(SkptFileFormat.WeightsEntryPath, "Zstd-decompress");
+        RefusedLoad(SkptFileFormat.WeightsEntryPath, "cut short");
     }
 
     [Fact]

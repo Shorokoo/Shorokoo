@@ -246,10 +246,11 @@ internal sealed class OrtPlacements : IDisposable
         => value.ReadShape.Aggregate(1L, (a, d) => a * d) * PlacementShapes.ElementBytes((int)value.ElementType);
 
     /// <summary>
-    /// The entry for a run that may place values in <paramref name="blocks"/>, made the first time
-    /// its signature is seen; null where this session has stopped planning or plans for as many
-    /// signatures as it will. <paramref name="aliasedInputs"/> names the inputs the run writes an
-    /// output into, which no plan places.
+    /// The entry for a run that may place values in <paramref name="blocks"/>: the one its signature
+    /// has, or one made the first time its signature is seen; null for a signature not seen before
+    /// where this session has stopped planning or plans for as many signatures as it will.
+    /// <paramref name="aliasedInputs"/> names the inputs the run writes an output into, which no plan
+    /// places.
     /// </summary>
     internal Entry? EntryFor(
         IReadOnlyDictionary<string, IShorokooTensorValue> inputs, Dictionary<string, OrtTensorValue> blocks,
@@ -272,9 +273,11 @@ internal sealed class OrtPlacements : IDisposable
         key.Append("->").AppendJoin(';', outputNames);
         lock (_gate)
         {
-            if (_disposed || _broken is not null) return null;
+            if (_disposed) return null;
+            // A session that stopped planning still runs what it settled: an adopted signature
+            // placed, on the variant it holds for it.
             if (_entries.TryGetValue(key.ToString(), out var entry)) return entry;
-            if (_entries.Count >= MostSignatures) return null;
+            if (_broken is not null || _entries.Count >= MostSignatures) return null;
             return _entries[key.ToString()] = new Entry();
         }
     }
@@ -303,7 +306,11 @@ internal sealed class OrtPlacements : IDisposable
             if (entry.Stage == Stage.Unplanned)
             {
                 cancellation.ThrowIfCancellationRequested();
-                Prepare(owner, entry, inputs, blocks, outputNames, aliasedOutputs, cancellation);
+                string? broken;
+                lock (_gate) broken = _broken;
+                // A session that stopped planning plans no signature left unplanned either.
+                if (broken is not null) Refuse(entry, broken);
+                else Prepare(owner, entry, inputs, blocks, outputNames, aliasedOutputs, cancellation);
                 Settled?.Invoke(entry);
             }
         }
@@ -435,7 +442,8 @@ internal sealed class OrtPlacements : IDisposable
     /// until the two agree. Refuses the entry, for good, where nothing can be placed, where placing
     /// saves too little, where the variant's compute nodes differ from the plain session's, or where
     /// anything fails on the way — the run then runs as it would have with no placing — and stops
-    /// planning for the session where it ran out of memory, as planning another signature would.
+    /// planning for the session where it ran out of memory, as planning another signature would; the
+    /// signatures adopted already go on placed.
     /// Leaves the entry to be planned again where <paramref name="cancellation"/> stopped it. Under
     /// the lock.
     /// </summary>
@@ -910,7 +918,7 @@ internal sealed class OrtPlacements : IDisposable
         /// <summary>Keeps <paramref name="model"/> in a file of its own, claimed.</summary>
         internal void KeepModel(byte[] model)
         {
-            ProcessSweep.Start();
+            (SweepOnThisThread ?? ProcessSweep).Start();
             Model = Path.Combine(Path.GetTempPath(), ModelFilePrefix + Guid.NewGuid().ToString("N") + ".onnx");
             File.WriteAllBytes(Model, model);
             _modelClaim = new FileStream(Model, FileMode.Open, FileAccess.Read, FileShare.Read);
@@ -920,7 +928,7 @@ internal sealed class OrtPlacements : IDisposable
         /// cannot be made, as a folder nothing else could take over a sweep is.</summary>
         internal void KeepRuns(string directory)
         {
-            ProcessSweep.Start();
+            (SweepOnThisThread ?? ProcessSweep).Start();
             Runs = directory;
             try
             {

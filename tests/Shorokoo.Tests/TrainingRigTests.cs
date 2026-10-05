@@ -2872,7 +2872,7 @@ public class TrainingRigTrainingLoopCoverageTests
     {
         var (loss, weights) = LossAndTrainedParams(DropoutSquaredInOneIfArmModel.ComputationGraph, true, 1f, 1f, 1f, 1f, 1f, 1f, 1f, 1f);
         int kept = weights.Count(w => Math.Abs(w - 0.2f) < 1e-5f);
-        Assert.Equal((double)loss, 2.0 * kept, 1e-4);
+        Assert.Equal(2.0 * kept, loss, 1e-4);
         Assert.Equal(8 - kept, weights.Count(w => w == 1f));
     }
 

@@ -145,8 +145,11 @@ public static partial class CudaLibraries
             {
                 IntPtr map;
                 if (((delegate* unmanaged<IntPtr, int, IntPtr*, int>)info)(handle, RtldDiLinkMap, &map) != 0) return null;
-                // A link_map's second field is the file's name, as it was found.
-                return Marshal.PtrToStringUTF8(Marshal.ReadIntPtr(map, IntPtr.Size)) is { Length: > 0 } path ? path : null;
+                // A link_map's second field is the file's name, as it was found; its third, the
+                // address of the object's dynamic section, which lies in the object's mapping.
+                return Marshal.PtrToStringUTF8(Marshal.ReadIntPtr(map, IntPtr.Size)) is { Length: > 0 } name
+                    ? LoadedPath(name, (ulong)Marshal.ReadIntPtr(map, 2 * IntPtr.Size), () => File.ReadAllText("/proc/self/maps"))
+                    : null;
             }
             finally
             {
@@ -158,6 +161,11 @@ public static partial class CudaLibraries
             Marshal.FreeCoTaskMem(utf8);
         }
     }
+
+    /// <summary>The file of a library the loader holds under <paramref name="name"/>, the name it was
+    /// found as, an address in whose mapping is <paramref name="address"/>, among the process's
+    /// mappings <paramref name="maps"/> lists.</summary>
+    internal static string LoadedPath(string name, ulong address, Func<string> maps) => name;
 
     private const int RtldLazy = 0x1;
     private const int RtldNoLoad = 0x4;

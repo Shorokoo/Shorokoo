@@ -1374,23 +1374,50 @@ namespace Shorokoo
         /// </summary>
         private static string ContentKey(TensorData data)
         {
-            // Hashed through the span rather than a copy -- this runs over every tensor being
-            // written -- so the tensor has to be kept alive across it: taking the span is its last
-            // read, and Sha256Hex allocates while reading through it.
-            var key = $"{data.DType}|{string.Join(",", data.Shape.Dims)}|" +
-                      SkptFileFormat.Sha256Hex(data.AccessRawMemory());
-            GC.KeepAlive(data);
-            return key;
+            // Hashed as the tensor's contents are written -- straight from its storage, a piece at
+            // a time where it is past one span or off the host -- rather than through a copy: this
+            // runs over every tensor being written.
+            using var hash = new HashingStream();
+            data.WriteContentTo(hash);
+            return $"{data.DType}|{string.Join(",", data.Shape.Dims)}|{hash.Sha256Hex()}";
         }
 
         /// <summary>The same key for a graph literal — an attribute's bytes hash to what a load
-        /// would bind, so the two forms dedup against each other. Hashed a piece at a time, so an
+        /// would bind, so the two forms dedup against each other. Hashed as it is written, so an
         /// attribute past one managed array is never read whole.</summary>
         private static string ContentKey(TensorAttribute data)
         {
-            using var elements = data.OpenRead();
-            return $"{data.DType}|{string.Join(",", data.Shape.Dims)}|"
-                   + Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(elements)).ToLowerInvariant();
+            using var hash = new HashingStream();
+            data.WriteTo(hash);
+            return $"{data.DType}|{string.Join(",", data.Shape.Dims)}|{hash.Sha256Hex()}";
+        }
+
+        /// <summary>A stream that keeps nothing of what is written to it but its SHA-256.</summary>
+        private sealed class HashingStream : Stream
+        {
+            private readonly System.Security.Cryptography.IncrementalHash _sha256 =
+                System.Security.Cryptography.IncrementalHash.CreateHash(System.Security.Cryptography.HashAlgorithmName.SHA256);
+
+            /// <summary>The hash of everything written, as lowercase hex.</summary>
+            internal string Sha256Hex() => Convert.ToHexString(_sha256.GetHashAndReset()).ToLowerInvariant();
+
+            public override void Write(ReadOnlySpan<byte> buffer) => _sha256.AppendData(buffer);
+            public override void Write(byte[] buffer, int offset, int count) => _sha256.AppendData(buffer, offset, count);
+            public override bool CanRead => false;
+            public override bool CanSeek => false;
+            public override bool CanWrite => true;
+            public override long Length => throw new NotSupportedException();
+            public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+            public override void Flush() { }
+            public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+            public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+            public override void SetLength(long value) => throw new NotSupportedException();
+
+            protected override void Dispose(bool disposing)
+            {
+                if (disposing) _sha256.Dispose();
+                base.Dispose(disposing);
+            }
         }
 
         /// <summary>

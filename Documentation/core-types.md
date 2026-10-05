@@ -287,14 +287,20 @@ reading their elements throws.
 
 | | Costs | Afterwards |
 |---|---|---|
-| `TensorData.MoveToAttribute()` | nothing, where the tensor holds its own array; a copy otherwise | **the tensor ends**: it is dead, and reading it throws `ObjectDisposedException` saying it was moved into an attribute |
-| `TensorAttribute.CopyToTensorData()` | a copy, always | both usable; the attribute is unchanged, and the copy is in the framework's own host memory |
+| `TensorData.MoveToAttribute()` | nothing, where the tensor holds its own array or is a host tensor past `Array.MaxLength` bytes; a copy otherwise | **the tensor ends**: it is dead, and reading it throws `ObjectDisposedException` saying it was moved into an attribute |
+| `TensorAttribute.CopyToTensorData()` | a copy, always | both usable; the attribute is unchanged, and the copy is in the framework's own host memory, or past `Array.MaxLength` bytes in host memory of the backend that holds the attribute |
 
 A tensor built from a C# array, including a checkpoint tensor parsed for binding,
 moves without a copy. A runtime-owned buffer (possibly on a card) or a string tensor
-is copied; the source memory is released either way. An attribute keeps its elements in
-one managed array, so a tensor of more bytes than one holds (`Array.MaxLength`, just
-under 2 GiB) is refused with `NotSupportedException` and left as it was.
+is copied; the source memory is released either way.
+
+An attribute holds elements of any size. One of more bytes than one managed array holds
+(`Array.MaxLength`, just under 2 GiB) keeps them in host memory of the backend
+`ComputeContext.Default` runs on: a host tensor that large moves in as it stands, and any
+other is copied there 8 MiB at a time. Such an attribute has no byte view, since no span
+reaches that far: `Bytes` and `Elements<V>()` throw `NotSupportedException`, and
+`CopyToTensorData()` reads it a piece at a time. Its memory is released when the attribute
+is garbage-collected.
 
 `MoveToAttribute()` accepts any live tensor, a run output included, but refuses one a
 run is still reading. To keep a result and also make a literal of it, move a copy:

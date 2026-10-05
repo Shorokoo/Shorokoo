@@ -609,6 +609,7 @@ public class CoreUtilsCoverageTests
         Assert.Equal(expected, compiled.Execute(length.Shared(), input.Shared())[0].ToTensorData().As<float32>().CopyMemory<float>());
         Assert.Equal(expected, context.Execute(model, length.Shared(), input.Shared())[0].ToTensorData().As<float32>().CopyMemory<float>());
         Assert.Empty(compiled.SuppliedTensors);
+        Assert.Throws<NotSupportedException>(() => CompressedFormatUtils.SaveFastGraphToBinary(model));
         weight.Delete();
     }
 

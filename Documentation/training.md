@@ -1219,7 +1219,9 @@ var eval  = Persistence.LoadEvaluationModel("run.skpt");   // [model inputs…, 
 `ToInferenceModel()` binds the checkpoint's trainable params and model state into its `.Rig`'s
 retained concrete architecture (concretized once at build, at all inputs, so multi-input models
 work) — no re-concretization or sample inputs. It requires an attached rig; use
-`rig.AdoptCheckpoint(checkpoint)` for a bare checkpoint.
+`rig.AdoptCheckpoint(checkpoint)` for a bare checkpoint. It copies each value into the model, so
+the checkpoint stays usable, and binds a parameter of any size: one past 2 GiB is copied 8 MiB at
+a time into host memory of the backend `ComputeContext.Default` runs on, where the model holds it.
 
 ## Types used by the training API
 

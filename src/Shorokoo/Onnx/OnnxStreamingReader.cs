@@ -262,15 +262,13 @@ namespace Shorokoo.Onnx
             }
         }
 
+        /// <summary>Copies a packed <c>dims</c> field's <paramref name="length"/> bytes as they
+        /// stand, each varint however it is spelled, gathering the dims they hold.</summary>
         private void ReadPackedDims(long length, Layout layout)
         {
             long end = _source.Consumed + length;
             while (_source.Consumed < end)
-            {
-                var value = ReadVarint(end);
-                layout.Dims.Add(unchecked((long)value));
-                WriteVarint(value);
-            }
+                layout.Dims.Add(unchecked((long)ReadVarint(end, copy: true)));
         }
 
         /// <summary>Copies the value of a field of wire type <paramref name="wire"/> as it stands: a
@@ -318,7 +316,7 @@ namespace Shorokoo.Onnx
             }
         }
 
-        private ulong ReadVarint(long end)
+        private ulong ReadVarint(long end, bool copy = false)
         {
             ulong value = 0;
             for (int shift = 0; shift < 64; shift += 7)
@@ -326,6 +324,7 @@ namespace Shorokoo.Onnx
                 RequireWithin(end, 1);
                 int b = _source.ReadByte();
                 if (b < 0) throw new EndOfStreamException();
+                if (copy) Write([(byte)b]);
                 value |= (ulong)(b & 0x7F) << shift;
                 if ((b & 0x80) == 0) return value;
             }

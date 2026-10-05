@@ -480,6 +480,8 @@ public class CoreUtilsCoverageTests
             s => SafeTensorLoader.SaveSafeTensorsToStream(s, [new SafeTensor("w", tensor, "F32", [Elements])])));
         Assert.Throws<ArgumentException>(
             () => backend.CreateTensorFromRawBytes(ShorokooTensorElementType.Float, new byte[16], [Elements]));
+        Assert.Throws<NotSupportedException>(() => tensor.MoveToAttribute());
+        Assert.False(tensor.IsDisposed);
         tensor.Delete();
         GC.KeepAlive(head);
     }

@@ -2923,6 +2923,10 @@ public class TrainingRigTrainingLoopCoverageTests
              DropoutStep(DropoutReadInOneIfArmAndAfterTheBranchModel.ComputationGraph, true, true).DrawCounter,
              DropoutStep(DropoutReadInOneIfArmAndAfterTheBranchModel.ComputationGraph, true, false).DrawCounter]);
 
+    [Fact]
+    public void TestADropoutInAnIfElseArmAdvancesTheDrawCounterOfARigBuiltAtASampleNotTakingIt()
+        => Assert.Equal(1L, DropoutStep(DropoutSquaredInOneIfArmModel.ComputationGraph, false, true).DrawCounter);
+
     private static TrainingRig OptionalBiasRig(OptionalTensorData bias, TensorData x)
         => TrainingRig.FromScratch(NullableTrainableBiasLayer.ComputationGraph,
             L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,

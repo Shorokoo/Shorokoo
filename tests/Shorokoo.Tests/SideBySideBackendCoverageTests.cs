@@ -827,6 +827,40 @@ public class SideBySideBackendCoverageTests
         Assert.Equal(nvidia, opened.CudaLibraryDirectory);
         Assert.Equal($"libcudnn.so.9 from '{other}'", CudaLibraries.Conflict(nvidia, pinned, [Path.Combine(other, "libcudnn.so.9"), Path.Combine(nvidia, "cu13", "lib", "libcublas.so.13")]));
         Assert.Null(CudaLibraries.Conflict(nvidia, pinned, [Path.Combine(nvidia, "cudnn", "lib", "libcudnn.so.9")]));
+        var versioned = scratch.Folder(("libcublas.so.13.0.0.19", [6]));
+        Assert.Equal($"libcublas.so.13.0.0.19 from '{versioned}'", CudaLibraries.Conflict(nvidia, pinned, [Path.Combine(versioned, "libcublas.so.13.0.0.19")]));
+        Assert.Equal("/opt/cuda/lib/libcudnn.so.9", CudaLibraries.LoadedPath("lib/libcudnn.so.9", 0x7f0000001000,
+            () => "7f0000000000-7f0000002000 r-xp 00000000 08:01 12345    /opt/cuda/lib/libcudnn.so.9\n7f0000002000-7f0000003000 r--p 00002000 08:01 12345    /opt/cuda/lib/libcudnn.so.9\n"));
+        Assert.Equal("/usr/lib/libcudnn.so.9", CudaLibraries.LoadedPath("/usr/lib/libcudnn.so.9", 0, () => ""));
+    }
+
+    [Fact]
+    public void TestAFilesIdentityIsTheOneItsFileSystemGivesItInFull()
+    {
+        using var scratch = new CudaScratch();
+        var file = Path.Combine(scratch.Folder(("cudnn64_9.dll", [1])), "cudnn64_9.dll");
+        var stamp = CudaLibraryCache.StampOf(file)!.Value;
+
+        Assert.True(CudaLibraryCache.SameFile(file, file));
+        if (OperatingSystem.IsWindows()) Assert.Equal(FileIdOf(file), (stamp.Volume, (UInt128)stamp.Index));
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct FileIdInfo
+    {
+        public ulong VolumeSerialNumber, IdLow, IdHigh;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetFileInformationByHandleEx(Microsoft.Win32.SafeHandles.SafeFileHandle file, int infoClass, out FileIdInfo info, int size);
+
+    /// <summary>The volume and file IDs Windows gives the file at <paramref name="path"/> in full
+    /// (<c>FILE_ID_INFO</c>).</summary>
+    private static (ulong Volume, UInt128 Id) FileIdOf(string path)
+    {
+        using var handle = File.OpenHandle(path);
+        Assert.True(GetFileInformationByHandleEx(handle, 18, out var info, Marshal.SizeOf<FileIdInfo>()));
+        return (info.VolumeSerialNumber, ((UInt128)info.IdHigh << 64) | info.IdLow);
     }
 
     /// <summary>A folder of its own for one test's cache, its installed copies and the wheels its

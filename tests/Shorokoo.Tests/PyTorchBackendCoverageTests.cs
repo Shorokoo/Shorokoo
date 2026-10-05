@@ -673,6 +673,7 @@ public class PyTorchBackendCoverageTests
         Assert.Equal(PythonEnvironmentFailure.MissingPackage, TorchRuntime.ImportFailure("ModuleNotFoundError", () => "cudnn64_9.dll", out _));
         Assert.Equal(PythonEnvironmentFailure.MissingPackage, TorchRuntime.ImportFailure("ImportError", () => null, out _));
         Assert.Null(TorchRuntime.ImportFailure("OSError", () => null, out _));
+        Assert.Equal(PythonEnvironmentFailure.MissingPackage, TorchRuntime.ImportFailure("ImportError", () => throw new IOException("unreadable"), out _));
     }
 
     [Fact]

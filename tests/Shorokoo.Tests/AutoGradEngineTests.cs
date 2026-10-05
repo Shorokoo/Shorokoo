@@ -54,6 +54,8 @@ public class AutoGradEngineTests
                 TensorData(DType.Float32, [5L], 0f, 1f, -1f, 3f, -7f),
                 TensorData(DType.Float32, [], 1f),
                 TensorData(DType.Float32, [5L], 1f, 0.25f, 0.25f, 0.0625f, 0.015625f)]));
+        Assert.True(AutoTest.AdvancedTestGraph<AutoGradEngineAnotherLossReadingAnUntakenArmCheck>(
+            hyperparamInputs: [], runtimeInputs: [TensorData(DType.Float32, [2L], 0f, 0f), TensorData(DType.Float32, [2L], 1f, 2f)]));
     }
 
     // An op with no [AutoDiff] rule but a registered lowering is rewritten into that

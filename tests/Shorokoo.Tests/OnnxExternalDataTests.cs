@@ -371,6 +371,9 @@ public class OnnxExternalDataTests
 
     [Fact]
     public void TestAModelNestedDeeperThanProtobufReadsIsRefusedWhereverItIsRead()
+        => Utils.OwnProcess.Run(typeof(OnnxExternalDataTests), nameof(AModelNestedDeeperThanProtobufReadsIsRefusedWhereverItIsRead));
+
+    internal static void AModelNestedDeeperThanProtobufReadsIsRefusedWhereverItIsRead()
     {
         WithTempDir(dir =>
         {

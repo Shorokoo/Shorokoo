@@ -26,6 +26,56 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
 
     private string P(string name) => Path.Combine(_tempDir, name);
 
+    [Fact]
+    public void TestASafeTensorsFilePastTwoGibibytesIsReadWithEachTensorAtItsOffset()
+    {
+        var path = SparseSafeTensors(P("large.safetensors"), ("a", 0, 2, [1f, 2f]), ("b", (1L << 31) + 8, 2, [3f, 4f]));
+        var loaded = SafeTensorLoader.LoadSafeTensors(path);
+
+        Assert.True(new FileInfo(path).Length > 1L << 31);
+        Assert.Equal((float[])[1f, 2f, 3f, 4f], loaded.SelectMany(t => t.Data.As<float32>().CopyMemory<float>()).ToArray());
+    }
+
+    [Fact(Skip = "#48: a host load reads each tensor into one byte array, which holds fewer bytes than this tensor's 2 GiB + 8")]
+    public void TestATensorPastTwoGibibytesInASafeTensorsFileIsReadIntoHostMemory()
+    {
+        const int Elements = (1 << 29) + 2;
+        var path = SparseSafeTensors(P("one-large.safetensors"), ("w", 0, Elements, []));
+        using (var file = new FileStream(path, FileMode.Open, FileAccess.Write))
+        {
+            file.Position = file.Length - 4;
+            file.Write(BitConverter.GetBytes(5f));
+        }
+        var loaded = SafeTensorLoader.LoadSafeTensors(path).Single().Data;
+
+        Assert.Equal(4L * Elements, loaded.ContentByteLength);
+        Assert.Equal(5f, loaded.ValueAt<float>(Elements - 1));
+    }
+
+    // A SafeTensors file of float tensors at the data offsets given, each starting with the values
+    // given; every other byte is a hole that holds no disk space.
+    private static string SparseSafeTensors(string path, params (string Name, long Offset, long Elements, float[] Head)[] tensors)
+    {
+        var header = System.Text.Encoding.UTF8.GetBytes("{" + string.Join(",", tensors.Select(t =>
+            $"\"{t.Name}\":{{\"dtype\":\"F32\",\"shape\":[{t.Elements}],\"data_offsets\":[{t.Offset},{t.Offset + 4 * t.Elements}]}}")) + "}");
+        using var file = new FileStream(path, FileMode.CreateNew, FileAccess.ReadWrite);
+        if (OperatingSystem.IsWindows() && !DeviceIoControl(file.SafeFileHandle, 0x000900C4, IntPtr.Zero, 0, IntPtr.Zero, 0, out _, IntPtr.Zero))
+            throw new System.ComponentModel.Win32Exception();
+        file.Write(BitConverter.GetBytes((long)header.Length));
+        file.Write(header);
+        file.SetLength(8 + header.Length + tensors.Max(t => t.Offset + 4 * t.Elements));
+        foreach (var (_, offset, _, head) in tensors)
+        {
+            file.Position = 8 + header.Length + offset;
+            file.Write(System.Runtime.InteropServices.MemoryMarshal.AsBytes(head.AsSpan()));
+        }
+        return path;
+    }
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool DeviceIoControl(Microsoft.Win32.SafeHandles.SafeFileHandle device, uint code,
+        IntPtr input, int inputSize, IntPtr output, int outputSize, out int returned, IntPtr overlapped);
+
     private static void AssertInspection(ArtifactInspection result, ArtifactKind kind,
         params string[][] observationsContainingAll)
     {

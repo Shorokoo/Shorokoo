@@ -188,8 +188,9 @@ static (TensorData x, TensorData y) MakeBatch(long seed)
 
 None of these shows in a small first run. Each can end a long one.
 
-- **Checkpoint size.** A checkpoint over 2 GB (one `.skpt` data entry, or a flat safetensors
-  file) saves without error and cannot be loaded back
+- **Checkpoint size.** A `.skpt` data entry of 2 GiB or more, or an archive of 4 GiB or more, is refused
+  when saved. A flat safetensors file of any size loads back, but a single tensor of 2 GiB or more
+  in it cannot be loaded into host memory
   ([#48](https://github.com/Shorokoo/Shorokoo/issues/48)). See
   [skpt-checkpoints.md](skpt-checkpoints.md).
 - **Save cost.** What a save allocates and how long it takes grow with the checkpoint:

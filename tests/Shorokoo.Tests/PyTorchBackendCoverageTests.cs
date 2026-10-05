@@ -1740,6 +1740,9 @@ public class PyTorchBackendCoverageTests
 
     [Fact]
     public void TestAHostTensorPastTwoGibibytesIsCopiedInAndOutByThePieceAndSavedFromItsAddress()
+        => Utils.OwnProcess.Run(typeof(PyTorchBackendCoverageTests), nameof(AHostTensorPastTwoGibibytesIsCopiedInAndOutByThePieceAndSavedFromItsAddress));
+
+    internal static void AHostTensorPastTwoGibibytesIsCopiedInAndOutByThePieceAndSavedFromItsAddress()
     {
         const long Elements = (1L << 30) + 2;
         using var head = (TorchTensorValue)Torch.CreateTensor(new float[StagedReadBack.StagingBytes / 4], [StagedReadBack.StagingBytes / 4]);

@@ -82,38 +82,29 @@ public partial class MemoryPassLstm
 
 /// <summary>
 /// Regression gate for the memory-aware pass that <see cref="TrainingRig"/> runs over every lowered
-/// training step (<c>MemoryAwareGraphOptimizer</c>), per model family and per backend: ONNX Runtime
-/// and PyTorch, each on the host. The pass chooses among its strategies' steps by the peak the
-/// backend's own model of a run puts on each (<see cref="GraphOptimizationResult.BackendPeakBytes"/>),
-/// so that is the figure gated against the recorded baseline (<c>Benchmarks/memory-pass-baseline.json</c>):
-/// the peak of the step the pass hands back may not exceed the baseline's by more than
-/// <see cref="PeakRegressionFactor"/>, and a family the baseline records the pass acting on must keep
-/// most of the relief recorded for it (<see cref="ReliefRetentionFactor"/>), since a change switching
-/// the pass off on one family moves the peak alone by only a few percent. Where a backend's model
-/// answers for no step of a family, the pass chose by its own evaluation, and that is the peak
-/// recorded and gated instead (<c>PeakModel</c> says which).
+/// training step (<c>MemoryAwareGraphOptimizer</c>), per model family and per backend. Each family's
+/// rig is built on three host contexts: ONNX Runtime and PyTorch, whose own models of a run judge the
+/// pass's steps (<see cref="GraphOptimizationResult.BackendPeakBytes"/>), and ONNX Runtime with no such
+/// model (<see cref="Unmodelled"/>), where the pass chooses by its own evaluation, as it does on any
+/// backend that models nothing. Per row, the peak the pass chose by — that model's, or the pass's own
+/// (<c>PeakModel</c> says which) — may not exceed the recorded baseline
+/// (<c>Benchmarks/memory-pass-baseline.json</c>) by more than <see cref="PeakRegressionFactor"/>, and a
+/// row on which the baseline records the pass lowering it must keep most of that relief
+/// (<see cref="ReliefRetentionFactor"/>), since switching the pass off on one family moves the peak
+/// alone by only a few percent. The pass's modelled compute, the other term of its objective, may not
+/// exceed the baseline by more than <see cref="ComputeRegressionFactor"/>.
 ///
-/// <para>The pass's modelled compute is the other term of the objective it weighs those peaks
-/// against, so it is gated too, by <see cref="ComputeRegressionFactor"/>: a pass that buys memory
-/// with unbounded recompute is a regression as well.</para>
+/// <para>On ONNX Runtime each step is also run as the rig runs it — a resident run writing its state
+/// over what it consumed — once as handed to the pass and once as handed back. <c>StepPeakBytes</c> is
+/// the most Shorokoo's allocator had handed out during one step beyond what it had as the step began,
+/// the batch's copy for the step included: the same on every step and in every process, so it is
+/// gated as tightly as the models are. <c>KernelTimeMs</c> (ONNX Runtime's profiler, a subgraph's
+/// kernels counted once) and <c>OrtOrderVsGraph</c> / <c>OrtOrderVsReverseDfs</c> (how much of the
+/// profiled kernel order follows the model's node order, and the depth-first order ONNX Runtime sorts
+/// a graph into) are recorded on the judged ONNX Runtime row, not gated.</para>
 ///
-/// <para>On ONNX Runtime each step is also run, in sessions over the model the rig compiles
-/// (<see cref="RigModel"/>) at the optimization level and log severity the rig builds its own with,
-/// on a feed of the shapes the pass was judged on. <c>RealPeakBytes</c> is the process's resident
-/// high-water mark over one run with ONNX Runtime's CPU arena off, each value a real allocation and
-/// no state written in place: <c>/proc/self/clear_refs</c> resets the mark and the <c>VmHWM</c> delta
-/// is the run's peak, the largest of five. It is measured only on Linux, in a process started with
-/// <c>MALLOC_MMAP_THRESHOLD_=16384 MALLOC_TRIM_THRESHOLD_=0 MALLOC_TOP_PAD_=0</c> — without them glibc
-/// keeps freed tensors and the mark never moves — and gated, where the baseline has it too, by
-/// <see cref="RealPeakRegressionFactor"/> plus <see cref="RealPeakNoiseFloorBytes"/>, since one step
-/// whose peak is a few MiB reads anywhere from 1 to 5 MiB in separate processes. Where the pass
-/// hands back the step it was handed, the step is read once for both columns. <c>KernelTimeMs</c>
-/// (ONNX Runtime's profiler, a subgraph's kernels counted once) and <c>OrtOrderVsGraph</c> /
-/// <c>OrtOrderVsReverseDfs</c> (how much of the profiled kernel order follows the model's node order,
-/// and the depth-first order ONNX Runtime sorts a graph into) are recorded, not gated.</para>
-///
-/// <para>Improvements do not fail the gate. Re-record the baseline to lock them in, on Linux under
-/// the malloc variables: <c>SHOROKOO_UPDATE_MEMORY_PASS_BASELINE=1 dotnet test --filter
+/// <para>Improvements do not fail the gate. Re-record the baseline to lock them in:
+/// <c>SHOROKOO_UPDATE_MEMORY_PASS_BASELINE=1 dotnet test --filter
 /// "FullyQualifiedName~MemoryPassBenchmarkTests"</c> rewrites the JSON in place and skips the
 /// assertions for that run.</para>
 /// </summary>
@@ -124,23 +115,13 @@ public class MemoryPassBenchmarkTests
 {
     private const double PeakRegressionFactor = 1.05;
     private const double ComputeRegressionFactor = 1.25;
-    private const double RealPeakRegressionFactor = 1.10;
-    private const long RealPeakNoiseFloorBytes = 4L << 20;
     private const double ReliefRetentionFactor = 0.85;
     private const string BaselineStrategy = "Baseline";
     private const string OnnxRuntime = "onnxruntime";
+    private const string Torch = "torch";
 
     private static double Relief(FamilyMeasurement m)
         => m.HandedPeakBytes == 0 ? 0 : 1.0 - (double)m.PeakBytes / m.HandedPeakBytes;
-
-    private const string MallocEnvironment =
-        "MALLOC_MMAP_THRESHOLD_=16384 MALLOC_TRIM_THRESHOLD_=0 MALLOC_TOP_PAD_=0";
-
-    private static readonly bool RealMemoryMeasurable =
-        OperatingSystem.IsLinux()
-        && File.Exists("/proc/self/clear_refs")
-        && MallocEnvironment.Split(' ').All(kv =>
-            Environment.GetEnvironmentVariable(kv[..kv.IndexOf('=')]) == kv[(kv.IndexOf('=') + 1)..]);
 
     internal static readonly (string Family, Func<ComputationGraph> Model, long[] Shape)[] Suite =
     [
@@ -156,9 +137,16 @@ public class MemoryPassBenchmarkTests
 
     private static readonly (string Name, Func<ComputeContext> Context)[] Backends =
     [
-        (OnnxRuntime, () => new ComputeContext()),
-        ("torch",     () => new ComputeContext(new Shorokoo.PyTorch.Cpu.TorchCpuBackend())),
+        (OnnxRuntime,              () => new ComputeContext()),
+        ("onnxruntime-unmodelled", () => new ComputeContext(new Unmodelled())),
+        (Torch,                    () => new ComputeContext(new Shorokoo.PyTorch.Cpu.TorchCpuBackend())),
     ];
+
+    /// <summary>ONNX Runtime on the host, with no model of a run.</summary>
+    private sealed class Unmodelled() : OrtBackend(), IShorokooBackend
+    {
+        long? IShorokooBackend.ModelledRunPeak(ModelProto model, IReadOnlyList<OutputAlias> outputAliases, PrecisionSettings precision) => null;
+    }
 
     [Fact]
     public void MemoryPassStaysWithinBaseline()
@@ -180,13 +168,13 @@ public class MemoryPassBenchmarkTests
             Assert.Equal(was.PeakModel, now.PeakModel);
             Assert.True(now.PeakBytes <= was.PeakBytes * PeakRegressionFactor);
             Assert.True(now.ComputeTime <= was.ComputeTime * ComputeRegressionFactor);
-            if (was.Strategy != BaselineStrategy)
+            if (Relief(was) > 0)
             {
                 Assert.NotEqual(BaselineStrategy, now.Strategy);
-                Assert.True(Relief(now) >= Relief(was) - Math.Abs(Relief(was)) * (1 - ReliefRetentionFactor));
+                Assert.True(Relief(now) >= Relief(was) * ReliefRetentionFactor);
             }
-            if (was.RealPeakBytes is long wasReal && now.RealPeakBytes is long nowReal)
-                Assert.True(nowReal <= wasReal * RealPeakRegressionFactor + RealPeakNoiseFloorBytes);
+            if (was.StepPeakBytes is long wasStep)
+                Assert.True(now.StepPeakBytes <= wasStep * PeakRegressionFactor);
         }
     }
 
@@ -213,22 +201,16 @@ public class MemoryPassBenchmarkTests
         {
             families[family] = [];
             foreach (var (backend, context) in Backends)
-                families[family][backend] = Measure(model(), shape, backend, context);
+                families[family][backend] = Measure(model, shape, backend, context);
         }
-        return new MemoryPassMeasurement
-        {
-            RealMemoryNote = RealMemoryMeasurable
-                ? $"RealPeakBytes = VmHWM delta of one train step, ORT CPU arena off, under {MallocEnvironment}"
-                : $"RealPeakBytes not measured: the test host must start with {MallocEnvironment} in its environment",
-            Families = families,
-        };
+        return new MemoryPassMeasurement { Families = families };
     }
 
-    private static FamilyMeasurement Measure(ComputationGraph model, long[] shape, string backend, Func<ComputeContext> newContext)
+    private static FamilyMeasurement Measure(Func<ComputationGraph> model, long[] shape, string backend, Func<ComputeContext> newContext)
     {
-        IData[] sample = [TensorData(shape, new float[shape.Aggregate(1L, (a, d) => a * d)])];
+        var sample = TensorData(shape, new float[shape.Aggregate(1L, (a, d) => a * d)]);
         using var context = newContext();
-        var rig = TrainingRig.FromScratch(model, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, sample,
+        var rig = TrainingRig.FromScratch(model(), L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, [sample],
             new SGDOptimizerHyperparameters { LearningRate = 0.01f }, runtimeContext: context);
         var result = rig.OptimizationResult;
         var chosen = result.AllStrategies.Select(s => s.Graph).ToList().FindIndex(g => ReferenceEquals(g, result.OptimizedGraph));
@@ -242,15 +224,18 @@ public class MemoryPassBenchmarkTests
             ComputeTime = result.Evaluation.TotalComputeTime,
             Nodes = rig.TrainingStepPureGraph.ToInternal().GetAllNodes().Length,
         };
+        if (backend == Torch) return measurement;
+
+        var handed = rig.PreOptimizationGraph;
+        var handedBack = rig.TrainingStepPureGraph;
+        measurement.HandedStepPeakBytes = StepPeak(rig, handed, model, sample, context);
+        measurement.StepPeakBytes = chosen == 0 ? measurement.HandedStepPeakBytes : StepPeak(rig, handedBack, model, sample, context);
         if (backend != OnnxRuntime) return measurement;
 
-        var before = new RealRun(rig.PreOptimizationGraph, rig.OptimizationInputShapes);
-        var after = chosen == 0 ? before : new RealRun(rig.TrainingStepPureGraph, rig.OptimizationInputShapes);
-        RealRun.MeasurePeaks(before, after);
+        var before = new ProfiledRun(handed, rig.OptimizationInputShapes);
+        var after = chosen == 0 ? before : new ProfiledRun(handedBack, rig.OptimizationInputShapes);
         before.Profile();
         if (after != before) after.Profile();
-        measurement.UnoptimizedRealPeakBytes = before.PeakBytes;
-        measurement.RealPeakBytes = after.PeakBytes;
         measurement.UnoptimizedKernelTimeMs = before.KernelTimeMs;
         measurement.KernelTimeMs = after.KernelTimeMs;
         measurement.OrtOrderVsGraph = after.OrderVsGraph;
@@ -258,12 +243,54 @@ public class MemoryPassBenchmarkTests
         return measurement;
     }
 
-    // ----- real session -----------------------------------------------------------
+    // ----- a step as the rig runs it ---------------------------------------------------
 
-    // One training step's model, run in ONNX Runtime sessions at the rig's session profile. Memory is
-    // read before any profile is parsed: the parse leaves managed garbage whose gradual decommit
-    // lowers RSS for seconds afterwards and masks the small peaks.
-    private sealed class RealRun
+    private static readonly System.Reflection.FieldInfo CompiledTrainSteps = typeof(TrainingRig)
+        .GetField("_compiledTrainSteps", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
+
+    private static readonly System.Reflection.PropertyInfo TrainingStep = typeof(TrainingRig)
+        .GetProperty(nameof(TrainingRig.TrainingStepPureGraph))!;
+
+    // The rig made to run step in place of its own: two steps of a resident run to warm it, then the
+    // third observed.
+    private static long StepPeak(TrainingRig rig, ComputationGraph step, Func<ComputationGraph> model, TensorData sample, ComputeContext context)
+    {
+        var output = context.Execute(model().ToConcreteArchitecture([sample]).ToConcreteModel(), sample.Shared())[0].ToTensorData();
+        long[] dims = [.. output.Shape.Dims.Select(d => (long)d)];
+        output.Delete();
+        var input = rig.InputDef.FromOrderedData(sample);
+        var targets = rig.TargetDef.FromOrderedData(TensorData(dims, new float[dims.Aggregate(1L, (a, d) => a * d)]));
+        TrainingStep.SetValue(rig, step);
+        var compiled = (System.Collections.IDictionary)CompiledTrainSteps.GetValue(rig)!;
+        lock (compiled) compiled.Clear();
+        using var run = rig.BeginResidentRun(rig.CreateInitialCheckpoint());
+        for (var i = 0; i < 2; i++) run.Step(input.Shared(), targets.Shared());
+        var gate = new object();
+        long current = 0, peak = 0;
+        CachingAllocator.Observer = e =>
+        {
+            if (e.OnCard) return;
+            lock (gate)
+            {
+                current += e.Allocation ? e.Size : -e.Size;
+                peak = Math.Max(peak, current);
+            }
+        };
+        try
+        {
+            run.Step(input.Shared(), targets.Shared());
+        }
+        finally
+        {
+            CachingAllocator.Observer = null;
+        }
+        return peak;
+    }
+
+    // ----- profile ------------------------------------------------------------------
+
+    // One training step's model, profiled in an ONNX Runtime session at the rig's session profile.
+    private sealed class ProfiledRun
     {
         private const int MeasuredRuns = 5;
 
@@ -272,12 +299,11 @@ public class MemoryPassBenchmarkTests
         private readonly string[] _graphOrder;
         private readonly string[] _reverseDfsOrder;
 
-        public long? PeakBytes { get; private set; }
         public double KernelTimeMs { get; private set; }
         public double OrderVsGraph { get; private set; }
         public double OrderVsReverseDfs { get; private set; }
 
-        public RealRun(ComputationGraph graph, (Shape Shape, DType DType)[] inputShapes)
+        public ProfiledRun(ComputationGraph graph, (Shape Shape, DType DType)[] inputShapes)
         {
             var proto = RigModel(graph, inputShapes);
             var stream = new MemoryStream();
@@ -286,57 +312,6 @@ public class MemoryPassBenchmarkTests
             _inputShapes = inputShapes;
             _graphOrder = proto.Graph.Nodes.Where(n => n.OpType != "Constant").Select(n => n.Name).ToArray();
             _reverseDfsOrder = ReverseDfsOrder(proto.Graph);
-        }
-
-        // Both steps' peaks in one interleaved sequence, so that each is read in the heap state the
-        // other left; a step the pass handed back as it came is read once.
-        public static void MeasurePeaks(RealRun first, RealRun second)
-        {
-            if (!RealMemoryMeasurable) return;
-            RealRun[] runs = ReferenceEquals(first, second) ? [first] : [first, second];
-            var options = runs.Select(_ => RigSessionOptions()).ToArray();
-            var sessions = new List<InferenceSession>();
-            try
-            {
-                foreach (var o in options) o.EnableCpuMemArena = false;
-                for (var i = 0; i < runs.Length; i++) sessions.Add(new InferenceSession(runs[i]._model, options[i]));
-                var feeds = runs.Select((run, i) => Feeds(sessions[i], run._inputShapes)).ToArray();
-                using var runOptions = new RunOptions();
-                var peaks = new long[runs.Length];
-                for (var pass = 0; pass <= MeasuredRuns; pass++)
-                    for (var i = 0; i < runs.Length; i++)
-                    {
-                        var peak = ReadPeak(sessions[i], feeds[i], runOptions);
-                        if (pass > 0) peaks[i] = Math.Max(peaks[i], peak);
-                    }
-                GC.KeepAlive(feeds);
-                for (var i = 0; i < runs.Length; i++) runs[i].PeakBytes = peaks[i];
-            }
-            finally
-            {
-                foreach (var session in sessions) session.Dispose();
-                foreach (var o in options) o.Dispose();
-            }
-        }
-
-        // Tensors under the mmap threshold come from the heap, and a heap full of resident free
-        // holes serves them without a page fault, so trim the holes away first: reuse then faults
-        // them back in and shows in RSS. Anything lowering RSS during a run masks part of the
-        // peak, and nothing else in the process allocates during one, so wait for RSS to settle
-        // and keep the largest reading.
-        private static long ReadPeak(InferenceSession session, Dictionary<string, OrtValue> feeds, RunOptions runOptions)
-        {
-            GC.Collect();
-            GC.WaitForPendingFinalizers();
-            GC.Collect();
-            malloc_trim(0);
-            WaitForStableRss();
-            File.WriteAllText("/proc/self/clear_refs", "5");
-            var before = ProcStatusBytes("VmHWM:");
-            var outputs = session.Run(runOptions, feeds, session.OutputNames);
-            var after = ProcStatusBytes("VmHWM:");
-            foreach (var o in outputs) o.Dispose();
-            return after - before;
         }
 
         public void Profile()
@@ -378,8 +353,7 @@ public class MemoryPassBenchmarkTests
 
         private readonly record struct ProfileEvent(string Cat, string Name, long Ts, long Dur);
 
-        // Streamed: a whole-file JArray of a few thousand kernels x six runs is tens of MB of
-        // garbage, and its decommit would shadow the next family's memory readings.
+        // Streamed: a whole-file JArray of a few thousand kernels x six runs is tens of MB of garbage.
         private static List<ProfileEvent> ReadEvents(string path)
         {
             var events = new List<ProfileEvent>();
@@ -438,30 +412,6 @@ public class MemoryPassBenchmarkTests
             for (var i = 0; i < session.InputNames.Count; i++)
                 feeds[session.InputNames[i]] = SyntheticFeed.Tensor(inputShapes[i].Shape, inputShapes[i].DType, i);
             return feeds;
-        }
-
-        [System.Runtime.InteropServices.DllImport("libc")]
-        private static extern int malloc_trim(nuint pad);
-
-        private static void WaitForStableRss()
-        {
-            var last = ProcStatusBytes("VmRSS:");
-            var stable = 0;
-            for (var i = 0; i < 800 && stable < 10; i++)
-            {
-                Thread.Sleep(25);
-                var now = ProcStatusBytes("VmRSS:");
-                stable = now == last ? stable + 1 : 0;
-                last = now;
-            }
-        }
-
-        private static long ProcStatusBytes(string key)
-        {
-            foreach (var line in File.ReadLines("/proc/self/status"))
-                if (line.StartsWith(key, StringComparison.Ordinal))
-                    return long.Parse(line.Split(' ', StringSplitOptions.RemoveEmptyEntries)[1]) * 1024;
-            throw new InvalidOperationException(key + " not found in /proc/self/status");
         }
 
         // ----- execution order ---------------------------------------------------------
@@ -570,16 +520,14 @@ public class MemoryPassBenchmarkTests
 
     private sealed class MemoryPassMeasurement
     {
-        public string Scenario { get; set; } = "L2Loss, SGD, net10.0, each family on each backend on the host: "
-            + "HandedPeakBytes / PeakBytes = the peak the backend's model of a run puts on the step as handed to the pass / as the pass hands it back "
-            + "(PeakModel 'pass': that model answered for no step, and these are the pass's own figures); compute = the pass's model; "
-            + "on onnxruntime, real peak and kernel time of each step in ONNX Runtime sessions over the model the rig compiles";
-        public string RealMemoryNote { get; set; } = "";
+        public string Scenario { get; set; } = "L2Loss, SGD, net10.0, each family on each host context: "
+            + "HandedPeakBytes / PeakBytes = the peak the pass chose by -- the backend's model of a run (PeakModel 'backend') or the pass's own "
+            + "(PeakModel 'pass') -- of the step as handed to the pass / as the pass hands it back; compute = the pass's model; "
+            + "on ONNX Runtime, HandedStepPeakBytes / StepPeakBytes = the most Shorokoo's allocator handed out during a resident step of each; "
+            + "kernel time from ONNX Runtime's profiler";
         public double PeakRegressionFactor { get; set; } = MemoryPassBenchmarkTests.PeakRegressionFactor;
         public double ComputeRegressionFactor { get; set; } = MemoryPassBenchmarkTests.ComputeRegressionFactor;
         public double ReliefRetentionFactor { get; set; } = MemoryPassBenchmarkTests.ReliefRetentionFactor;
-        public double RealPeakRegressionFactor { get; set; } = MemoryPassBenchmarkTests.RealPeakRegressionFactor;
-        public long RealPeakNoiseFloorBytes { get; set; } = MemoryPassBenchmarkTests.RealPeakNoiseFloorBytes;
         public required Dictionary<string, Dictionary<string, FamilyMeasurement>> Families { get; set; }
     }
 
@@ -592,8 +540,8 @@ public class MemoryPassBenchmarkTests
         public double UnoptimizedComputeTime { get; set; }
         public double ComputeTime { get; set; }
         public int Nodes { get; set; }
-        public long? UnoptimizedRealPeakBytes { get; set; }
-        public long? RealPeakBytes { get; set; }
+        public long? HandedStepPeakBytes { get; set; }
+        public long? StepPeakBytes { get; set; }
         public double? UnoptimizedKernelTimeMs { get; set; }
         public double? KernelTimeMs { get; set; }
         public double? OrtOrderVsGraph { get; set; }

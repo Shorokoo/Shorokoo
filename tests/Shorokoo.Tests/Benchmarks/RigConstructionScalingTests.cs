@@ -161,17 +161,17 @@ public class RigConstructionScalingTests
         using (Shorokoo.Core.Nodes.Processors.Fast.FastInitializeModelParams.DecideSideBySide(false))
             small.InitializeTrainableParams();
 
-        // Peak working set is monotonic, so the two table builds have to be what raises it. That
-        // holds while this class runs in a process of its own, which is how the release workflow
-        // invokes it; the assertion below is what catches it if that ever stops being true,
-        // rather than letting the arm read zero and pass.
+        // The peak is monotonic, so the two table builds have to be what raises it. That holds
+        // while this class runs in a process of its own, which is how the release workflow invokes
+        // it; the assertion below is what catches it if that ever stops being true, rather than
+        // letting the arm read zero and pass.
         var smallTable = Concretize(RigScalingTableSmall.ComputationGraph);
         var largeTable = Concretize(RigScalingTableLarge.ComputationGraph);
-        long peakBeforeTables = PeakWorkingSetBytes();
+        long peakBeforeTables = PeakBytes();
         smallTable.InitializeTrainableParams();
-        long peakAfterSmallTable = PeakWorkingSetBytes();
+        long peakAfterSmallTable = PeakBytes();
         largeTable.InitializeTrainableParams();
-        long peakGrowth = PeakWorkingSetBytes() - peakAfterSmallTable;
+        long peakGrowth = PeakBytes() - peakAfterSmallTable;
 
         // Warmed first, so what the allocators take or hand back on a first run is not counted
         // against the one measured.
@@ -224,11 +224,13 @@ public class RigConstructionScalingTests
         return best;
     }
 
-    private static long PeakWorkingSetBytes()
+    // On Windows the system trims a process's working set when memory runs short, and a peak read
+    // after that need not move; the memory the process has committed is not trimmed.
+    private static long PeakBytes()
     {
         using var proc = Process.GetCurrentProcess();
         proc.Refresh();
-        return proc.PeakWorkingSet64;
+        return OperatingSystem.IsWindows() ? proc.PeakPagedMemorySize64 : proc.PeakWorkingSet64;
     }
 
     // The positive control for the retention arm, whose healthy reading is near zero.
@@ -248,8 +250,8 @@ public class RigConstructionScalingTests
         }
     }
 
-    // The working set outside the managed heap, whose own commit and decommit around a collection
-    // moves tens of MiB either way.
+    // What the process holds outside the managed heap, whose own commit and decommit around a
+    // collection moves tens of MiB either way: committed on Windows, as PeakBytes reads it.
     private static long LiveNativeBytes()
     {
         GC.Collect();
@@ -257,6 +259,6 @@ public class RigConstructionScalingTests
         GC.Collect();
         using var proc = Process.GetCurrentProcess();
         proc.Refresh();
-        return proc.WorkingSet64 - GC.GetGCMemoryInfo().TotalCommittedBytes;
+        return (OperatingSystem.IsWindows() ? proc.PrivateMemorySize64 : proc.WorkingSet64) - GC.GetGCMemoryInfo().TotalCommittedBytes;
     }
 }

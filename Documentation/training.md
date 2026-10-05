@@ -1170,9 +1170,11 @@ steady.Start();
 savedBytes += save.BytesWritten;
 ```
 
-The flat safetensors save streams each tensor from its storage with no extra copy. It has no size
-guard: a file over the 2 GB safetensors read limit is written without complaint and cannot be read
-back ([#48](https://github.com/Shorokoo/Shorokoo/issues/48)).
+The flat safetensors save streams each tensor from its storage with no extra copy, and a load reads
+the file forward a tensor at a time, so a file of any size is read back whole as long as each tensor
+in it is under 2 GiB. A tensor of 2 GiB or more is saved, and loads into a context whose memory is a
+backend's, but cannot be read back into the framework's own host memory
+([#48](https://github.com/Shorokoo/Shorokoo/issues/48)).
 
 The `.skpt` save also streams each entry straight from the tensors' storage, with no managed copy of
 the training state. An entry compressed with `WithZstdCompressedData` is compressed as it streams,

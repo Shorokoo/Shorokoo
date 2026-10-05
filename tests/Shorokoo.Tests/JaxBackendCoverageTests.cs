@@ -40,6 +40,9 @@ public class JaxBackendCoverageTests
 
     [Fact]
     public void TestAHostTensorPastTwoGibibytesIsCopiedInAndOutByThePieceAndSavedFromItsAddress()
+        => Utils.OwnProcess.Run(typeof(JaxBackendCoverageTests), nameof(AHostTensorPastTwoGibibytesIsCopiedInAndOutByThePieceAndSavedFromItsAddress));
+
+    internal static void AHostTensorPastTwoGibibytesIsCopiedInAndOutByThePieceAndSavedFromItsAddress()
     {
         const long Elements = (1L << 30) + 2;
         using var head = (JaxTensorValue)Jax.CreateTensor(new float[StagedReadBack.StagingBytes / 4], [StagedReadBack.StagingBytes / 4]);

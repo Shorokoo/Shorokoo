@@ -1403,8 +1403,7 @@ public class ComputeContextLifetimeCoverageTests
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static OrtValue InnerOnly(Func<OrtTensorValue> make) => make().Inner;
 
-    /// <summary>What <paramref name="block"/> holds after a collection while only the ORT value
-    /// inside the value <paramref name="make"/> stands on it with is kept.</summary>
+    // What the block holds after a collection while only the ORT value inside the made value is kept.
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static long HeldWithOnlyTheInnerValueKept(Func<OrtTensorValue> make, SharedBlock block)
     {
@@ -1416,8 +1415,7 @@ public class ComputeContextLifetimeCoverageTests
         return held;
     }
 
-    /// <summary>Of the two outputs a run of <see cref="TwoHalves"/> places on one block, one, and
-    /// the block; the other is dropped undeleted.</summary>
+    // One of the two outputs a run places on one block, and the block; the other is dropped undeleted.
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static (TensorData Kept, SharedBlock Block) OneOfTwoOnABlock(ComputeContext context)
     {
@@ -1450,8 +1448,7 @@ public class ComputeContextLifetimeCoverageTests
         Assert.True(placed.IsReleased);
     }
 
-    /// <summary>Whether a byte array of at least <paramref name="bytes"/> bytes is reachable from
-    /// <paramref name="root"/> through delegates and the closures the compiler makes for them.</summary>
+    // Through delegates and the closures the compiler makes for them.
     private static bool ClosuresHold(object? root, long bytes) => root switch
     {
         byte[] array => array.Length >= bytes,

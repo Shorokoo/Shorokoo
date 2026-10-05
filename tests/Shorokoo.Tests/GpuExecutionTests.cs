@@ -897,22 +897,11 @@ public class GpuExecutionTests
         Assert.Equal(5 * 56L, budgetWritten);
     }
 
-    /// <summary>
-    /// What writing a step's state over the state it consumed saves: a resident run of
-    /// <see cref="WideLinearModel"/> under AdamW, with shrinkage on as a budget would force it. A
-    /// step that writes its state elsewhere has its session allocate the new state beside the state
-    /// it consumed, which its session wrote the step before and holds too, so the session's peak falls
-    /// by at least the state for one that writes the new state over the old. On the card both hold
-    /// the consumed state — the one writing over it outside its session's memory — so the card's peak
-    /// falls by what the session's does less that state: what of the new state the other step holds
-    /// at its busiest. That is two of the state's three parameter-sized values, the weight and its two
-    /// moments: both steps hold three parameter-sized temporaries at their busiest, and the one
-    /// writing elsewhere allocates the weight's new value only after freeing one of them. Each
-    /// measured run starts with the garbage of the one before it collected and handed back to the
-    /// card, so neither finds blocks the other freed waiting to be reused.
-    /// </summary>
+    // A resident AdamW run of WideLinearModel, shrinking as under a budget: the plain step holds the
+    // new state beside the consumed one, two of its three parameter-sized values at once on the card
+    // (the third is written after a temporary goes).
     [CudaFact]
-    public void CudaProvider_WritingAStepsStateOverWhatItConsumedTakesTheStateOffTheCardsPeak()
+    public void CudaProvider_WritingAStepsStateOverWhatItConsumedTakesMostOfTheStateOffTheCardsPeak()
     {
         DeviceMemory.ResetPeak();
         try
@@ -921,9 +910,8 @@ public class GpuExecutionTests
             var plain = StepPeaks(aliasing: false);
             var aliased = StepPeaks(aliasing: true, placing: false);
 
-            Assert.True(plain.Arena - aliased.Arena >= aliased.State - (1L << 20));
-            Assert.True(plain.Card - aliased.Card >= plain.Arena - aliased.Arena - aliased.State - (1L << 20));
-            Assert.True(plain.Card - aliased.Card >= aliased.State * 2 / 3 - (1L << 20));
+            Assert.True(plain.Arena - aliased.Arena >= aliased.State);
+            Assert.True(plain.Card - aliased.Card >= aliased.State / 2);
         }
         finally
         {

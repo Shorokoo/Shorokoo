@@ -180,7 +180,7 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
 
             // Which IfElse arm each forward node belongs to, so a gradient leaving one can be
             // zeroed when that arm did not run.
-            var armOf = FastIfArms.Classify(graph, gradientReadsOnly: true);
+            var armOf = FastIfArms.GradientGuards(graph, autoGradNode);
             var armConditions = new Dictionary<FastTensorKey, Scalar<bit>>();
 
             for (int i = topoOrder.Count - 1; i >= 0; i--)
@@ -269,24 +269,18 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
             Variable grad,
             FastNode node,
             FastTensorKey destination,
-            Dictionary<FastNodeKey, List<IfArm>> armOf,
+            Dictionary<FastNodeKey, IfGuard> armOf,
             Dictionary<FastTensorKey, Scalar<bit>> armConditions,
             Dictionary<Variable, FastTensorKey> freshInputBacking,
             Dictionary<FastTensorKey, FastNode> producerByOutput)
         {
-            if (!armOf.TryGetValue(node.Key, out var arms)) return grad;
+            if (!armOf.TryGetValue(node.Key, out var guard)) return grad;
 
-            var destinationArms = producerByOutput.TryGetValue(destination, out var producer)
-                && armOf.TryGetValue(producer.Key, out var found) ? found : [];
+            var destinationGuard = producerByOutput.TryGetValue(destination, out var producer)
+                && armOf.TryGetValue(producer.Key, out var found) ? found : null;
+            if (guard.SameAs(destinationGuard)) return grad;
 
-            // The arms the gradient actually crosses out of; the rest it stays inside.
-            var crossed = arms.Where(arm => !destinationArms.Contains(arm)).ToList();
-            if (crossed.Count == 0) return grad;
-
-            var isOptional = grad.Structure() == DataStructure.Optional;
-            var gated = isOptional ? OnnxOp.OptionalGetElement(grad) : grad;
-
-            foreach (var arm in crossed)
+            Scalar<bit> Condition(IfArm arm)
             {
                 if (!armConditions.TryGetValue(arm.Condition, out var cond))
                 {
@@ -294,14 +288,32 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
                     freshInputBacking[fresh] = arm.Condition;
                     armConditions[arm.Condition] = cond = fresh.ToValue<Scalar<bit>>();
                 }
-
-                // Zeros of the gradient's own shape, at the dtype every gradient here carries (see
-                // the loss seed above). Sub(g, g) would carry the NaN through.
-                var zeros = OnnxOp.ConstantOfShape(
-                    OnnxOp.Shape(gated), Globals.TensorData(DType.Float32, [1L], 0f).MoveToAttribute(), gated.Rank);
-                gated = arm.IsThen ? Ops.IfElse(cond, gated, zeros) : Ops.IfElse(cond, zeros, gated);
+                return arm.IsThen ? cond : !cond;
             }
 
+            // Where both are one run of arms, the gradient crosses out of only those the
+            // destination is not inside; otherwise it is gated on all of its own guard.
+            var terms = guard.SingleTerm is { } mine && destinationGuard?.SingleTerm is { } theirs
+                ? [[.. mine.Where(arm => !theirs.Contains(arm))]]
+                : guard.Terms.Select(t => t.ToList()).ToList();
+            if (terms.Count == 1 && terms[0].Count == 0) return grad;
+
+            Scalar<bit>? runs = null;
+            foreach (var term in terms)
+            {
+                Scalar<bit>? all = null;
+                foreach (var arm in term)
+                    all = all is null ? Condition(arm) : all.Value & Condition(arm);
+                runs = runs is null ? all : runs.Value | all!.Value;
+            }
+
+            var isOptional = grad.Structure() == DataStructure.Optional;
+            var gated = isOptional ? OnnxOp.OptionalGetElement(grad) : grad;
+            // Zeros of the gradient's own shape, at the dtype every gradient here carries (see
+            // the loss seed above). Sub(g, g) would carry the NaN through.
+            var zeros = OnnxOp.ConstantOfShape(
+                OnnxOp.Shape(gated), Globals.TensorData(DType.Float32, [1L], 0f).MoveToAttribute(), gated.Rank);
+            gated = Ops.IfElse(runs!.Value, gated, zeros);
             return isOptional ? OnnxOp.Optional(gated, DataStructure.Tensor, gated.Type) : gated;
         }
 
@@ -409,7 +421,7 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
             Dictionary<string, Func<Variable?[], Variable?[], OnnxCSharpAttributes, Variable?[]>> gradOpsMap,
             Dictionary<FastNodeKey, FastNode> nodesByKey,
             Dictionary<FastTensorKey, FastTensorInfo> tensorInfo,
-            Dictionary<FastNodeKey, List<IfArm>> armOf,
+            Dictionary<FastNodeKey, IfGuard> armOf,
             Dictionary<FastTensorKey, Scalar<bit>> armConditions,
             Dictionary<FastTensorKey, FastNode> producerByOutput)
         {

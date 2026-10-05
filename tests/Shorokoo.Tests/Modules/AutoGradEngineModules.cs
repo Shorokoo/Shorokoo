@@ -116,6 +116,27 @@ namespace Shorokoo.Tests.Modules
         }
     }
 
+    /// <summary>
+    /// Two losses: one through an <c>IfElse</c> whose arm under a square root never runs, the other
+    /// reading that root outside any branch. Differentiating the first gives 1, whatever the second
+    /// reads; the second gives the root.
+    /// </summary>
+    [Module]
+    public partial class AutoGradEngineAnotherLossReadingAnUntakenArmCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x, Tensor<float32> z)
+        {
+            var q = x.Sqrt();
+            var c = z.Reduce(ReduceKind.Max, keepDims: false).Scalar() > Scalar(100f);
+            var g1 = (Tensor<float32>)Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(x,
+                c.IfElse(q, x * Scalar(1f)).Reduce(ReduceKind.Sum, keepDims: false).Scalar());
+            var g2 = (Tensor<float32>)Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(z,
+                (q * z).Reduce(ReduceKind.Sum, keepDims: false).Scalar());
+            var slack = Scalar(1e-5f) - (g1 - Scalar(1f)).Abs() - (g2 - q).Abs();
+            return slack.Reduce(ReduceKind.Min, keepDims: false).Scalar() > Scalar(0f);
+        }
+    }
+
     // ===================================================================
     //  AD003 guards: unsupported attribute combinations must throw loudly
     //  (asserted via Assert.Throws in AutoGradEngineTests — the modules just

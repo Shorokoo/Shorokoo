@@ -426,6 +426,32 @@ public class CodegenFreeModuleTests
     {
         Assert.Equal(2f, StateAfterBakingTheTripCount(StatefulCalledTwiceInALoopOfAnInputTripCountModel.ComputationGraph));
         Assert.Equal(8f, StateAfterBakingTheTripCount(InputAccumulatingInALoopOfAnInputTripCountThatStopsEarlyModel.ComputationGraph));
+        Assert.Equal(2f, StateAfterBakingTheTripCount(CallCounterCalledTwiceInALoopOfAnInputTripCountModel.ComputationGraph));
+    }
+
+    [Fact]
+    public void TestAConcreteArchitectureNamesItsUnrolledLoopsTheSameEveryTimeItIsBuilt()
+    {
+        var first = LoopTripsOf(StatefulCallInAnIfElseInARolledLoopInsideALiteralLoopAndALiteralLoopAfterModel.ComputationGraph);
+        Assert.NotEmpty(first);
+        Assert.Equal(first, LoopTripsOf(StatefulCallInAnIfElseInARolledLoopInsideALiteralLoopAndALiteralLoopAfterModel.ComputationGraph));
+    }
+
+    private static long[] LoopTripsOf(ComputationGraph cg)
+        => [.. cg.ToConcreteArchitecture([TensorData([2L], 1f, 2f)]).ToInternal().Nodes
+               .Where(n => n.OpCode == InternalOpCodes.STATE_UPDATE_LINK)
+               .SelectMany(n => n.Attributes.GetLongsVal(OnnxOpAttributeNames.ShrkAttrLoopTrips) ?? [])];
+
+    [Fact]
+    public void TestStateThatDependsOnNothingInTheLoopIsUpdatedByEachCallItMakes()
+        => Assert.Equal([2f, 0f], [StateAfterOneExecution(CallCounterCalledTwiceInALoopOfAnInputTripCountModel.ComputationGraph, 3L),
+                                   StateAfterOneExecution(CallCounterCalledTwiceInALoopOfAnInputTripCountModel.ComputationGraph, 0L)]);
+
+    private static float StateAfterOneExecution(ComputationGraph cg, long trips)
+    {
+        var input = TensorData([2L], 1f, 2f);
+        var concrete = cg.ToConcreteArchitecture([input, TensorData([], 3L)]).ToConcreteModel();
+        return StateValue(ComputeContext.Default.ExecuteWithState(concrete, input.Shared(), TensorData([], trips).Shared()).updatedGraph);
     }
 
     private static float StateAfterBakingTheTripCount(ComputationGraph cg)

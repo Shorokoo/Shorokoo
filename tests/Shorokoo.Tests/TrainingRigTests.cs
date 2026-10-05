@@ -2644,8 +2644,9 @@ public class TrainingRigTrainingLoopCoverageTests
 
     [Fact]
     public void TestAStatefulModelCalledTwiceInALoopBodyAppliesBothUpdatesEvenWhenOneIsDiscarded()
-        => Assert.Equal([2f, 2f], [.. StateFieldsAfterOneStep(StatefulCalledTwiceInALoopModel.ComputationGraph),
-                                   .. StateFieldsAfterOneStep(StatefulCallDiscardedInALoopModel.ComputationGraph)]);
+        => Assert.Equal([2f, 2f, 2f], [.. StateFieldsAfterOneStep(StatefulCalledTwiceInALoopModel.ComputationGraph),
+                                       .. StateFieldsAfterOneStep(StatefulCallDiscardedInALoopModel.ComputationGraph),
+                                       .. StateFieldsAfterOneStep(CallCounterCalledTwiceInALoopModel.ComputationGraph)]);
 
     [Fact]
     public void TestALoopBodyIsOneCallSiteThatComposesWithTheCallsAroundIt()

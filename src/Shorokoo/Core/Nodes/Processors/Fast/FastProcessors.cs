@@ -5964,40 +5964,25 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             return false;
         }
 
-        private static long s_nextLoopId;
-
-        /// <summary>
-        /// The values module-owned state is read as: what each state update names as the state it
-        /// updates, and the Identity chains inlining wraps around it.
-        /// </summary>
-        private static HashSet<FastTensorKey> StateValues(InternalComputationGraph graph)
-        {
-            var producer = new Dictionary<FastTensorKey, FastNode>();
-            foreach (var n in graph.Nodes)
-                foreach (var o in n.Outputs)
-                    if (o is FastTensorKey k) producer[k] = n;
-
-            var state = new HashSet<FastTensorKey>();
-            foreach (var n in graph.Nodes)
-            {
-                if (n.OpCode != InternalOpCodes.STATE_UPDATE_LINK || n.Inputs.Count == 0 || n.Inputs[0] is not FastTensorKey k)
-                    continue;
-                while (state.Add(k) && producer.TryGetValue(k, out var p) && p.OpCode == OpCodes.IDENTITY
-                       && p.Inputs.Count > 0 && p.Inputs[0] is FastTensorKey inner)
-                    k = inner;
-            }
-            foreach (var n in graph.Nodes)
-                if (n.OpCode == OpCodes.IDENTITY && n.Inputs.Count > 0 && n.Inputs[0] is FastTensorKey i && state.Contains(i)
-                    && n.Outputs.Count > 0 && n.Outputs[0] is FastTensorKey o)
-                    state.Add(o);
-            return state;
-        }
-
         /// <summary>
         /// Adds a trip of one unrolled loop to a cloned state update's
         /// <see cref="OnnxOpAttributeNames.ShrkAttrLoopTrips"/>, with the flag saying whether the trip
         /// ran as one more input where that is decided at run time.
         /// </summary>
+        /// <summary>
+        /// An id no state update in <paramref name="graph"/> names a loop by yet. Ids are the graph's
+        /// own, so a graph saved and loaded elsewhere keeps them apart from the loops unrolled there.
+        /// </summary>
+        private static long NextLoopId(InternalComputationGraph graph)
+        {
+            long max = 0;
+            foreach (var n in graph.Nodes)
+                if (n.OpCode == InternalOpCodes.STATE_UPDATE_LINK
+                    && n.Attributes.GetLongsVal(OnnxOpAttributeNames.ShrkAttrLoopTrips) is { } trips)
+                    for (int i = 0; i < trips.Length; i += 5) max = Math.Max(max, trips[i]);
+            return max + 1;
+        }
+
         private static void TagLoopTrip(
             FastNode cloned, FastNode original, long loopId, long trip, long tripCount, long rolledDepth, FastTensorKey? ran)
         {
@@ -6064,8 +6049,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             // trip's own, and they keep the order the calls were made in. Sharing one across the
             // trips would leave nothing to tell which call it belongs to once the loop is gone.
             if (bodyNodes.Any(b => b.OpCode == InternalOpCodes.STATE_UPDATE_LINK))
-                loopDependentTensors.UnionWith(StateValues(graph));
-            long loopId = Interlocked.Increment(ref s_nextLoopId);
+                loopDependentTensors.UnionWith(FastScopeHelper.StateValues(graph));
+            long loopId = NextLoopId(graph);
 
             // The loops still standing around this one, which a call in it is inside of too.
             long rolledDepth = 0;

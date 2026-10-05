@@ -945,6 +945,52 @@ public partial class StatefulCalledTwiceInALoopModel
     }
 }
 
+/// <summary>Counts its calls in state that depends on nothing it is given.</summary>
+[Module]
+public partial class CallCounterSubModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> input)
+    {
+        var calls = InitRunningMean.Init(Vector(1L));
+        Globals.StateUpdate(calls, calls + Scalar(1f));
+        return input * Ones.Init([Scalar(2L)]);
+    }
+}
+
+/// <summary><see cref="CallCounterSubModel"/> called twice in one loop body.</summary>
+[Module]
+public partial class CallCounterCalledTwiceInALoopModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var m = CallCounterSubModel.Model();
+        var x = t;
+        foreach (var ctx in LoopAPI.Iterate(Scalar(3L)))
+        {
+            x = m.Call(m.Call(x));
+            ctx.ContinueWhile(Scalar(true));
+        }
+        return x;
+    }
+}
+
+/// <summary><see cref="CallCounterSubModel"/> called twice in a loop whose trip count is an input.</summary>
+[Module]
+public partial class CallCounterCalledTwiceInALoopOfAnInputTripCountModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t, Scalar<int64> trips)
+    {
+        var m = CallCounterSubModel.Model();
+        var x = t;
+        foreach (var ctx in LoopAPI.Iterate(trips))
+        {
+            x = m.Call(m.Call(x));
+            ctx.ContinueWhile(Scalar(true));
+        }
+        return x;
+    }
+}
+
 /// <summary>A stateful model called twice in one loop body with the second call's output discarded,
 /// so that call reaches the graph through nothing but its state update.</summary>
 [Module]
@@ -1740,6 +1786,33 @@ public partial class StatefulCallInAnIfElseInARolledLoopAndAfterItModel
             ctx.ContinueWhile(Scalar(true));
         }
         return m.Call(x);
+    }
+}
+
+/// <summary>A stateful call in an <c>IfElse</c> in a rolled loop inside a literal loop, and a
+/// literal loop after them that makes a call on each trip.</summary>
+[Module]
+public partial class StatefulCallInAnIfElseInARolledLoopInsideALiteralLoopAndALiteralLoopAfterModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var m = StatefulGainSubModel.Model();
+        var x = t;
+        foreach (var outer in LoopAPI.Iterate(Scalar(2L)))
+        {
+            foreach (var ctx in LoopAPI.Iterate(t.ShapeTensor()[0]))
+            {
+                x = (ctx.IterationIndex > Scalar(0L)).IfElse(m.Call(x), x);
+                ctx.ContinueWhile(Scalar(true));
+            }
+            outer.ContinueWhile(Scalar(true));
+        }
+        foreach (var ctx in LoopAPI.Iterate(Scalar(2L)))
+        {
+            x = m.Call(x);
+            ctx.ContinueWhile(Scalar(true));
+        }
+        return x;
     }
 }
 

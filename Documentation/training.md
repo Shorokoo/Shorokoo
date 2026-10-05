@@ -1181,9 +1181,9 @@ The `.skpt` save also streams each entry straight from the tensors' storage, wit
 the training state. An entry compressed with `WithZstdCompressedData` is compressed as it streams,
 afresh on each pass the writer makes over it, so it is never held whole either; its length is known
 only once it is compressed, so its tensors are read three times rather than two. An entry over
-`int.MaxValue` bytes, an archive of 4 GiB or more, or more than 65,535 entries is refused with
-`NotSupportedException` before anything is written, and any previous file at the target is left
-intact.
+`int.MaxValue` bytes as stored, an archive of 4 GiB or more, or more than 65,535 entries is refused
+with `NotSupportedException` before anything is written, and any previous file at the target is
+left intact. A Zstd entry is held to that limit by its compressed size, and may decompress to more.
 
 A checkpoint in device memory is saved from there: the flat and `.skpt` saves (file and directory
 form) write each tensor through one bounded host staging buffer (8 MiB), piece by piece, so the

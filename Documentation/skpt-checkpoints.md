@@ -542,7 +542,10 @@ Rules:
 - One **weight-bearing** model per file (the `model` entry), with any number of
   [named weight sets](#named-weight-sets-default--ema). A training checkpoint's extra
   `models/` entries bind no weights.
-- A single data entry must hold under 2 GB of tensor data, both stored and decompressed.
+- A single data entry holds at most `int.MaxValue` bytes (just under 2 GiB) as stored. A Zstd
+  entry may decompress to more: it is read a tensor at a time, and a tensor past what a managed
+  array holds is read into host memory of a backend (see
+  [training.md](training.md#what-a-save-costs)).
 - An archive holds under 4 GiB and at most 65,535 entries. A save that would exceed either
   limit, or put more than `int.MaxValue` bytes in one entry, is refused with
   `NotSupportedException` before anything is written, leaving any previous file intact.

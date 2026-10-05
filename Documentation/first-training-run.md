@@ -188,8 +188,8 @@ static (TensorData x, TensorData y) MakeBatch(long seed)
 
 None of these shows in a small first run. Each can end a long one.
 
-- **Checkpoint size.** A `.skpt` data entry of 2 GiB or more, or an archive of 4 GiB or more, is refused
-  when saved. A flat safetensors file loads back whatever its size and the size of each tensor in
+- **Checkpoint size.** A `.skpt` data entry of 2 GiB or more as stored, or an archive of 4 GiB or more,
+  is refused when saved; a Zstd entry may decompress to more. A flat safetensors file loads back whatever its size and the size of each tensor in
   it. See [skpt-checkpoints.md](skpt-checkpoints.md).
 - **Save cost.** What a save allocates and how long it takes grow with the checkpoint:
   [What a save costs](training.md#what-a-save-costs).

@@ -732,8 +732,9 @@ namespace Shorokoo.Core.Utils
         /// </summary>
         internal sealed class EntryPayload
         {
-            /// <summary>The largest entry a .skpt reader reads, in either form; a produced entry
-            /// larger than this is refused when it is measured.</summary>
+            /// <summary>The largest entry a .skpt reader reads, in either form, as the entry is
+            /// stored: a Zstd entry is held to it by its compressed bytes, and may decompress to more.
+            /// A produced entry larger than this is refused when it is measured.</summary>
             public const long MaxEntryLength = int.MaxValue;
 
             private readonly byte[]? _bytes;

@@ -101,8 +101,9 @@ namespace Shorokoo.Onnx
 
         /// <summary>
         /// Walks every <see cref="TensorProto"/> reachable from the model: graph
-        /// initializers, sparse initializers, tensor-valued node attributes, and all of
-        /// those recursively through subgraph attributes and function bodies.
+        /// initializers, sparse initializers, tensor- and sparse-tensor-valued node
+        /// attributes, and all of those recursively through subgraph attributes and
+        /// function bodies.
         /// </summary>
         internal static IEnumerable<TensorProto> EnumerateAllTensors(ModelProto model)
         {
@@ -122,10 +123,8 @@ namespace Shorokoo.Onnx
                 yield return init;
 
             foreach (var sparse in graph.SparseInitializers)
-            {
-                if (sparse.Values is not null) yield return sparse.Values;
-                if (sparse.Indices is not null) yield return sparse.Indices;
-            }
+                foreach (var t in EnumerateSparseTensors(sparse))
+                    yield return t;
 
             foreach (var node in graph.Nodes)
                 foreach (var t in EnumerateNodeTensors(node))
@@ -140,6 +139,12 @@ namespace Shorokoo.Onnx
                     yield return attr.T;
                 foreach (var t in attr.Tensors)
                     yield return t;
+                if (attr.SparseTensor is not null)
+                    foreach (var t in EnumerateSparseTensors(attr.SparseTensor))
+                        yield return t;
+                foreach (var sparse in attr.SparseTensors)
+                    foreach (var t in EnumerateSparseTensors(sparse))
+                        yield return t;
                 if (attr.G is not null)
                     foreach (var t in EnumerateGraphTensors(attr.G))
                         yield return t;
@@ -147,6 +152,12 @@ namespace Shorokoo.Onnx
                     foreach (var t in EnumerateGraphTensors(g))
                         yield return t;
             }
+        }
+
+        private static IEnumerable<TensorProto> EnumerateSparseTensors(SparseTensorProto sparse)
+        {
+            if (sparse.Values is not null) yield return sparse.Values;
+            if (sparse.Indices is not null) yield return sparse.Indices;
         }
 
         private static void MaterializeExternalTensor(
@@ -287,13 +298,14 @@ namespace Shorokoo.Onnx
 
         /// <summary>Whether a tensor of <paramref name="dtype"/> is a flat buffer of whole-byte
         /// elements, which is what <see cref="ComputeContext.ReadTensor"/> reads.</summary>
-        private static bool HasFlatBuffer(DType dtype)
+        internal static bool HasFlatBuffer(DType dtype)
             => !dtype.IsSameElementTypeAs(DType.Utf8) && dtype != DType.Complex64 && dtype != DType.Complex128
                 && dtype.EncodingBitCount >= 8;
 
         /// <summary>
         /// The byte count implied by the tensor's dtype and dims, or -1 when the dtype
-        /// has no fixed per-element width (e.g. String) so the count cannot be derived.
+        /// has no fixed per-element width (e.g. String), a dim is negative, or the count
+        /// does not fit a <see cref="long"/>, so no count can be derived.
         /// </summary>
         internal static long TryGetExpectedByteLength(TensorProto tensor)
         {
@@ -309,10 +321,20 @@ namespace Shorokoo.Onnx
             }
 
             long count = 1;
-            if (tensor.Dims is not null)
-                foreach (var d in tensor.Dims)
-                    count *= d;
-            return count * bits / 8;
+            try
+            {
+                if (tensor.Dims is not null)
+                    foreach (var d in tensor.Dims)
+                    {
+                        if (d < 0) return -1;
+                        count = checked(count * d);
+                    }
+                return checked(count * bits) / 8;
+            }
+            catch (OverflowException)
+            {
+                return -1;
+            }
         }
     }
 }

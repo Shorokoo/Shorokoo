@@ -23,8 +23,8 @@ namespace Shorokoo.Onnx
     /// <para>So each weight is held once, where the model keeps it, and nothing holds the model
     /// whole: what remains besides the payloads set aside is held once more while protobuf-net
     /// parses it. Tensors are found where the writer streams them (graph initializers, sparse
-    /// initializers, the tensors of node attributes, through nested graphs and function bodies). A
-    /// <c>raw_data</c> past what one array holds is read where its tensor's <c>dims</c> and
+    /// initializers, the tensors and sparse tensors of node attributes, through nested graphs and
+    /// function bodies). A <c>raw_data</c> past what one array holds is read where its tensor's <c>dims</c> and
     /// <c>data_type</c> come first and account for exactly its bytes, as every writer of a
     /// <c>.srk</c> payload lays a tensor out; any other is refused as malformed.</para>
     /// </summary>
@@ -80,19 +80,21 @@ namespace Shorokoo.Onnx
 
         /// <summary>
         /// The model <paramref name="source"/> holds from where it stands to its end, read forward
-        /// once. A truncated or malformed model throws <see cref="EndOfStreamException"/> or
+        /// once: at most <paramref name="maxLength"/> bytes, which bounds every length a field of it
+        /// declares, so a field claiming more than the source can hold is refused before anything
+        /// is allocated for it. A truncated or malformed model throws <see cref="EndOfStreamException"/> or
         /// <see cref="ProtoBuf.ProtoException"/>, as parsing it whole does; a model holding more
         /// than one array besides its payloads, or a <c>raw_data</c> past one array that its
         /// tensor's layout does not account for, throws <see cref="InvalidDataException"/> naming
         /// <paramref name="origin"/>.
         /// </summary>
-        internal static ModelProto ReadModel(Stream source, string origin)
+        internal static ModelProto ReadModel(Stream source, long maxLength, string origin)
         {
             ArgumentNullException.ThrowIfNull(source);
             var reader = new OnnxStreamingReader(source, origin);
             try
             {
-                reader.Message(Kind.Model, long.MaxValue, 0, null);
+                reader.Message(Kind.Model, maxLength, 0, null);
                 var model = OnnxProtobuf.ReadModel(new MemoryStream(reader.Assemble(), writable: false));
                 reader.Restore(model);
                 return model;
@@ -124,7 +126,7 @@ namespace Shorokoo.Onnx
         };
 
         /// <summary>Reads the message of <paramref name="kind"/> running to <paramref name="end"/>
-        /// (the model's own runs to the end of the stream), <paramref name="depth"/> levels below
+        /// (the model's own runs to the end of the stream, at most there), <paramref name="depth"/> levels below
         /// the model, into the skeleton; <paramref name="layout"/> gathers a tensor's.</summary>
         private void Message(Kind kind, long end, int depth, Layout? layout)
         {
@@ -215,8 +217,8 @@ namespace Shorokoo.Onnx
             long total = _skeleton.Length + _lengthBytes;
             if (total > Array.MaxLength)
                 throw new InvalidDataException(
-                    $"'{_origin}': the ONNX model holds {total:N0} bytes besides its tensors' raw_data, more than " +
-                    "one protobuf message is read into.");
+                    $"'{_origin}': the ONNX model holds {total:N0} bytes besides the raw_data of at least " +
+                    $"{MinSetAsideBytes:N0} bytes it sets aside, more than one protobuf message is read into.");
             var output = GC.AllocateUninitializedArray<byte>((int)total);
             var skeleton = _skeleton.GetBuffer();
             int from = 0, to = 0;
@@ -237,6 +239,30 @@ namespace Shorokoo.Onnx
             }
             skeleton.AsSpan(from, (int)_skeleton.Length - from).CopyTo(output.AsSpan(to));
             return output;
+        }
+
+        /// <summary>
+        /// Hands each tensor of <paramref name="model"/> whose <c>raw_data</c> of at least
+        /// <see cref="MinSetAsideBytes"/> is exactly its dims' worth of a flat data type that
+        /// <c>raw_data</c> as the attribute it carries (<see cref="TensorProto.Carried"/>), over
+        /// the array itself, so an import takes each weight where it lies rather than copying it.
+        /// Only for a model the caller owns outright, as <see cref="ReadModel"/> returns it:
+        /// nothing else may hold its arrays. Any other tensor keeps its <c>raw_data</c>, for the
+        /// import to read or refuse.
+        /// </summary>
+        internal static void CarryRawData(ModelProto model)
+        {
+            foreach (var tensor in OnnxExternalData.EnumerateAllTensors(model))
+            {
+                if (tensor is not { RawData: { Length: >= MinSetAsideBytes } raw, Carried: null }
+                    || tensor.data_location == TensorProto.DataLocation.External
+                    || OnnxExternalData.TryGetExpectedByteLength(tensor) != raw.Length
+                    || !OnnxExternalData.HasFlatBuffer((DType)tensor.data_type))
+                    continue;
+                Shape shape = tensor.Dims is { Length: > 0 } dims ? dims : (long[])[];
+                tensor.Carried = TensorData.NewHostTensor(shape, (DType)tensor.data_type, raw).MoveToAttribute();
+                tensor.RawData = null!;
+            }
         }
 
         /// <summary>Gives each tensor holding a placeholder the payload it stands for.</summary>
@@ -262,15 +288,13 @@ namespace Shorokoo.Onnx
             }
         }
 
+        /// <summary>Copies a packed <c>dims</c> field's <paramref name="length"/> bytes as they
+        /// stand, each varint however it is spelled, gathering the dims they hold.</summary>
         private void ReadPackedDims(long length, Layout layout)
         {
             long end = _source.Consumed + length;
             while (_source.Consumed < end)
-            {
-                var value = ReadVarint(end);
-                layout.Dims.Add(unchecked((long)value));
-                WriteVarint(value);
-            }
+                layout.Dims.Add(unchecked((long)ReadVarint(end, copy: true)));
         }
 
         /// <summary>Copies the value of a field of wire type <paramref name="wire"/> as it stands: a
@@ -318,7 +342,7 @@ namespace Shorokoo.Onnx
             }
         }
 
-        private ulong ReadVarint(long end)
+        private ulong ReadVarint(long end, bool copy = false)
         {
             ulong value = 0;
             for (int shift = 0; shift < 64; shift += 7)
@@ -326,6 +350,7 @@ namespace Shorokoo.Onnx
                 RequireWithin(end, 1);
                 int b = _source.ReadByte();
                 if (b < 0) throw new EndOfStreamException();
+                if (copy) Write([(byte)b]);
                 value |= (ulong)(b & 0x7F) << shift;
                 if ((b & 0x80) == 0) return value;
             }
@@ -375,8 +400,8 @@ namespace Shorokoo.Onnx
         {
             if (_skeleton.Length + _lengthBytes + bytes.Length > Array.MaxLength)
                 throw new InvalidDataException(
-                    $"'{_origin}': the ONNX model holds more than {Array.MaxLength:N0} bytes besides its tensors' " +
-                    "raw_data, more than one protobuf message is read into.");
+                    $"'{_origin}': the ONNX model holds more than {Array.MaxLength:N0} bytes besides the raw_data " +
+                    $"of at least {MinSetAsideBytes:N0} bytes it sets aside, more than one protobuf message is read into.");
             _skeleton.Write(bytes);
         }
 

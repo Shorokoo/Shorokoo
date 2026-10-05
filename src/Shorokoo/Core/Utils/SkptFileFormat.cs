@@ -1015,6 +1015,11 @@ namespace Shorokoo.Core.Utils
         [ThreadStatic]
         internal static (long Field32, int Count16)? Zip64ThresholdInjection;
 
+        /// <summary>The largest value the writer puts in a 32-bit zip field and the largest entry
+        /// count it puts in a 16-bit one; past either, it writes the Zip64 record.</summary>
+        internal static (long Field32, int Count16) Zip64Limits
+            => Zip64ThresholdInjection ?? (uint.MaxValue - 1L, ushort.MaxValue - 1);
+
         /// <summary>
         /// Writes <paramref name="entries"/> as a STORED-only zip archive. Every entry is
         /// method-0 (no compression); entries flagged <see cref="ZipEntrySpec.Align"/> get a
@@ -1030,7 +1035,7 @@ namespace Shorokoo.Core.Utils
             if (entries is null) throw new ArgumentNullException(nameof(entries));
 
             (ushort dosTime, ushort dosDate) = ToDosDateTime(timestampUtc);
-            var (max32, max16) = Zip64ThresholdInjection ?? (uint.MaxValue - 1L, ushort.MaxValue - 1);
+            var (max32, max16) = Zip64Limits;
 
             // Lay the archive out before writing any of it: every entry's size is known up front,
             // so each header knows whether it needs Zip64 before a byte of the archive is written.

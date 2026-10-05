@@ -21,9 +21,9 @@ namespace Shorokoo.Onnx
     ///
     /// <para>Payloads are found where the importer reads tensors (as
     /// <see cref="OnnxExternalData.EnumerateAllTensors"/> walks them): graph initializers, sparse
-    /// initializers, the tensors of node attributes, through nested graphs and function bodies.
-    /// Each payload is written from where it lives, by the piece its source writes, so no buffer
-    /// ever holds more than one message besides its payloads.</para>
+    /// initializers, the tensors and sparse tensors of node attributes, through nested graphs and
+    /// function bodies. Each payload is written from where it lives, by the piece its source
+    /// writes, so no buffer ever holds more than one message besides its payloads.</para>
     /// </summary>
     internal sealed class OnnxStreamingWriter
     {
@@ -31,7 +31,7 @@ namespace Shorokoo.Onnx
         /// the model: below it, a placeholder saves nothing worth its walk.</summary>
         internal const int MinStreamedBytes = 1024;
 
-        private const int WireVarint = 0, WireFixed64 = 1, WireLengthDelimited = 2, WireFixed32 = 5;
+        private const int WireVarint = 0, WireFixed64 = 1, WireLengthDelimited = 2, WireStartGroup = 3, WireEndGroup = 4, WireFixed32 = 5;
         private const int RawDataField = 9;
         private const int NonceLength = 16;
         private const int PlaceholderLength = NonceLength + sizeof(long);
@@ -108,9 +108,10 @@ namespace Shorokoo.Onnx
                 using var measured = ProtoBuf.Serializer.Measure(model);
                 if (measured.Length > ceiling)
                     throw new NotSupportedException(
-                        $"The ONNX model holds {measured.Length:N0} bytes besides its tensors' raw data, more than " +
-                        $"the {ceiling:N0} bytes one protobuf message is built in. Only a tensor's raw_data " +
-                        "is streamed: string tensors and typed data fields are held with the rest of the model.");
+                        $"The ONNX model holds {measured.Length:N0} bytes besides the raw_data it streams, more than " +
+                        $"the {ceiling:N0} bytes one protobuf message is built in. Only a tensor's raw_data of at least " +
+                        $"{MinStreamedBytes:N0} bytes is streamed: smaller raw_data, string tensors and typed data fields " +
+                        "are held with the rest of the model.");
                 var skeleton = new byte[measured.Length];
                 using (var buffer = new MemoryStream(skeleton))
                     measured.Serialize(buffer);
@@ -202,7 +203,7 @@ namespace Shorokoo.Onnx
                     }
                 }
                 else
-                    SkipValue(wire, ref at, end);
+                    SkipValue(key, ref at, end, 0);
                 size += at - fieldStart;
             }
             return size;
@@ -239,7 +240,7 @@ namespace Shorokoo.Onnx
                     }
                 }
                 else
-                    SkipValue(wire, ref at, end);
+                    SkipValue(key, ref at, end, 0);
                 output.Write(_skeleton, fieldStart, at - fieldStart);
             }
         }
@@ -270,9 +271,12 @@ namespace Shorokoo.Onnx
             return (int)length;
         }
 
-        private void SkipValue(int wire, ref int at, int end)
+        /// <summary>Steps past the value of the field keyed <paramref name="key"/>, of any wire type
+        /// but length-delimited: a group whole, through its end, <paramref name="depth"/> groups
+        /// deep.</summary>
+        private void SkipValue(ulong key, ref int at, int end, int depth)
         {
-            switch (wire)
+            switch ((int)(key & 7))
             {
                 case WireVarint:
                     ReadVarint(ref at, end);
@@ -283,8 +287,26 @@ namespace Shorokoo.Onnx
                 case WireFixed32:
                     at += 4;
                     return;
+                case WireLengthDelimited:
+                    at += ReadLength(ref at, end);
+                    return;
+                case WireStartGroup:
+                    if (depth + 1 > OnnxProtobuf.MaxDepth)
+                        throw new InvalidOperationException(
+                            $"The serialized ONNX model nests a group {depth + 1} levels deep; a model is written to a depth of {OnnxProtobuf.MaxDepth}.");
+                    while (true)
+                    {
+                        var inner = ReadVarint(ref at, end);
+                        if ((inner & 7) == WireEndGroup)
+                        {
+                            if (inner >> 3 != key >> 3)
+                                throw new InvalidOperationException("The serialized ONNX model holds a group that ends as another field.");
+                            return;
+                        }
+                        SkipValue(inner, ref at, end, depth + 1);
+                    }
                 default:
-                    throw new InvalidOperationException($"The serialized ONNX model holds a field of wire type {wire}.");
+                    throw new InvalidOperationException($"The serialized ONNX model holds a field of wire type {key & 7}.");
             }
         }
 

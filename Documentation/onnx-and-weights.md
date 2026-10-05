@@ -14,8 +14,11 @@ Related: [inference.md](inference.md) · [core-types.md](core-types.md) · [skpt
   export; side files load transparently on import). A concrete model holds a weight of any
   size; ONNX export with external data and `ExportSafeTensors` write one past 2 GiB from where
   the model holds it, 8 MiB at a time.
-- `.srk`/`.zsrk` and `.zsafetensor` files have no size limit of their own: they are
-  saved and loaded as streams, never held whole, and a `.srk` holds a weight of any size.
+- `.srk`/`.zsrk` and `.zsafetensor` files are saved and loaded as streams, never held
+  whole, and a `.srk` holds a weight of any size and weights of any total. What a `.srk`
+  model holds besides each tensor's `raw_data` of 1,024 bytes or more — its structure,
+  smaller `raw_data`, string tensors and typed data fields — must fit in one array
+  (`Array.MaxLength` bytes, just under 2 GiB).
 - Pretrained weights load from `.safetensors` (and compressed `.zsafetensor`).
 - Every save API is **atomic** (staged beside the target, committed by rename), so an
   interrupted write never damages the existing file: the `Persistence.*` facade,
@@ -214,10 +217,15 @@ byte[] bytes = CompressedFormatUtils.SaveFastGraphToBinary(graph, compressed: tr
 For a concrete model, a [`.skpt`](skpt-checkpoints.md) is the richer container; a
 module-stage graph can only be saved as `.srk`.
 
-A `.srk` file has no size limit of its own. `SaveFastGraphToFile` streams the container
-to the file, each weight written from where it lies, and `LoadFastGraphFromFile` reads
-the file as a stream — once to check `payloadSha256`, once to parse the payload — so
-neither ever holds the file whole. Each weight is read into storage of its own as the
+`SaveFastGraphToFile` streams the container to the file, each weight written from where
+it lies, and `LoadFastGraphFromFile` reads the file as a stream — once to check
+`payloadSha256`, once to parse the payload — so neither ever holds the file whole. Every
+tensor's `raw_data` of 1,024 bytes or more is streamed this way, so the weights may total
+any size; the rest of the model — the graph's structure, smaller `raw_data`, string
+tensors and typed data fields — is built and parsed as one protobuf message, which must fit
+in one array (`Array.MaxLength` bytes). A save past that is refused with
+`NotSupportedException` before anything is written, and a load past it with
+`InvalidDataException`. Each weight is read into storage of its own as the
 payload is parsed; one of more bytes than one managed array holds (`Array.MaxLength`, just
 under 2 GiB) is read 8 MiB at a time into host memory of the backend
 `ComputeContext.Default` runs on, where the loaded graph holds it. `SaveFastGraphToBinary`

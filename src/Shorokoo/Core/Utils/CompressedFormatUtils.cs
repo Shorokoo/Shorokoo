@@ -208,12 +208,14 @@ namespace Shorokoo.Core.Utils
         /// <see cref="SaveFastGraphToBinary(InternalComputationGraph, GraphKind?, bool, int)"/>
         /// refusing a container of more than <paramref name="maxBytes"/> bytes: up front, before
         /// any of it is written, when the uncompressed payload alone exceeds it, else as soon as
-        /// the container being written does.
+        /// the container being written does. The refusal is <paramref name="tooLarge"/>'s of what
+        /// exceeds the limit, when given.
         /// </summary>
         internal static byte[] SaveFastGraphToBinary(
-            InternalComputationGraph graph, GraphKind? stage, bool compressed, int compressionLevel, long maxBytes)
+            InternalComputationGraph graph, GraphKind? stage, bool compressed, int compressionLevel, long maxBytes,
+            Func<string, NotSupportedException>? tooLarge = null)
         {
-            NotSupportedException TooLarge(string what) => new(
+            NotSupportedException TooLarge(string what) => tooLarge?.Invoke(what) ?? new(
                 $"{what} more than the {maxBytes:N0} bytes one array holds, so SaveFastGraphToBinary cannot " +
                 "return this graph's .srk container. Save it with CompressedFormatUtils.SaveFastGraphToFile, " +
                 "which streams a container of any size to the file.");
@@ -259,7 +261,8 @@ namespace Shorokoo.Core.Utils
                     IrVersion = model.IrVersion,
                     Opsets = [.. model.OpsetImports.Select(o => new KeyValuePair<string, long>(o.Domain, o.Version))],
                     // The model's weights are streamed into the payload from where they lie, so the
-                    // container is never held whole and has no size limit of its own.
+                    // container is never held whole; only the model besides each raw_data of at least
+                    // OnnxStreamingWriter.MinStreamedBytes is built in one array.
                     Writer = OnnxStreamingWriter.Prepare(model),
                 };
             }
@@ -342,7 +345,7 @@ namespace Shorokoo.Core.Utils
         internal static (InternalComputationGraph Graph, GraphKind Kind) LoadFastGraphCore(
             Stream container, string origin, GraphKind? requiredStage)
         {
-            var (header, payload) = SrkFileFormat.OpenPayload(container, origin);
+            var (header, payload, maxLength) = SrkFileFormat.OpenPayload(container, origin);
             using var _ = payload;
 
             if (requiredStage is not null)
@@ -358,8 +361,10 @@ namespace Shorokoo.Core.Utils
             GraphKind? taggedKind;
             try
             {
-                (graph, taggedKind) = OnnxModelImporter.FromModelProtoWithKindTag(
-                    OnnxStreamingReader.ReadModel(payload, origin));
+                // The model is this load's own, so each weight's array becomes its tensor as it is.
+                var model = OnnxStreamingReader.ReadModel(payload, maxLength, origin);
+                OnnxStreamingReader.CarryRawData(model);
+                (graph, taggedKind) = OnnxModelImporter.FromModelProtoWithKindTag(model);
             }
             catch (Exception e) when (e is ProtoBuf.ProtoException
                 or EndOfStreamException
@@ -389,8 +394,11 @@ namespace Shorokoo.Core.Utils
         /// the extension is normalized to .zsrk/.srk purely as a hint for humans — the
         /// extension has no parsing significance; the header records the compression.
         /// The container is streamed to the file, each weight from where it lies, so a graph's
-        /// container has no size limit: its weights may be of any size, a weight past what one
-        /// array holds included, and may total any size.
+        /// weights may be of any size, a weight past what one array holds included, and may total
+        /// any size. The model besides each tensor's <c>raw_data</c> of at least 1,024 bytes — its
+        /// structure, smaller <c>raw_data</c>, string tensors and typed data fields — is built in
+        /// one array, and a graph whose model besides those exceeds <see cref="Array.MaxLength"/>
+        /// bytes is refused with <see cref="NotSupportedException"/> before anything is written.
         /// The write is atomic: the container is staged in a <c>.tmp-</c> sibling and committed
         /// by rename, so a failed or interrupted save leaves any previous file untouched.
         /// </summary>
@@ -456,9 +464,9 @@ namespace Shorokoo.Core.Utils
             if (!File.Exists(filePath))
                 throw new FileNotFoundException($"Architecture file not found: {filePath}");
             using var file = OpenSrkFile(filePath);
-            var (_, payload) = SrkFileFormat.OpenPayload(file, filePath);
+            var (_, payload, maxLength) = SrkFileFormat.OpenPayload(file, filePath);
             using (payload)
-                return OnnxStreamingReader.ReadModel(payload, filePath);
+                return OnnxStreamingReader.ReadModel(payload, maxLength, filePath);
         }
 
         /// <summary>
@@ -783,14 +791,30 @@ namespace Shorokoo.Core.Utils
         /// is believed. Every frame Shorokoo writes declares its size (<see cref="WriteZstdFrame(Stream, int, long, Action{Stream})"/>),
         /// and a tool that writes a payload in several frames — pzstd, say — declares each one's, so
         /// bytes that are not Zstd frames each declaring its size are refused, with the exception
-        /// <paramref name="malformed"/> makes of the reason. A skippable frame holds no payload and
-        /// adds nothing.
+        /// <paramref name="malformed"/> makes of the reason, as is a frame declaring more than its
+        /// blocks hold. A skippable frame holds no payload and adds nothing.
         ///
         /// <para>Each frame is walked by its header and its blocks' headers, three bytes a block, the
         /// blocks themselves sought past where the stream can seek and read past where it cannot: no
         /// byte is decompressed, and a file is read through at most once.</para>
         /// </summary>
         internal static long DeclaredZstdContentSize(Stream frames, Func<string, Exception> malformed)
+            => ZstdContentSize(frames, malformed, requireDeclared: true);
+
+        /// <summary>
+        /// The most bytes the Zstd frames of <paramref name="frames"/>, from where it stands to its
+        /// end, decompress to, walked as <see cref="DeclaredZstdContentSize"/> walks them: each
+        /// frame's declared size, or for a frame declaring none the most its blocks hold — a raw or
+        /// RLE block its stated size, a compressed one <see cref="ZstdMaxBlockBytes"/>. What a
+        /// streamed payload's fields declare is held to it before anything they claim is allocated.
+        /// </summary>
+        internal static long ZstdContentSizeBound(Stream frames, Func<string, Exception> malformed)
+            => ZstdContentSize(frames, malformed, requireDeclared: false);
+
+        /// <summary>The most bytes one Zstd block decompresses to.</summary>
+        internal const int ZstdMaxBlockBytes = 1 << 17;
+
+        private static long ZstdContentSize(Stream frames, Func<string, Exception> malformed, bool requireDeclared)
         {
             Span<byte> field = stackalloc byte[8];
             void Read(Span<byte> bytes)
@@ -834,15 +858,14 @@ namespace Shorokoo.Core.Utils
                 bool singleSegment = (descriptor & 0x20) != 0;
                 Pass((singleSegment ? 0 : 1) + (descriptor & 3) switch { 0 => 0, 1 => 1, 2 => 2, _ => 4 });
                 int sizeBytes = (descriptor >> 6) switch { 0 => singleSegment ? 1 : 0, 1 => 2, 2 => 4, _ => 8 };
-                if (sizeBytes == 0)
+                if (sizeBytes == 0 && requireDeclared)
                     throw malformed("a Zstd frame of it declares no decompressed size, which every frame written here declares");
                 field.Clear();
                 Read(field[..sizeBytes]);
-                ulong size = System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(field) + (sizeBytes == 2 ? 256UL : 0);
-                if (size > (ulong)(long.MaxValue - total))
-                    throw malformed("its Zstd frames declare more bytes than a payload holds");
-                total += (long)size;
+                ulong? declared = sizeBytes == 0 ? null
+                    : System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(field) + (sizeBytes == 2 ? 256UL : 0);
 
+                ulong held = 0;
                 while (true)
                 {
                     Read(field[..3]);
@@ -850,9 +873,17 @@ namespace Shorokoo.Core.Utils
                     int type = header >> 1 & 3;
                     if (type == 3) throw malformed("a Zstd block of it is of a reserved type");
                     Pass(type == 1 ? 1 : header >> 3);
+                    held += type == 2 ? ZstdMaxBlockBytes : (ulong)(header >> 3);
                     if ((header & 1) != 0) break;
                 }
                 if ((descriptor & 0x04) != 0) Pass(4);
+
+                if (declared > held)
+                    throw malformed("a Zstd frame of it declares more bytes than its blocks hold");
+                ulong size = declared ?? held;
+                if (size > (ulong)(long.MaxValue - total))
+                    throw malformed("its Zstd frames declare more bytes than a payload holds");
+                total += (long)size;
             }
         }
 

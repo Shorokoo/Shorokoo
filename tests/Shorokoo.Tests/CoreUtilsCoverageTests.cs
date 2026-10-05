@@ -461,6 +461,15 @@ public class CoreUtilsCoverageTests
     public void TestAHostTensorPastTwoGibibytesIsCopiedIntoHostMemoryByThePiece()
         => AssertAHostTensorPastTwoGibibytesIsCopiedByThePiece(t => t.CopyTo(ComputeContext.Host));
 
+    [Fact]
+    public void TestAHostTensorPastTwoGibibytesIsCopiedAsASequenceElementAndAcrossRuntimesByThePiece()
+    {
+        var backend = DefaultBackend.Instance;
+        AssertAHostTensorPastTwoGibibytesIsCopiedByThePiece(t => TensorData.Create(t.Shape, t.DType, t.HostCopyOn(backend), backend));
+        AssertAHostTensorPastTwoGibibytesIsCopiedByThePiece(
+            t => TensorData.Create(t.Shape, t.DType, BackendTransfer.CopyTo(backend, t.ToTensorValue(backend)), backend));
+    }
+
     /// <summary>
     /// A host tensor of 2 GiB + 8 bytes, its first and last four bytes set, copied by
     /// <paramref name="copy"/> into a tensor of its own in host memory as long as it, holding them

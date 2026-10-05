@@ -60,6 +60,106 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
     }
 
     [Fact]
+    public void TestASkptBindFailingAfterItReadATensorPastTwoGibibytesReleasesItBeforeItReturns()
+        => Utils.OwnProcess.Run(typeof(CompressedFormatUtilsCoverageTests), nameof(ASkptBindFailingAfterItReadATensorPastTwoGibibytesReleasesItBeforeItReturns));
+
+    internal static void ASkptBindFailingAfterItReadATensorPastTwoGibibytesReleasesItBeforeItReturns()
+    {
+        var dir = Directory.CreateTempSubdirectory("ShorokooLargeSkpt_").FullName;
+        try
+        {
+            var (model, _, _) = BuildCompressibleSkptModel();
+            var (path, large) = (Path.Combine(dir, "zstd.skpt"), Path.Combine(dir, "zstd-large.skpt"));
+            Persistence.From(model).WithModel().WithWeights().WithZstdCompressedData().Save(path);
+            var entries = ReadZipEntries(path);
+            var name = SafeTensorLoader.ParseSafeTensorBytes(CompressedFormatUtils.Decompress(entries[SkptFileFormat.WeightsEntryPath]))[0].Name;
+            var weights = ZstdFloatZeros(name, LargeElements);
+            var config = JsonNode.Parse(entries[SkptFileFormat.ConfigEntryName])!;
+            config["data"]!["weights"]!["sha256"] = SkptFileFormat.Sha256Hex(weights);
+            RewriteSkpt(large, [.. entries.Select(e => (e.Key,
+                e.Key == SkptFileFormat.ConfigEntryName ? System.Text.Encoding.UTF8.GetBytes(config.ToJsonString())
+                : e.Key == SkptFileFormat.WeightsEntryPath ? weights : e.Value))]);
+            var host = Core.Backends.CachingAllocator.ForHost().Placements;
+            var before = host.InUse;
+
+            Assert.IsType<InvalidDataException>(Record.Exception(() => Persistence.Load(large)));
+            Assert.Equal((before, true), (host.InUse, host.MaxInUse - before >= 4 * LargeElements));
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void TestAnImportRefusingATensorPastWhatAnAttributeHoldsCopiesNothingAndReleasesItBeforeItReturns()
+        => Utils.OwnProcess.Run(typeof(CompressedFormatUtilsCoverageTests), nameof(AnImportRefusingATensorPastWhatAnAttributeHoldsCopiesNothingAndReleasesItBeforeItReturns));
+
+    internal static void AnImportRefusingATensorPastWhatAnAttributeHoldsCopiesNothingAndReleasesItBeforeItReturns()
+    {
+        var dir = Directory.CreateTempSubdirectory("ShorokooLargeImport_").FullName;
+        try
+        {
+            var arch = FCLayer.ComputationGraph.ToConcreteArchitecture(
+                [TensorData(DType.Int64, [], 32769L), TensorDataWithSmallVals(DType.Float32, [1L, 16384L])]);
+            var infos = arch.GetConcreteModelParamInfos();
+            var scheme = ModuleParamSetNamingScheme.CreateShorokooNamingScheme(infos);
+            var path = SparseSafeTensors(Path.Combine(dir, "large.safetensors"), [.. infos.ParamInfos
+                .Where(p => !Core.Nodes.Processors.Fast.FastInjectRngDrawCounter.IsExecutionCounter(p.ParamIdentifier))
+                .Select(p => (scheme.ToName(p)!, p.Shape.Dims))]);
+            var host = Core.Backends.CachingAllocator.ForHost().Placements;
+            var before = host.InUse;
+
+            Assert.Throws<NotSupportedException>(() => Persistence.ImportSafeTensors(arch, path));
+            Assert.Equal((before, true, true), (host.InUse, host.MaxInUse - before >= 4 * 32769L * 16384L,
+                host.MaxInUse - before < 8 * 32769L * 16384L));
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    private const long LargeElements = (1L << 29) + 2;
+
+    // A single Zstd frame of a SafeTensors payload holding one float tensor of zeros.
+    private static byte[] ZstdFloatZeros(string name, long elements)
+    {
+        var header = System.Text.Encoding.UTF8.GetBytes(
+            $"{{\"{name}\":{{\"dtype\":\"F32\",\"shape\":[{elements}],\"data_offsets\":[0,{4 * elements}]}}}}");
+        var zeros = new byte[1 << 20];
+        using var frame = new MemoryStream();
+        CompressedFormatUtils.WriteZstdFrame(frame, 1, s =>
+        {
+            s.Write(BitConverter.GetBytes((long)header.Length));
+            s.Write(header);
+            for (long left = 4 * elements; left > 0; left -= zeros.Length) s.Write(zeros, 0, (int)Math.Min(left, zeros.Length));
+        });
+        return frame.ToArray();
+    }
+
+    // A SafeTensors file of float tensors of the shapes given, laid out one after another, every
+    // byte of them a hole that holds no disk space.
+    private static string SparseSafeTensors(string path, (string Name, long[] Shape)[] tensors)
+    {
+        long offset = 0;
+        var entries = tensors.Select(t =>
+        {
+            var start = offset;
+            offset += 4 * t.Shape.Aggregate(1L, (a, d) => a * d);
+            return $"\"{t.Name}\":{{\"dtype\":\"F32\",\"shape\":[{string.Join(",", t.Shape)}],\"data_offsets\":[{start},{offset}]}}";
+        }).ToList();
+        var header = System.Text.Encoding.UTF8.GetBytes("{" + string.Join(",", entries) + "}");
+        using var file = new FileStream(path, FileMode.CreateNew, FileAccess.ReadWrite);
+        if (OperatingSystem.IsWindows() && !DeviceIoControl(file.SafeFileHandle, 0x000900C4, IntPtr.Zero, 0, IntPtr.Zero, 0, out _, IntPtr.Zero))
+            throw new System.ComponentModel.Win32Exception();
+        file.Write(BitConverter.GetBytes((long)header.Length));
+        file.Write(header);
+        file.SetLength(8 + header.Length + offset);
+        return path;
+    }
+
+    [Fact]
     public void TestATensorNoMemoryIsNamedForIsPassedOverAndTheTensorsAfterItAreReadAtTheirOffsets()
     {
         var path = SparseSafeTensors(P("subset.safetensors"),
@@ -1196,7 +1296,7 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
     }
 
     [Fact]
-    public void TestSkptEntryLargerThanTheReaderReadsIsRefusedAtSave()
+    public void TestSkptEntryLargerAsStoredThanTheReaderReadsIsRefusedAtSaveAndOneLargerOnlyDecompressedIsNot()
     {
         byte[] mebibyte = new byte[1 << 20];
         void TwoGibibytesAndOne(Stream s)
@@ -1206,6 +1306,8 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
 
         Assert.Throws<NotSupportedException>(() => SkptFileFormat.EntryPayload.Produced(TwoGibibytesAndOne));
         Assert.Throws<NotSupportedException>(() => SkptFileFormat.EntryPayload.ProduceBytes(TwoGibibytesAndOne));
+        Assert.True(SkptFileFormat.EntryPayload.Produced(s => CompressedFormatUtils.WriteZstdFrame(s, 1, TwoGibibytesAndOne)).Length
+            < SkptFileFormat.EntryPayload.MaxEntryLength);
     }
 
     [Fact]

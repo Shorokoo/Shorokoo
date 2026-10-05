@@ -584,6 +584,161 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
         Assert.Contains("major version 3", exPeek.Message);
     }
 
+    [Fact]
+    public void TestAModelIsStreamedByteForByteAsProtobufWritesItWithEveryTensorWhereverItLies()
+    {
+        var (module, arch, model) = BuildStageGraphs();
+        var (large, _, _) = BuildCompressibleSkptModel();
+        foreach (var graph in (ComputationGraph[])[module, arch, model, large])
+            AssertStreamedAsSerialized(SrkModelOf(graph));
+        AssertStreamedAsSerialized(EveryPlaceATensorLies());
+    }
+
+    private static void AssertStreamedAsSerialized(ModelProto model)
+    {
+        var writer = OnnxStreamingWriter.Prepare(model);
+        using var streamed = new MemoryStream();
+        writer.WriteTo(streamed);
+        using var serialized = new MemoryStream();
+        ProtoBuf.Serializer.Serialize(serialized, model);
+        Assert.Equal(serialized.ToArray(), streamed.ToArray());
+        Assert.Equal(serialized.Length, writer.Length);
+    }
+
+    private static ModelProto EveryPlaceATensorLies()
+    {
+        int next = 0;
+        TensorProto T(int bytes) => new() { Name = $"t{next++}", Dims = [bytes], data_type = (int)TensorProto.DataType.Uint8,
+            RawData = [.. Enumerable.Range(next, bytes).Select(i => (byte)i)] };
+        GraphProto G(params TensorProto[] initializers)
+        {
+            var graph = new GraphProto { Name = $"g{next++}" };
+            graph.Initializers.AddRange(initializers);
+            return graph;
+        }
+        var attribute = new AttributeProto { Name = "a", Type = AttributeProto.AttributeType.Tensor, T = T(4096), G = G(T(2048), T(8)) };
+        attribute.Tensors.AddRange([T(1500), T(3)]);
+        attribute.Graphs.Add(G(T(200_000)));
+        var node = new NodeProto { Name = "n", OpType = "Constant" };
+        node.Attributes.Add(attribute);
+        var graph = G(T(1024), T(1023), new TensorProto { Name = "s", data_type = (int)TensorProto.DataType.String, StringDatas = { new byte[5000] } });
+        graph.Nodes.Add(node);
+        graph.SparseInitializers.Add(new SparseTensorProto { Values = T(1 << 16), Indices = T(1100), Dims = [1 << 16] });
+        var function = new FunctionProto { Name = "f", Domain = "d" };
+        function.Nodes.Add(new NodeProto { Name = "fn", OpType = "Constant", Attributes = { new AttributeProto { Name = "v", Type = AttributeProto.AttributeType.Tensor, T = T(70_000) } } });
+        var model = new ModelProto { IrVersion = 10, Graph = graph };
+        model.Functions.Add(function);
+        return model;
+    }
+
+    [Fact]
+    public void TestAnSrkPayloadPastTwoGibibytesIsStreamedWithItsHashInItsHeader()
+    {
+        var weight = new byte[1 << 28];
+        weight[^1] = 7;
+        var model = new ModelProto { IrVersion = 10, Graph = new GraphProto { Name = "g" } };
+        for (int i = 0; i < 8; i++)
+            model.Graph.Initializers.Add(new TensorProto { Name = $"w{i}", Dims = [weight.Length], data_type = (int)TensorProto.DataType.Uint8, RawData = weight });
+        var writer = OnnxStreamingWriter.Prepare(model);
+        using var sink = new SrkSink();
+        SrkFileFormat.Write(sink, GraphKind.ConcreteModel, false, 0, model.IrVersion, [new("", 21)], writer.Length, writer.WriteTo);
+
+        Assert.True(writer.Length > 1L << 31);
+        Assert.Equal(sink.PayloadStart + writer.Length, sink.Length);
+        Assert.Equal(sink.PayloadSha256(), SrkFileFormat.TryReadHeader(sink.Head)!.PayloadSha256);
+    }
+
+    // A seekable stream that keeps a .srk container's first bytes, takes the SHA-256 of its payload
+    // as it is appended, and keeps nothing else.
+    private sealed class SrkSink : Stream
+    {
+        public readonly byte[] Head = new byte[1 << 16];
+        private readonly System.Security.Cryptography.IncrementalHash _payload =
+            System.Security.Cryptography.IncrementalHash.CreateHash(System.Security.Cryptography.HashAlgorithmName.SHA256);
+        private long _position, _length;
+
+        public long PayloadStart => 6 + (Head[4] | Head[5] << 8);
+        public string PayloadSha256() => Convert.ToHexStringLower(_payload.GetCurrentHash());
+
+        public override void Write(ReadOnlySpan<byte> buffer)
+        {
+            if (_position < Head.Length)
+                buffer[..(int)Math.Min(buffer.Length, Head.Length - _position)].CopyTo(Head.AsSpan((int)_position));
+            if (_position == _length)
+            {
+                if (_position + buffer.Length > PayloadStart)
+                    _payload.AppendData(buffer[(int)Math.Max(0, PayloadStart - _position)..]);
+                _length += buffer.Length;
+            }
+            _position += buffer.Length;
+        }
+
+        public override void Write(byte[] buffer, int offset, int count) => Write(buffer.AsSpan(offset, count));
+        public override long Position { get => _position; set => _position = value; }
+        public override long Length => _length;
+        public override bool CanRead => false;
+        public override bool CanSeek => true;
+        public override bool CanWrite => true;
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+    }
+
+    [Fact]
+    public void TestAnSrkFileIsSavedAndLoadedWithoutEverBeingHeldWhole()
+    {
+        var model = FCLayer.ComputationGraph.ToConcreteArchitecture(
+            [TensorData(DType.Int64, [], 1024L), TensorDataWithSmallVals(DType.Float32, [1L, 1024L])]).ToConcreteModel();
+        const long Weight = 4L * 1024 * 1024;
+        foreach (var compressed in (bool[])[false, true])
+        {
+            var path = P($"streamed-{compressed}.srk");
+            long before = GC.GetAllocatedBytesForCurrentThread();
+            CompressedFormatUtils.SaveFastGraphToFile(path, model, compressed, overrideExtension: false);
+            long saved = GC.GetAllocatedBytesForCurrentThread();
+            var loaded = CompressedFormatUtils.LoadFastGraphFromFile(path);
+            long loadedAt = GC.GetAllocatedBytesForCurrentThread();
+
+            Assert.Equal((true, true), (saved - before < 2 * Weight, loadedAt - saved < 3 * Weight));
+            Assert.Equal(WeightBytesByParam(model), WeightBytesByParam(loaded));
+        }
+    }
+
+    [Fact]
+    public void TestWhatOneArrayCannotHoldIsRefusedNamingTheStreamingRoute()
+    {
+        var (model, _, _) = BuildCompressibleSkptModel();
+        var graph = model.ToInternal();
+        byte[] Binary(bool compressed, long max) => CompressedFormatUtils.SaveFastGraphToBinary(graph, GraphKind.ConcreteModel, compressed, 3, max);
+        long plain = Binary(false, Array.MaxLength).Length, zstd = Binary(true, Array.MaxLength).Length;
+        var bytes = new byte[5000];
+
+        Assert.Equal((plain, zstd), (Binary(false, plain).Length, Binary(true, zstd).Length));
+        Assert.Contains("SaveFastGraphToFile", Assert.Throws<NotSupportedException>(() => Binary(false, plain - 1)).Message);
+        Assert.Contains("SaveFastGraphToFile", Assert.Throws<NotSupportedException>(() => Binary(false, 1000)).Message);
+        Assert.Contains("SaveFastGraphToFile", Assert.Throws<NotSupportedException>(() => Binary(true, zstd - 1)).Message);
+        Assert.Equal(bytes, CompressedFormatUtils.DecompressStream(new MemoryStream(CompressedFormatUtils.Compress(bytes)), bytes.Length));
+        Assert.Throws<NotSupportedException>(() => CompressedFormatUtils.DecompressStream(new MemoryStream(CompressedFormatUtils.Compress(bytes)), bytes.Length - 1));
+        Assert.Throws<NotSupportedException>(() => OnnxStreamingWriter.Prepare(SrkModelOf(model), maxSkeletonBytes: 10));
+    }
+
+    [Fact]
+    public void TestACompressedSafeTensorsFilePastTwoGibibytesIsWrittenAsAStreamAndReadBack()
+    {
+        var zeros = TensorData([16L << 20], new float[16 << 20]);
+        static SafeTensor F32(string name, TensorData data) => new(name, data, "F32", data.Shape.Dims);
+        List<SafeTensor> tensors = [F32("a", TensorData([2], 1f, 2f)), .. Enumerable.Range(0, 33).Select(i => F32($"zeros{i}", zeros)), F32("z", TensorData([2], 3f, 4f))];
+        var path = P("large.zsafetensor");
+        CompressedFormatUtils.SaveCompressedSafeTensors(path, tensors, compressionLevel: 1);
+        var read = CompressedFormatUtils.ReadCompressedSafeTensors(path, (name, _) => name.StartsWith("zeros") ? null : ComputeContext.Host);
+
+        using (var file = File.OpenRead(path))
+            Assert.True(CompressedFormatUtils.DeclaredZstdContentSize(file, reason => new InvalidDataException(reason)) > 33L << 26);
+        Assert.Equal(["a", "z"], read.Select(t => t.Name));
+        Assert.Equal((float[])[1f, 2f, 3f, 4f], read.SelectMany(t => t.Data.As<float32>().CopyMemory<float>()).ToArray());
+    }
+
     /// <summary>Tensors come back in the order the file lays their bytes out, whatever order the
     /// JSON header happens to list them in — a header is a JSON object, and nothing promises the
     /// parse preserves its key order.</summary>

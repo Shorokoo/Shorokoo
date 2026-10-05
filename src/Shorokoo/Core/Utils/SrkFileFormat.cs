@@ -399,28 +399,34 @@ namespace Shorokoo.Core.Utils
         #region Writing
 
         /// <summary>
-        /// Wraps serialized ONNX bytes in a .srk container: applies the (single, optional) Zstd
-        /// layer, records stage/compression/payload-hash/producer in the JSON header, and
-        /// prepends magic + header length.
+        /// Writes a .srk container to <paramref name="destination"/>: magic, header length, the JSON
+        /// header recording stage/compression/payload-hash/producer, then the payload
+        /// <paramref name="writePayload"/> writes — <paramref name="payloadLength"/> bytes of
+        /// serialized ONNX — through the (single, optional) Zstd layer. Nothing holds the payload
+        /// whole: it is hashed as it is written, and the hash, which the header carries ahead of
+        /// the payload, is written into its place in the header once the payload is done. The
+        /// destination must therefore be seekable.
         /// </summary>
-        internal static byte[] Write(
-            byte[] onnxBytes,
+        internal static void Write(
+            Stream destination,
             GraphKind stage,
             bool compress,
             int compressionLevel,
             long irVersion,
-            IReadOnlyCollection<KeyValuePair<string, long>> opsets)
+            IReadOnlyCollection<KeyValuePair<string, long>> opsets,
+            long payloadLength,
+            Action<Stream> writePayload)
         {
-            var payload = compress
-                ? CompressedFormatUtils.Compress(onnxBytes, compressionLevel)
-                : onnxBytes;
+            if (!destination.CanSeek)
+                throw new ArgumentException("A .srk container is written to a seekable stream.", nameof(destination));
 
             var header = new SrkHeader
             {
                 SrkVersion = CurrentVersion,
                 Stage = StageName(stage),
                 Compression = compress ? CompressionZstd : CompressionNone,
-                PayloadSha256 = Sha256Hex(payload),
+                // A stand-in of the hash's own length, overwritten once the payload is hashed.
+                PayloadSha256 = new string('0', Sha256HexLength),
                 Producer = new SrkProducerInfo
                 {
                     // Same version the ONNX exporter stamps as producer_version — one source of
@@ -435,18 +441,65 @@ namespace Shorokoo.Core.Utils
             if (headerBytes.Length > ushort.MaxValue)
                 throw new InvalidOperationException(
                     $".srk header is {headerBytes.Length} bytes; the u16 length field caps it at {ushort.MaxValue}.");
+            int hashAt = headerBytes.AsSpan().IndexOf(PayloadSha256Key) + PayloadSha256Key.Length;
 
-            var result = new byte[MagicLength + HeaderLengthFieldSize + headerBytes.Length + payload.Length];
-            Magic.CopyTo(result);
-            result[MagicLength] = (byte)(headerBytes.Length & 0xFF);
-            result[MagicLength + 1] = (byte)(headerBytes.Length >> 8);
-            headerBytes.CopyTo(result, MagicLength + HeaderLengthFieldSize);
-            payload.CopyTo(result, MagicLength + HeaderLengthFieldSize + headerBytes.Length);
-            return result;
+            long start = destination.Position;
+            destination.Write(Magic);
+            destination.Write([(byte)(headerBytes.Length & 0xFF), (byte)(headerBytes.Length >> 8)]);
+            destination.Write(headerBytes);
+
+            string hash;
+            using (var hashed = new Sha256WriteStream(destination))
+            {
+                if (compress)
+                    CompressedFormatUtils.WriteZstdFrame(hashed, compressionLevel, payloadLength, writePayload);
+                else
+                    writePayload(hashed);
+                hash = hashed.Sha256Hex();
+            }
+
+            long end = destination.Position;
+            destination.Position = start + MagicLength + HeaderLengthFieldSize + hashAt;
+            destination.Write(Encoding.ASCII.GetBytes(hash));
+            destination.Position = end;
         }
 
-        private static string Sha256Hex(ReadOnlySpan<byte> payload)
-            => Convert.ToHexString(SHA256.HashData(payload)).ToLowerInvariant();
+        private const int Sha256HexLength = 64;
+
+        /// <summary>The header's hash key and the opening quote of its value, as the writer spells them.</summary>
+        private static ReadOnlySpan<byte> PayloadSha256Key => "\"payloadSha256\":\""u8;
+
+        /// <summary>A forward write-only stream passing every byte on and taking their SHA-256.</summary>
+        private sealed class Sha256WriteStream(Stream inner) : Stream
+        {
+            private readonly IncrementalHash _hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+
+            /// <summary>The lowercase hex SHA-256 of everything written so far.</summary>
+            public string Sha256Hex() => Convert.ToHexStringLower(_hash.GetCurrentHash());
+
+            public override void Write(ReadOnlySpan<byte> buffer)
+            {
+                inner.Write(buffer);
+                _hash.AppendData(buffer);
+            }
+
+            public override void Write(byte[] buffer, int offset, int count) => Write(buffer.AsSpan(offset, count));
+            public override void Flush() => inner.Flush();
+            public override bool CanRead => false;
+            public override bool CanSeek => false;
+            public override bool CanWrite => true;
+            public override long Length => throw new NotSupportedException();
+            public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+            public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+            public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+            public override void SetLength(long value) => throw new NotSupportedException();
+
+            protected override void Dispose(bool disposing)
+            {
+                if (disposing) _hash.Dispose();
+                base.Dispose(disposing);
+            }
+        }
 
         #endregion
 
@@ -486,7 +539,7 @@ namespace Shorokoo.Core.Utils
         /// </summary>
         public static SrkHeader? TryReadHeader(byte[] data, string? origin = null)
         {
-            origin ??= "<in-memory .srk data>";
+            origin ??= InMemoryOrigin;
             if (IsSrkContainer(data))
                 return ReadHeaderCore(data, origin, out _);
             ThrowIfUnsupportedContainerVersion(data, origin);
@@ -534,39 +587,82 @@ namespace Shorokoo.Core.Utils
         public static (SrkHeader Header, byte[] OnnxBytes) Read(byte[] data, string? origin = null)
         {
             if (data is null) throw new ArgumentNullException(nameof(data));
-            origin ??= "<in-memory .srk data>";
+            using var container = new MemoryStream(data, writable: false);
+            var (header, payload) = OpenPayload(container, origin ?? InMemoryOrigin);
+            using (payload)
+            {
+                if (ReferenceEquals(payload, container))
+                    return (header, data[(int)container.Position..]);
+                using var onnx = new MemoryStream();
+                payload.CopyTo(onnx);
+                return (header, onnx.ToArray());
+            }
+        }
 
-            if (data.Length == 0)
+        /// <summary>The name a container held in memory goes by in error messages.</summary>
+        internal const string InMemoryOrigin = "<in-memory .srk data>";
+
+        /// <summary>
+        /// Opens the serialized ONNX payload of the .srk container that <paramref name="container"/>
+        /// holds from where it stands to its end, validated as <see cref="Read"/> validates it: the
+        /// header read and checked, the payload's SHA-256 taken by reading it through once and held
+        /// to the header's, and the header-declared compression layer removed as the returned
+        /// stream is read. Nothing reads the payload whole: a container of any size opens. The
+        /// returned stream is <paramref name="container"/> itself, positioned at the payload, when
+        /// the payload is not compressed, else a decoder reading from it whose failure is the
+        /// payload failing to decompress, refused naming <paramref name="origin"/>.
+        /// </summary>
+        internal static (SrkHeader Header, Stream Payload) OpenPayload(Stream container, string origin)
+        {
+            long start = container.Position;
+            var prefix = new byte[MagicLength + HeaderLengthFieldSize];
+            int prefixRead = container.ReadAtLeast(prefix, prefix.Length, throwOnEndOfStream: false);
+            if (prefixRead == 0)
                 throw new InvalidDataException($"'{origin}': the file is empty — not a valid .srk file.");
 
-            if (!IsSrkContainer(data))
+            var head = prefix;
+            if (prefixRead == prefix.Length && IsSrkContainer(prefix))
+            {
+                int headerLen = prefix[MagicLength] | (prefix[MagicLength + 1] << 8);
+                head = new byte[prefix.Length + headerLen];
+                prefix.CopyTo(head, 0);
+                int bodyRead = container.ReadAtLeast(head.AsSpan(prefix.Length), headerLen, throwOnEndOfStream: false);
+                head = head[..(prefix.Length + bodyRead)];
+            }
+            else
+                head = prefix[..prefixRead];
+
+            if (!IsSrkContainer(head))
             {
                 // A "SRK"-prefixed file of an unsupported major version fails with a clear
                 // version error; anything else is simply not a .srk container.
-                ThrowIfUnsupportedContainerVersion(data, origin);
+                ThrowIfUnsupportedContainerVersion(head, origin);
                 throw new InvalidDataException(
                     $"'{origin}': not a Shorokoo .srk container — the file does not open with the " +
                     $"'SRK\\x{CurrentVersion:X2}' container magic.");
             }
 
-            var header = ReadHeaderCore(data, origin, out var payloadOffset);
-            // Hash and (for the compressed case) decompress the payload straight from the
-            // file buffer — no intermediate whole-payload copy for a large model.
-            var payload = data.AsSpan(payloadOffset);
+            var header = ReadHeaderCore(head, origin, out var payloadOffset);
+            long payloadStart = start + payloadOffset;
 
             if (string.IsNullOrEmpty(header.PayloadSha256))
                 throw new InvalidDataException(
                     $"'{origin}': invalid .srk header — required field 'payloadSha256' is missing.");
-            var actualSha = Sha256Hex(payload);
+            container.Position = payloadStart;
+            var actualSha = Convert.ToHexStringLower(SHA256.HashData(container));
             if (!string.Equals(actualSha, header.PayloadSha256, StringComparison.OrdinalIgnoreCase))
                 throw new InvalidDataException(
                     $"'{origin}': payload SHA-256 mismatch — the file is corrupt or truncated " +
                     $"(header records {header.PayloadSha256}, payload hashes to {actualSha}).");
 
+            container.Position = payloadStart;
             return header.Compression switch
             {
-                CompressionNone => (header, payload.ToArray()),
-                CompressionZstd => (header, DecompressPayload(payload, origin)),
+                CompressionNone => (header, container),
+                CompressionZstd => (header, new DecodingReadStream(
+                    new ZstdSharp.DecompressionStream(container, leaveOpen: true),
+                    e => new InvalidDataException(
+                        $"'{origin}': failed to Zstd-decompress the payload — the file is corrupt or truncated. ({e.Message})", e))),
                 _ => throw new InvalidDataException(
                     $"'{origin}': .srk header declares unsupported compression " +
                     $"'{header.Compression}' (supported: '{CompressionNone}', '{CompressionZstd}')."),
@@ -612,19 +708,6 @@ namespace Shorokoo.Core.Utils
                     $"Shorokoo build, which reads version {CurrentVersion} only.");
 
             return header;
-        }
-
-        private static byte[] DecompressPayload(ReadOnlySpan<byte> payload, string origin)
-        {
-            try
-            {
-                return CompressedFormatUtils.Decompress(payload);
-            }
-            catch (Exception e)
-            {
-                throw new InvalidDataException(
-                    $"'{origin}': failed to Zstd-decompress the payload — the file is corrupt or truncated. ({e.Message})", e);
-            }
         }
 
         #endregion

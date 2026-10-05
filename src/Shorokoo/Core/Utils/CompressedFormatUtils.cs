@@ -81,6 +81,13 @@ namespace Shorokoo.Core.Utils
         /// refused as that rather than as whatever the reader was reading when it happened.
         /// </summary>
         private static List<SafeTensor> ReadCompressedSafeTensors(string filePath)
+            => ReadCompressedSafeTensors(filePath, (_, _) => ComputeContext.Host);
+
+        /// <summary><see cref="ReadCompressedSafeTensors(string)"/>, putting each tensor where
+        /// <paramref name="placement"/> names for it, and passing over one it names none for
+        /// (<see cref="SafeTensorLoader.ReadSafeTensors"/>).</summary>
+        internal static List<SafeTensor> ReadCompressedSafeTensors(
+            string filePath, Func<string, long, ComputeContext?> placement)
         {
             if (!File.Exists(filePath))
                 throw new FileNotFoundException($"Compressed file not found: {filePath}");
@@ -93,7 +100,7 @@ namespace Shorokoo.Core.Utils
                 new DecompressionStream(file, leaveOpen: true),
                 e => new InvalidDataException(
                     $"'{filePath}': failed to Zstd-decompress the file — it is corrupt or truncated. ({e.Message})", e));
-            return SafeTensorLoader.ReadSafeTensors(decoded, declared, (_, _) => ComputeContext.Host, filePath);
+            return SafeTensorLoader.ReadSafeTensors(decoded, declared, placement, filePath);
         }
 
         /// <summary>
@@ -131,7 +138,13 @@ namespace Shorokoo.Core.Utils
         #region Compressed SafeTensor Saving
 
         /// <summary>
-        /// Save tensors to a compressed SafeTensor file (.zsafetensor)
+        /// Save tensors to a compressed SafeTensor file (.zsafetensor): the SafeTensors file is
+        /// written straight through a Zstd compressor into the file, each tensor from its own
+        /// storage by the piece, so neither the file nor its uncompressed form is ever held whole
+        /// and a file of any size is written. The payload is one Zstd frame declaring its
+        /// decompressed size, which the loader holds the SafeTensors header to. The write is atomic
+        /// (staged beside the target and committed by rename), so a failed or interrupted save
+        /// leaves any previous file untouched; the target's directory must already exist.
         /// </summary>
         /// <param name="filePath">Path for the output .zsafetensor file</param>
         /// <param name="tensors">List of SafeTensor objects to save</param>
@@ -139,13 +152,8 @@ namespace Shorokoo.Core.Utils
         /// <param name="compressionLevel">Zstandard compression level (1-22, default: 3)</param>
         public static void SaveCompressedSafeTensors(string filePath, List<SafeTensor> tensors, Dictionary<string, object>? globalMetadata = null, int compressionLevel = DefaultCompressionLevel)
         {
-            // First save to an uncompressed memory stream
-            using var uncompressedStream = new MemoryStream();
-            SafeTensorLoader.SaveSafeTensorsToStream(uncompressedStream, tensors, globalMetadata);
-            var uncompressedBytes = uncompressedStream.ToArray();
-
-            // Compress and write to file
-            CompressToFile(filePath, uncompressedBytes, compressionLevel);
+            AtomicFileWriter.WriteFile(filePath, file => WriteZstdFrame(file, compressionLevel,
+                frame => SafeTensorLoader.SaveSafeTensorsToStream(frame, tensors, globalMetadata)));
         }
 
         /// <summary>
@@ -176,6 +184,10 @@ namespace Shorokoo.Core.Utils
         /// <see cref="FastOnnxModelBuilder"/>, wrapped in exactly one optional Zstd layer,
         /// behind a JSON header recording the container version, the graph's lifecycle
         /// stage, the compression, the payload SHA-256, and producer info.
+        /// <para>The container is returned as one array, so it is refused, with
+        /// <see cref="NotSupportedException"/>, when it is larger than an array holds
+        /// (<see cref="Array.MaxLength"/> bytes); <see cref="SaveFastGraphToFile(string, ComputationGraph, bool, bool, int)"/>
+        /// writes a container of any size.</para>
         /// </summary>
         public static byte[] SaveFastGraphToBinary(
             ComputationGraph graph, bool compressed = true, int compressionLevel = DefaultCompressionLevel)
@@ -190,30 +202,99 @@ namespace Shorokoo.Core.Utils
         internal static byte[] SaveFastGraphToBinary(
             InternalComputationGraph graph, GraphKind? stage = null, bool compressed = true,
             int compressionLevel = DefaultCompressionLevel)
-        {
-            var resolvedStage = stage ?? SrkFileFormat.DetectStage(graph);
-            using var memoryStream = new MemoryStream();
-            // The stage rides in the payload's metadata too (not just this container's
-            // header), so the graph reloads as the same kind even when the payload
-            // travels as a bare ONNX model. Persistence must be faithful, so the
-            // execution lowerings are disabled: a saved graph keeps its
-            // STATE_UPDATE_LINK / WITH_STATE_DEPS machinery, state initializers, and
-            // SHRK_RANDOM_* / SHRK_RNG_* feed ops verbatim.
-            // emitInputsAsNodes: the .srk on-disk dialect serializes every top-level model-input op as an
-            // ordinary NodeProto (carrying its attributes — e.g. a MODEL_TENSOR_INPUT's representative-
-            // input shape), not a graph-input ValueInfoProto, so a saved graph stays self-describing
-            // across the round-trip: the representative attributes are serialized on those nodes exactly
-            // as the in-memory build set them.
-            var model = FastOnnxModelBuilder.BuildInternalOnnxModel(
-                graph, stage: resolvedStage, applyExecutionLowerings: false, emitInputsAsNodes: true);
-            Serializer.Serialize(memoryStream, model);
-            var onnxBytes = memoryStream.ToArray();
+            => SaveFastGraphToBinary(graph, stage, compressed, compressionLevel, Array.MaxLength);
 
-            KeyValuePair<string, long>[] opsets =
-                [.. model.OpsetImports.Select(o => new KeyValuePair<string, long>(o.Domain, o.Version))];
-            return SrkFileFormat.Write(
-                onnxBytes, resolvedStage, compressed, compressionLevel,
-                model.IrVersion, opsets);
+        /// <summary>
+        /// <see cref="SaveFastGraphToBinary(InternalComputationGraph, GraphKind?, bool, int)"/>
+        /// refusing a container of more than <paramref name="maxBytes"/> bytes: up front, before
+        /// any of it is written, when the uncompressed payload alone exceeds it, else as soon as
+        /// the container being written does.
+        /// </summary>
+        internal static byte[] SaveFastGraphToBinary(
+            InternalComputationGraph graph, GraphKind? stage, bool compressed, int compressionLevel, long maxBytes)
+        {
+            NotSupportedException TooLarge(string size) => new(
+                $"This graph's .srk container is {size}, more than the {maxBytes:N0} bytes one array holds, so " +
+                "SaveFastGraphToBinary cannot return it. Save it with CompressedFormatUtils.SaveFastGraphToFile, " +
+                "which streams a container of any size to the file.");
+
+            var srk = SrkPayload.Of(graph, stage);
+            if (!compressed && srk.Writer.Length > maxBytes)
+                throw TooLarge($"{srk.Writer.Length:N0} bytes of payload and its header");
+            using var buffer = new BoundedMemoryStream(maxBytes, () => TooLarge("more than that"));
+            srk.WriteContainer(buffer, compressed, compressionLevel);
+            return buffer.ToArray();
+        }
+
+        /// <summary>
+        /// A graph prepared for a .srk container: the ONNX model it is persisted as, ready to be
+        /// streamed (<see cref="OnnxStreamingWriter"/>), and the stage the header records.
+        /// </summary>
+        private sealed class SrkPayload
+        {
+            public required GraphKind Stage { get; init; }
+            public required long IrVersion { get; init; }
+            public required KeyValuePair<string, long>[] Opsets { get; init; }
+            public required OnnxStreamingWriter Writer { get; init; }
+
+            public static SrkPayload Of(InternalComputationGraph graph, GraphKind? stage)
+            {
+                var resolvedStage = stage ?? SrkFileFormat.DetectStage(graph);
+                // The stage rides in the payload's metadata too (not just this container's
+                // header), so the graph reloads as the same kind even when the payload
+                // travels as a bare ONNX model. Persistence must be faithful, so the
+                // execution lowerings are disabled: a saved graph keeps its
+                // STATE_UPDATE_LINK / WITH_STATE_DEPS machinery, state initializers, and
+                // SHRK_RANDOM_* / SHRK_RNG_* feed ops verbatim.
+                // emitInputsAsNodes: the .srk on-disk dialect serializes every top-level model-input op as an
+                // ordinary NodeProto (carrying its attributes — e.g. a MODEL_TENSOR_INPUT's representative-
+                // input shape), not a graph-input ValueInfoProto, so a saved graph stays self-describing
+                // across the round-trip: the representative attributes are serialized on those nodes exactly
+                // as the in-memory build set them.
+                var model = FastOnnxModelBuilder.BuildInternalOnnxModel(
+                    graph, stage: resolvedStage, applyExecutionLowerings: false, emitInputsAsNodes: true);
+                return new SrkPayload
+                {
+                    Stage = resolvedStage,
+                    IrVersion = model.IrVersion,
+                    Opsets = [.. model.OpsetImports.Select(o => new KeyValuePair<string, long>(o.Domain, o.Version))],
+                    // The model's weights are streamed into the payload from where they lie, so the
+                    // container is never held whole and has no size limit of its own.
+                    Writer = OnnxStreamingWriter.Prepare(model),
+                };
+            }
+
+            public void WriteContainer(Stream destination, bool compressed, int compressionLevel)
+                => SrkFileFormat.Write(destination, Stage, compressed, compressionLevel, IrVersion, Opsets,
+                    Writer.Length, Writer.WriteTo);
+        }
+
+        /// <summary>A memory stream refusing to grow past <paramref name="maxBytes"/>, with the
+        /// exception <paramref name="refusal"/> makes, before it allocates for the bytes past it.</summary>
+        private sealed class BoundedMemoryStream(long maxBytes, Func<Exception> refusal) : MemoryStream
+        {
+            private void Admit(int count)
+            {
+                if (Position + count > maxBytes) throw refusal();
+            }
+
+            public override void Write(ReadOnlySpan<byte> buffer)
+            {
+                Admit(buffer.Length);
+                base.Write(buffer);
+            }
+
+            public override void Write(byte[] buffer, int offset, int count)
+            {
+                Admit(count);
+                base.Write(buffer, offset, count);
+            }
+
+            public override void WriteByte(byte value)
+            {
+                Admit(1);
+                base.WriteByte(value);
+            }
         }
 
         /// <summary>
@@ -232,7 +313,7 @@ namespace Shorokoo.Core.Utils
         public static ComputationGraph LoadFastGraphFromBinary(
             byte[] data, GraphKind? requiredStage = null)
         {
-            var (graph, kind) = LoadFastGraphCore(data, origin: "<in-memory .srk data>", requiredStage);
+            var (graph, kind) = LoadFastGraphCore(data, origin: SrkFileFormat.InMemoryOrigin, requiredStage);
             return new ComputationGraph(graph, kind);
         }
 
@@ -246,7 +327,22 @@ namespace Shorokoo.Core.Utils
         internal static (InternalComputationGraph Graph, GraphKind Kind) LoadFastGraphCore(
             byte[] data, string origin, GraphKind? requiredStage)
         {
-            var (header, onnxBytes) = SrkFileFormat.Read(data, origin);
+            if (data is null) throw new ArgumentNullException(nameof(data));
+            using var container = new MemoryStream(data, writable: false);
+            return LoadFastGraphCore(container, origin, requiredStage);
+        }
+
+        /// <summary>
+        /// <see cref="LoadFastGraphCore(byte[], string, GraphKind?)"/> over the container
+        /// <paramref name="container"/> holds from where it stands to its end, which must be
+        /// seekable: its payload is hashed in one read through it and parsed in a second
+        /// (<see cref="SrkFileFormat.OpenPayload"/>), never held whole.
+        /// </summary>
+        internal static (InternalComputationGraph Graph, GraphKind Kind) LoadFastGraphCore(
+            Stream container, string origin, GraphKind? requiredStage)
+        {
+            var (header, payload) = SrkFileFormat.OpenPayload(container, origin);
+            using var _ = payload;
 
             if (requiredStage is not null)
             {
@@ -261,8 +357,7 @@ namespace Shorokoo.Core.Utils
             GraphKind? taggedKind;
             try
             {
-                using var onnxStream = new MemoryStream(onnxBytes);
-                (graph, taggedKind) = OnnxModelImporter.FromOnnxModelWithKindTag(onnxStream);
+                (graph, taggedKind) = OnnxModelImporter.FromOnnxModelWithKindTag(payload);
             }
             catch (Exception e) when (e is ProtoBuf.ProtoException
                 or EndOfStreamException
@@ -291,6 +386,9 @@ namespace Shorokoo.Core.Utils
         /// <see cref="LoadFastGraphFromFile"/>. With <paramref name="overrideExtension"/>
         /// the extension is normalized to .zsrk/.srk purely as a hint for humans — the
         /// extension has no parsing significance; the header records the compression.
+        /// The container is streamed to the file, each weight from where it lies, so a graph's
+        /// container has no size limit: its weights may total any size, each within what one
+        /// weight holds.
         /// The write is atomic: the container is staged in a <c>.tmp-</c> sibling and committed
         /// by rename, so a failed or interrupted save leaves any previous file untouched.
         /// </summary>
@@ -320,8 +418,8 @@ namespace Shorokoo.Core.Utils
             if (directoryPath is not null)
                 Directory.CreateDirectory(directoryPath);
 
-            var bytes = SaveFastGraphToBinary(graph, stage, compressed, compressionLevel);
-            AtomicFileWriter.WriteFile(filename, stream => stream.Write(bytes));
+            var srk = SrkPayload.Of(graph, stage);
+            AtomicFileWriter.WriteFile(filename, stream => srk.WriteContainer(stream, compressed, compressionLevel));
             return filename;
         }
 
@@ -330,27 +428,34 @@ namespace Shorokoo.Core.Utils
         /// the content decides how the file parses, never the extension, so a renamed
         /// file loads identically. See <see cref="LoadFastGraphFromBinary"/> for the
         /// container handling and the <paramref name="requiredStage"/> contract; errors
-        /// name <paramref name="filename"/>.
+        /// name <paramref name="filename"/>. The file is read as a stream — once to verify
+        /// its payload hash, once to parse the payload — and never held whole, so a file of
+        /// any size loads.
         /// </summary>
         public static ComputationGraph LoadFastGraphFromFile(
             string filename, GraphKind? requiredStage = null)
         {
-            var allData = File.ReadAllBytes(filename);
-            var (graph, kind) = LoadFastGraphCore(allData, filename, requiredStage);
+            using var file = OpenSrkFile(filename);
+            var (graph, kind) = LoadFastGraphCore(file, filename, requiredStage);
             return new ComputationGraph(graph, kind);
         }
 
+        private static FileStream OpenSrkFile(string filePath)
+            => new(filePath, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 1 << 16);
+
         /// <summary>
-        /// Reads the raw serialized-ONNX payload out of a .srk container file, by content.
+        /// Parses the ONNX model out of a .srk container file, by content, streaming the payload.
         /// Shared by the JSON/introspection helpers below, which parse the ModelProto without
         /// building a full <see cref="InternalComputationGraph"/>.
         /// </summary>
-        private static byte[] ReadArchitecturePayloadFromFile(string filePath)
+        private static ModelProto ReadArchitectureModelFromFile(string filePath)
         {
             if (!File.Exists(filePath))
                 throw new FileNotFoundException($"Architecture file not found: {filePath}");
-            var allData = File.ReadAllBytes(filePath);
-            return SrkFileFormat.Read(allData, filePath).OnnxBytes;
+            using var file = OpenSrkFile(filePath);
+            var (_, payload) = SrkFileFormat.OpenPayload(file, filePath);
+            using (payload)
+                return OnnxProtobuf.ReadModel(payload);
         }
 
         /// <summary>
@@ -366,14 +471,8 @@ namespace Shorokoo.Core.Utils
         /// <returns>Formatted text listing of node names and tensor names</returns>
         public static string GetNodeAndTensorNameListing(string filePath)
         {
-            var decompressedBytes = ReadArchitecturePayloadFromFile(filePath);
-
             // Deserialize to IR.ModelProto — do NOT go all the way to InternalComputationGraph
-            ModelProto model;
-            using (var ms = new MemoryStream(decompressedBytes))
-            {
-                model = OnnxProtobuf.ReadModel(ms);
-            }
+            var model = ReadArchitectureModelFromFile(filePath);
 
             // Clear raw data so the JSON serialization stays compact
             foreach (var initializer in model.Graph.Initializers)
@@ -463,13 +562,7 @@ namespace Shorokoo.Core.Utils
         /// <returns>Pretty-printed JSON string representing the ModelProto.</returns>
         public static string ToJson(string filePath)
         {
-            var decompressedBytes = ReadArchitecturePayloadFromFile(filePath);
-
-            ModelProto model;
-            using (var ms = new MemoryStream(decompressedBytes))
-            {
-                model = OnnxProtobuf.ReadModel(ms);
-            }
+            var model = ReadArchitectureModelFromFile(filePath);
 
             // Strip all raw tensor data so the JSON stays compact and human-readable.
             // This covers initializer tensors, inline attribute tensors (e.g. Constant nodes),
@@ -586,7 +679,7 @@ namespace Shorokoo.Core.Utils
         #region Generic Compression Utilities
 
         /// <summary>
-        /// Decompress a Zstandard-compressed file
+        /// Decompress a Zstandard-compressed file, read as a stream (see <see cref="DecompressStream(Stream)"/>).
         /// </summary>
         /// <param name="filePath">Path to the compressed file</param>
         /// <returns>Decompressed byte array</returns>
@@ -595,21 +688,29 @@ namespace Shorokoo.Core.Utils
             if (!File.Exists(filePath))
                 throw new FileNotFoundException($"Compressed file not found: {filePath}");
 
-            var compressedBytes = File.ReadAllBytes(filePath);
-            return Decompress(compressedBytes);
+            using var file = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read,
+                bufferSize: 1 << 16, FileOptions.SequentialScan);
+            return DecompressStream(file);
         }
 
         /// <summary>
-        /// Decompress a Zstandard-compressed stream
+        /// Decompress a Zstandard-compressed stream, decoding it as it is read. The result is one
+        /// array, so decompressed data larger than an array holds (<see cref="Array.MaxLength"/>
+        /// bytes) is refused with <see cref="NotSupportedException"/> as soon as it passes that.
         /// </summary>
         /// <param name="stream">Stream containing compressed data</param>
         /// <returns>Decompressed byte array</returns>
         public static byte[] DecompressStream(Stream stream)
+            => DecompressStream(stream, Array.MaxLength);
+
+        internal static byte[] DecompressStream(Stream stream, long maxBytes)
         {
-            using var memoryStream = new MemoryStream();
-            stream.CopyTo(memoryStream);
-            var compressedBytes = memoryStream.ToArray();
-            return Decompress(compressedBytes);
+            using var decompressed = new BoundedMemoryStream(maxBytes, () => new NotSupportedException(
+                $"The decompressed data is more than the {maxBytes:N0} bytes one array holds. " +
+                "Read it as a stream with ZstdSharp.DecompressionStream instead."));
+            using (var decoder = new DecompressionStream(stream, leaveOpen: true))
+                decoder.CopyTo(decompressed);
+            return decompressed.ToArray();
         }
 
         /// <summary>
@@ -641,20 +742,20 @@ namespace Shorokoo.Core.Utils
         /// <param name="compressionLevel">Zstandard compression level (1-22, default: 3)</param>
         public static void CompressToFile(string filePath, byte[] uncompressedBytes, int compressionLevel = DefaultCompressionLevel)
         {
-            var compressedBytes = Compress(uncompressedBytes, compressionLevel);
-            AtomicFileWriter.WriteFile(filePath, stream => stream.Write(compressedBytes));
+            AtomicFileWriter.WriteFile(filePath, stream => CompressToStream(stream, uncompressedBytes, compressionLevel));
         }
 
         /// <summary>
-        /// Compress bytes using Zstandard and write to a stream
+        /// Compress bytes using Zstandard and write to a stream, as one frame declaring its
+        /// decompressed size, compressed straight into the stream with no compressed copy held.
         /// </summary>
         /// <param name="stream">Stream to write the compressed data to</param>
         /// <param name="uncompressedBytes">Bytes to compress</param>
         /// <param name="compressionLevel">Zstandard compression level (1-22, default: 3)</param>
         public static void CompressToStream(Stream stream, byte[] uncompressedBytes, int compressionLevel = DefaultCompressionLevel)
         {
-            var compressedBytes = Compress(uncompressedBytes, compressionLevel);
-            stream.Write(compressedBytes, 0, compressedBytes.Length);
+            if (uncompressedBytes is null) throw new ArgumentNullException(nameof(uncompressedBytes));
+            WriteZstdFrame(stream, compressionLevel, uncompressedBytes.LongLength, frame => frame.Write(uncompressedBytes));
         }
 
         /// <summary>
@@ -676,7 +777,7 @@ namespace Shorokoo.Core.Utils
         /// <summary>
         /// The decompressed size the Zstd frames of <paramref name="frames"/>, from where it stands to
         /// its end, declare between them: what bounds a streamed payload's header before a byte of it
-        /// is believed. Every frame Shorokoo writes declares its size (<see cref="WriteZstdFrame"/>),
+        /// is believed. Every frame Shorokoo writes declares its size (<see cref="WriteZstdFrame(Stream, int, long, Action{Stream})"/>),
         /// and a tool that writes a payload in several frames — pzstd, say — declares each one's, so
         /// bytes that are not Zstd frames each declaring its size are refused, with the exception
         /// <paramref name="malformed"/> makes of the reason. A skippable frame holds no payload and
@@ -765,7 +866,17 @@ namespace Shorokoo.Core.Utils
         {
             var counter = new LengthCountingStream();
             produce(counter);
-            using var frame = new PledgedZstdFrameStream(destination, level, counter.Length);
+            WriteZstdFrame(destination, level, counter.Length, produce);
+        }
+
+        /// <summary>
+        /// <see cref="WriteZstdFrame(Stream, int, Action{Stream})"/> for a producer whose length is
+        /// known: <paramref name="produce"/> runs once, straight into the compressor, and must write
+        /// exactly <paramref name="length"/> bytes — the compressor refuses the frame otherwise.
+        /// </summary>
+        internal static void WriteZstdFrame(Stream destination, int level, long length, Action<Stream> produce)
+        {
+            using var frame = new PledgedZstdFrameStream(destination, level, length);
             produce(frame);
             frame.Finish();
         }

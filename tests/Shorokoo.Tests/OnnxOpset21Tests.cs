@@ -241,7 +241,10 @@ public class OnnxOpset21Tests
         model.OpsetImports.Single(o => o.Domain == "").Version = version;
         using var ms = new MemoryStream();
         ProtoBuf.Serializer.Serialize(ms, model);
-        return SrkFileFormat.Write(ms.ToArray(), GraphKind.Module, false, 0, model.IrVersion, [new("", version)]);
+        var payload = ms.ToArray();
+        using var srkStream = new MemoryStream();
+        SrkFileFormat.Write(srkStream, GraphKind.Module, false, 0, model.IrVersion, [new("", version)], payload.Length, s => s.Write(payload));
+        return srkStream.ToArray();
     }
 
     private static NodeProto[] AllNodes(ModelProto model)

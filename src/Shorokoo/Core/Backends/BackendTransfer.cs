@@ -19,8 +19,9 @@ public static class BackendTransfer
 {
     /// <summary>
     /// An independent copy of <paramref name="value"/>, built by <paramref name="target"/> on
-    /// storage of its own. Tensors are copied through their raw bytes, string tensors through
-    /// their elements, and a sequence element by element.
+    /// storage of its own. Tensors are copied through their raw bytes — a piece at a time where
+    /// they are more than one managed array holds — string tensors through their elements, and a
+    /// sequence element by element.
     /// </summary>
     /// <exception cref="ArgumentNullException">Either argument is null.</exception>
     /// <exception cref="InvalidOperationException"><paramref name="value"/> lives in an
@@ -56,12 +57,56 @@ public static class BackendTransfer
         if (value.ElementType == ShorokooTensorElementType.String)
             return target.CreateStringTensor(value.GetStringTensorData(), value.Shape);
 
+        if (BytesPastOneArray(value) is { } length) return CopyByThePiece(target, value, length);
+
         var copy = target.CreateTensorFromRawBytes(
             value.ElementType, value.GetTensorDataAsSpan<byte>().ToArray(), value.Shape);
         // Taking the span is the source's last read, so without this the JIT may retire it before
         // ToArray has copied out of the buffer it points at (Shorokoo/Shorokoo#178).
         GC.KeepAlive(value);
         return copy;
+    }
+
+    /// <summary>The bytes <paramref name="value"/> covers where they are more than one managed array
+    /// holds, and null otherwise.</summary>
+    private static long? BytesPastOneArray(IShorokooTensorValue value)
+    {
+        if (TensorElementLayout.FixedElementSize(value.ElementType) is not { } size) return null;
+        long bytes = size;
+        foreach (var dim in value.Shape) bytes *= dim;
+        return bytes > Array.MaxLength ? bytes : null;
+    }
+
+    /// <summary>
+    /// A copy of a host value of <paramref name="length"/> bytes, more than one managed array holds,
+    /// in host memory <paramref name="target"/> allocates
+    /// (<see cref="IShorokooBackend.CreateUninitializedHostTensor"/>), each piece of the source's
+    /// buffer copied straight into it (<see cref="IShorokooBackend.TryCopyHostToTensorRange"/>).
+    /// </summary>
+    private static IShorokooTensorValue CopyByThePiece(IShorokooBackend target, IShorokooTensorValue value, long length)
+    {
+        var copy = target.CreateUninitializedHostTensor(value.ElementType, value.Shape);
+        try
+        {
+            for (long offset = 0; offset < length;)
+            {
+                var count = (int)Math.Min(length - offset, StagedReadBack.StagingBytes);
+                if (!target.TryCopyHostToTensorRange(copy, offset, value.HostPiece(offset, count)))
+                    throw new InvalidOperationException(
+                        $"{target.Description} cannot write part of a tensor in its host memory, and this "
+                        + $"one ({string.Join('x', value.Shape)}:{value.ElementType}) holds more bytes than one "
+                        + "managed array does, so it cannot be copied whole either.");
+                offset += count;
+            }
+            // The pieces are the source's last read (Shorokoo/Shorokoo#178).
+            GC.KeepAlive(value);
+            return copy;
+        }
+        catch
+        {
+            copy.Dispose();
+            throw;
+        }
     }
 
     private static IShorokooTensorValue CopySequence(

@@ -22,7 +22,15 @@ public static class TensorElementLayout
     /// <see cref="ShorokooTensorElementType.String"/> is variable-length, so
     /// <see cref="IShorokooBackend.CreateStringTensor"/> is what builds one — or is not
     /// one the byte-wise paths handle at all.</exception>
-    public static int ElementSizeInBytes(ShorokooTensorElementType elementType) => elementType switch
+    public static int ElementSizeInBytes(ShorokooTensorElementType elementType) => FixedElementSize(elementType) ?? (
+        elementType == ShorokooTensorElementType.String
+            ? throw new NotSupportedException(
+                "String tensors are variable-length and not byte-stride; use CreateStringTensor instead.")
+            : throw new NotSupportedException(
+                $"A {elementType} tensor has no fixed byte stride, so it cannot be built or read as bytes."));
+
+    /// <summary><see cref="ElementSizeInBytes"/>, or null for an element type it refuses.</summary>
+    internal static int? FixedElementSize(ShorokooTensorElementType elementType) => elementType switch
     {
         ShorokooTensorElementType.Int8 or ShorokooTensorElementType.UInt8
             or ShorokooTensorElementType.Bool => 1,
@@ -32,10 +40,7 @@ public static class TensorElementLayout
             or ShorokooTensorElementType.UInt32 => 4,
         ShorokooTensorElementType.Double or ShorokooTensorElementType.Int64
             or ShorokooTensorElementType.UInt64 => 8,
-        ShorokooTensorElementType.String => throw new NotSupportedException(
-            "String tensors are variable-length and not byte-stride; use CreateStringTensor instead."),
-        _ => throw new NotSupportedException(
-            $"A {elementType} tensor has no fixed byte stride, so it cannot be built or read as bytes."),
+        _ => null,
     };
 
     /// <summary>The bytes a tensor of <paramref name="elementType"/> and <paramref name="shape"/>

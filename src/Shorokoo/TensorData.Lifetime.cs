@@ -308,14 +308,18 @@ namespace Shorokoo
         /// <summary>
         /// A new value of <paramref name="backend"/>'s runtime, in host memory, holding this tensor's
         /// contents as they stand — the caller's to own. What a sequence value is built from, element
-        /// by element. Without the liveness check: the caller holds this tensor, by a reader lock or
-        /// by having taken it.
+        /// by element: from one array of the contents where one holds them, and otherwise read into
+        /// a value the backend allocates, from this tensor a piece at a time. Without the liveness
+        /// check: the caller holds this tensor, by a reader lock or by having taken it.
         /// </summary>
         internal IShorokooTensorValue HostCopyOn(IShorokooBackend backend)
             => DType.IsSameElementTypeAs(DType.Utf8)
                 ? backend.CreateStringTensor(CopyContentStrings(), (long[])Shape)
-                : backend.CreateTensorFromRawBytes(
-                    (ShorokooTensorElementType)(int)DType, ContentBytesForCopy(), (long[])Shape);
+                : PastOneArray
+                    ? StagedUpload.ReadIntoHostMemory(backend, (ShorokooTensorElementType)(int)DType, (long[])Shape,
+                        ByteCount, new ContentStream(this))
+                    : backend.CreateTensorFromRawBytes(
+                        (ShorokooTensorElementType)(int)DType, ContentBytesForCopy(), (long[])Shape);
 
         /// <summary>
         /// Retires every copy runs made of this tensor, because the tensor they were copied from is

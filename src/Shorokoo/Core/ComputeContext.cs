@@ -1985,14 +1985,17 @@ namespace Shorokoo.Runtime
         /// Declares in <paramref name="model"/> each initializer whose elements are carried beside it
         /// rather than in it — a graph attribute past what one managed array holds
         /// (<see cref="TensorProto.Carried"/>), which no model's bytes can hold — as one its session
-        /// is handed as a value (<see cref="SuppliedInitializer"/>). Where this context's runs can
-        /// read the attribute's host memory as it stands, the session reads it there, borrowed;
-        /// otherwise it is copied into this context's memory, a piece at a time, and the copy is the
-        /// caller's to own. On failure every copy made is deleted.
+        /// is handed as a value (<see cref="SuppliedInitializer"/>). A <c>Constant</c> node whose
+        /// value is such an attribute — a literal, in the graph or in a subgraph of it — becomes an
+        /// initializer of the graph first, which a subgraph reads from the scope around it. Where
+        /// this context's runs can read the attribute's host memory as it stands, the session reads
+        /// it there, borrowed; otherwise it is copied into this context's memory, a piece at a time,
+        /// and the copy is the caller's to own. On failure every copy made is deleted.
         /// </summary>
         /// <exception cref="NotSupportedException">This context's backend takes every initializer
         /// inside the model's bytes, where protobuf's 2 GiB ceiling leaves no room for such a
-        /// weight.</exception>
+        /// weight; or such an attribute is a node attribute other than a <c>Constant</c>'s value in
+        /// the graph, which a session has no way to be handed.</exception>
         private (List<(SuppliedInitializer Initializer, TensorData Tensor)> Copied,
             List<(SuppliedInitializer Initializer, TensorAttribute Attribute)> Borrowed) Carried(
             ModelProto model, string operation)
@@ -2001,6 +2004,8 @@ namespace Shorokoo.Runtime
             List<(SuppliedInitializer, TensorAttribute)> borrowed = [];
             if (model.Graph is not { } graph) return (copied, borrowed);
             var backend = ResolvedBackend;
+            HoistCarriedConstants(graph);
+            RefuseCarriedAttributes(model, operation);
             try
             {
                 foreach (var initializer in graph.Initializers)
@@ -2032,6 +2037,79 @@ namespace Shorokoo.Runtime
             }
             return (copied, borrowed);
         }
+
+        /// <summary>
+        /// Turns each <c>Constant</c> node of <paramref name="graph"/> or of a subgraph of it whose
+        /// value is carried beside the model (<see cref="TensorProto.Carried"/>) into an initializer
+        /// of <paramref name="graph"/> of the same name, holding the same attribute: the form a
+        /// session can be handed such a tensor in. A subgraph's node reads it from the enclosing
+        /// scope, as it reads any of the graph's values.
+        /// </summary>
+        private static void HoistCarriedConstants(GraphProto graph)
+        {
+            List<(GraphProto Owner, NodeProto Node, TensorProto Value)> found = [];
+            FastOnnxModelBuilder.ForEachGraphRecursive(graph, g =>
+            {
+                foreach (var node in g.Nodes)
+                    if (node.OpType == "Constant" && string.IsNullOrEmpty(node.Domain) && node.Outputs.Count == 1
+                        && node.Attributes.FirstOrDefault(a => a.Name == "value")?.T is { } value
+                        && IsCarriedHere(value))
+                        found.Add((g, node, value));
+            });
+            foreach (var (owner, node, value) in found)
+            {
+                owner.Nodes.Remove(node);
+                graph.Initializers.Add(new TensorProto
+                {
+                    Name = node.Outputs[0],
+                    Dims = value.Dims,
+                    data_type = value.data_type,
+                    Carried = value.Carried,
+                });
+            }
+        }
+
+        /// <summary>
+        /// Refuses a tensor carried beside the model anywhere but among the graph's own
+        /// initializers — once <see cref="HoistCarriedConstants"/> has made initializers of the
+        /// literals — naming the node that holds it: a session is handed values only as the
+        /// graph's initializers, and the model's bytes cannot hold it.
+        /// </summary>
+        /// <exception cref="NotSupportedException">Such a tensor is found.</exception>
+        private static void RefuseCarriedAttributes(ModelProto model, string operation)
+        {
+            void Refuse(string where, TensorProto tensor)
+                => throw new NotSupportedException(
+                    $"Cannot {operation} this graph: {where} holds a tensor of {tensor.Carried!.ByteLength} bytes "
+                    + $"({tensor.Carried}), more than one managed array holds. A session is handed a tensor that "
+                    + "large only as one of the graph's weights or as the value of a Constant node outside a "
+                    + "function body. Feed it to the graph as an input instead.");
+
+            void Check(IEnumerable<NodeProto> nodes)
+            {
+                foreach (var node in nodes)
+                    foreach (var attribute in node.Attributes)
+                        foreach (var tensor in (TensorProto?[])[attribute.T, .. attribute.Tensors])
+                            if (tensor is not null && IsCarriedHere(tensor))
+                                Refuse($"attribute '{attribute.Name}' of node '{node.Name}' ({node.OpType})", tensor);
+            }
+
+            FastOnnxModelBuilder.ForEachGraphRecursive(model.Graph, g =>
+            {
+                if (!ReferenceEquals(g, model.Graph))
+                    foreach (var initializer in g.Initializers)
+                        if (IsCarriedHere(initializer))
+                            Refuse($"initializer '{initializer.Name}' of subgraph '{g.Name}'", initializer);
+                Check(g.Nodes);
+            });
+            foreach (var function in model.Functions)
+                Check(function.Nodes);
+        }
+
+        /// <summary>Whether <paramref name="tensor"/>'s elements are carried beside the model rather
+        /// than in it or in a file it names.</summary>
+        private static bool IsCarriedHere(TensorProto tensor)
+            => tensor.Carried is { Held: not null } && tensor.data_location != TensorProto.DataLocation.External;
 
         private static string[] ResolveOriginalInputNames(InternalComputationGraph graph)
         {
@@ -2201,10 +2279,13 @@ namespace Shorokoo.Runtime
             // CompiledGraph.Run. This path pays for a whole model build and a session on top.
             RunSettings.CancellationToken.ThrowIfCancellationRequested();
             var model = buildModel();
+            // Asked of the graph as built: the weights Carried declares supplied are listed among
+            // its inputs, and do not make a graph that takes none any less one computed once.
+            var fullyConstant = IsFullyConstant(model.Graph);
             var (copied, borrowed) = Carried(model, "run");
             try
             {
-                return RunModel(model, originalInputNames, inputs,
+                return RunModel(model, originalInputNames, inputs, fullyConstant,
                     [.. copied.Select(c => c.Initializer), .. borrowed.Select(b => b.Initializer)]);
             }
             finally
@@ -2217,7 +2298,7 @@ namespace Shorokoo.Runtime
         }
 
         private NamedModelParam[] RunModel(
-            ModelProto model, string[] originalInputNames, NamedModelParam[] inputs,
+            ModelProto model, string[] originalInputNames, NamedModelParam[] inputs, bool fullyConstant,
             IReadOnlyList<SuppliedInitializer> supplied)
         {
             var memoryStream = new MemoryStream();
@@ -2255,7 +2336,7 @@ namespace Shorokoo.Runtime
                     deviceMemory = deviceMemory with { LimitBytes = feeds.AdmitFresh(limit, plan) };
                 }
                 var optimization = SessionOptimization(
-                    HasOptionalOps(model.Graph) || IsFullyConstant(model.Graph), trainingStep: false);
+                    HasOptionalOps(model.Graph) || fullyConstant, trainingStep: false);
                 // Built for one run: placing that run's values would build two more sessions over
                 // the model for it, the graph the runtime runs and the one that places.
                 session = BuildSession(backend, modelData, optimization, deviceMemory, supplied: supplied, placing: false);

@@ -462,6 +462,10 @@ public class CoreUtilsCoverageTests
         => AssertAHostTensorPastTwoGibibytesIsCopiedByThePiece(t => t.CopyTo(ComputeContext.Host));
 
     [Fact]
+    public void TestAnAttributeOverAHostTensorPastTwoGibibytesOfAnUnrecordedProducerIsCopiedOutByThePiece()
+        => AssertAHostTensorPastTwoGibibytesIsCopiedByThePiece(t => t.MoveToAttribute().CopyToTensorData(), recorded: false);
+
+    [Fact]
     public void TestAHostTensorPastTwoGibibytesIsCopiedAsASequenceElementAndAcrossRuntimesByThePiece()
     {
         var backend = DefaultBackend.Instance;
@@ -475,12 +479,15 @@ public class CoreUtilsCoverageTests
     /// <paramref name="copy"/> into a tensor of its own in host memory as long as it, holding them
     /// where they were.
     /// </summary>
-    internal static void AssertAHostTensorPastTwoGibibytesIsCopiedByThePiece(Func<TensorData, TensorData> copy)
+    internal static void AssertAHostTensorPastTwoGibibytesIsCopiedByThePiece(
+        Func<TensorData, TensorData> copy, bool recorded = true)
     {
         const long Length = (1L << 31) + 8;
         var backend = DefaultBackend.Instance;
         var value = backend.CreateUninitializedTensorInBackendMemory(ShorokooTensorElementType.UInt8, [Length]);
-        var tensor = TensorData.Create(new Shape([Length]), DType.UInt8, value, backend);
+        var tensor = recorded
+            ? TensorData.Create(new Shape([Length]), DType.UInt8, value, backend)
+            : TensorData.Create(new Shape([Length]), DType.UInt8, value);
         var ends = new byte[8];
         TensorData? copied = null;
         try
@@ -568,20 +575,101 @@ public class CoreUtilsCoverageTests
         Assert.True(attribute.SameElements(attribute.WithDType(DType.UInt8)));
     }
 
+    [Fact]
+    public void TestALiteralPastTwoGibibytesIsReadWhereItIsByARunAndByACompiledGraph()
+    {
+        var (attribute, _) = AttributePastTwoGibibytes();
+        var shape = OnnxOp.Shape(OnnxOp.Constant(attribute));
+        long[] expected = [attribute.ByteLength];
+
+        Assert.Equal(expected, OnnxEngine.Eval(shape).CopyMemory<long>());
+        Assert.Equal(expected, ComputeContext.Default.Compile(new InternalComputationGraph([], [shape]))
+            .Execute()[0].ToTensorData().CopyMemory<long>());
+        var open = OnnxOp.IfOpen(Scalar(true));
+        var branch = OnnxOp.IfClose([OnnxOp.Shape(OnnxOp.Constant(attribute))], [OnnxOp.Shape(OnnxOp.Constant(TensorData([1L], 0L).MoveToAttribute()))], open)[0];
+        Assert.Equal(expected, OnnxEngine.Eval(branch).CopyMemory<long>());
+        Assert.Contains("ConstantOfShape", Assert.Throws<NotSupportedException>(
+            () => OnnxEngine.Eval(OnnxOp.ConstantOfShape(OnnxOp.Shape(Scalar(1f)), attribute))).Message);
+    }
+
+    [Fact]
+    public void TestAnInputFreeOneShotRunOverALiteralPastTwoGibibytesIsBuiltUnoptimizedAsAnyInputFreeOneIs()
+    {
+        List<GraphOptimizationLevel> seen = [];
+        using var context = new ComputeContext(new SessionProbe(options => { lock (seen) seen.Add(options.GraphOptimizationLevel); }));
+        var (attribute, _) = AttributePastTwoGibibytes();
+
+        context.Execute(new InternalComputationGraph([], [OnnxOp.Shape(Scalar(1f))]));
+        context.Execute(new InternalComputationGraph([], [OnnxOp.Shape(OnnxOp.Constant(attribute))]));
+        Assert.Equal([GraphOptimizationLevel.ORT_DISABLE_ALL, GraphOptimizationLevel.ORT_DISABLE_ALL], seen);
+    }
+
+    [Fact]
+    public void TestALiteralPastTwoGibibytesARunCannotReadWhereItIsIsCopiedForTheRunAndTheCopyDeletedAfterwards()
+    {
+        const long Length = (1L << 31) + 8;
+        var (attribute, _) = HeldAttribute(Length, recorded: false, (0, [1]), (Length - 1, [8]));
+        var gathered = OnnxOp.Gather(OnnxOp.Constant(attribute), Tensor(TensorData([2L], 0L, Length - 1).MoveToAttribute()));
+        var graph = new InternalComputationGraph([], [gathered]);
+        var context = new ComputeContext();
+        var refusing = new ComputeContext(new SessionProbe(_ => throw new InvalidOperationException()));
+
+        Assert.Equal((byte[])[1, 8], context.Execute(graph)[0].ToTensorData().CopyMemory<byte>());
+        Assert.Equal((2L, 1), context.AttachedIn());
+        Assert.Throws<InvalidOperationException>(() => refusing.Compile(graph));
+        Assert.Equal((0L, 0), refusing.AttachedIn());
+    }
+
+    [Fact]
+    public void TestATensorPastTwoGibibytesStandingOnASharedBlockIsCopiedIntoAnAttributeAndTheBlockLetGo()
+    {
+        const long Length = (1L << 31) + 8;
+        var backend = DefaultBackend.Instance;
+        var owner = (OrtTensorValue)backend.CreateUninitializedTensorInBackendMemory(ShorokooTensorElementType.UInt8, [Length]);
+        Assert.True(backend.TryCopyHostToTensorRange(owner, Length - 4, [5, 6, 7, 8]));
+        var block = new SharedBlock(Length, () => backend.Release(owner));
+        var tensor = TensorData.Create(new Shape([Length]), DType.UInt8,
+            OrtBackend.View(owner, 0, ShorokooTensorElementType.UInt8, [Length], Length, block, 0), backend);
+        var ends = new byte[4];
+
+        var attribute = tensor.MoveToAttribute();
+        Assert.True(attribute.Held!.TryCopyRows([(int)(Length / 4 - 1)], 4, ends));
+        Assert.Equal((true, true, true, (SharedBlock?)null), (tensor.IsDisposed, block.IsReleased, attribute.PastOneArray, attribute.Held.Block));
+        Assert.Equal((byte[])[5, 6, 7, 8], ends);
+    }
+
     /// <summary>An attribute over a host tensor of 2 GiB + 8 bytes, moved into it as it stands with
     /// <paramref name="writes"/> made at their offsets, and the value it holds.</summary>
     internal static (TensorAttribute Attribute, IShorokooTensorValue Value) AttributePastTwoGibibytes(
         params (long Offset, byte[] Bytes)[] writes)
+        => HeldAttribute((1L << 31) + 8, recorded: true, writes);
+
+    /// <summary><see cref="AttributePastTwoGibibytes"/> of <paramref name="length"/> bytes, over a
+    /// tensor whose producer is <paramref name="recorded"/> or not.</summary>
+    internal static (TensorAttribute Attribute, IShorokooTensorValue Value) HeldAttribute(
+        long length, bool recorded, params (long Offset, byte[] Bytes)[] writes)
     {
-        const long Length = (1L << 31) + 8;
         var backend = DefaultBackend.Instance;
-        var value = backend.CreateUninitializedTensorInBackendMemory(ShorokooTensorElementType.UInt8, [Length]);
+        var value = backend.CreateUninitializedTensorInBackendMemory(ShorokooTensorElementType.UInt8, [length]);
         foreach (var (offset, bytes) in writes)
             Assert.True(backend.TryCopyHostToTensorRange(value, offset, bytes));
-        var tensor = TensorData.Create(new Shape([Length]), DType.UInt8, value, backend);
+        var tensor = recorded
+            ? TensorData.Create(new Shape([length]), DType.UInt8, value, backend)
+            : TensorData.Create(new Shape([length]), DType.UInt8, value);
         var attribute = tensor.MoveToAttribute();
         Assert.True(tensor.IsDisposed);
         return (attribute, value);
+    }
+
+    [Fact]
+    public void TestAttributesPastTwoGibibytesLeftToTheCollectorMakeItCollect()
+        => Utils.OwnProcess.Run(typeof(CoreUtilsCoverageTests), nameof(AttributesPastTwoGibibytesLeftToTheCollectorMakeItCollect));
+
+    internal static void AttributesPastTwoGibibytesLeftToTheCollectorMakeItCollect()
+    {
+        var collections = GC.CollectionCount(2);
+        for (int i = 0; i < 8; i++) AttributePastTwoGibibytes();
+        Assert.True(GC.CollectionCount(2) - collections >= 3);
     }
 
     // Keeps what the first write hands it, and stops the writer there.
@@ -788,6 +876,9 @@ public class CoreUtilsCoverageTests
         public CapturingBackendProbe(List<(DeviceMemorySettings, PrecisionSettings)> seen)
             : base((_, mem, precision) => { lock (seen) seen.Add((mem, precision)); }, ComputeDevice.Cpu, cudaDeviceId: null) { }
     }
+
+    private sealed class SessionProbe(Action<SessionOptions> built) : OrtBackend(
+        (options, _, _) => built(options), ComputeDevice.Cpu, cudaDeviceId: null);
 
     /// <summary>Records the settings each run was handed. No outputs, so every run returns nothing
     /// and every overload can be driven without a model.</summary>

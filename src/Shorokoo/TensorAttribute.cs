@@ -36,12 +36,16 @@ namespace Shorokoo
         private readonly string[]? _values;
         // The elements where one managed array cannot hold them: a host tensor nobody else names,
         // which lives exactly as long as this attribute and is released by its value's finalizer
-        // once the attribute is collected.
+        // once the attribute is collected -- which _pressure makes the collector see coming.
         private readonly TensorData? _held;
+
+        // What the collector is told _held weighs, for as long as an attribute over it is reachable:
+        // shared by every attribute naming the same held tensor, as the tensor is.
+        private readonly HeldMemoryPressure? _pressure;
 
         private TensorAttribute(
             Shape shape, DType dtype, byte[]? bytes, string[]? values, DType? storageDType = null,
-            TensorData? held = null)
+            TensorData? held = null, HeldMemoryPressure? pressure = null)
         {
             Shape = shape;
             DType = dtype;
@@ -49,6 +53,29 @@ namespace Shorokoo
             _bytes = bytes;
             _values = values;
             _held = held;
+            _pressure = pressure;
+        }
+
+        /// <summary>
+        /// The native memory a held tensor takes, reported to the garbage collector
+        /// (<see cref="GC.AddMemoryPressure"/>) from the moment an attribute takes the tensor over
+        /// until the last attribute over it is collected, and withdrawn exactly once then. Nothing
+        /// releases that memory but the collector — an attribute has no owner to end it — and the
+        /// collector would otherwise see a few managed objects standing for gigabytes, and collect
+        /// them no sooner than if they stood for nothing: a program loading weights of that size
+        /// one after another would run out of memory with the earlier ones already garbage.
+        /// </summary>
+        private sealed class HeldMemoryPressure
+        {
+            private readonly long _bytes;
+
+            internal HeldMemoryPressure(long bytes)
+            {
+                _bytes = bytes;
+                GC.AddMemoryPressure(bytes);
+            }
+
+            ~HeldMemoryPressure() => GC.RemoveMemoryPressure(_bytes);
         }
 
         /// <summary>The attribute's shape.</summary>
@@ -217,12 +244,15 @@ namespace Shorokoo
         /// attribute is immutable and never releases it but by being collected.
         /// </summary>
         internal static TensorAttribute OverHeld(Shape shape, DType dtype, TensorData held, DType? storageDType = null)
-            => new(shape, dtype, null, null, storageDType, held ?? throw new ArgumentNullException(nameof(held)));
+        {
+            ArgumentNullException.ThrowIfNull(held);
+            return new(shape, dtype, null, null, storageDType, held, new HeldMemoryPressure(held.ByteCount));
+        }
 
         /// <summary>The same elements at <paramref name="dtype"/>. The bytes are shared, which
         /// costs nothing and is safe: both attributes are immutable.</summary>
         internal TensorAttribute WithDType(DType dtype)
-            => new(Shape, dtype, _bytes, _values, StorageDType, _held);
+            => new(Shape, dtype, _bytes, _values, StorageDType, _held, _pressure);
 
         /// <summary>The array itself, for the one test that can see a move did not copy.</summary>
         internal byte[] BytesArray => _bytes ?? throw (
@@ -299,7 +329,8 @@ namespace Shorokoo
         /// <summary>
         /// A <see cref="TensorData"/> holding a copy of these elements, in the framework's own host
         /// memory — or, for elements past one managed array, in host memory of the backend that
-        /// holds them, copied a piece at a time.
+        /// holds them (of the one <see cref="ComputeContext.Default"/> runs on, where the runtime
+        /// that made them was not recorded), copied a piece at a time.
         ///
         /// <para>A copy, always. This attribute is immutable and every graph that captured it holds
         /// the same one, so a tensor sharing its bytes would be a way to edit a description through
@@ -322,8 +353,11 @@ namespace Shorokoo
             if (_held is not null)
             {
                 // Through one bounded buffer into host memory of the backend the held tensor is in,
-                // since no managed array holds the copy either.
-                var backend = _held.AllocatingBackend;
+                // since no managed array holds the copy either -- or, for a tensor whose producer was
+                // not recorded, which allocates nothing, of the one ComputeContext.Default runs on.
+                var backend = _held.AllocatingBackend is Core.Backends.UnrecordedBackend
+                    ? ComputeContext.Default.ResolvedBackend
+                    : _held.AllocatingBackend;
                 using var source = _held.OpenContentStream();
                 return TensorData.Create(Shape, atStorageDType ? StorageDType : DType,
                     Core.Backends.StagedUpload.ReadIntoHostMemory(

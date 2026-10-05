@@ -631,12 +631,23 @@ public class OnnxExternalDataTests
         var side = new HeadStream(4096);
 
         Assert.Equal(["a", "w"], externalized.Select(t => t.Name));
+        Assert.Equal(["w"], OnnxModelExporter.ExternalizedInitializers(proto, new() { SizeThreshold = long.MaxValue }).Select(t => t.Name));
         Assert.IsType<IOException>(Record.Exception(
             () => OnnxModelExporter.WriteExternalData(side, externalized, "m.onnx.data", new OnnxExternalDataOptions())));
         Assert.Equal([2000, 2096, Core.Backends.StagedReadBack.StagingBytes], side.Writes);
         Assert.Equal((byte[])[1, 2, 3, 4], side.ToArray()[4096..4100]);
         Assert.Equal(ErrorCodes.XD007, SelfContainedSaveRefusal(proto));
         Assert.Throws<NotSupportedException>(() => ProtoBuf.Serializer.Serialize(Stream.Null, proto));
+    }
+
+    [Fact]
+    public void TestAWeightJustPastOneArrayIsRefusedSelfContainedAsOverTheCeiling()
+    {
+        var (attribute, _) = CoreUtilsCoverageTests.HeldAttribute(Array.MaxLength + 1L, recorded: true);
+        var proto = BuildAddModel(OnnxIRFactory.CreateTensor([attribute.ByteLength], "w", DType.UInt8, null, false, attribute));
+
+        Assert.True(attribute.ByteLength < OnnxModelExporter.MaxSelfContainedTensorBytes);
+        Assert.Equal(ErrorCodes.XD007, SelfContainedSaveRefusal(proto));
     }
 
     private static string SelfContainedSaveRefusal(ModelProto proto)

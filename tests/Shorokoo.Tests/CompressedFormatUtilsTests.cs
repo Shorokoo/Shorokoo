@@ -1767,6 +1767,9 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
             }
         }
 
+        Assert.Equal(11f, ComputeContext.Default.Execute(checkpoint.ToInferenceModel(), TensorData(DType.Int64, [], LargeElements),
+            TensorData([4L], 10f, 20f, 30f, 40f))[0].ToTensorData().As<float32>().CopyMemory<float>()[0]);
+
         var dir = Directory.CreateTempSubdirectory("ShorokooLargeTrainingSkpt_").FullName;
         try
         {

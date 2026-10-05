@@ -63,7 +63,10 @@ namespace Shorokoo.Onnx
 
             var allTensors = OnnxExternalData.EnumerateAllTensors(model).ToList();
             long totalTensorBytes = allTensors.Sum(TensorPayloadBytes);
-            if (totalTensorBytes > maxTensorBytes)
+            // A tensor carried beside the message is past one managed array, which no protobuf
+            // message holds inline whatever the model's total, so it is over the ceiling alone.
+            var carried = allTensors.FirstOrDefault(t => CarriedBytes(t) > 0);
+            if (totalTensorBytes > maxTensorBytes || carried is not null)
             {
                 // External data is defined over raw bytes, and ONNX forbids raw_data for STRING,
                 // so a string initializer can never move to a side file. Where the payload is
@@ -74,10 +77,12 @@ namespace Shorokoo.Onnx
                       + "raw_data and so cannot be moved to an external-data side file at all: "
                       + "the model has to hold fewer or shorter strings."
                     : "Use OnnxModelExporter.SaveWithExternalData to store large initializers in a side file.";
-                throw new ModelException(ErrorCodes.XD007, $"model '{filePath}'",
-                    $"the model's tensor data totals {totalTensorBytes:N0} bytes, which exceeds the " +
-                    $"{maxTensorBytes:N0}-byte protobuf message ceiling for a self-contained .onnx file. " +
-                    remedy);
+                string over = totalTensorBytes > maxTensorBytes
+                    ? $"the model's tensor data totals {totalTensorBytes:N0} bytes, which exceeds the " +
+                      $"{maxTensorBytes:N0}-byte protobuf message ceiling for a self-contained .onnx file. "
+                    : $"tensor '{carried!.Name}' holds {CarriedBytes(carried):N0} bytes, more than one " +
+                      "managed array holds, which a self-contained .onnx file cannot carry inline. ";
+                throw new ModelException(ErrorCodes.XD007, $"model '{filePath}'", over + remedy);
             }
 
             AtomicFileWriter.WriteFile(

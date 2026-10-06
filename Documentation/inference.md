@@ -346,11 +346,17 @@ var y = compiled.Execute(x);
   in the last bits from the same model compiled from its graph.
 - On a backend that cannot use weights where they are (PyTorch, JAX), `LoadCompiled` is
   `Compile(Persistence.Load(...))`.
-- A graph holds each of its weights in one managed array, so a weight of more bytes than one holds
-  (`Array.MaxLength`, just under 2 GiB) cannot be bound into a graph: `Persistence.Load`,
-  `Persistence.ImportOnnx`, `Persistence.ImportSafeTensors` and `LoadCompiled` on PyTorch or JAX
-  refuse it with `NotSupportedException`. `LoadCompiled` and `ImportCompiledOnnx` on an ONNX
-  Runtime context, CPU or CUDA, read it into the context's memory instead.
+- A graph holds a weight of any size. One of more bytes than one managed array holds
+  (`Array.MaxLength`, just under 2 GiB) is kept in host memory of the backend
+  `ComputeContext.Default` runs on: `Persistence.Load`, `Persistence.ImportOnnx`,
+  `Persistence.ImportSafeTensors` and `CompressedFormatUtils.LoadFastGraphFromFile` bind it where
+  they read it, without a copy. Compiling or running
+  such a model on an ONNX Runtime context hands its session the weight where it is on the CPU, and
+  a copy in the context's memory on CUDA, never through the model's bytes. PyTorch and JAX take
+  every weight inside the model's bytes, which protobuf caps at 2 GiB, so compiling or running such
+  a model there, `LoadCompiled` included, is refused with `NotSupportedException`. `LoadCompiled`
+  and `ImportCompiledOnnx` on an ONNX Runtime context, CPU or CUDA, read it into the context's
+  memory.
 - `ImportCompiledOnnx` imports the `.onnx` as `Persistence.ImportOnnx` does and refuses it
   alike, with the same `namingScheme` and `inputShapes` overloads. Its weights are read from where
   they lie in the file, inline in the protobuf or in an external-data side file alike, so the
@@ -836,7 +842,13 @@ runs on for `ComputeContext.Host`, `ToHost()` and a load into host memory.
 
 A graph's literals are
 [`TensorAttribute`s](core-types.md#two-kinds-of-concrete-tensor-tensordata-and-tensorattribute),
-immutable and without lifetime.
+immutable and without lifetime. One past `Array.MaxLength` bytes keeps its elements in host memory
+of a backend — of the one that made the tensor it was moved from, where that tensor was a host
+tensor owning its runtime value whole, and of the one `ComputeContext.Default` runs on, where it was
+copied in (see [the two conversions](core-types.md#the-two-conversions-and-which-one-spends-its-source))
+— released when the attribute is garbage-collected. A run or a compile hands its session a
+`Constant`'s value that large as it hands it such a weight, in a subgraph too; any other
+tensor-valued node attribute that large is refused with `NotSupportedException`, naming the node.
 
 ### Moving data between contexts
 

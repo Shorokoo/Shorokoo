@@ -63,7 +63,10 @@ namespace Shorokoo.Onnx
 
             var allTensors = OnnxExternalData.EnumerateAllTensors(model).ToList();
             long totalTensorBytes = allTensors.Sum(TensorPayloadBytes);
-            if (totalTensorBytes > maxTensorBytes)
+            // A tensor carried beside the message is past one managed array, which no protobuf
+            // message holds inline whatever the model's total, so it is over the ceiling alone.
+            var carried = allTensors.FirstOrDefault(t => CarriedBytes(t) > 0);
+            if (totalTensorBytes > maxTensorBytes || carried is not null)
             {
                 // External data is defined over raw bytes, and ONNX forbids raw_data for STRING,
                 // so a string initializer can never move to a side file. Where the payload is
@@ -74,10 +77,12 @@ namespace Shorokoo.Onnx
                       + "raw_data and so cannot be moved to an external-data side file at all: "
                       + "the model has to hold fewer or shorter strings."
                     : "Use OnnxModelExporter.SaveWithExternalData to store large initializers in a side file.";
-                throw new ModelException(ErrorCodes.XD007, $"model '{filePath}'",
-                    $"the model's tensor data totals {totalTensorBytes:N0} bytes, which exceeds the " +
-                    $"{maxTensorBytes:N0}-byte protobuf message ceiling for a self-contained .onnx file. " +
-                    remedy);
+                string over = totalTensorBytes > maxTensorBytes
+                    ? $"the model's tensor data totals {totalTensorBytes:N0} bytes, which exceeds the " +
+                      $"{maxTensorBytes:N0}-byte protobuf message ceiling for a self-contained .onnx file. "
+                    : $"tensor '{carried!.Name}' holds {CarriedBytes(carried):N0} bytes, more than one " +
+                      "managed array holds, which a self-contained .onnx file cannot carry inline. ";
+                throw new ModelException(ErrorCodes.XD007, $"model '{filePath}'", over + remedy);
             }
 
             AtomicFileWriter.WriteFile(
@@ -92,7 +97,7 @@ namespace Shorokoo.Onnx
         /// </summary>
         private static long TensorPayloadBytes(TensorProto t)
         {
-            long total = t.RawData?.LongLength ?? 0;
+            long total = t.RawData?.LongLength ?? CarriedBytes(t);
             total += (long)(t.FloatDatas?.Length ?? 0) * sizeof(float);
             total += (long)(t.Int32Datas?.Length ?? 0) * sizeof(int);
             total += (long)(t.Int64Datas?.Length ?? 0) * sizeof(long);
@@ -102,6 +107,12 @@ namespace Shorokoo.Onnx
                 total += s?.LongLength ?? 0;
             return total;
         }
+
+        /// <summary>The bytes of the elements <paramref name="t"/> carries beside the message
+        /// (<see cref="TensorProto.Carried"/>) rather than in it, or 0.</summary>
+        private static long CarriedBytes(TensorProto t)
+            => t.Carried is { HasValues: true } carried && t.data_location != TensorProto.DataLocation.External
+                ? carried.ByteLength : 0;
 
         /// <summary>
         /// Saves the model with every top-level graph initializer at or above
@@ -116,6 +127,9 @@ namespace Shorokoo.Onnx
         /// initializer reaches the threshold, no side file is written (a stale one from
         /// a previous save of the same path is removed) and the output equals
         /// <see cref="Save(ModelProto, string)"/>.
+        /// An initializer whose elements are a graph attribute past what one managed array holds
+        /// is written to the side file whatever the threshold, straight from where the attribute
+        /// holds it, a piece at a time — no protobuf message could hold it inline.
         /// The passed <paramref name="model"/> is left unmodified (externalized tensors
         /// are restored to their inline form before returning).
         /// <para>The pair is written atomically: both files are staged in <c>.tmp-</c> siblings
@@ -152,11 +166,7 @@ namespace Shorokoo.Onnx
             var dataFileName = Path.GetFileName(fullPath) + ".data";
             var dataPath = fullPath + ".data";
 
-            var externalized = (model.Graph?.Initializers ?? [])
-                .Where(t => t.RawData is not null
-                         && t.RawData.LongLength >= options.SizeThreshold
-                         && t.data_location != TensorProto.DataLocation.External)
-                .ToList();
+            var externalized = ExternalizedInitializers(model, options);
 
             if (externalized.Count == 0)
             {
@@ -194,12 +204,23 @@ namespace Shorokoo.Onnx
         }
 
         /// <summary>
+        /// The top-level initializers <see cref="SaveWithExternalData"/> writes to the side file, in
+        /// initializer order: each whose <c>raw_data</c> reaches the threshold, and each whose
+        /// elements are carried beside the message (<see cref="TensorProto.Carried"/>), which only
+        /// a side file can hold.
+        /// </summary>
+        internal static List<TensorProto> ExternalizedInitializers(ModelProto model, OnnxExternalDataOptions options)
+            => [.. (model.Graph?.Initializers ?? [])
+                .Where(t => t.data_location != TensorProto.DataLocation.External
+                         && (t.RawData is not null ? t.RawData.LongLength >= options.SizeThreshold : CarriedBytes(t) > 0))];
+
+        /// <summary>
         /// Writes the externalized tensors' bytes to the side file stream, each padded up to
         /// <see cref="OnnxExternalDataOptions.Alignment"/>, and rewrites each tensor in place to
         /// point at the location/offset/length it just landed at — so serializing the model after
         /// this call produces the external-data form. The caller restores the tensors.
         /// </summary>
-        private static void WriteExternalData(
+        internal static void WriteExternalData(
             Stream dataStream, List<TensorProto> externalized, string dataFileName,
             OnnxExternalDataOptions options)
         {
@@ -211,8 +232,19 @@ namespace Shorokoo.Onnx
                     dataStream.Write(new byte[padding]);
 
                 long offset = dataStream.Position;
-                var raw = tensor.RawData!;
-                dataStream.Write(raw);
+                long length;
+                if (tensor.RawData is { } raw)
+                {
+                    dataStream.Write(raw);
+                    length = raw.LongLength;
+                }
+                else
+                {
+                    // Straight from where the attribute holds the elements, a piece at a time.
+                    var carried = tensor.Carried!;
+                    carried.WriteTo(dataStream);
+                    length = carried.ByteLength;
+                }
 
                 tensor.RawData = null!;
                 tensor.data_location = TensorProto.DataLocation.External;
@@ -221,7 +253,7 @@ namespace Shorokoo.Onnx
                 tensor.ExternalDatas.Add(new StringStringEntryProto
                 { Key = OnnxExternalData.OffsetKey, Value = offset.ToString(CultureInfo.InvariantCulture) });
                 tensor.ExternalDatas.Add(new StringStringEntryProto
-                { Key = OnnxExternalData.LengthKey, Value = raw.LongLength.ToString(CultureInfo.InvariantCulture) });
+                { Key = OnnxExternalData.LengthKey, Value = length.ToString(CultureInfo.InvariantCulture) });
             }
         }
     }

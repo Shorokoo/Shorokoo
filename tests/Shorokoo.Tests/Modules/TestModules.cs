@@ -58,6 +58,16 @@ namespace Shorokoo.Tests.Modules
     }
 
     [Module]
+    public partial class LargeWeightHead
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input, [Hyper] Scalar<int64> length)
+        {
+            var weights = InitSimple.Init([length]);
+            return input + weights.Slice(Globals.Vector(0L), input.ShapeTensor(), axes: Globals.Vector(0L));
+        }
+    }
+
+    [Module]
     public partial class SimplestLayer
     {
         public static Tensor<float32> Inline(Tensor<float32> input)

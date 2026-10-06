@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Shorokoo.Core.Utils;
@@ -21,20 +22,60 @@ namespace Shorokoo
     /// surrenders its bytes and is spent, so a 165 M-parameter checkpoint binds without copying a
     /// byte — while <see cref="CopyToTensorData()"/> <b>copies</b>, because a mutable tensor over an
     /// attribute's bytes would be a way to edit a description through the back door.</para>
+    ///
+    /// <para>Of any size. Elements one managed array holds are kept in one; more than that — a
+    /// weight past 2 GiB — are kept in host memory of the backend <see cref="ComputeContext.Default"/>
+    /// runs on, in a tensor the attribute alone holds and never hands out, and are read and written
+    /// a piece at a time (<see cref="CopyToTensorData()"/>, and every save and export of a model
+    /// holding it). Such an attribute has no byte view: <see cref="Bytes"/> and
+    /// <see cref="Elements{V}"/> refuse it, since no span reaches that far.</para>
     /// </summary>
     public sealed class TensorAttribute
     {
         private readonly byte[]? _bytes;
         private readonly string[]? _values;
+        // The elements where one managed array cannot hold them: a host tensor nobody else names,
+        // which lives exactly as long as this attribute and is released by its value's finalizer
+        // once the attribute is collected -- which _pressure makes the collector see coming.
+        private readonly TensorData? _held;
+
+        // What the collector is told _held weighs, for as long as an attribute over it is reachable:
+        // shared by every attribute naming the same held tensor, as the tensor is.
+        private readonly HeldMemoryPressure? _pressure;
 
         private TensorAttribute(
-            Shape shape, DType dtype, byte[]? bytes, string[]? values, DType? storageDType = null)
+            Shape shape, DType dtype, byte[]? bytes, string[]? values, DType? storageDType = null,
+            TensorData? held = null, HeldMemoryPressure? pressure = null)
         {
             Shape = shape;
             DType = dtype;
             StorageDType = storageDType ?? dtype;
             _bytes = bytes;
             _values = values;
+            _held = held;
+            _pressure = pressure;
+        }
+
+        /// <summary>
+        /// The native memory a held tensor takes, reported to the garbage collector
+        /// (<see cref="GC.AddMemoryPressure"/>) from the moment an attribute takes the tensor over
+        /// until the last attribute over it is collected, and withdrawn exactly once then. Nothing
+        /// releases that memory but the collector — an attribute has no owner to end it — and the
+        /// collector would otherwise see a few managed objects standing for gigabytes, and collect
+        /// them no sooner than if they stood for nothing: a program loading weights of that size
+        /// one after another would run out of memory with the earlier ones already garbage.
+        /// </summary>
+        private sealed class HeldMemoryPressure
+        {
+            private readonly long _bytes;
+
+            internal HeldMemoryPressure(long bytes)
+            {
+                _bytes = bytes;
+                GC.AddMemoryPressure(bytes);
+            }
+
+            ~HeldMemoryPressure() => GC.RemoveMemoryPressure(_bytes);
         }
 
         /// <summary>The attribute's shape.</summary>
@@ -57,7 +98,21 @@ namespace Shorokoo
         /// model definition was saved without its weights, which carries dtype and shape and no
         /// values at all until a checkpoint is bound back onto it.
         /// </summary>
-        public bool HasValues => _bytes is not null || _values is not null;
+        public bool HasValues => _bytes is not null || _values is not null || _held is not null;
+
+        /// <summary>
+        /// Whether the elements are more bytes than one managed array holds, so that they have no
+        /// byte view and are read and written a piece at a time.
+        /// </summary>
+        internal bool PastOneArray => _held is not null;
+
+        /// <summary>
+        /// The bytes the elements take up laid out flat — what <see cref="WriteTo"/> writes —
+        /// measured, never read. Zero for a string attribute, whose elements are variable-length.
+        /// </summary>
+        /// <exception cref="InvalidOperationException">The values were elided.</exception>
+        internal long ByteLength
+            => _held?.ByteCount ?? _bytes?.LongLength ?? (_values is not null ? 0 : throw ValuesElided());
 
         /// <summary>
         /// The elements as raw bytes. The span is a window onto the attribute's own array, which
@@ -66,11 +121,13 @@ namespace Shorokoo
         /// </summary>
         /// <exception cref="InvalidOperationException">The values were elided, or the dtype is
         /// <see cref="DType.Utf8"/>, whose elements are variable-length.</exception>
+        /// <exception cref="NotSupportedException">The elements are more bytes than one span
+        /// reaches; <see cref="CopyToTensorData()"/> reads them.</exception>
         public ReadOnlySpan<byte> Bytes => BytesArray;
 
         /// <summary>
         /// The elements read as <typeparamref name="V"/>, which must be the dtype's storage type.
-        /// Same window, same lifetime rule as <see cref="Bytes"/>.
+        /// Same window, same lifetime rule, same refusals as <see cref="Bytes"/>.
         /// </summary>
         public ReadOnlySpan<V> Elements<V>() where V : unmanaged
             => MemoryMarshal.Cast<byte, V>(BytesArray);
@@ -180,10 +237,22 @@ namespace Shorokoo
         internal static TensorAttribute OverStrings(Shape shape, string[] values)
             => new(shape, DType.Utf8, null, values ?? throw new ArgumentNullException(nameof(values)));
 
+        /// <summary>
+        /// The attribute over <paramref name="held"/> — a tensor in host memory of more bytes than
+        /// one managed array holds, which it takes as its own storage. Internal because the caller
+        /// has to be one that hands the tensor over: nothing else may name it again, since the
+        /// attribute is immutable and never releases it but by being collected.
+        /// </summary>
+        internal static TensorAttribute OverHeld(Shape shape, DType dtype, TensorData held, DType? storageDType = null)
+        {
+            ArgumentNullException.ThrowIfNull(held);
+            return new(shape, dtype, null, null, storageDType, held, new HeldMemoryPressure(held.ByteCount));
+        }
+
         /// <summary>The same elements at <paramref name="dtype"/>. The bytes are shared, which
         /// costs nothing and is safe: both attributes are immutable.</summary>
         internal TensorAttribute WithDType(DType dtype)
-            => new(Shape, dtype, _bytes, _values, StorageDType);
+            => new(Shape, dtype, _bytes, _values, StorageDType, _held, _pressure);
 
         /// <summary>The array itself, for the one test that can see a move did not copy.</summary>
         internal byte[] BytesArray => _bytes ?? throw (
@@ -192,11 +261,76 @@ namespace Shorokoo
                     $"Attribute {this} holds strings. Their elements are variable-length and "
                     + $"reference-typed, so there is no flat buffer to span over. Read them with "
                     + $"{nameof(Values)}.")
+            : _held is not null
+                ? new NotSupportedException(
+                    $"Attribute {this} holds {ByteLength} bytes, more than one managed array or span "
+                    + $"reaches, so it has no byte view. {nameof(CopyToTensorData)}() reads it into a "
+                    + "tensor a piece at a time.")
                 : ValuesElided());
 
         /// <summary>
+        /// The host tensor holding the elements of an attribute <see cref="PastOneArray"/> — for a
+        /// compiled session to read them where they are — or null. The attribute's own: a caller
+        /// reads it and keeps the attribute reachable while anything does, and never ends it.
+        /// </summary>
+        internal TensorData? Held => _held;
+
+        /// <summary>
+        /// Writes the elements, laid out flat, to <paramref name="destination"/>: the attribute's
+        /// own array in one write, or a held tensor a piece at a time
+        /// (<see cref="TensorData.WriteContentTo"/>), never whole in a managed array.
+        /// </summary>
+        /// <exception cref="InvalidOperationException">The values were elided, or the dtype is
+        /// <see cref="DType.Utf8"/>.</exception>
+        internal void WriteTo(Stream destination)
+        {
+            ArgumentNullException.ThrowIfNull(destination);
+            if (_held is not null) _held.WriteContentTo(destination);
+            else destination.Write(BytesArray);
+        }
+
+        /// <summary>
+        /// The elements, laid out flat, as a stream read forward: over the attribute's own array,
+        /// or a piece at a time out of a held tensor.
+        /// </summary>
+        /// <exception cref="InvalidOperationException">The values were elided, or the dtype is
+        /// <see cref="DType.Utf8"/>.</exception>
+        internal Stream OpenRead()
+            => _held is not null ? _held.OpenContentStream() : new MemoryStream(BytesArray, writable: false);
+
+        /// <summary>
+        /// Whether <paramref name="other"/> holds the same elements: the same strings, or the same
+        /// bytes — compared a piece at a time where either is past one array. Shape and dtype are
+        /// the caller's to compare.
+        /// </summary>
+        internal bool SameElements(TensorAttribute other)
+        {
+            ArgumentNullException.ThrowIfNull(other);
+            if (ReferenceEquals(this, other) || (_held is not null && ReferenceEquals(_held, other._held))) return true;
+            if (_values is not null || other._values is not null)
+                return _values is not null && other._values is not null && _values.AsSpan().SequenceEqual(other._values);
+            if (_held is null && other._held is null) return BytesArray.AsSpan().SequenceEqual(other.BytesArray);
+            if (ByteLength != other.ByteLength) return false;
+
+            using var mine = OpenRead();
+            using var theirs = other.OpenRead();
+            var (a, b) = (new byte[Core.Backends.StagedReadBack.StagingBytes], new byte[Core.Backends.StagedReadBack.StagingBytes]);
+            for (long left = ByteLength; left > 0;)
+            {
+                var count = (int)Math.Min(left, a.Length);
+                mine.ReadExactly(a, 0, count);
+                theirs.ReadExactly(b, 0, count);
+                if (!a.AsSpan(0, count).SequenceEqual(b.AsSpan(0, count))) return false;
+                left -= count;
+            }
+            return true;
+        }
+
+        /// <summary>
         /// A <see cref="TensorData"/> holding a copy of these elements, in the framework's own host
-        /// memory.
+        /// memory — or, for elements past one managed array, in host memory of the backend that
+        /// holds them (of the one <see cref="ComputeContext.Default"/> runs on, where the runtime
+        /// that made them was not recorded), copied a piece at a time.
         ///
         /// <para>A copy, always. This attribute is immutable and every graph that captured it holds
         /// the same one, so a tensor sharing its bytes would be a way to edit a description through
@@ -216,6 +350,20 @@ namespace Shorokoo
         {
             if (_values is not null)
                 return TensorData.NewHostStringTensor(Shape, [.. _values]);
+            if (_held is not null)
+            {
+                // Through one bounded buffer into host memory of the backend the held tensor is in,
+                // since no managed array holds the copy either -- or, for a tensor whose producer was
+                // not recorded, which allocates nothing, of the one ComputeContext.Default runs on.
+                var backend = _held.AllocatingBackend is Core.Backends.UnrecordedBackend
+                    ? ComputeContext.Default.ResolvedBackend
+                    : _held.AllocatingBackend;
+                using var source = _held.OpenContentStream();
+                return TensorData.Create(Shape, atStorageDType ? StorageDType : DType,
+                    Core.Backends.StagedUpload.ReadIntoHostMemory(
+                        backend, (Core.Backends.ShorokooTensorElementType)(int)StorageDType, (long[])Shape, ByteLength, source),
+                    backend);
+            }
             return OnnxUtils.CreateHostTensorData(
                 Shape, atStorageDType ? StorageDType : DType, BytesArray.AsSpan().ToArray());
         }

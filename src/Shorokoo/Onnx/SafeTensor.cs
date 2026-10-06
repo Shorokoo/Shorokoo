@@ -29,15 +29,16 @@ namespace Shorokoo.Onnx
         /// <summary>The bytes <see cref="WriteTo"/> writes, measured without reading them —
         /// which for a tensor on a device is what lets a save lay out its header before a byte of
         /// the payload has left the card.</summary>
-        internal long ByteLength => _attribute is not null ? _attribute.Bytes.Length : _data!.ContentByteLength;
+        internal long ByteLength => _attribute is not null ? _attribute.ByteLength : _data!.ContentByteLength;
 
         /// <summary>Writes the elements to <paramref name="destination"/> out of whichever form this
-        /// record holds, copying neither: a graph literal's own bytes, a host tensor's own storage,
-        /// or a device tensor streamed off the device through one bounded buffer
+        /// record holds, copying neither: a graph literal's own bytes — a piece at a time, for one
+        /// past one managed array (<see cref="TensorAttribute.WriteTo"/>) — a host tensor's own
+        /// storage, or a device tensor streamed off the device through one bounded buffer
         /// (<see cref="TensorData.WriteContentTo"/>).</summary>
         internal void WriteTo(Stream destination)
         {
-            if (_attribute is not null) destination.Write(_attribute.Bytes);
+            if (_attribute is not null) _attribute.WriteTo(destination);
             else _data!.WriteContentTo(destination);
         }
 

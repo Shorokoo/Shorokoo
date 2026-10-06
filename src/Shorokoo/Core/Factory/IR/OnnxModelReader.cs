@@ -389,9 +389,10 @@ namespace Shorokoo.Core.Factory.IR
 
         private static TensorAttribute CreateTensorData(TensorProto tensorProto)
         {
-            // External data already read, straight into its own tensor.
-            if (tensorProto.Loaded is { } loaded)
-                return loaded;
+            // External data already read, straight into its own tensor, or an attribute carried
+            // beside the message.
+            if (tensorProto.Carried is { } carried)
+                return carried;
 
             byte[] rawDataBytes;
 

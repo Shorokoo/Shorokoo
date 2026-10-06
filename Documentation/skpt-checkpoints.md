@@ -93,8 +93,10 @@ Use the **directory** for working runs: unchanged entries stay untouched files
 (diff/rsync-friendly), and one tensor file can be fetched, read or replaced on its own.
 Use the **single file** to hand someone one artifact.
 
-Convert between the forms; content is byte-identical and every entry's sha256 is
-verified in transit:
+Convert between the forms; content is byte-identical, each entry is copied in bounded
+pieces (so a checkpoint of any size converts without being held in memory), and every
+entry's sha256 is verified in transit. A conversion that meets an entry failing its check
+commits nothing:
 
 ```csharp
 Persistence.ExtractSkpt("model.skpt", "model-dir.skpt");   // file → directory
@@ -542,13 +544,19 @@ Rules:
 - One **weight-bearing** model per file (the `model` entry), with any number of
   [named weight sets](#named-weight-sets-default--ema). A training checkpoint's extra
   `models/` entries bind no weights.
-- A single data entry holds at most `int.MaxValue` bytes (just under 2 GiB) as stored. A Zstd
-  entry may decompress to more: it is read a tensor at a time, and a tensor past what a managed
-  array holds is read into host memory of a backend (see
-  [training.md](training.md#what-a-save-costs)).
-- An archive holds under 4 GiB and at most 65,535 entries. A save that would exceed either
-  limit, or put more than `int.MaxValue` bytes in one entry, is refused with
-  `NotSupportedException` before anything is written, leaving any previous file intact.
+- A data entry, stored or Zstd-compressed, may be of any size, and so may the checkpoint:
+  an entry is written straight from the tensors' storage and read back a tensor at a time,
+  and a tensor past what a managed array holds is read into host memory of a backend (see
+  [training.md](training.md#what-a-save-costs)). The single file writes Zip64 records
+  where a size or offset — an entry's, or the central directory's — is 4,294,967,295 bytes
+  (4 GiB − 1) or more, or where the archive holds 65,535 entries or more, and nowhere
+  else, so a smaller archive carries none; any Zip64-capable zip reader opens it. The directory form has no limit of its own.
+- The entries read whole — `config.json`, the model definitions under `models/`, and
+  `data/user-data.json` — hold at most `Array.MaxLength` bytes (just under 2 GiB) each; a
+  larger one is refused with `InvalidDataException` when read. A model definition holds the
+  graph without the weights the data entries store, and a save whose model definition would
+  be larger is refused with `NotSupportedException` naming the entry, before anything is
+  written.
 - The flat safetensors training format carries no rig constituents: rebuild the rig from
   the same graphs, then `rig.LoadCheckpoint`.
 - Precompiled artifacts are not supported.

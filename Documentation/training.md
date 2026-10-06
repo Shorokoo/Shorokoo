@@ -1180,10 +1180,10 @@ in a managed array, and a run on that context reads it where it is.
 The `.skpt` save also streams each entry straight from the tensors' storage, with no managed copy of
 the training state. An entry compressed with `WithZstdCompressedData` is compressed as it streams,
 afresh on each pass the writer makes over it, so it is never held whole either; its length is known
-only once it is compressed, so its tensors are read three times rather than two. An entry over
-`int.MaxValue` bytes as stored, an archive of 4 GiB or more, or more than 65,535 entries is refused
-with `NotSupportedException` before anything is written, and any previous file at the target is
-left intact. A Zstd entry is held to that limit by its compressed size, and may decompress to more.
+only once it is compressed, so its tensors are read three times rather than two. An entry and an
+archive may be of any size: the single file writes Zip64 records where a size or offset is
+4,294,967,295 bytes (4 GiB − 1) or more, or where there are 65,535 entries or more. A load reads each data entry forward, a tensor at a
+time, exactly as the flat load does.
 
 A checkpoint in device memory is saved from there: the flat and `.skpt` saves (file and directory
 form) write each tensor through one bounded host staging buffer (8 MiB), piece by piece, so the
@@ -1219,7 +1219,9 @@ var eval  = Persistence.LoadEvaluationModel("run.skpt");   // [model inputs…, 
 `ToInferenceModel()` binds the checkpoint's trainable params and model state into its `.Rig`'s
 retained concrete architecture (concretized once at build, at all inputs, so multi-input models
 work) — no re-concretization or sample inputs. It requires an attached rig; use
-`rig.AdoptCheckpoint(checkpoint)` for a bare checkpoint.
+`rig.AdoptCheckpoint(checkpoint)` for a bare checkpoint. It copies each value into the model, so
+the checkpoint stays usable, and binds a parameter of any size: one past 2 GiB is copied 8 MiB at
+a time into host memory of the backend `ComputeContext.Default` runs on, where the model holds it.
 
 ## Types used by the training API
 

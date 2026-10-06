@@ -21,9 +21,11 @@ namespace Shorokoo
         /// and the same models/ and data/ entries as real files, byte-identical to the zip's —
         /// so the result loads (<see cref="Load(string)"/>,
         /// <see cref="TrainingRig.Load(string, Runtime.ComputeContext?, Runtime.ComputeContext?, IProgress{Graph.BuildProgress}, TrainingBackend?)"/>)
-        /// and inspects exactly like the source. Every entry's recorded SHA-256 is verified in
-        /// transit, entry paths must resolve inside the target (a hostile manifest cannot write
-        /// elsewhere), and only the manifest and the entries it references are carried. The
+        /// and inspects exactly like the source. Each entry is copied in bounded pieces, so a
+        /// checkpoint of any size converts without being held in memory; its recorded SHA-256 is
+        /// verified in transit, entry paths must resolve inside the target (a hostile manifest
+        /// cannot write elsewhere), and only the manifest and the entries it references are
+        /// carried. The
         /// write is atomic (staged to a temp directory beside the target and committed by
         /// rename); the target's parent directory must already exist, and an existing directory
         /// at the target — whatever it holds — is replaced by a completed conversion.
@@ -53,7 +55,9 @@ namespace Shorokoo
         /// Converts a <c>.skpt</c> checkpoint <b>directory</b> back into the single-file form
         /// (issue #183): the same <c>config.json</c> and the same entries, byte-identical,
         /// written as the STORED zip <see cref="CheckpointBuilder.Save"/> produces (uncompressed
-        /// safetensors data entries keep their 64-byte payload alignment). Every entry's
+        /// safetensors data entries keep their 64-byte payload alignment, and Zip64 records are
+        /// written where the archive's sizes or entry count need them). Each entry is copied in
+        /// bounded pieces, so a checkpoint of any size converts without being held in memory; its
         /// recorded SHA-256 is verified in transit, and only the manifest and the entries it
         /// references are carried. The write is atomic (staged to a temp file and committed by
         /// rename); the target's directory must already exist. <see cref="ExtractSkpt"/>
@@ -80,14 +84,17 @@ namespace Shorokoo
         }
 
         /// <summary>
-        /// Reads a checkpoint's manifest and every entry it references out of either container
-        /// shape, as the entry list the writers consume: <c>config.json</c> (verbatim) first,
-        /// then the model entries and the data entries in manifest order. Each model/data
-        /// entry's recorded SHA-256 is verified (over the stored bytes, so a compressed entry
-        /// needs no decompression), and an uncompressed safetensors data entry is flagged for
-        /// the zip form's payload alignment — reproducing the writers' rule, so a round-tripped
-        /// zip keeps the writers' STORED-and-aligned payload layout (entry order may differ
-        /// from a direct save; content and per-entry properties do not).
+        /// Reads a checkpoint's manifest and lists every entry it references out of either
+        /// container shape, as the entry list the writers consume: <c>config.json</c> (verbatim)
+        /// first, then the model entries and the data entries in manifest order. The manifest is
+        /// read whole; every other entry is copied from the source as the writer writes it, in
+        /// bounded pieces, so an entry of any size converts without being held. Each model/data
+        /// entry's recorded SHA-256 is checked over the stored bytes as they pass (so a compressed
+        /// entry needs no decompression), and an entry that fails it fails the conversion, which
+        /// then commits nothing. An uncompressed safetensors data entry is flagged for the zip
+        /// form's payload alignment — reproducing the writers' rule, so a round-tripped zip keeps
+        /// the writers' STORED-and-aligned payload layout (entry order may differ from a direct
+        /// save; content and per-entry properties do not).
         /// </summary>
         private static List<SkptFileFormat.ZipEntrySpec> CollectManifestEntries(SkptContainer container)
         {
@@ -100,24 +107,35 @@ namespace Shorokoo
             {
                 new(SkptFileFormat.ConfigEntryName, configBytes, Align: false),
             };
-            var carried = new Dictionary<string, byte[]>(StringComparer.Ordinal)
-            {
-                [SkptFileFormat.ConfigEntryName] = configBytes,
-            };
+            // Two registry keys may share one stored entry; it is carried once, but every key's
+            // recorded hash must match it, or the source is internally inconsistent.
+            var expectedByEntry = new Dictionary<string, List<string>>(StringComparer.Ordinal);
 
-            void Carry(string entryPath, string role, string? sha256, bool align)
+            void Carry(string entryPath, string role, string? recorded, bool align)
             {
-                // Two registry keys may share one stored entry; it is carried once, but every
-                // key's recorded hash must match it, or the source is internally inconsistent.
-                if (carried.TryGetValue(entryPath, out var already))
+                var sha256 = RequireSha256(recorded, entryPath, path);
+                if (entryPath == SkptFileFormat.ConfigEntryName)
                 {
-                    VerifySha256(already, sha256, entryPath, path);
+                    VerifySha256(configBytes, sha256, entryPath, path);
                     return;
                 }
-                var bytes = container.ReadRequiredEntry(entryPath, role);
-                VerifySha256(bytes, sha256, entryPath, path);
-                carried[entryPath] = bytes;
-                entries.Add(new(entryPath, bytes, align));
+                if (expectedByEntry.TryGetValue(entryPath, out var expected))
+                {
+                    expected.Add(sha256);
+                    return;
+                }
+                expected = [sha256];
+                expectedByEntry[entryPath] = expected;
+                long length;
+                using (container.OpenRequiredEntry(entryPath, role, out length)) { }
+                entries.Add(new(entryPath, SkptFileFormat.EntryPayload.Copied(
+                    () => container.OpenRequiredEntry(entryPath, role, out _),
+                    length,
+                    actual =>
+                    {
+                        foreach (var sha in expected) VerifySha256(actual, sha, entryPath, path);
+                    },
+                    $"'{path}': entry '{entryPath}'"), align));
             }
 
             foreach (var (key, model) in manifest.Models ?? new())

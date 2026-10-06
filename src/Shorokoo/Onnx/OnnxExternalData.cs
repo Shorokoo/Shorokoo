@@ -17,7 +17,7 @@ namespace Shorokoo.Onnx
     /// <para>
     /// <see cref="LoadIntoModel"/> reads every external tensor in a freshly deserialized
     /// <see cref="ModelProto"/> into the value the reader takes for it
-    /// (<see cref="TensorProto.Loaded"/>), so the rest of the import pipeline never sees an
+    /// (<see cref="TensorProto.Carried"/>), so the rest of the import pipeline never sees an
     /// external tensor. Each is read from its file range straight into its own tensor
     /// (<see cref="ComputeContext.ReadTensor"/>), never whole anywhere else. All dtypes the inline
     /// path supports are supported externally — the side file carries exactly the little-endian
@@ -101,8 +101,9 @@ namespace Shorokoo.Onnx
 
         /// <summary>
         /// Walks every <see cref="TensorProto"/> reachable from the model: graph
-        /// initializers, sparse initializers, tensor-valued node attributes, and all of
-        /// those recursively through subgraph attributes and function bodies.
+        /// initializers, sparse initializers, tensor- and sparse-tensor-valued node
+        /// attributes, and all of those recursively through subgraph attributes and
+        /// function bodies.
         /// </summary>
         internal static IEnumerable<TensorProto> EnumerateAllTensors(ModelProto model)
         {
@@ -122,10 +123,8 @@ namespace Shorokoo.Onnx
                 yield return init;
 
             foreach (var sparse in graph.SparseInitializers)
-            {
-                if (sparse.Values is not null) yield return sparse.Values;
-                if (sparse.Indices is not null) yield return sparse.Indices;
-            }
+                foreach (var t in EnumerateSparseTensors(sparse))
+                    yield return t;
 
             foreach (var node in graph.Nodes)
                 foreach (var t in EnumerateNodeTensors(node))
@@ -140,6 +139,12 @@ namespace Shorokoo.Onnx
                     yield return attr.T;
                 foreach (var t in attr.Tensors)
                     yield return t;
+                if (attr.SparseTensor is not null)
+                    foreach (var t in EnumerateSparseTensors(attr.SparseTensor))
+                        yield return t;
+                foreach (var sparse in attr.SparseTensors)
+                    foreach (var t in EnumerateSparseTensors(sparse))
+                        yield return t;
                 if (attr.G is not null)
                     foreach (var t in EnumerateGraphTensors(attr.G))
                         yield return t;
@@ -147,6 +152,12 @@ namespace Shorokoo.Onnx
                     foreach (var t in EnumerateGraphTensors(g))
                         yield return t;
             }
+        }
+
+        private static IEnumerable<TensorProto> EnumerateSparseTensors(SparseTensorProto sparse)
+        {
+            if (sparse.Values is not null) yield return sparse.Values;
+            if (sparse.Indices is not null) yield return sparse.Indices;
         }
 
         private static void MaterializeExternalTensor(
@@ -263,16 +274,16 @@ namespace Shorokoo.Onnx
                 {
                     var placeholder = TensorAttribute.WithoutValues(shape, dtype);
                     onDevice[placeholder] = onto.ReadTensor(shape, dtype, fs);
-                    tensor.Loaded = placeholder;
+                    tensor.Carried = placeholder;
                 }
                 else
                 {
-                    // A tensor no attribute holds is refused by the move, which leaves it whole and
-                    // the read's memory with nobody else to release it.
+                    // A move that fails leaves the tensor whole, and the read's memory with nobody
+                    // else to release it.
                     var read = ComputeContext.Host.ReadTensor(shape, dtype, fs);
                     try
                     {
-                        tensor.Loaded = read.MoveToAttribute();
+                        tensor.Carried = read.MoveToAttribute();
                     }
                     catch
                     {
@@ -287,13 +298,14 @@ namespace Shorokoo.Onnx
 
         /// <summary>Whether a tensor of <paramref name="dtype"/> is a flat buffer of whole-byte
         /// elements, which is what <see cref="ComputeContext.ReadTensor"/> reads.</summary>
-        private static bool HasFlatBuffer(DType dtype)
+        internal static bool HasFlatBuffer(DType dtype)
             => !dtype.IsSameElementTypeAs(DType.Utf8) && dtype != DType.Complex64 && dtype != DType.Complex128
                 && dtype.EncodingBitCount >= 8;
 
         /// <summary>
         /// The byte count implied by the tensor's dtype and dims, or -1 when the dtype
-        /// has no fixed per-element width (e.g. String) so the count cannot be derived.
+        /// has no fixed per-element width (e.g. String), a dim is negative, or the count
+        /// does not fit a <see cref="long"/>, so no count can be derived.
         /// </summary>
         internal static long TryGetExpectedByteLength(TensorProto tensor)
         {
@@ -309,10 +321,20 @@ namespace Shorokoo.Onnx
             }
 
             long count = 1;
-            if (tensor.Dims is not null)
-                foreach (var d in tensor.Dims)
-                    count *= d;
-            return count * bits / 8;
+            try
+            {
+                if (tensor.Dims is not null)
+                    foreach (var d in tensor.Dims)
+                    {
+                        if (d < 0) return -1;
+                        count = checked(count * d);
+                    }
+                return checked(count * bits) / 8;
+            }
+            catch (OverflowException)
+            {
+                return -1;
+            }
         }
     }
 }
@@ -321,9 +343,36 @@ namespace Shorokoo.Core.Factory.IR
 {
     public partial class TensorProto
     {
-        /// <summary>The value <see cref="Onnx.OnnxExternalData.LoadIntoModel"/> read for this
-        /// tensor's external data, which the reader takes in place of the proto's own payload. Not
-        /// part of the message.</summary>
-        internal TensorAttribute? Loaded { get; set; }
+        /// <summary>
+        /// The attribute this tensor's elements are, carried beside the message in place of its
+        /// payload. Not part of the message. Set by <see cref="Onnx.OnnxExternalData.LoadIntoModel"/>
+        /// for the external data it read, and by the model builder for an attribute too large for
+        /// <c>raw_data</c> (<see cref="TensorAttribute.PastOneArray"/>), which the exporter writes
+        /// into the external-data side file a piece at a time and a compute context hands its
+        /// session as a value. The reader takes it in place of the proto's own payload.
+        /// </summary>
+        internal TensorAttribute? Carried { get; set; }
+
+        /// <summary>
+        /// Refuses to serialize a tensor whose elements are carried beside the message and not
+        /// declared external: the message would say nothing of them, and a reader would find the
+        /// tensor empty. protobuf-net builds a message whole in one buffer of at most 2 GiB, so
+        /// such a tensor never fits in one it builds; <see cref="Onnx.OnnxStreamingWriter"/> writes
+        /// it as the tensor's <c>raw_data</c>, streamed from the attribute.
+        /// </summary>
+        [ProtoBuf.ProtoBeforeSerialization]
+        private void RefuseCarriedPayload()
+        {
+            if (Carried is { HasValues: true } carried && RawData is null
+                && data_location != DataLocation.External)
+                throw new NotSupportedException(
+                    $"Tensor '{Name}' ({carried}) holds {carried.ByteLength} bytes, more than protobuf-net "
+                    + "writes in one message (2 GiB), so it cannot be serialized inside this ONNX model. "
+                    + "Export the model with external data (Persistence.ExportOnnx with "
+                    + "OnnxExternalDataOptions), which writes it to a side file; save it as a "
+                    + "checkpoint (Persistence.Save, .skpt), which writes the weights apart from the "
+                    + "model; or save the graph with CompressedFormatUtils.SaveFastGraphToFile (.srk), "
+                    + "which streams it into the file.");
+        }
     }
 }

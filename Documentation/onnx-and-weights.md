@@ -11,7 +11,14 @@ Related: [inference.md](inference.md) · [core-types.md](core-types.md) · [skpt
   Use `FastOnnxModelBuilder.BuildOnnxModel` + `OnnxModelExporter` when you need the
   `ModelProto` in between.
 - Models over protobuf's 2 GB limit use ONNX **external data** (`externalData:` on
-  export; side files load transparently on import).
+  export; side files load transparently on import). A concrete model holds a weight of any
+  size; ONNX export with external data and `ExportSafeTensors` write one past 2 GiB from where
+  the model holds it, 8 MiB at a time.
+- `.srk`/`.zsrk` and `.zsafetensor` files are saved and loaded as streams, never held
+  whole, and a `.srk` holds a weight of any size and weights of any total. What a `.srk`
+  model holds besides each tensor's `raw_data` of 1,024 bytes or more — its structure,
+  smaller `raw_data`, string tensors and typed data fields — must fit in one array
+  (`Array.MaxLength` bytes, just under 2 GiB).
 - Pretrained weights load from `.safetensors` (and compressed `.zsafetensor`).
 - Every save API is **atomic** (staged beside the target, committed by rename), so an
   interrupted write never damages the existing file: the `Persistence.*` facade,
@@ -58,6 +65,14 @@ Persistence.ExportOnnx(graph, "model.onnx",
 // From a ModelProto; deterministic for the same proto and file name.
 OnnxModelExporter.SaveWithExternalData(model, "model.onnx");
 ```
+
+A weight of more bytes than one managed array holds (`Array.MaxLength`, just under 2 GiB) has
+no `raw_data` in the `ModelProto`: `BuildOnnxModel` carries it beside the proto, and
+`SaveWithExternalData` always writes it to the side file, whatever `SizeThreshold`, straight
+from where the model holds it, 8 MiB at a time. A self-contained save of such a model is
+refused with `XD007`, and serializing the proto yourself (`ProtoBuf.Serializer.Serialize`)
+throws `NotSupportedException`, naming the tensor, since the proto alone would lose it. A
+[`.srk`](#saveload-shorokoo-graph-format-srk--zsrk) holds it inline.
 
 - **Concrete models only**; anything else is refused with `XD008`, naming the actual
   and required kind.
@@ -202,6 +217,22 @@ byte[] bytes = CompressedFormatUtils.SaveFastGraphToBinary(graph, compressed: tr
 For a concrete model, a [`.skpt`](skpt-checkpoints.md) is the richer container; a
 module-stage graph can only be saved as `.srk`.
 
+`SaveFastGraphToFile` streams the container to the file, each weight written from where
+it lies, and `LoadFastGraphFromFile` reads the file as a stream — once to check
+`payloadSha256`, once to parse the payload — so neither ever holds the file whole. Every
+tensor's `raw_data` of 1,024 bytes or more is streamed this way, so the weights may total
+any size; the rest of the model — the graph's structure, smaller `raw_data`, string
+tensors and typed data fields — is built and parsed as one protobuf message, which must fit
+in one array (`Array.MaxLength` bytes). A save past that is refused with
+`NotSupportedException` before anything is written, and a load past it with
+`InvalidDataException`. Each weight is read into storage of its own as the
+payload is parsed; one of more bytes than one managed array holds (`Array.MaxLength`, just
+under 2 GiB) is read 8 MiB at a time into host memory of the backend
+`ComputeContext.Default` runs on, where the loaded graph holds it. `SaveFastGraphToBinary`
+and `LoadFastGraphFromBinary` hold the container in one array, so `SaveFastGraphToBinary`
+refuses a container of more than `Array.MaxLength` bytes with `NotSupportedException`
+naming `SaveFastGraphToFile`.
+
 ### The `.srk` container
 
 ```
@@ -266,7 +297,11 @@ which also matches names.
 
 Compressed `.zsafetensor` variants are in `CompressedFormatUtils`:
 `SaveCompressedSafeTensors`, `LoadCompressedSafeTensors`,
-`SaveCompressedModelParamSet`, `LoadCompressedModelParamSet`.
+`SaveCompressedModelParamSet`, `LoadCompressedModelParamSet`. The save writes a standard
+SafeTensors file as one Zstandard frame declaring its decompressed size, compressed
+straight into the target with each tensor written from its own storage, and the load
+decodes the file as it reads it, so a file of any size is written and read without
+either form of it being held whole.
 
 ## Weight exchange with naming schemes (`ExportSafeTensors` / `ImportSafeTensors`)
 
@@ -291,7 +326,8 @@ ComputationGraph m3 = Persistence.ImportSafeTensorsToCheckpoint(
 ```
 
 - `ExportSafeTensors` takes a **concrete model** and writes every weight (not the RNG
-  identity parameter) to one plain safetensors file.
+  identity parameter) to one plain safetensors file. Each is written from where the model
+  holds it, one past 2 GiB 8 MiB at a time.
 - `ImportSafeTensors` takes a **concrete architecture** and binds like
   `ToConcreteModel(weights, scheme)`, but fails loudly, naming the tensor, on:
   - a tensor mapping to no parameter (a training-checkpoint file is detected and

@@ -1145,27 +1145,31 @@ public class NNLibraryLayerTrainingCoverageTests
         AssertTinyConvRigTrainStepFlows(NNTinyConvClassifier.ComputationGraph, NNCrossEntropyBakedWeightLoss.ComputationGraph);
     }
 
-    private static float IgnoredTargetTrainLoss(ComputationGraph loss, long classes, long[] targets)
+    private static float[] IgnoredTargetLossAndTrainedTable(ComputationGraph loss, long classes, long[] tokens, long[] targets)
     {
         var model = NNZeroLogitsTokenClassifier.ComputationGraph.Specialize(
             NNZeroLogitsTokenClassifier.ComputationGraph.FromOrderedInputs([TensorData([], classes)]));
         var rig = TrainingRig.FromScratch(model, loss, SGDOptimizer.ComputationGraph,
-            [TensorData([4L], new long[4])], new SGDOptimizerHyperparameters { LearningRate = 1f });
-        long[] tokens = [0, 1, 2, 3];
-        return rig.TrainStep(rig.CreateInitialCheckpoint(),
-            rig.InputDef.FromOrderedData(TensorData([4L], tokens)),
-            rig.TargetDef.FromOrderedData(TensorData([4L], targets))).Loss!.Value;
+            [TensorData([tokens.Length], new long[tokens.Length])], new SGDOptimizerHyperparameters { LearningRate = 1f });
+        var step = rig.TrainStep(rig.CreateInitialCheckpoint(),
+            rig.InputDef.FromOrderedData(TensorData([tokens.Length], tokens)),
+            rig.TargetDef.FromOrderedData(TensorData([targets.Length], targets)));
+        return [step.Loss!.Value, .. Floats(step.TrainableParams.Fields.Values.Single())];
     }
+
+    private static void AssertIgnoredTargetLeavesTheStepAsIfAbsent(ComputationGraph loss, long classes, long ignoreIndex)
+        => Assert.Equal(IgnoredTargetLossAndTrainedTable(loss, classes, [0, 1, 2], [1, 2, 3]),
+            IgnoredTargetLossAndTrainedTable(loss, classes, [0, 1, 2, 3], [1, 2, 3, ignoreIndex]));
 
     // https://github.com/Shorokoo/Shorokoo/issues/499: the CrossEntropyLoss / NLLLoss gradients
     // gather the class weight on the raw labels before masking, so an ignoreIndex outside [-C, C-1] is an out-of-range Gather.
     [Fact(Skip = "Pinned bug #499: loss gradients gather raw labels before masking ignoreIndex")]
     public void TestOutOfRangeIgnoreIndexTrainsWithTheIgnoredTargetExcluded()
     {
-        Assert.Equal(MathF.Log(5f), IgnoredTargetTrainLoss(NNCrossEntropyIgnoreMinus100Loss.ComputationGraph, 5, [1, 2, 3, -100]), 1e-4f);
-        Assert.Equal(MathF.Log(5f), IgnoredTargetTrainLoss(NNCrossEntropyIgnore999Loss.ComputationGraph, 5, [1, 2, 3, 999]), 1e-4f);
-        Assert.Equal(MathF.Log(5f), IgnoredTargetTrainLoss(NNNllIgnoreMinus100Loss.ComputationGraph, 5, [1, 2, 3, -100]), 1e-4f);
-        Assert.Equal(MathF.Log(128f), IgnoredTargetTrainLoss(NNCrossEntropyIgnore999Loss.ComputationGraph, 128, [1, 2, 3, 999]), 1e-4f);
+        AssertIgnoredTargetLeavesTheStepAsIfAbsent(NNCrossEntropyIgnoreMinus100Loss.ComputationGraph, 5, -100);
+        AssertIgnoredTargetLeavesTheStepAsIfAbsent(NNCrossEntropyIgnore999Loss.ComputationGraph, 5, 999);
+        AssertIgnoredTargetLeavesTheStepAsIfAbsent(NNNllIgnoreMinus100Loss.ComputationGraph, 5, -100);
+        AssertIgnoredTargetLeavesTheStepAsIfAbsent(NNCrossEntropyIgnore999Loss.ComputationGraph, 128, 999);
     }
 }
 

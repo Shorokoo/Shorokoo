@@ -2423,6 +2423,35 @@ public partial class NNCrossEntropyIgnoreSumLoss
         => CrossEntropyLoss.Reduced(predictions, targets, ignoreIndex: 7L, reduction: LossReduction.Sum);
 }
 
+/// <summary>Zero logits over <c>classes</c> classes, one row per token, from a trainable table.</summary>
+[Module]
+public partial class NNZeroLogitsTokenClassifier
+{
+    public static Tensor<float32> Inline(Tensor<int64> tokens, [Hyper] Scalar<int64> classes)
+        => Constant.Init([classes, classes], Scalar(0f)).Gather(tokens);
+}
+
+[Module]
+public partial class NNCrossEntropyIgnoreMinus100Loss
+{
+    public static Scalar<float32> Inline(Tensor<float32> predictions, Tensor<int64> targets)
+        => CrossEntropyLoss.Reduced(predictions, targets, ignoreIndex: -100L);
+}
+
+[Module]
+public partial class NNCrossEntropyIgnore999Loss
+{
+    public static Scalar<float32> Inline(Tensor<float32> predictions, Tensor<int64> targets)
+        => CrossEntropyLoss.Reduced(predictions, targets, ignoreIndex: 999L);
+}
+
+[Module]
+public partial class NNNllIgnoreMinus100Loss
+{
+    public static Scalar<float32> Inline(Tensor<float32> predictions, Tensor<int64> targets)
+        => NLLLoss.Reduced(predictions.LogSoftmax(1), targets, ignoreIndex: -100L);
+}
+
 /// <summary>
 /// CrossEntropyLoss with a baked-constant class <c>weight=[2,1]</c> (the
 /// documented weight-via-rig recipe). The weight tensor is fixed as a graph

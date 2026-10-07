@@ -353,12 +353,19 @@ public static class " + modelName + @"
                 }
             }
 
+            // Each node is generated against the generators and names of the nodes before it. The
+            // immutable views grow alongside the dictionaries: a copy of each per node would make
+            // generating a method quadratic in its node count.
+            var generatorsSoFar = ImmutableDictionary<Node, NodeGenerationInfo>.Empty;
+            var namesSoFar = ImmutableDictionary<Variable, string>.Empty;
             foreach (var node in topologicalOrderNodes)
             {
-                (var newNodeGenerator, var newVariableNames) = this.MakeNode(node, nodeCodeGenerators.ToImmutableDictionary(), variableNames.ToImmutableDictionary(), functionNames, tensorChildNodes);
+                (var newNodeGenerator, var newVariableNames) = this.MakeNode(node, generatorsSoFar, namesSoFar, functionNames, tensorChildNodes);
                 var newInlinedVariables = newNodeGenerator.InlinedNodes;
                 variableNames.AddAll(newVariableNames);
+                namesSoFar = namesSoFar.SetItems(newVariableNames);
                 nodeCodeGenerators[node] = newNodeGenerator;
+                generatorsSoFar = generatorsSoFar.SetItem(node, newNodeGenerator);
                 inlinedNodes.AddAll(newInlinedVariables);
             }
 
@@ -430,11 +437,10 @@ public static class " + modelName + @"
                 }
             }
 
-            var mainScript = "";
+            var mainScriptBuilder = new System.Text.StringBuilder();
             foreach (var (code, indent) in allLines)
-            {
-                mainScript += new string('\t', indent) + code + "\r\n";
-            }
+                mainScriptBuilder.Append('\t', indent).Append(code).Append("\r\n");
+            var mainScript = mainScriptBuilder.ToString();
 
             var methodSignature = targetFunction?.FunctionType == FunctionType.TrainableParamInitializer ||
                                    targetFunction?.FunctionType == FunctionType.StateParamInitializer ?

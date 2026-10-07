@@ -1153,16 +1153,13 @@ public class RngRuntimeTests
             .As<uint64>().AccessMemory().ToArray()];
     }
 
-    private static uint[] GraphDrawBits((float Low, float High)[] ranges)
+    private static uint[] GraphDrawBits(InternalComputationGraph model, (float Low, float High)[] ranges)
     {
         float[] bounds = new float[RngDenseUniformOutput.Ranges * 2];
         for (int r = 0; r < ranges.Length; r++)
             (bounds[2 * r], bounds[2 * r + 1]) = (ranges[r].Low, ranges[r].High);
-        var g = ((ComputationGraph)typeof(RngDenseUniformOutput)
-            .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
         var input = TensorData([(long)bounds.Length], bounds);
-        var concrete = g.ToConcreteArchitecture([input]).ToConcreteModel();
-        return [.. ComputeContext.Default.Execute(concrete, input)[0].ToTensorData()
+        return [.. ComputeContext.Default.Execute(model, input)[0].ToTensorData()
             .As<float32>().AccessMemory().ToArray().Select(BitConverter.SingleToUInt32Bits)];
     }
 
@@ -1219,7 +1216,7 @@ public class RngRuntimeTests
         var seed = TensorData([(long)RngDenseUniformOutput.Ranges * 2],
             new float[RngDenseUniformOutput.Ranges * 2]);
         var model = g.ToConcreteArchitecture([seed]).ToConcreteModel();
-        uint[] ort = GraphDrawBits(ranges), qee = QeeDrawBits(model, ranges);
+        uint[] ort = GraphDrawBits(model, ranges), qee = QeeDrawBits(model, ranges);
         for (int r = 0; r < ranges.Length; r++)
             for (int i = 0; i < RngDenseUniformOutput.Draws; i++)
             {
@@ -1244,7 +1241,7 @@ public class RngRuntimeTests
         var seed = TensorData([(long)RngDenseUniformOutput.Ranges * 2],
             new float[RngDenseUniformOutput.Ranges * 2]);
         var model = g.ToConcreteArchitecture([seed]).ToConcreteModel();
-        uint[] ort = GraphDrawBits(ranges), qee = QeeDrawBits(model, ranges);
+        uint[] ort = GraphDrawBits(model, ranges), qee = QeeDrawBits(model, ranges);
         for (int r = 0; r < ranges.Length; r++)
             for (int i = 0; i < RngDenseUniformOutput.Draws; i++)
             {

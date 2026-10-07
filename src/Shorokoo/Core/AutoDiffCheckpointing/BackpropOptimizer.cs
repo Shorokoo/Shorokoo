@@ -238,7 +238,7 @@ internal class SimpleBackpropOptimizer
             FullInputs = newFullInputs,
             FullOutputs = newFullOutputs,
             FriendlyName = producer.FriendlyName,
-            StackTrace = producer.StackTrace,
+            CallStack = producer.CallStack,
             // GraphOpenNodeKey and TargetFunction are intentionally not copied — those are
             // structural / function-call concerns ruled out above.
         };

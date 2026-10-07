@@ -204,7 +204,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 OpCode = built.OpCode,
                 Attributes = built.Attributes,
                 FriendlyName = built.FriendlyName,
-                StackTrace = built.StackTrace,
+                CallStack = built.CallStack,
                 GraphOpenNodeKey = RemapNode(built.GraphOpenNodeKey, nodeMap),
                 IdentifierTemplate = built.IdentifierTemplate,
                 TargetFunction = built.TargetFunction,

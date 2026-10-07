@@ -110,7 +110,7 @@ namespace Shorokoo.Graph
                     OpCode = node.OpCode,
                     Attributes = node.Attributes,
                     FriendlyName = node.FriendlyName,
-                    StackTrace = node.StackTrace,
+                    CallStack = node.CallStack,
                     GraphOpenNodeKey = graphOpenNodeKey,
                     IdentifierTemplate = node.IdentifierTemplate?.ToString(),
                     TargetFunction = node.TargetFunction,
@@ -218,7 +218,7 @@ namespace Shorokoo.Graph
         public static Dictionary<FastTensorKey, Variable> BuildTensorMapping(InternalComputationGraph fastGraph)
         {
             if (fastGraph is null) throw new ArgumentNullException(nameof(fastGraph));
-            return BuildNodesAndTensorMap(fastGraph, traceUnbuiltNodes: false).tensorsByKey;
+            return BuildNodesAndTensorMap(fastGraph).tensorsByKey;
         }
 
         /// <summary>
@@ -234,7 +234,7 @@ namespace Shorokoo.Graph
             BuildNodes(InternalComputationGraph fastGraph)
         {
             if (fastGraph is null) throw new ArgumentNullException(nameof(fastGraph));
-            var built = BuildNodesAndTensorMap(fastGraph, traceUnbuiltNodes: true);
+            var built = BuildNodesAndTensorMap(fastGraph);
             return (built.nodesInTopoOrder, built.inputs, built.outputs, built.tensorsByKey);
         }
 
@@ -295,15 +295,11 @@ namespace Shorokoo.Graph
             return fastGraph.Nodes.Select(n => n.TargetFunction).NotNulls().Distinct().ToImmutableArray();
         }
 
-        /// <param name="fastGraph">The graph to rebuild.</param>
-        /// <param name="traceUnbuiltNodes">Whether a rebuilt node whose <see cref="FastNode"/>
-        /// carries no stack trace captures one where it is rebuilt. A caller reading only the
-        /// tensors' metadata says no: the capture is the costliest part of a rebuild.</param>
         private static (ImmutableArray<Node> nodesInTopoOrder,
                         Dictionary<FastTensorKey, Variable> tensorsByKey,
                         ImmutableArray<Variable> inputs,
                         ImmutableArray<Variable> outputs)
-            BuildNodesAndTensorMap(InternalComputationGraph fastGraph, bool traceUnbuiltNodes)
+            BuildNodesAndTensorMap(InternalComputationGraph fastGraph)
         {
             // Map from the stored FastTensorKey to the freshly-created Variable we built while
             // rebuilding nodes in topological order.
@@ -349,7 +345,7 @@ namespace Shorokoo.Graph
                     NodeDef = nodeDef,
                     FullInputs = fullInputs,
                     ProtoAttributes = attributes.ToProto(),
-                    StackTrace = fastNode.StackTrace,
+                    StackTrace = fastNode.CallStack,
                 };
 
                 ImmutableDictionary<string, int?>? knownVariadicCounts = null;
@@ -361,7 +357,7 @@ namespace Shorokoo.Graph
                         NodeDef = openNode.NodeDef,
                         FullInputs = openNode.FullInputs,
                         ProtoAttributes = openNode.Attributes.ToProto(),
-                        StackTrace = openNode.StackTrace,
+                        StackTrace = openNode.CallStack,
                     }.InferVariadicCounts(openNode.FullOutputs.Values.Select(x => x.Length).Max());
                 }
 
@@ -393,12 +389,13 @@ namespace Shorokoo.Graph
                     attributes: attributes,
                     inputs: fullInputs,
                     outputs: fullOutputs,
-                    stackTrace: traceUnbuiltNodes ? fastNode.StackTrace : fastNode.StackTrace ?? string.Empty,
+                    callStack: fastNode.CallStack,
                     defaultName: fastNode.FriendlyName,
                     identifierTemplateString: fastNode.IdentifierTemplate,
                     targetFunction: fastNode.TargetFunction,
                     openNode: openNode,
-                    existingKey: fastNode.Key.ToCgKey());
+                    existingKey: fastNode.Key.ToCgKey(),
+                    captureCallStack: false);
 
                 // If this is a close node whose open node hasn't been built yet,
                 // defer the GraphOpenNode / ConnectingTensor linkage.

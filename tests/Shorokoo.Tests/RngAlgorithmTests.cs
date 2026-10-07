@@ -215,6 +215,28 @@ public class RngAlgorithmTests
         Assert.DoesNotContain(proto.Graph.Nodes, n => n.OpType.Contains("RngSplit"));
     }
 
+    private static byte[] Serialized(Shorokoo.Core.Factory.IR.ModelProto proto)
+    {
+        using var bytes = new MemoryStream();
+        ProtoBuf.Serializer.Serialize(bytes, proto);
+        return bytes.ToArray();
+    }
+
+    [Fact]
+    public void TestEverySessionModelGetsRngFunctionsOfItsOwnAndTheSameEachTime()
+    {
+        var g = (ComputationGraph)typeof(RngSplitThenDraw).GetProperty("ComputationGraph")!.GetValue(null)!;
+        var concrete = g.ToConcreteArchitecture([TensorData([2L, 2L], 0f, 0f, 0f, 0f)]).ToConcreteModel().ToInternal();
+        var first = FastOnnxModelBuilder.BuildInternalOnnxModel(concrete, prepForOnnx: true);
+        var bytes = Serialized(first);
+        Assert.Equal(2, first.Functions.Count(f => f.Name.Contains("ShrkRng_")));
+        foreach (var fn in first.Functions) fn.Nodes.Clear();
+
+        var second = FastOnnxModelBuilder.BuildInternalOnnxModel(concrete, prepForOnnx: true);
+        Assert.Equal(bytes, Serialized(second));
+        Assert.All(second.Functions, f => Assert.NotEmpty(f.Nodes));
+    }
+
     private static string[] RngTags(Shorokoo.Core.Factory.IR.ModelProto proto)
         => [.. proto.Functions.Select(f => $"{f.Name}|{f.MetadataProps.FirstOrDefault(p => p.Key == Function.IRRngAlgorithmParamName)?.Value}|" +
             f.MetadataProps.FirstOrDefault(p => p.Key == Function.IRRngFunctionKindParamName)?.Value).Order()];

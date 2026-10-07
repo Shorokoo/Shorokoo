@@ -195,7 +195,14 @@ namespace Shorokoo.Core.Nodes
 
         public Variable?[] InputsWithTrailingNulls => [.. Inputs, .. Enumerable.Repeat((Variable?)null, this.NumTrailingNullInputs)];
 
-        public string? StackTrace { get; protected set; }
+        public string? StackTrace
+        {
+            get => CallStack?.Text;
+            protected set => CallStack = Shorokoo.Core.Nodes.CallStack.FromText(value);
+        }
+
+        /// <summary>The call stack behind <see cref="StackTrace"/>, rendered only when that is read.</summary>
+        internal CallStack? CallStack { get; private set; }
 
         public Function? TargetFunction { get; protected set; }
 
@@ -230,6 +237,14 @@ namespace Shorokoo.Core.Nodes
         public bool IsWithStateDeps => this.OpCode == InternalOpCodes.WITH_STATE_DEPS;
 
         public Node(NodeDefinition nodeDef, OnnxCSharpAttributes? attributes, ImmutableDictionary<string, Variable?[]> inputs, ImmutableDictionary<string, OutputTensorInfo[]> outputs, string? stackTrace, string? defaultName, string? identifierTemplateString, Function? targetFunction = null, Node? openNode = null, NodeKey? existingKey = null, long? existingOrderingHint = null)
+            : this(nodeDef, attributes, inputs, outputs, Shorokoo.Core.Nodes.CallStack.FromText(stackTrace), defaultName, identifierTemplateString, targetFunction, openNode, existingKey, existingOrderingHint)
+        {
+        }
+
+        // captureCallStack: whether a node given no call stack takes the caller's. A node rebuilt
+        // from a graph that carries none has no call stack of its own to take: the caller's would
+        // describe the rebuild, not the code that built the node.
+        internal Node(NodeDefinition nodeDef, OnnxCSharpAttributes? attributes, ImmutableDictionary<string, Variable?[]> inputs, ImmutableDictionary<string, OutputTensorInfo[]> outputs, CallStack? callStack, string? defaultName, string? identifierTemplateString, Function? targetFunction = null, Node? openNode = null, NodeKey? existingKey = null, long? existingOrderingHint = null, bool captureCallStack = true)
         {
 
             if (inputs.SelectMany(x => x.Value).NotNulls().Any(x => !x.IsValid))
@@ -294,7 +309,7 @@ namespace Shorokoo.Core.Nodes
                                 x.ModuleFn ?? moduleFnOverride, 
                                 x.Structure, x.Rank, x.Name)).ToArray());
 
-            this.StackTrace = stackTrace is null ? new StackTrace(fNeedFileInfo: true).ToString() : stackTrace;
+            this.CallStack = callStack ?? (captureCallStack ? Shorokoo.Core.Nodes.CallStack.Capture() : null);
 
             if (GraphTrace.ParamInitializerBodyName is { } initializerName && this.TouchesAModel())
                 throw new ModuleException(ErrorCodes.FW055, initializerName,

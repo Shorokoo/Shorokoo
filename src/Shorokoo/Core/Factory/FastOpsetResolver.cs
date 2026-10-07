@@ -86,7 +86,7 @@ namespace Shorokoo.Core.Factory
                 FullInputs = node.FullInputs,
                 FullOutputs = node.FullOutputs,
                 FriendlyName = node.FriendlyName,
-                StackTrace = node.StackTrace,
+                CallStack = node.CallStack,
                 GraphOpenNodeKey = node.GraphOpenNodeKey,
                 IdentifierTemplate = node.IdentifierTemplate,
                 TargetFunction = node.TargetFunction,

@@ -67,7 +67,15 @@ namespace Shorokoo.Core.Graph
         /// <summary>
         /// Original stack trace captured when the node was first built, if any.
         /// </summary>
-        public string? StackTrace { get; set; }
+        public string? StackTrace
+        {
+            get => CallStack?.Text;
+            set => CallStack = Shorokoo.Core.Nodes.CallStack.FromText(value);
+        }
+
+        /// <summary>The call stack behind <see cref="StackTrace"/>, rendered only when that is read;
+        /// what copies of the node carry, so that none of them renders it.</summary>
+        internal CallStack? CallStack { get; set; }
 
         /// <summary>
         /// For close nodes (e.g. IF_CLOSE, LOOP_CLOSE), the key of the matching open node.

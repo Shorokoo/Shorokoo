@@ -969,7 +969,7 @@ internal class Rematerializer
             FullInputs = newFullInputs,
             FullOutputs = newFullOutputs,
             FriendlyName = producer.FriendlyName,
-            StackTrace = producer.StackTrace,
+            CallStack = producer.CallStack,
         };
     }
 }

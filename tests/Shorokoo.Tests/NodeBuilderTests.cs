@@ -85,6 +85,34 @@ public class NodeBuilderCoverageTests
     }
 
     [Fact]
+    public void TestANodeKeepsTheCallStackItWasBuiltFromThroughCopiesAndRebuildsOfItsGraph()
+    {
+        var a = InputScalar<float32>("a");
+        var graph = new InternalComputationGraph([a.ToVariable()],
+            [NodeBuilder.CallCustomOperator<Scalar<float32>>(ADD, [a, a], []).ToVariable()]);
+        static string? Built(InternalComputationGraph g) => g.Nodes.Single(n => n.OpCode == ADD).StackTrace;
+        static string? Rebuilt(InternalComputationGraph g)
+            => InternalComputationGraphConverter.BuildNodes(g).nodesInTopoOrder.Single(n => n.OpCode == ADD).StackTrace;
+
+        var trace = Built(graph);
+        Assert.Contains(nameof(TestANodeKeepsTheCallStackItWasBuiltFromThroughCopiesAndRebuildsOfItsGraph), trace);
+        Assert.StartsWith("   at Shorokoo.Core.Nodes.NodeDefinitions.NodeBuilder.BuildNode(", trace);
+        Assert.Equal(trace, Built(graph.Clone()));
+        Assert.Equal(trace, Built(new ComputationGraph(graph, GraphKind.Module).ToInternal()));
+        Assert.Equal(trace, Rebuilt(graph));
+
+        var add = InternalComputationGraphConverter.BuildNodes(graph).nodesInTopoOrder.Single(n => n.OpCode == ADD);
+        ImmutableDictionary<string, OutputTensorInfo[]> outputs = ImmutableDictionary<string, OutputTensorInfo[]>.Empty.Add("",
+            [new OutputTensorInfo { DType = DType.Float32, ModuleFn = null, Structure = DataStructure.Tensor, Rank = 0, Name = null }]);
+        Assert.Equal("given", new Node(add.NodeDef, add.Attributes, add.FullInputs, outputs, "given", null, null).StackTrace);
+
+        var stripped = graph.Clone();
+        FastStripCallStacks.Process(stripped);
+        Assert.Null(Built(stripped));
+        Assert.Null(Rebuilt(stripped));
+    }
+
+    [Fact]
     public void TestListValuedAttributesSurviveTheProtoRoundTrip()
     {
         Assert.Equal<bool>([true, false, true], RoundTrip(AttributeType.Bools, (bool[])[true, false, true]).GetBoolsVal("v").AssertNotNull());

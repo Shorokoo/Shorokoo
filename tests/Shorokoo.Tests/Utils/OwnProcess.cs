@@ -28,5 +28,16 @@ internal static class OwnProcess
         {
             return 1;
         }
+        finally
+        {
+            AppDomain.CurrentDomain.ProcessExit -= PythonFinalization;
+        }
     }
+
+    // pythonnet finalizes the interpreter as the process exits, collecting Python's garbage again and
+    // again until none is left: seconds of work once torch or jax is loaded, for a child that is
+    // about to be gone.
+    private static readonly EventHandler PythonFinalization = typeof(Python.Runtime.PythonEngine)
+        .GetMethod("OnProcessExit", BindingFlags.Static | BindingFlags.NonPublic)!
+        .CreateDelegate<EventHandler>();
 }

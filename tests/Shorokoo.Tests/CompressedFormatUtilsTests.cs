@@ -1733,6 +1733,34 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
 
     internal static void ATrainingSkptOfAParameterPastTwoGibibytesExtractsToTheDirectoryFormAndLoads()
     {
+        var dir = Directory.CreateTempSubdirectory("ShorokooLargeTrainingSkpt_").FullName;
+        try
+        {
+            var (zip, tree) = (Path.Combine(dir, "large.skpt"), Path.Combine(dir, "large-dir.skpt"));
+            var (trainable, state, optimizer, name) = RunAndSaveALargeTrainingCheckpoint(zip);
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            SkptFileFormat.PayloadDestinationInjection = s => new HoleWritingStream(s);
+            try { Persistence.ExtractSkpt(zip, tree); }
+            finally { SkptFileFormat.PayloadDestinationInjection = null; }
+            var read = (TensorData)Persistence.LoadTrainingCheckpointFromSkpt(zip, trainable, state, optimizer, null, null,
+                ComputeContext.Host).TrainableParams.Fields[name];
+            var (bytes, ends) = (read.ContentByteLength, new byte[8]);
+            try { Assert.True(read.TryCopyRows([0, (int)(LargeElements - 1)], 4, ends)); }
+            finally { read.Delete(); }
+
+            Assert.True(Directory.EnumerateFiles(tree, "*", SearchOption.AllDirectories).Max(f => new FileInfo(f).Length) > 4 * LargeElements);
+            Assert.Equal((4 * LargeElements, 1f, 5f), (bytes, BitConverter.ToSingle(ends, 0), BitConverter.ToSingle(ends, 4)));
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static (Core.TensorStructDef, Core.TensorStructDef, Core.TensorStructDef, string) RunAndSaveALargeTrainingCheckpoint(string path)
+    {
         var rig = TrainingRig.FromScratch(LargeWeightHead.ComputationGraph, Shorokoo.Modules.Losses.L2Loss.ComputationGraph,
             Shorokoo.Modules.Optimizers.SGDOptimizer.ComputationGraph,
             (IData[])[TensorData(DType.Int64, [], LargeElements), TensorData([4L], 10f, 20f, 30f, 40f)], 0.01f);
@@ -1751,48 +1779,13 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
             Rig = rig,
         };
 
-        (long, float, float) LoadedEnds(string path)
-        {
-            var read = (TensorData)Persistence.LoadTrainingCheckpointFromSkpt(path, rig.TrainableParamStructDef,
-                rig.ModelStateDef, rig.OptimizerStateDef, null, null, ComputeContext.Host).TrainableParams.Fields[name];
-            var ends = new byte[8];
-            try
-            {
-                Assert.True(read.TryCopyRows([0, (int)(LargeElements - 1)], 4, ends));
-                return (read.ContentByteLength, BitConverter.ToSingle(ends, 0), BitConverter.ToSingle(ends, 4));
-            }
-            finally
-            {
-                read.Delete();
-            }
-        }
-
         Assert.Equal(11f, ComputeContext.Default.Execute(checkpoint.ToInferenceModel(), TensorData(DType.Int64, [], LargeElements),
             TensorData([4L], 10f, 20f, 30f, 40f))[0].ToTensorData().As<float32>().CopyMemory<float>()[0]);
-
-        var dir = Directory.CreateTempSubdirectory("ShorokooLargeTrainingSkpt_").FullName;
-        try
-        {
-            var (zip, tree) = (Path.Combine(dir, "large.skpt"), Path.Combine(dir, "large-dir.skpt"));
-            SkptFileFormat.PayloadDestinationInjection = s => new HoleWritingStream(s);
-            try
-            {
-                Persistence.SaveTrainingCheckpointToSkpt(checkpoint, zip);
-                large.Delete();
-                Persistence.ExtractSkpt(zip, tree);
-            }
-            finally
-            {
-                SkptFileFormat.PayloadDestinationInjection = null;
-            }
-
-            Assert.True(Directory.EnumerateFiles(tree, "*", SearchOption.AllDirectories).Max(f => new FileInfo(f).Length) > 4 * LargeElements);
-            Assert.Equal((4 * LargeElements, 1f, 5f), LoadedEnds(zip));
-        }
-        finally
-        {
-            Directory.Delete(dir, recursive: true);
-        }
+        SkptFileFormat.PayloadDestinationInjection = s => new HoleWritingStream(s);
+        try { Persistence.SaveTrainingCheckpointToSkpt(checkpoint, path); }
+        finally { SkptFileFormat.PayloadDestinationInjection = null; }
+        large.Delete();
+        return (rig.TrainableParamStructDef, rig.ModelStateDef, rig.OptimizerStateDef, name);
     }
 
     [Fact]

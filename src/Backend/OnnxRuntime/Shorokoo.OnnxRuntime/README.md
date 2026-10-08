@@ -12,4 +12,4 @@ ONNX Runtime binaries for your platform:
 - `Shorokoo.WinCPU` — Windows x64, CPU
 - `Shorokoo.WinGPU` — Windows x64, GPU (CUDA)
 
-Documentation: https://github.com/Shorokoo/Shorokoo
+Documentation: https://github.com/Shorokoo/Shorokoo/tree/main/Documentation

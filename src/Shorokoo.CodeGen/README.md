@@ -14,4 +14,4 @@ This is a development-time dependency (a Roslyn analyzer); it adds nothing to
 your runtime output. Shorokoo is usable without it, but `[Module]` classes are
 the recommended way to define models.
 
-Documentation: https://github.com/Shorokoo/Shorokoo
+Documentation: https://github.com/Shorokoo/Shorokoo/tree/main/Documentation

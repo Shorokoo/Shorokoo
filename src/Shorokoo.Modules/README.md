@@ -51,4 +51,4 @@ var rig = TrainingRig.FromScratch(
     new AdamOptimizerHyperparameters { LearningRate = 1e-3f });
 ```
 
-Documentation: https://github.com/Shorokoo/Shorokoo
+Documentation: https://github.com/Shorokoo/Shorokoo/tree/main/Documentation

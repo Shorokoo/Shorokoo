@@ -18,4 +18,4 @@ native ONNX Runtime at the same path, so two referenced the ordinary way are one
 deployed twice. See
 [Deploying two backends](https://github.com/Shorokoo/Shorokoo/blob/main/Documentation/backends-and-devices.md#deploying-two-backends).
 
-Documentation: https://github.com/Shorokoo/Shorokoo
+Documentation: https://github.com/Shorokoo/Shorokoo/tree/main/Documentation

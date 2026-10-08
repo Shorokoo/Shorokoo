@@ -14,4 +14,4 @@ second backend package: they deliver their native ONNX Runtime at the same path,
 referenced the ordinary way are one of them deployed twice. See
 [Deploying two backends](https://github.com/Shorokoo/Shorokoo/blob/main/Documentation/backends-and-devices.md#deploying-two-backends).
 
-Documentation: https://github.com/Shorokoo/Shorokoo
+Documentation: https://github.com/Shorokoo/Shorokoo/tree/main/Documentation

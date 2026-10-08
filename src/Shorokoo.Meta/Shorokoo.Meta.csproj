@@ -19,6 +19,16 @@
     <PackageTags>machine-learning;deep-learning;neural-network;tensor;autodiff;onnx;training;ai</PackageTags>
   </PropertyGroup>
 
+  <!-- The guides travel with the package, under docs/, at the version they describe.
+       They are plain package files: PackagePath keeps them out of content/ and
+       contentFiles/, so nothing of them reaches a consumer's build. Their links to
+       the rest of the repository ("](../") are made absolute at the packed commit,
+       since the folder above them is not in the package. -->
+  <ItemGroup>
+    <ShorokooVersionedPackFile Include="..\..\Documentation\*.md"
+                               PackagePath="docs/" PackSubdir="docs/" RebaseParentLinks="true" />
+  </ItemGroup>
+
   <!-- These become the meta's package dependencies. Core and Modules flow as
        normal runtime deps. By default a project-reference dependency is packed with
        exclude="Build,Analyzers"; for CodeGen we override PrivateAssets=none so the

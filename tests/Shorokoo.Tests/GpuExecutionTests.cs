@@ -1286,6 +1286,23 @@ public class GpuExecutionTests
         public OrtArenaCardBackend() : base(cudaDeviceId: 0) => SessionsUseOrtArena = true;
     }
 
+    [CudaFact]
+    public void CudaProvider_AnAdamOrAdamWStepUpdatesATableInOneFusedPassToTheBit()
+    {
+        NNLibraryOptimizerTrainingCoverageTests.AssertFusedToTheBit(fuses => new FusingCardBackend(fuses), AdamOptimizer.ComputationGraph, [0.001f, 0.9f, 0.999f, 1e-8f]);
+        NNLibraryOptimizerTrainingCoverageTests.AssertFusedToTheBit(fuses => new FusingCardBackend(fuses), AdamWOptimizer.ComputationGraph, [0.001f, 0.9f, 0.999f, 1e-8f, 0.01f]);
+        NNLibraryOptimizerTrainingCoverageTests.AssertFusedToTheBit(fuses => new FusingCardBackend(fuses), AdamWOptimizer.ComputationGraph, [0.01f, 0.8f, 0.9f, 1e-6f, 0f]);
+        NNLibraryOptimizerTrainingCoverageTests.AssertFusedToTheBit(fuses => new FusingCardBackend(fuses), AdamWOptimizer.ComputationGraph,
+            new AdamWOptimizerHyperparameters { WeightDecay = Hyperparameter.Runtime() }.InOptimizerOrder(), 0.1f);
+        NNLibraryOptimizerTrainingCoverageTests.AssertFusedToTheBit(fuses => new FusingCardBackend(fuses), AdamWOptimizer.ComputationGraph,
+            [0.001f, 0.9f, 0.999f, 1e-8f, 0.01f], null, NNWideGatheredTableProjectionModel.ComputationGraph, 8256);
+    }
+
+    private sealed class FusingCardBackend : OrtBackend
+    {
+        public FusingCardBackend(bool fuses) : base(cudaDeviceId: 0) => FusesOptimizerUpdates = fuses;
+    }
+
     /// <summary>What this process holds on the card once every tensor nothing reaches any more is
     /// released: a released tensor's finalizer can leave another to the next collection.</summary>
     private static long HeldOnTheCard()

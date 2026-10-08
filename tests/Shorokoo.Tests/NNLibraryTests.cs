@@ -805,8 +805,13 @@ public class NNLibraryOptimizerTrainingCoverageTests
 
     private static (Dictionary<string, int> TableSized, float[][] State, long InPlace) ResidentStepsOnHost(
         bool fuses, ComputationGraph optimizer, Hyperparameter[] hyperparameters, float? runtimeValue, ComputationGraph? table = null, long rows = 64)
+        => ResidentSteps(new HostBackend(fuses), optimizer, hyperparameters, runtimeValue, table, rows);
+
+    private static (Dictionary<string, int> TableSized, float[][] State, long InPlace) ResidentSteps(
+        Shorokoo.OnnxRuntime.OrtBackend backend, ComputationGraph optimizer, Hyperparameter[] hyperparameters, float? runtimeValue,
+        ComputationGraph? table, long rows)
     {
-        using var context = new ComputeContext(new HostBackend(fuses)) { Diagnostics = new Shorokoo.Core.Backends.DiagnosticSettings { TraceNodePlacement = true } };
+        using var context = new ComputeContext(backend) { Diagnostics = new Shorokoo.Core.Backends.DiagnosticSettings { TraceNodePlacement = true } };
         var rig = TrainingRig.FromScratch(table ?? NNGatheredTableProjectionModel.ComputationGraph, L2Loss.ComputationGraph, optimizer,
             [new TensorDataModelParam("tokens", ModelParamType.InputParam, TensorData([3L], 1L, 5L, 9L))],
             hyperparameters, runtimeContext: context);
@@ -830,9 +835,13 @@ public class NNLibraryOptimizerTrainingCoverageTests
 
     private static void AssertFusedToTheBit(ComputationGraph optimizer, Hyperparameter[] hyperparameters, float? runtimeValue = null,
         ComputationGraph? table = null, long rows = 64)
+        => AssertFusedToTheBit(fuses => new HostBackend(fuses), optimizer, hyperparameters, runtimeValue, table, rows);
+
+    internal static void AssertFusedToTheBit(Func<bool, Shorokoo.OnnxRuntime.OrtBackend> backend, ComputationGraph optimizer,
+        Hyperparameter[] hyperparameters, float? runtimeValue = null, ComputationGraph? table = null, long rows = 64)
     {
-        var fused = ResidentStepsOnHost(true, optimizer, hyperparameters, runtimeValue, table, rows);
-        var written = ResidentStepsOnHost(false, optimizer, hyperparameters, runtimeValue, table, rows);
+        var fused = ResidentSteps(backend(true), optimizer, hyperparameters, runtimeValue, table, rows);
+        var written = ResidentSteps(backend(false), optimizer, hyperparameters, runtimeValue, table, rows);
         Assert.Equal(new Dictionary<string, int> { ["AdamUpdate"] = 1 }, fused.TableSized);
         Assert.DoesNotContain("AdamUpdate", written.TableSized.Keys);
         Assert.Equal(written.State, fused.State);

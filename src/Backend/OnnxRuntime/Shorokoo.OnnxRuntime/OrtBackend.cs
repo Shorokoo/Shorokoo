@@ -219,7 +219,7 @@ public abstract class OrtBackend : IShorokooBackend
                 ? $"{InstructionSets.Value}|cuda {CudaDriver.ComputeCapability(device) ?? "unknown"}"
                 : InstructionSets.Value;
             return FusesOptimizerUpdates && RegistersOperators
-                ? $"{RunModelBuild.Value}|{hardware}|fused|{FusedOperatorsBuild.Value}"
+                ? $"{RunModelBuild.Value}|{hardware}|fused|{FusedOperatorsBuild(OperatorsLibrary!)}"
                 : $"{RunModelBuild.Value}|{hardware}";
         }
     }
@@ -246,9 +246,12 @@ public abstract class OrtBackend : IShorokooBackend
         return string.Join(",", sets.Where(set => set.Supported).Select(set => set.Name));
     });
 
-    private static readonly Lazy<string> FusedOperatorsBuild = new(() =>
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> FusedOperatorsBuilds = new(StringComparer.Ordinal);
+
+    /// <summary>The build of the operators library at <paramref name="path"/>, by its content.</summary>
+    private static string FusedOperatorsBuild(string path) => FusedOperatorsBuilds.GetOrAdd(path, static p =>
     {
-        using var library = File.OpenRead(NativeAllocator.Located!);
+        using var library = File.OpenRead(p);
         return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(library));
     });
 
@@ -452,10 +455,11 @@ public abstract class OrtBackend : IShorokooBackend
     internal bool OnCard => _cudaDeviceId is not null;
 
     /// <summary>
-    /// Whether a training step's session on the host runs each Adam or AdamW parameter update as
-    /// the one operator the native library adds to the CPU provider, rather than as the chain of
-    /// element-wise operators it is written as (<see cref="OrtFusedUpdates"/>); true unless set
-    /// otherwise, for a test that holds the one to the other. The result is the same to the bit.
+    /// Whether a training step's session runs each Adam or AdamW parameter update as the one
+    /// operator the native library adds to the CPU provider, or its CUDA build to the CUDA provider,
+    /// rather than as the chain of element-wise operators it is written as
+    /// (<see cref="OrtFusedUpdates"/>); true unless set otherwise, for a test that holds the one to
+    /// the other. The result is the same to the bit.
     /// </summary>
     internal bool FusesOptimizerUpdates { get; init; } = true;
 
@@ -464,16 +468,21 @@ public abstract class OrtBackend : IShorokooBackend
     private static readonly object OperatorsGate = new();
     private static volatile bool _operatorsAdded;
 
-    /// <summary>Whether this backend's sessions register the native library's operators: those of
-    /// the CPU provider alone, where the library is deployed.</summary>
-    private bool RegistersOperators => _cudaDeviceId is null && _stockProvider && NativeAllocator.Located is not null;
+    /// <summary>The library whose operators this backend's sessions register, for the provider they
+    /// run on: the native library on the host, its CUDA build on a card, each where it is deployed;
+    /// none for a provider other than ONNX Runtime's own.</summary>
+    private string? OperatorsLibrary => !_stockProvider ? null
+        : _cudaDeviceId is null ? NativeAllocator.Located : NativeAllocator.LocatedCudaOperators;
+
+    /// <summary>Whether this backend's sessions register the native library's operators.</summary>
+    private bool RegistersOperators => OperatorsLibrary is not null;
 
     /// <summary>Whether a training step's session fuses its Adam and AdamW updates.</summary>
     private bool FusesHere => FusesOptimizerUpdates && RegistersOperators;
 
     /// <summary>
     /// <paramref name="model"/> as a session built at <paramref name="graphOptimization"/> runs it:
-    /// a training step's on the host with its Adam and AdamW updates fused
+    /// a training step's with its Adam and AdamW updates fused
     /// (<see cref="FusesOptimizerUpdates"/>), every other as it is, unparsed — as is one with no
     /// <c>Sqrt</c>, which every update fused takes.
     /// </summary>
@@ -881,7 +890,7 @@ public abstract class OrtBackend : IShorokooBackend
         options.LogId = log.Id;
         // Every session that may run one of the operators: a graph the runtime wrote out, which a
         // session is also built from, holds them as it was given them.
-        if (RegistersOperators) options.RegisterCustomOpLibrary(NativeAllocator.Located!);
+        if (OperatorsLibrary is { } operators) options.RegisterCustomOpLibrary(operators);
         if (intraOpThreads > 0) options.IntraOpNumThreads = intraOpThreads;
         // A session with no thread count of its own runs its operators on the process's pools, so
         // that two sessions run one after another -- a session and the one it places values

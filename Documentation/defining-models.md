@@ -122,7 +122,9 @@ How a hyper is supplied depends on the route:
   [Hyperparameter baking](#hyperparameter-baking). A hyper that is a **constant** before
   lowering (via `Foo.Call(Scalar(k), x)` or
   [`Specialize`](inference.md#hardcoding-hypers-with-specialize)) folds *every*
-  `IfElse` on it.
+  `IfElse` on it. Inside a `LoopAPI.Iterate` body, a gate computed from hypers and
+  `ctx.IterationIndex` folds **per iteration**
+  ([Per-layer variants](#per-layer-variants)).
 
   ```csharp
   // Apply bias only when useBias is true — both branches are built, one runs.
@@ -149,8 +151,9 @@ How a hyper is supplied depends on the route:
 
   These names key checkpoints and naming schemes
   ([onnx-and-weights.md](onnx-and-weights.md#naming)); under a plain `for`, adding or
-  removing one `Init(...)` renumbers every later parameter. Use a plain `for` only when
-  the body differs between iterations.
+  removing one `Init(...)` renumbers every later parameter. Iterations that differ are no
+  reason for a plain `for`: gate the difference on `ctx.IterationIndex` with an `IfElse`
+  ([Per-layer variants](#per-layer-variants)).
 
   Simple — add `x` to itself `n` times:
   ```csharp
@@ -339,6 +342,67 @@ Samples bind by position; to bind by name pass `NamedModelParam`s:
 Swapping `tiny` for `small` is the whole diff. Each variant is still built separately
 (see [What construction costs](training.md#what-construction-costs)).
 
+### Per-layer variants
+
+Layers of one stack may differ: a hyper says which layers take which branch, and the
+gate reads `ctx.IterationIndex`. Here bit `i` of `lookupMask` makes layer `i` take its
+values from a per-token table, `v = γ·E_v[token]`, instead of a projection, `v = h·W_V`;
+`E_v` starts from the token embedding:
+
+```csharp
+[TrainableParamInitializer]
+public static partial class ValueBankInit                 // E_v = wte·W, W drawn here
+{
+    public static Tensor<float32> Inline(Vector<int64> shape, Tensor<float32> wte)
+        => wte.MatMul(XavierUniform.Init([shape[1], shape[1]]));
+}
+
+[Module]
+public partial class ValueLookupStack
+{
+    public static Tensor<float32> Inline(
+        Tensor<int64> tokens,
+        [Hyper] Scalar<int64> vocab, [Hyper] Scalar<int64> width,
+        [Hyper] Scalar<int64> layers, [Hyper] Scalar<int64> lookupMask)
+    {
+        var wte = Normal.Init([vocab, width]);
+        var x = wte.Gather(tokens);
+        foreach (var ctx in LoopAPI.Iterate(layers))
+        {
+            var isLookup = ((lookupMask >> ctx.IterationIndex) & Scalar(1L)) == Scalar(1L);
+            var wv    = XavierUniform.Init([width, width]);         // ordinary layers
+            var bank  = ValueBankInit.Init([vocab, width], wte);    // lookup layers
+            var gamma = ScalarOnes.Init();                          // lookup layers
+            var v = isLookup.IfElse(bank.Gather(tokens) * gamma, x.MatMul(wv));
+            x = x + v;                                              // attention, FFN, … elided
+        }
+        return x;
+    }
+}
+```
+
+With `layers` and `lookupMask` fixed by `Specialize`, `isLookup` is a constant on every
+iteration, so each iteration's `IfElse` folds on its own and the layer keeps only its
+branch's parameters. `layers = 3, lookupMask = 0b010` gives:
+
+```
+TrainableParam#0.wte#0
+TrainableParam#0.Loop#0:0.wv#0
+TrainableParam#0.Loop#0:1.bank#0
+TrainableParam#0.Loop#0:1.gamma#0
+TrainableParam#0.Loop#0:2.wv#0
+```
+
+Passing the values as concretization hints instead gives the same parameters
+([What concretization fixes](inference.md#what-concretization-fixes)). Any gate on hypers
+and the index works the same way: `[Hyper] Scalar<int64> lookupFrom` with
+`ctx.IterationIndex >= lookupFrom` makes every layer from `lookupFrom` on a lookup layer.
+
+`bank`'s initializer reading `wte`, a parameter outside the branch, does not keep `bank`
+alive in the ordinary layers: pruning follows where a parameter's value goes, not what
+its initializer reads ([Writing your own](nn-library.md#initializers-shorokoomodulesinitializers)
+covers initializers that take another parameter).
+
 ### What must still be a C# argument
 
 - **`Inline`'s return type cannot vary.** A choice that changes the output *type*
@@ -346,7 +410,9 @@ Swapping `tiny` for `small` is the whole diff. Each variant is still built separ
   a hyper. `TrainingRig.FromScratch` takes the loss as a **separate graph**, so pick the
   reduction there ([nn-library.md](nn-library.md#loss-configurable-knobs)).
 - **There is no enum hyper.** Encode the knob as a `Scalar<int64>` compared in-graph
-  (`(mode > Scalar(3L)).IfElse(a, b)`), or make it a plain C# argument of a `static`
+  (`(mode > Scalar(3L)).IfElse(a, b)`); the comparison may read `ctx.IterationIndex`, so
+  the knob can differ per layer ([Per-layer variants](#per-layer-variants)). A choice
+  fixed at each call site can instead be a plain C# argument of a `static`
   non-`[Module]` helper, as `Recurrent.RNN` and `EmbeddingBag.Bag` do
   ([nn-library.md](nn-library.md#recurrent-layers)).
 - **Both `IfElse` branches must agree in *type*.** Shapes may differ: the result takes
@@ -649,10 +715,12 @@ new Module<Scalar<float32>, (Tensor<float32>, Tensor<float32>), Tensor<float32>>
 - An initializer class named `Init` (`MSG003`).
 - Missing `partial` on the class or `static` on `Inline`.
 - A plain C# `for`/`if` on graph values; use `LoopAPI.Iterate` / `.IfElse`.
-- One class per configuration; use `[Hyper]` values
-  ([Workflow: one module, many variants](#workflow-one-module-many-variants)).
-- Stacking layers with a plain C# `for`, even with a constant count
-  ([Control flow inside `Inline`](#control-flow-inside-inline)).
+- One class per configuration, or per kind of layer; use `[Hyper]` values
+  ([Workflow: one module, many variants](#workflow-one-module-many-variants)), gated on
+  `ctx.IterationIndex` for layers that differ ([Per-layer variants](#per-layer-variants)).
+- Stacking layers with a plain C# `for`, even with a constant count or layers that
+  differ; use `LoopAPI.Iterate` ([Control flow inside `Inline`](#control-flow-inside-inline),
+  [Per-layer variants](#per-layer-variants)).
 - Switching threads in a module body (`async`/`await`, `Parallel.For`): the body runs on
   one thread, and `Globals.StateUpdate` or `Rng.Pin` from another thread throws.
 - Referencing the generator as a normal project reference instead of an analyzer

@@ -1118,6 +1118,35 @@ public class ModulesCoverageTests
 
     }
 
+    private static string PerLayerParams(long layers, long lookupMask, bool viaSpecialize)
+    {
+        var g = Modules.PerLayerValueLookupStack.ComputationGraph;
+        TensorData[] hypers = [TensorData([], 5L), TensorData([], 3L), TensorData([], layers), TensorData([], lookupMask)];
+        var tokens = TensorData([2L], 1L, 4L);
+        if (viaSpecialize) g = g.Specialize(g.FromOrderedInputs([.. hypers]));
+        var arch = g.ToConcreteArchitecture(viaSpecialize ? [tokens] : [.. hypers, tokens]);
+        return string.Join(" ", arch.GetConcreteModelParamInfos().ParamInfos
+            .Select(p => p.ToShorokooIdString().Replace("TrainableParam#0.", "")));
+    }
+
+    [Fact]
+    public void TestAGateOnHypersAndTheIterationIndexKeepsOnlyEachLayersOwnBranchParams()
+    {
+        Assert.Equal("wte#0 Loop#0:0.wv#0 Loop#0:1.bank#0 Loop#0:1.gamma#0 Loop#0:2.wv#0",
+                     PerLayerParams(3, 0b010, viaSpecialize: true));
+        Assert.Equal("wte#0 Loop#0:0.bank#0 Loop#0:0.gamma#0 Loop#0:1.wv#0 Loop#0:2.bank#0 Loop#0:2.gamma#0",
+                     PerLayerParams(3, 0b101, viaSpecialize: true));
+        Assert.Equal("wte#0 Loop#0:0.wv#0 Loop#0:1.wv#0",
+                     PerLayerParams(2, 0, viaSpecialize: true));
+        Assert.Equal("wte#0 Loop#0:0.wv#0 Loop#0:1.bank#0 Loop#0:1.gamma#0 Loop#0:2.wv#0",
+                     PerLayerParams(3, 0b010, viaSpecialize: false));
+    }
+
+    [Fact]
+    public void TestAShapedInitializerWithoutAShapeVectorFirstIsRefused()
+        => Assert.ThrowsAny<InvalidOperationException>(() => Modules.ParamFromParamWithoutShapeLayer.ComputationGraph
+            .ToConcreteArchitecture([TensorData([2L], 1L, 4L)]));
+
     [Fact]
     public void TestSpecializeFullPartialAndThenConcretizePipelineCoverage()
     {

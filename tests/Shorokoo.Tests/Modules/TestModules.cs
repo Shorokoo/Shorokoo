@@ -1725,6 +1725,58 @@ namespace Shorokoo.Tests.Modules
         }
     }
 
+    [TrainableParamInitializer]
+    public static partial class ValueBankInit
+    {
+        public static Tensor<float32> Inline(Vector<int64> shape, Tensor<float32> embedding)
+            => embedding.MatMul(XavierUniform.Init([shape[1], shape[1]]));
+    }
+
+    [TrainableParamInitializer]
+    public static partial class HalfOfParamWithoutShapeInit
+    {
+        public static Tensor<float32> Inline(Tensor<float32> source) => source * Scalar(0.5f);
+    }
+
+    /// <summary>A shaped parameter whose initializer takes another parameter where the shape
+    /// vector belongs.</summary>
+    [Module]
+    public partial class ParamFromParamWithoutShapeLayer
+    {
+        public static Tensor<float32> Inline(Tensor<int64> tokens)
+        {
+            var wte = Normal.Init([Scalar(5L), Scalar(3L)]);
+            var half = HalfOfParamWithoutShapeInit.Init(wte);
+            return wte.Gather(tokens) + half.Gather(tokens);
+        }
+    }
+
+    /// <summary>Per-layer variants in one loop body, as in the per-layer example in
+    /// <c>Documentation/defining-models.md</c>: bit i of <c>lookupMask</c> makes layer i take
+    /// its value from a lookup table initialized from <c>wte</c> instead of a projection.</summary>
+    [Module]
+    public partial class PerLayerValueLookupStack
+    {
+        public static Tensor<float32> Inline(
+            Tensor<int64> tokens,
+            [Hyper] Scalar<int64> vocab, [Hyper] Scalar<int64> width,
+            [Hyper] Scalar<int64> layers, [Hyper] Scalar<int64> lookupMask)
+        {
+            var wte = Normal.Init([vocab, width]);
+            var x = wte.Gather(tokens);
+            foreach (var ctx in LoopAPI.Iterate(layers))
+            {
+                var isLookup = ((lookupMask >> ctx.IterationIndex) & Scalar(1L)) == Scalar(1L);
+                var wv = XavierUniform.Init([width, width]);
+                var bank = ValueBankInit.Init([vocab, width], wte);
+                var gamma = ScalarOnes.Init();
+                var v = isLookup.IfElse(bank.Gather(tokens) * gamma, x.MatMul(wv));
+                x = x + v;
+            }
+            return x;
+        }
+    }
+
     /// <summary>An output whose rank its flag decides: the input as it is, or flattened.</summary>
     [Module]
     public partial class RankByFlagLayer

@@ -246,8 +246,15 @@ Control flow is rewritten only as the parameter space requires:
 - An `IfElse` whose selected branch holds the parameters, or that holds none, stays live and
   selects at run time. For `bit.IfElse(withParams, without)`, baking the bit **off** folds it;
   baking it **on** leaves it live.
-- Only an `IfElse` that *solely* owns the pruned parameters folds; one sharing them with
-  another `IfElse`, or a tuple `IfElse`, stays live.
+- Only an `IfElse` that *solely* owns the pruned parameters folds: every use of a pruned
+  parameter's value must lead into that one branch. If the value also reaches another
+  `IfElse`, an `IfElse` condition or a model output, or the `IfElse` is a tuple, it stays
+  live. Ownership follows the parameter's value, not its inputs: a parameter whose
+  initializer reads a parameter from outside the branch is still owned by the branch.
+- Inside a `LoopAPI.Iterate` body, a gate computed from these values and
+  `ctx.IterationIndex` is resolved **per iteration**: each iteration keeps only the
+  parameters its own branch holds, so the layers of one stack can differ
+  ([Per-layer variants](defining-models.md#per-layer-variants)).
 - The concretization value decides, not the `[Hyper]` marker: a plain runtime input gating a
   parameter is resolved the same way. Mark such gates `[Hyper]` so the baking is visible.
 

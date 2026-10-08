@@ -2453,6 +2453,20 @@ public partial class NNCrossEntropySmoothedLoss
 }
 
 [Module]
+public partial class NNCrossEntropySmoothedIgnore999Loss
+{
+    public static Scalar<float32> Inline(Tensor<float32> predictions, Tensor<int64> targets)
+        => CrossEntropyLoss.Reduced(predictions, targets, ignoreIndex: 999L, labelSmoothing: 0.1f);
+}
+
+[Module]
+public partial class NNCrossEntropyWeightedIgnoreMinus100Loss
+{
+    public static Scalar<float32> Inline(Tensor<float32> predictions, Tensor<int64> targets)
+        => CrossEntropyLoss.Reduced(predictions, targets, weight: Tensor([5L], 2f, 1f, 0.5f, 3f, 1f), ignoreIndex: -100L);
+}
+
+[Module]
 public partial class NNNllIgnoreMinus100Loss
 {
     public static Scalar<float32> Inline(Tensor<float32> predictions, Tensor<int64> targets)
@@ -2516,7 +2530,7 @@ public partial class NNChainedBatchedProjectionModel
     public static Tensor<float32> Inline(Tensor<float32> x)
     {
         for (int layer = 0; layer < 8; layer++)
-            x = x.MatMul(Normal.Init(Vector(4L, 4L)));
+            x = x.MatMul(Normal.Init(Vector(4L, 4L)).Named($"w{layer}"));
         return x;
     }
 }

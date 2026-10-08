@@ -16,6 +16,9 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.ML.OnnxRuntime.Managed" Version="1.30.0" />
+    <!-- For ONNX Runtime's C API header alone, which the native library is compiled against; none
+         of the package's assets reach this assembly or its package. -->
+    <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.30.0" ExcludeAssets="all" PrivateAssets="all" GeneratePathProperty="true" />
   </ItemGroup>
 
   <!-- NuGet auto-imports build/<PackageId>.targets for a DIRECT PackageReference and
@@ -34,8 +37,9 @@
     <ProjectReference Include="..\..\..\Shorokoo\Shorokoo.csproj" />
   </ItemGroup>
 
-  <!-- The native allocator every session allocates through (native/shorokoo_ort_allocator.cpp),
-       built with CMake for the platform the build runs on. It lands under runtimes/<rid>/native in
+  <!-- The native library: the allocator every session allocates through
+       (native/shorokoo_ort_allocator.cpp) and the operators a CPU session registers
+       (native/shorokoo_ort_ops.cpp), built with CMake for the platform the build runs on. It lands under runtimes/<rid>/native in
        the output, beside where ONNX Runtime's own natives go, and is found there by
        NativeAllocator.cs; the package carries it for every platform the backends target, under
        the same path. -->
@@ -89,7 +93,7 @@
           Condition="'$(ShorokooAllocatorRid)' != ''"
           DependsOnTargets="LocateShorokooCMake"
           BeforeTargets="BeforeBuild"
-          Inputs="$(ShorokooAllocatorSource)/shorokoo_ort_allocator.cpp;$(ShorokooAllocatorSource)/CMakeLists.txt"
+          Inputs="$(ShorokooAllocatorSource)/shorokoo_ort_allocator.cpp;$(ShorokooAllocatorSource)/shorokoo_ort_ops.cpp;$(ShorokooAllocatorSource)/CMakeLists.txt"
           Outputs="$(ShorokooAllocatorOutDir)/$(ShorokooAllocatorFile)">
     <Exec Command="&quot;$(ShorokooCMake)&quot; --version" ConsoleToMSBuild="true" StandardOutputImportance="low"
           IgnoreExitCode="true" IgnoreStandardErrorWarningFormat="true" EchoOff="true">
@@ -97,7 +101,7 @@
     </Exec>
     <Error Condition="'$(_ShorokooCMakeFound)' != '0'"
            Text="Shorokoo.OnnxRuntime builds a native library of its own, which takes CMake and a C++ compiler, and '$(ShorokooCMake)' did not run. On Windows, install Visual Studio (2019 or later, the Build Tools will do) with its C++ workload, which brings both; on Linux, install cmake and g++. Or name a CMake with -p:ShorokooCMake=&lt;path&gt;." />
-    <Exec Command="&quot;$(ShorokooCMake)&quot; -S &quot;$(ShorokooAllocatorSource)&quot; -B &quot;$(ShorokooAllocatorBuildDir)&quot; -DSHOROKOO_OUTPUT_DIR=&quot;$(ShorokooAllocatorOutDir)&quot;"
+    <Exec Command="&quot;$(ShorokooCMake)&quot; -S &quot;$(ShorokooAllocatorSource)&quot; -B &quot;$(ShorokooAllocatorBuildDir)&quot; -DSHOROKOO_OUTPUT_DIR=&quot;$(ShorokooAllocatorOutDir)&quot; -DSHOROKOO_ORT_INCLUDE_DIR=&quot;$(PkgMicrosoft_ML_OnnxRuntime)/build/native/include&quot;"
           StandardOutputImportance="low" />
     <Exec Command="&quot;$(ShorokooCMake)&quot; --build &quot;$(ShorokooAllocatorBuildDir)&quot; --config Release"
           StandardOutputImportance="low" />
@@ -111,7 +115,7 @@
       <_ShorokooAllocatorLinux Condition="'$(ShorokooAllocatorRid)' != 'linux-x64'">$(ShorokooNativeAllocators)/linux-x64/libshorokoo_ort_allocator.so</_ShorokooAllocatorLinux>
     </PropertyGroup>
     <Error Condition="'$(ShorokooNativeAllocators)' == '' or !Exists('$(_ShorokooAllocatorWin)') or !Exists('$(_ShorokooAllocatorLinux)')"
-           Text="The Shorokoo.OnnxRuntime package carries its native allocator for win-x64 and for linux-x64, and a build makes only its own platform's. Build the other on its platform (cmake -S native -B build -DSHOROKOO_OUTPUT_DIR=&lt;folder&gt;/&lt;rid&gt;, then cmake --build build --config Release) and pack with -p:ShorokooNativeAllocators=&lt;folder&gt;." />
+           Text="The Shorokoo.OnnxRuntime package carries its native allocator for win-x64 and for linux-x64, and a build makes only its own platform's. Build the other on its platform (cmake -S native -B build -DSHOROKOO_OUTPUT_DIR=&lt;folder&gt;/&lt;rid&gt; -DSHOROKOO_ORT_INCLUDE_DIR=&lt;ONNX Runtime include folder&gt;, then cmake --build build --config Release) and pack with -p:ShorokooNativeAllocators=&lt;folder&gt;." />
   </Target>
 
   <!-- The arena-statistics binding reaches ONNX Runtime by reflection, so the guard that fails

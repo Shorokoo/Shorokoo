@@ -61,7 +61,10 @@ internal sealed record UnorderedStatePair(
 /// <item><c>P</c> itself reads <c>I</c> only as the first operand of a two-input <c>Add</c>,
 /// <c>Sub</c>, <c>Mul</c> or <c>Div</c>, which reads each element before writing the same element
 /// of its output — the in-place form ONNX Runtime uses for these operators itself. With <c>O</c>
-/// and <c>I</c> of one shape, that operand is not broadcast.</item>
+/// and <c>I</c> of one shape, that operand is not broadcast. Or <c>P</c> is Shorokoo's fused
+/// optimizer update (<c>ai.shorokoo</c> <c>AdamUpdate</c>), <c>O</c> its parameter or moment output
+/// and <c>I</c> read only as the input of the same position, which it updates element by element
+/// in the same way.</item>
 /// <item>No node holding a subgraph refers to <c>I</c> or a view of it: what a subgraph hands back
 /// may be the memory it was given.</item>
 /// </list>
@@ -296,6 +299,14 @@ public static class OutputAliasProof
 
     internal static bool IsStandard(NodeProto node) => node.Domain is "" or "ai.onnx";
 
+    // Shorokoo's own fused optimizer update, the AdamUpdate of the ai.shorokoo domain that the ONNX
+    // Runtime backend writes an Adam or AdamW update as: it writes its outputs 0, 1 and 2 (the
+    // parameter and the two moments) over its inputs 0, 1 and 2, element by element, each element
+    // read before the same element is written, and reads its other inputs whole.
+    private const int UpdatedInPlace = 3;
+
+    private static bool IsUpdate(NodeProto node) => node.Domain == "ai.shorokoo" && node.OpType == "AdamUpdate";
+
     internal static bool HoldsSubgraph(NodeProto node)
         => node.Attributes.Any(a => a.G is not null || a.Graphs.Count > 0);
 
@@ -409,7 +420,7 @@ public static class OutputAliasProof
                 }
             }
 
-            if (readers.Remove(writer) && !WritesInPlace(p, views)) return null;
+            if (readers.Remove(writer) && !WritesInPlace(p, views, output)) return null;
             if (foldable && !AddFoldableReaders(views, writer, readers)) return null;
             return (writer, NotAncestorsOf(writer, readers));
         }
@@ -476,10 +487,19 @@ public static class OutputAliasProof
 
         /// <summary>Whether <paramref name="p"/> reads the input — through one of
         /// <paramref name="views"/> — only as it may while writing over it.</summary>
-        private static bool WritesInPlace(NodeProto p, HashSet<string> views)
-            => IsStandard(p) && InPlace.Contains(p.OpType)
-               && p.Inputs.Count == 2 && p.Outputs.Count == 1
-               && views.Contains(p.Inputs[0]) && !views.Contains(p.Inputs[1]);
+        private static bool WritesInPlace(NodeProto p, HashSet<string> views, string output)
+        {
+            if (IsStandard(p))
+                return InPlace.Contains(p.OpType)
+                       && p.Inputs.Count == 2 && p.Outputs.Count == 1
+                       && views.Contains(p.Inputs[0]) && !views.Contains(p.Inputs[1]);
+            if (!IsUpdate(p)) return false;
+            var k = p.Outputs.IndexOf(output);
+            if (k < 0 || k >= UpdatedInPlace) return false;
+            for (int i = 0; i < p.Inputs.Count; i++)
+                if (views.Contains(p.Inputs[i]) != (i == k)) return false;
+            return true;
+        }
 
         /// <summary>
         /// Those of <paramref name="readers"/> that are not ancestors of node

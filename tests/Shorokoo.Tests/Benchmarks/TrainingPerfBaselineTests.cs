@@ -24,6 +24,23 @@ public partial class PerfBaselineLinearModel
 }
 
 /// <summary>
+/// Tokens through four <c>[16384, 64]</c> tables, each adding its row of the token, and a
+/// <c>[64, 16]</c> head: four million parameters and next to no arithmetic, so a step's time is
+/// its optimizer's passes over the tables.
+/// </summary>
+[Module]
+public partial class PerfTableBankModel
+{
+    public static Tensor<float32> Inline(Tensor<int64> tokens)
+    {
+        var x = Shorokoo.Modules.Initializers.Normal.Init([Scalar(16384L), Scalar(64L)]).Gather(tokens);
+        for (int table = 0; table < 3; table++)
+            x = x + Shorokoo.Modules.Initializers.Normal.Init([Scalar(16384L), Scalar(64L)]).Gather(tokens);
+        return x.MatMul(Shorokoo.Modules.Initializers.Normal.Init([Scalar(64L), Scalar(16L)]));
+    }
+}
+
+/// <summary>
 /// Code-pinned performance gate for the training hot path: the throughput half of the
 /// release checks, frozen here as code so a regression is caught on every run rather
 /// than at release time. It measures four phases of the
@@ -126,6 +143,50 @@ public class TrainingPerfBaselineTests
         }
 
         Assert.True(on <= off * 1.15);
+    }
+
+    private sealed class HostBackend : Shorokoo.OnnxRuntime.OrtBackend
+    {
+        public HostBackend(bool fuses) => FusesOptimizerUpdates = fuses;
+    }
+
+    [Fact]
+    public void AnAdamWStepOverLargeTablesOnTheHostTakesLessFusedThanWrittenOut()
+    {
+        long[] tokens = [.. Enumerable.Range(0, 256).Select(i => i * 7919L % 16384)];
+        (TrainingRig Rig, ResidentTrainingRun Run, ComputeContext Context) Begin(bool fuses)
+        {
+            var context = new ComputeContext(new HostBackend(fuses));
+            var rig = TrainingRig.FromScratch(PerfTableBankModel.ComputationGraph, L2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph,
+                [new TensorDataModelParam("tokens", ModelParamType.InputParam, TensorData([256L], tokens))],
+                new AdamWOptimizerHyperparameters { WeightDecay = 0f }, runtimeContext: context);
+            return (rig, rig.BeginResidentRun(), context);
+        }
+        double Step((TrainingRig Rig, ResidentTrainingRun Run, ComputeContext Context) r)
+        {
+            var x = r.Rig.InputDef.FromOrderedData(TensorData([256L], tokens));
+            var y = r.Rig.TargetDef.FromOrderedData(TensorData([256L, 16L], new float[256 * 16]));
+            var watch = Stopwatch.StartNew();
+            r.Run.Step(x, y);
+            return watch.Elapsed.TotalMilliseconds;
+        }
+
+        var (fused, written) = (Begin(true), Begin(false));
+        var (onFused, onWritten) = (new List<double>(), new List<double>());
+        for (int s = 0; s < 43; s++)
+        {
+            var (f, w) = (Step(fused), Step(written));
+            if (s < 3) continue;
+            onFused.Add(f);
+            onWritten.Add(w);
+        }
+        foreach (var r in (ReadOnlySpan<(TrainingRig, ResidentTrainingRun Run, ComputeContext Context)>)[fused, written])
+        {
+            r.Run.Dispose();
+            r.Context.Dispose();
+        }
+
+        Assert.True(onFused.Order().ElementAt(20) <= onWritten.Order().ElementAt(20) * 0.8);
     }
 
     private static void AssertNotSlower(string phase, double measuredMs, double baselineMs, double factor)

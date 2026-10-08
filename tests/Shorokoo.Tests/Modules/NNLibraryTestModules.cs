@@ -2501,6 +2501,19 @@ public partial class NNGatheredBiasModel
         => Normal.Init(Vector(64L)).Gather(tokens);
 }
 
+/// <summary>A batch of rows through eight <c>[4, 4]</c> weights in turn, each product a batch of
+/// matrices times a matrix: a stack of linear layers.</summary>
+[Module]
+public partial class NNChainedBatchedProjectionModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+    {
+        for (int layer = 0; layer < 8; layer++)
+            x = x.MatMul(Normal.Init(Vector(4L, 4L)));
+        return x;
+    }
+}
+
 /// <summary><see cref="NNGatheredTableModel"/> projected by a <c>[4, 48]</c> weight: the shape of
 /// an embedding feeding a linear layer.</summary>
 [Module]

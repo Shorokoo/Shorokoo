@@ -465,7 +465,11 @@ foreach (var run in stats.RecentRuns.TakeLast(5))
 
 ## Did part of my GPU graph run on the host?
 
-A CUDA session leaves operators the provider cannot run to the host. Two signals:
+A CUDA session leaves operators the provider cannot run to the host: among them the bitwise
+operators of every random draw (`Dropout`, a random initializer), which the CUDA provider has no
+kernels for, so a draw is computed on the host and copied to the card. ONNX Runtime's own notice
+that it added such copies arrives as a `Verbose` message ([Log messages](backends-and-devices.md#log-messages)), once
+per session built; ask for placement instead. Two signals:
 
 ```csharp
 switch (compiled.OutputPlacement)

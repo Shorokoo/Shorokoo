@@ -1012,16 +1012,11 @@ public abstract class OrtBackend : IShorokooBackend
 
     /// <summary>
     /// The level the logger of a session or of a run logs from, for settings <paramref name="log"/>:
-    /// theirs where they ask for <see cref="ShorokooLogSeverity.Info"/> or
-    /// <see cref="ShorokooLogSeverity.Verbose"/>, and <see cref="ShorokooLogSeverity.Fatal"/>
-    /// otherwise. What those loggers warn of is the graph Shorokoo lowered and handed the runtime — an
-    /// initializer its rewrites left unread, a custom operator constant folding has no kernel for, the
-    /// optimized graph Shorokoo has it write out — and what they report as an error is a failure the
-    /// run raises as an exception, so settings that ask for warnings get what ONNX Runtime logs for
-    /// the process instead: a kernel's warning about an operator it is given.
+    /// the least severe message they pass on. Of what ONNX Runtime logs there, a message no user can
+    /// act on is delivered at <see cref="ShorokooLogSeverity.Verbose"/> (<see cref="OrtLogTriage"/>),
+    /// so it reaches only settings that ask for that.
     /// </summary>
-    internal static ShorokooLogSeverity LoggerSeverity(LogSettings log)
-        => log.EffectiveSeverity < ShorokooLogSeverity.Warning ? log.EffectiveSeverity : ShorokooLogSeverity.Fatal;
+    internal static ShorokooLogSeverity LoggerSeverity(LogSettings log) => log.EffectiveSeverity;
 
     /// <summary>Releases a session nothing will own, and its profile folder.</summary>
     private static void Discard(BuiltSession built)

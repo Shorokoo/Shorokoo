@@ -140,12 +140,27 @@ What reaches the sink, per backend:
   and each run with settings other than its session's through one named for the run, so every
   message goes to the build or run it came from. ONNX Runtime also logs much of what happens during
   a run through the session's logger; that goes to the run in progress on the thread that logged it.
-  A session's and a run's loggers log only where the settings ask for `Info` or `Verbose`: what they
-  warn of is the graph Shorokoo lowered and handed the runtime (an initializer its rewrites left
-  unread, a custom operator constant folding has no kernel for), and what they report as an error is
-  a failure the run raises as an exception. A run asking for `Info` or `Verbose` gets what the
-  session's logger says during it from the level the session was built at, so compile on a context
-  asking for as much to see all of it.
+  A session's and a run's loggers log from the severity their settings ask for. A run asking for
+  less than its session was built at gets what the session's logger says during it from the
+  session's level, so compile on a context asking for as much to see all of it.
+
+  Some of what ONNX Runtime logs reports on something no user can act on, and arrives as `Verbose`
+  whatever severity ONNX Runtime gave it, so that every warning that reaches a sink at the default
+  severity is worth reading:
+
+  - that it wrote out the graph it optimized, which Shorokoo has it do for its own use;
+  - that a CUDA session left some nodes to the host and added copies to and from the card. Ask
+    `DiagnosticSettings.TraceNodePlacement` for which nodes, and `CompiledGraph.OutputPlacement` for
+    where the outputs are computed ([Did part of my GPU graph run on the
+    host?](gpu-backends.md#did-part-of-my-gpu-graph-run-on-the-host));
+  - that its optimizer could not fold a node into a constant, which the run then computes, or that
+    two of its own shape inferences of a value disagreed;
+  - that a weight the session reads from memory it already holds is listed among the model's
+    inputs, which Shorokoo does so that the weight is not folded;
+  - a node failing during a run, which fails the run: the exception it raises carries the same
+    message.
+
+  Every other message arrives at the severity ONNX Runtime gave it.
 
   ONNX Runtime also logs for the whole process rather than for a session — a kernel's warning about
   an operator it is handed, at any severity. Such a message goes to the settings of the session

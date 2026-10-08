@@ -153,11 +153,12 @@ internal static class OrtEnvironment
     // pointer to it and calls it from any thread for as long as the environment lives. Every copy of
     // this assembly, the ones IsolatedBackend loads included, hands its runtime's messages to the one
     // table of routes the core keeps, which delivers each to the session or run whose logger it went
-    // through.
+    // through, at the severity OrtLogTriage gives it.
     private static readonly DOrtLoggingFunction LogFunction = Log;
 
     private static void Log(IntPtr param, OrtLoggingLevel severity, string category, string logId, string codeLocation, string message)
-        => RuntimeLogRoutes.Deliver(logId, (ShorokooLogSeverity)severity, Source, category, codeLocation, message);
+        => RuntimeLogRoutes.Deliver(
+            logId, OrtLogTriage.Of((ShorokooLogSeverity)severity, codeLocation, message), Source, category, codeLocation, message);
 
     /// <summary>What a message ONNX Runtime logs names as its source.</summary>
     internal const string Source = "ONNX Runtime";

@@ -1249,7 +1249,7 @@ public class CoreUtilsCoverageTests
         Assert.Throws<ArgumentOutOfRangeException>(() => new LogSettings { MinimumSeverity = (ShorokooLogSeverity)5 });
         Assert.Throws<ArgumentNullException>(() => new RunSettings { Log = null! });
         Assert.Equal(
-            [ShorokooLogSeverity.Verbose, ShorokooLogSeverity.Info, ShorokooLogSeverity.Fatal, ShorokooLogSeverity.Fatal, ShorokooLogSeverity.Fatal],
+            [ShorokooLogSeverity.Verbose, ShorokooLogSeverity.Info, ShorokooLogSeverity.Warning, ShorokooLogSeverity.Error, ShorokooLogSeverity.Fatal],
             [.. Enum.GetValues<ShorokooLogSeverity>().Take(4).Select(s => OrtBackend.LoggerSeverity(new LogSettings { MinimumSeverity = s })),
                 OrtBackend.LoggerSeverity(info with { Sink = null })]);
 
@@ -1269,7 +1269,77 @@ public class CoreUtilsCoverageTests
         (built, ran) = Logged(backend, info, _ => LogSettings.None);
         Assert.DoesNotContain(built, Misshapen);
         (built, ran) = Logged(backend, new LogSettings(), sink => Into(sink, ShorokooLogSeverity.Warning));
-        Assert.Empty(built.Concat(ran));
+        Assert.True(Unused(Assert.Single(built)));
+        Assert.True(Misshapen(Assert.Single(ran)));
+    }
+
+    internal static byte[] NoisyModel()
+    {
+        TypeProto Tensor(int type, long? dim)
+        {
+            var tensor = new TypeProto.Tensor { ElemType = type, Shape = new TensorShapeProto() };
+            tensor.Shape.Dims.Add(dim is { } d ? new TensorShapeProto.Dimension { DimValue = d } : new TensorShapeProto.Dimension { DimParam = "N" });
+            return new TypeProto { TensorType = tensor };
+        }
+        var graph = new GraphProto();
+        graph.Inputs.Add(new ValueInfoProto { Name = "x", Type = Tensor(1, null) });
+        graph.Inputs.Add(new ValueInfoProto { Name = "i", Type = Tensor(7, 1) });
+        graph.Inputs.Add(new ValueInfoProto { Name = "w", Type = Tensor(1, 1) });
+        graph.Outputs.Add(new ValueInfoProto { Name = "y", Type = Tensor(1, 1) });
+        graph.Nodes.Add(ComputeContextLifetimeCoverageTests.Op("Add", "x w", "s"));
+        graph.Nodes.Add(ComputeContextLifetimeCoverageTests.Op("Gather", "s i", "y"));
+        graph.Initializers.Add(new TensorProto { Name = "w", data_type = 1, Dims = [1], FloatDatas = [1f] });
+        return ComputeContextLifetimeCoverageTests.ModelOf(graph);
+    }
+
+    private static (RuntimeLogMessage[] Logged, string Failure) Noisy(ShorokooLogSeverity severity)
+    {
+        var backend = DefaultBackend.Instance;
+        ConcurrentQueue<RuntimeLogMessage> sink = [];
+        using var session = backend.CreateSession(NoisyModel(), ShorokooGraphOptimization.EnableAll, Into(sink, severity), DeviceMemorySettings.Default);
+        using var x = backend.CreateTensorInBackendMemory(ShorokooTensorElementType.Float, [.. MemoryMarshal.AsBytes<float>([1f, 2f])], [2]);
+        using var i = backend.CreateTensorInBackendMemory(ShorokooTensorElementType.Int64, [.. MemoryMarshal.AsBytes<long>([5L])], [1]);
+        var failure = Assert.ThrowsAny<Exception>(() => session.Run(
+            new Dictionary<string, IShorokooTensorValue> { ["x"] = x, ["i"] = i }, session.OutputNames, new RunSettings { Log = Into(sink, severity) }));
+        return ([.. sink], failure.Message);
+    }
+
+    private static bool Overridable(RuntimeLogMessage m) => m.Text.Contains("Initializer w appears in graph inputs");
+    private static bool Failing(string text) => text.Contains("Non-zero status code returned while running Gather node");
+
+    [Fact]
+    public void TestOnnxRuntimesMessagesNoUserCanActOnReachASinkAsVerboseAndTheFailureStillRaisesThem()
+    {
+        var (atWarning, failed) = Noisy(ShorokooLogSeverity.Warning);
+        var (atVerbose, _) = Noisy(ShorokooLogSeverity.Verbose);
+        Assert.Empty(atWarning);
+        Assert.True(Failing(failed));
+        Assert.Equal(ShorokooLogSeverity.Verbose, Assert.Single(atVerbose, Overridable).Severity);
+        Assert.Equal(ShorokooLogSeverity.Verbose, Assert.Single(atVerbose, m => Failing(m.Text)).Severity);
+    }
+
+    [Fact]
+    public void TestOnlyTheOnnxRuntimeMessagesListedAsNoUserCanActOnAreDeliveredAsVerbose()
+    {
+        const ShorokooLogSeverity W = ShorokooLogSeverity.Warning, V = ShorokooLogSeverity.Verbose;
+        (ShorokooLogSeverity Logged, string Location, string Text, ShorokooLogSeverity Delivered)[] cases =
+        [
+            (W, "inference_session.cc:3040 onnxruntime::InferenceSession::Initialize", "Serializing optimized model with Graph Optimization level greater than ORT_ENABLE_EXTENDED and the NchwcTransformer enabled.", V),
+            (W, "session_state.cc:1397 onnxruntime::VerifyEachNodeIsAssignedToAnEp", "Some nodes were not assigned to the preferred execution providers which may or may not have an negative impact on performance.", V),
+            (W, "session_state.cc:1399 onnxruntime::VerifyEachNodeIsAssignedToAnEp", "Rerunning with verbose output on a non-minimal build will show node assignments.", V),
+            (W, "transformer_memcpy.cc:111 onnxruntime::MemcpyTransformer::ApplyImpl", "87 Memcpy nodes are added to the graph main_graph for CUDAExecutionProvider.", V),
+            (W, "constant_folding.cc:608 onnxruntime::ConstantFolding::ApplyImpl", "Failure during constant folding of ScatterElements node 'N5': indices element out of data bounds", V),
+            (W, "constant_folding.cc:581 onnxruntime::ConstantFolding::ApplyImpl", "Could not find a CPU kernel and hence can't constant fold CastLike node 'N105'", V),
+            (W, "graph.cc:124 onnxruntime::MergeShapeInfo", "Error merging shape info for output. 'N53_T0' source:{2,3,1} target:{2,3,0}. Falling back to lenient merge.", V),
+            (W, "graph.cc:1430 onnxruntime::Graph::Graph", "Initializer N3_T0 appears in graph inputs and will not be treated as constant value/weight.", V),
+            (ShorokooLogSeverity.Error, "sequential_executor.cc:671 onnxruntime::ExecuteKernel", "Non-zero status code returned while running Gather node.", V),
+            (W, "graph.cc:5607 onnxruntime::Graph::CleanUnusedInitializersAndNodeArgs", "Removing initializer 'w'. It is not used by any node and should be removed from the model.", W),
+            (W, "graph.cc:124 onnxruntime::MergeShapeInfo", "Some other message.", W),
+            (W, "graph.cc:124 onnxruntime::SomeOtherFunction", "Error merging shape info for output.", W),
+            (ShorokooLogSeverity.Error, "execution_frame.cc:900 onnxruntime::ExecutionFrame::VerifyOutputSizes", "Non-zero status code returned while running Gather node.", ShorokooLogSeverity.Error),
+            (W, "", "Memcpy nodes are added to the graph", W),
+        ];
+        Assert.Equal([.. cases.Select(c => c.Delivered)], cases.Select(c => OrtLogTriage.Of(c.Logged, c.Location, c.Text)));
     }
 
     [Fact]

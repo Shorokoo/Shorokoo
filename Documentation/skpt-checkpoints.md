@@ -528,8 +528,9 @@ model.skpt
       },
 
       // What the backend's model of a run told the memory-aware pass: the peak, or null where
-      // it could not tell, by the SHA-256 of the question (the step asked about, the backend
-      // and the build of both). A rig loaded on the same build of the same backend takes them
+      // it could not tell, by the SHA-256 of the question (the step asked about, the backend,
+      // the operators it runs the step's optimizer updates as, and the build of each). A rig
+      // loaded on the same build of the same backend, running the step alike, takes them
       // in place of asking. Omitted when the pass asked nothing.
       "runModelAnswers": {
         "9f2c…": 2689049,

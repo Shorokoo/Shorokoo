@@ -207,8 +207,18 @@ public abstract class OrtBackend : IShorokooBackend
 
     /// <summary>The build of this assembly, whose <see cref="OrtRunMemory"/> reads the graph a session
     /// writes out, the native ONNX Runtime's version, and the build and location of the managed
-    /// library over it, which decide that graph.</summary>
-    string? IShorokooBackend.RunModelIdentity => RunModelBuild.Value;
+    /// library over it, which decide that graph; and, where a training step's Adam and AdamW updates
+    /// run as the native library's operator (<see cref="FusesOptimizerUpdates"/>), which changes the
+    /// graph a step's session writes out, the build of that library.</summary>
+    string? IShorokooBackend.RunModelIdentity => FusesOptimizerUpdates && RegistersOperators
+        ? $"{RunModelBuild.Value}|fused|{FusedOperatorsBuild.Value}"
+        : RunModelBuild.Value;
+
+    private static readonly Lazy<string> FusedOperatorsBuild = new(() =>
+    {
+        using var library = File.OpenRead(NativeAllocator.Located!);
+        return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(library));
+    });
 
     private static readonly Lazy<string> RunModelBuild = new(() =>
     {

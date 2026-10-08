@@ -155,6 +155,18 @@ How a hyper is supplied depends on the route:
   reason for a plain `for`: gate the difference on `ctx.IterationIndex` with an `IfElse`
   ([Per-layer variants](#per-layer-variants)).
 
+  The generator reports a plain `for`, `foreach`, `while` or `do` that stacks layers as
+  the Info diagnostic `MSG007`, at the loop. A loop stacks layers when its body, directly
+  or through a method it calls, runs `Init(...)` on an initializer class or `Model(...)` /
+  `Call(...)` on a `[Module]` class, without naming the result with `.Named(...)`. The
+  loop may sit in `Inline` or in a helper it calls. A model created before the loop and
+  called inside it is reused, not stacked, and is not reported. Info diagnostics show in
+  the IDE, not in `dotnet build` output; set `dotnet_diagnostic.MSG007.severity = warning`
+  in `.editorconfig` to see them there. For a loop that must stay plain, such as one
+  whose iterations build parameters of different shapes, name each item with
+  `.Named($"layer{i}")`, or wrap the loop in `#pragma warning disable MSG007` /
+  `#pragma warning restore MSG007`.
+
   Simple — add `x` to itself `n` times:
   ```csharp
   var acc = TensorFill(x.TShape, 0f);
@@ -719,7 +731,7 @@ new Module<Scalar<float32>, (Tensor<float32>, Tensor<float32>), Tensor<float32>>
   ([Workflow: one module, many variants](#workflow-one-module-many-variants)), gated on
   `ctx.IterationIndex` for layers that differ ([Per-layer variants](#per-layer-variants)).
 - Stacking layers with a plain C# `for`, even with a constant count or layers that
-  differ; use `LoopAPI.Iterate` ([Control flow inside `Inline`](#control-flow-inside-inline),
+  differ (`MSG007`); use `LoopAPI.Iterate` ([Control flow inside `Inline`](#control-flow-inside-inline),
   [Per-layer variants](#per-layer-variants)).
 - Switching threads in a module body (`async`/`await`, `Parallel.For`): the body runs on
   one thread, and `Globals.StateUpdate` or `Rng.Pin` from another thread throws.

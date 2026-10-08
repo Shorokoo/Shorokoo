@@ -38,8 +38,10 @@ public partial class SquareStackModel
 {
     public static Tensor<float32> Inline(Tensor<float32> x)
     {
+#pragma warning disable MSG007 // separate trace-order parameters are the shape under test
         for (int i = 0; i < 64; i++)
             x = x.MatMul(Shorokoo.Modules.Initializers.XavierUniform.Init([Scalar(64L), Scalar(64L)]));
+#pragma warning restore MSG007
         return x;
     }
 }

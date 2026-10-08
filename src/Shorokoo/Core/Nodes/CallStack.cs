@@ -10,7 +10,7 @@ namespace Shorokoo.Core.Nodes
     /// </summary>
     internal sealed class CallStack
     {
-        private readonly System.Diagnostics.StackTrace? _trace;
+        private System.Diagnostics.StackTrace? _trace;
         private string? _text;
 
         private CallStack(System.Diagnostics.StackTrace? trace, string? text)
@@ -27,18 +27,21 @@ namespace Shorokoo.Core.Nodes
         /// <summary>A call stack already rendered, or null for none.</summary>
         public static CallStack? FromText(string? text) => text is null ? null : new(null, text);
 
-        /// <summary>The rendered call stack. Rendering is deterministic, so two threads reading it
-        /// at once at worst render it twice and agree.</summary>
+        /// <summary>The rendered call stack. The captured stack is dropped once it is rendered, so a
+        /// read call stack holds the text alone. Rendering is deterministic, so two threads reading
+        /// it at once at worst render it twice and agree; the text is published before the stack is
+        /// dropped, so a reader that finds no stack finds the text.</summary>
         public string Text
         {
             get
             {
-                var text = _text;
-                if (text is null)
-                {
-                    text = _trace!.ToString();
-                    _text = text;
-                }
+                var text = System.Threading.Volatile.Read(ref _text);
+                if (text is not null) return text;
+                var trace = System.Threading.Volatile.Read(ref _trace);
+                if (trace is null) return System.Threading.Volatile.Read(ref _text)!;
+                text = trace.ToString();
+                System.Threading.Volatile.Write(ref _text, text);
+                System.Threading.Volatile.Write(ref _trace, null);
                 return text;
             }
         }

@@ -236,8 +236,12 @@ namespace Shorokoo.Core.Nodes
 
         public bool IsWithStateDeps => this.OpCode == InternalOpCodes.WITH_STATE_DEPS;
 
+        // Captures here, not in the overload it calls, so a call stack taken for a node built
+        // through this constructor starts at this constructor's frame; kept out of line so that
+        // frame is there to start at.
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
         public Node(NodeDefinition nodeDef, OnnxCSharpAttributes? attributes, ImmutableDictionary<string, Variable?[]> inputs, ImmutableDictionary<string, OutputTensorInfo[]> outputs, string? stackTrace, string? defaultName, string? identifierTemplateString, Function? targetFunction = null, Node? openNode = null, NodeKey? existingKey = null, long? existingOrderingHint = null)
-            : this(nodeDef, attributes, inputs, outputs, Shorokoo.Core.Nodes.CallStack.FromText(stackTrace), defaultName, identifierTemplateString, targetFunction, openNode, existingKey, existingOrderingHint)
+            : this(nodeDef, attributes, inputs, outputs, stackTrace is null ? Shorokoo.Core.Nodes.CallStack.Capture() : Shorokoo.Core.Nodes.CallStack.FromText(stackTrace), defaultName, identifierTemplateString, targetFunction, openNode, existingKey, existingOrderingHint)
         {
         }
 

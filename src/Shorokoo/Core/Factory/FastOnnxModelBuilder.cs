@@ -1687,11 +1687,12 @@ namespace Shorokoo.Core.Factory
 
         /// <summary>
         /// <see cref="BuildFunctionProto"/>, worked out once per RNG algorithm function and dialect.
-        /// Those functions are built once per process and never change (see
-        /// <see cref="Shorokoo.Core.Rng.RngAlgorithms"/>), and every model with a runtime random
-        /// draw or a drawing initializer calls one, so a session's model would otherwise lower the
-        /// same large body again on every build. Each caller gets a copy of its own, since a model is
-        /// rewritten after its functions are built.
+        /// Every model with a runtime random draw or a drawing initializer calls one of these
+        /// functions (see <see cref="Shorokoo.Core.Rng.RngAlgorithms"/>), whose bodies are large and
+        /// never change once built, so a session's model would otherwise lower the same body again
+        /// on every build. A function is held weakly: a loaded or rewritten model carries RNG
+        /// functions of its own, and their entries go when they do. Each caller gets a copy of its
+        /// own, since a model is rewritten after its functions are built.
         ///
         /// <para>A build is a function of the body and the arguments only while nothing on the
         /// calling thread changes how bodies lower or fold — a lowering, export-list or operator
@@ -1709,18 +1710,20 @@ namespace Shorokoo.Core.Factory
                 return BuildFunctionProto(function, prepForOnnx, applyExecutionLowerings, stripCheckpointStamp,
                     flattenBody, forSession, workarounds, shapesAreConcrete);
 
-            var built = RngFunctionProtos.GetOrAdd(
-                (function, prepForOnnx, applyExecutionLowerings, stripCheckpointStamp, flattenBody, forSession,
+            var built = RngFunctionProtos.GetValue(function, static _ => new()).GetOrAdd(
+                (prepForOnnx, applyExecutionLowerings, stripCheckpointStamp, flattenBody, forSession,
                     workarounds, shapesAreConcrete),
-                static k => BuildFunctionProto(k.Function, k.PrepForOnnx, k.ApplyExecutionLowerings,
-                    k.StripCheckpointStamp, k.FlattenBody, k.ForSession, k.Workarounds, k.ShapesAreConcrete));
+                static (k, fn) => BuildFunctionProto(fn, k.PrepForOnnx, k.ApplyExecutionLowerings,
+                    k.StripCheckpointStamp, k.FlattenBody, k.ForSession, k.Workarounds, k.ShapesAreConcrete),
+                function);
             return ProtoBuf.Serializer.DeepClone(built);
         }
 
-        private static readonly System.Collections.Concurrent.ConcurrentDictionary<
-            (Function Function, bool PrepForOnnx, bool ApplyExecutionLowerings, bool StripCheckpointStamp,
-                bool FlattenBody, bool ForSession, KernelWorkaroundSet? Workarounds, bool ShapesAreConcrete),
-            FunctionProto> RngFunctionProtos = new();
+        private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<Function,
+            System.Collections.Concurrent.ConcurrentDictionary<
+                (bool PrepForOnnx, bool ApplyExecutionLowerings, bool StripCheckpointStamp, bool FlattenBody,
+                    bool ForSession, KernelWorkaroundSet? Workarounds, bool ShapesAreConcrete),
+                FunctionProto>> RngFunctionProtos = new();
 
         private static FunctionProto BuildFunctionProto(
             Function function, bool prepForOnnx, bool applyExecutionLowerings,

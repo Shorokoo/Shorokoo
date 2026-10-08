@@ -105,6 +105,10 @@ public class NodeBuilderCoverageTests
         ImmutableDictionary<string, OutputTensorInfo[]> outputs = ImmutableDictionary<string, OutputTensorInfo[]>.Empty.Add("",
             [new OutputTensorInfo { DType = DType.Float32, ModuleFn = null, Structure = DataStructure.Tensor, Rank = 0, Name = null }]);
         Assert.Equal("given", new Node(add.NodeDef, add.Attributes, add.FullInputs, outputs, "given", null, null).StackTrace);
+        var captured = new Node(add.NodeDef, add.Attributes, add.FullInputs, outputs, (string?)null, null, null).StackTrace!;
+        Assert.StartsWith("   at Shorokoo.Core.Nodes.Node..ctor(", captured);
+        Assert.Single(captured.Split('\n'), l => l.Contains("Node..ctor("));
+        Assert.Contains(nameof(TestANodeKeepsTheCallStackItWasBuiltFromThroughCopiesAndRebuildsOfItsGraph), captured);
 
         var stripped = graph.Clone();
         FastStripCallStacks.Process(stripped);

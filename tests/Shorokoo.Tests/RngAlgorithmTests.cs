@@ -1,7 +1,9 @@
 using System;
 using System.Linq;
+using System.Reflection;
 using System.Runtime.CompilerServices;
 using Shorokoo.Core.Factory;
+using Shorokoo.Core.Lowering;
 using Shorokoo.Core.Rng;
 using Shorokoo.Modules.Layers;
 using Shorokoo.Runtime;
@@ -231,11 +233,38 @@ public class RngAlgorithmTests
         var first = FastOnnxModelBuilder.BuildInternalOnnxModel(concrete, prepForOnnx: true);
         var bytes = Serialized(first);
         Assert.Equal(2, first.Functions.Count(f => f.Name.Contains("ShrkRng_")));
+        first.Functions.First(f => f.Nodes.Any(n => n.Attributes.Count > 0)).Nodes.First(n => n.Attributes.Count > 0).Attributes.Clear();
+        foreach (var fn in first.Functions) fn.Nodes[0].Inputs.Add("renamed");
         foreach (var fn in first.Functions) fn.Nodes.Clear();
 
         var second = FastOnnxModelBuilder.BuildInternalOnnxModel(concrete, prepForOnnx: true);
         Assert.Equal(bytes, Serialized(second));
         Assert.All(second.Functions, f => Assert.NotEmpty(f.Nodes));
+    }
+
+    private static Variable?[] AbsAsRootOfSquare<T>(Tensor<T> x) where T : IVarType => [OnnxOp.Sqrt(x * x)];
+
+    private static string[] RngBodyOps(InternalComputationGraph concrete)
+        => [.. FastOnnxModelBuilder.BuildInternalOnnxModel(concrete, prepForOnnx: true).Functions
+            .Where(f => f.Name.Contains("ShrkRng_")).SelectMany(f => f.Nodes).Select(n => n.OpType).Distinct()];
+
+    [Fact]
+    public void TestAnRngFunctionBuiltUnderAnExportOverrideIsBuiltAfreshAndNotKept()
+    {
+        var g = (ComputationGraph)typeof(RngSplitThenDraw).GetProperty("ComputationGraph")!.GetValue(null)!;
+        var concrete = g.ToConcreteArchitecture([TensorData([2L, 2L], 0f, 0f, 0f, 0f)]).ToConcreteModel().ToInternal();
+        var bytes = Serialized(FastOnnxModelBuilder.BuildInternalOnnxModel(concrete, prepForOnnx: true));
+        var abs = new OpLowering(OpCodes.ABS, typeof(RngAlgorithmTests).GetMethod(nameof(AbsAsRootOfSquare), BindingFlags.NonPublic | BindingFlags.Static)!);
+
+        string[] lowered;
+        using (OpLoweringRegistry.Override(abs))
+        using (FastOnnxModelBuilder.OverrideExportLoweredOpCodes(OpCodes.ABS))
+            lowered = RngBodyOps(concrete);
+        Assert.Contains(OpCodes.SQRT, lowered);
+        Assert.DoesNotContain(OpCodes.ABS, lowered);
+        using (FastOnnxModelBuilder.OverrideExportLoweredOpCodes(OpCodes.ABS))
+            Assert.Throws<InvalidOperationException>(() => RngBodyOps(concrete));
+        Assert.Equal(bytes, Serialized(FastOnnxModelBuilder.BuildInternalOnnxModel(concrete, prepForOnnx: true)));
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]

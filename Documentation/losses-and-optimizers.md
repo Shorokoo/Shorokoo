@@ -71,11 +71,16 @@ Knobs are **build-time C# arguments** on two extra methods:
 - **`ignoreIndex`** (CE, NLL): a target equal to it adds nothing to the loss or the gradient, and
   `Mean` divides by the targets that are not ignored, as PyTorch does: by their count, or with
   `weight` by the sum of their classes' weights. The sentinel is any `int64`, a negative one such
-  as PyTorch's `-100` included. On the CPU backend, a training step whose batch holds an ignored
-  target fails when the sentinel lies outside `[-C, C-1]` for `C` classes — `-100` below 100
-  classes, say — because the gradient indexes the class weights with it
-  ([#499](https://github.com/Shorokoo/Shorokoo/issues/499)); evaluating the loss does not. Until
-  that is fixed, pick a sentinel inside `[-C, C-1]` for a model you train.
+  as PyTorch's `-100` included, in evaluation and training alike.
+- <a id="loss-target-range"></a>**Target range** (CE, NLL): every other target must lie in
+  `[0, C-1]` for `C` classes. A run fed a target outside it — `C` or above, or a negative one that
+  is not `ignoreIndex` — is refused on every backend before anything is computed or any parameter
+  updated, with an `IndexOutOfRangeInputException` (`CR014`) that names the input, the element's
+  position, its value and the range. The check reads the targets the host holds, fed to the loss
+  as they are or reshaped, wherever the class count follows from the shapes the run is fed;
+  targets in a device's memory, or computed in the graph, are not checked, and an out-of-range one is then the backend's to handle: ONNX Runtime's CPU kernel
+  refuses one of `C` or above and reads a negative `t` as class `C + t`, and its CUDA kernel can
+  count one of `C` or above as a zero loss.
 - **SmoothL1 ↔ Huber**: `SmoothL1(e; β) = HuberLoss(δ = β) / β`. Huber's `delta` is a
   live, schedulable `[Hyper]`; SmoothL1's `beta` is baked.
 - **PoissonNLL**: the Keras `Poisson` form is
@@ -88,8 +93,7 @@ Knobs are **build-time C# arguments** on two extra methods:
 The rig gives the loss graph exactly **two tensor inputs** and expects a
 **`Scalar<float32>`**.
 
-- **Rig-safe**: `reduction = Mean`/`Sum`, `ignoreIndex` (with a sentinel inside `[-C, C-1]`;
-  see [`ignoreIndex`](#loss-configurable-knobs) above), `labelSmoothing` — through a
+- **Rig-safe**: `reduction = Mean`/`Sum`, `ignoreIndex`, `labelSmoothing` — through a
   **wrapper module**, since the generated `ComputationGraph` uses the bare `Inline`:
 
   ```csharp

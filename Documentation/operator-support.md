@@ -247,7 +247,7 @@ shape and type.
 | Expand | ✅ | ✅ | ✅ |
 | EyeLike | ✅ | ✅ | N/A (structural) |
 | Flatten | ✅ | ✅ | ✅ |
-| Gather | ✅ | ✅ | ✅ [4] |
+| Gather | ✅ [20] | ✅ | ✅ [4] |
 | GatherElements | ✅ | ✅ | ✅ |
 | GatherND | ✅ | ✅ | 🟡 [5] |
 | Identity | ✅ | ✅ | ✅ |
@@ -344,6 +344,15 @@ shape and type.
     the call (`Tensor storage size overflowed`): accepted as ONNX Runtime's
     behaviour ([#447](https://github.com/Shorokoo/Shorokoo/issues/447),
     [#450](https://github.com/Shorokoo/Shorokoo/issues/450)).
+20. An index must lie in `[-n, n-1]` for the `n` entries along `axis`; a negative one
+    counts from the end. Where the indices are an input of the graph — as fed, or
+    through `Identity`, `Reshape`, `Squeeze`, `Unsqueeze`, `Flatten` or a `Cast`
+    between integer types — every backend refuses a run fed one outside, before it
+    computes anything, with `IndexOutOfRangeInputException` (`CR014`), which names
+    the input, the element's position, its value and the range. The check reads
+    the indices the host holds, wherever `n` follows from the shapes the run is
+    fed. Indices in a device's memory, or computed in the graph, are not checked, and an index outside is then the backend's to handle:
+    ONNX Runtime's CPU kernel refuses it, its CUDA kernel can read a zero row.
 
 ## Convolution & pooling
 
@@ -414,9 +423,9 @@ shape and type.
 | LayerNormalization | ✅ | 🟡 [5] | ✅ [6] |
 | LpNormalization | ✅ | 🟡 [5] | ✅ |
 | MeanVarianceNormalization | ✅ | 🟡 [5] | ✅ |
-| NegativeLogLikelihoodLoss | ✅ | 🟡 [5] | ✅ |
+| NegativeLogLikelihoodLoss | ✅ [8] | 🟡 [5] | ✅ |
 | RMSNormalization | ✅ [7] | ✅ | ✅ |
-| SoftmaxCrossEntropyLoss | ✅ | 🟡 [5] | ✅ |
+| SoftmaxCrossEntropyLoss | ✅ [8] | 🟡 [5] | ✅ |
 
 1. With `training_mode=1` the node is decomposed into primitives on export, with
    the same results.
@@ -433,6 +442,10 @@ shape and type.
 7. Lowers inline to opset-21 primitives
    (`y = x / sqrt(mean(x², suffix axes) + epsilon) * scale`, via
    `ReduceMean`/`Sqrt`/`Div`/`Mul`), so it runs on any execution provider.
+8. A target must lie in `[0, C-1]` for `C` classes, or equal `ignore_index`, which
+   may be any value. Where the targets are an input of the graph, a run fed one
+   outside is refused as Gather's indices are (note 20 under Shape & data
+   movement), on every backend and before anything is computed.
 
 ## MatMul & linear algebra
 

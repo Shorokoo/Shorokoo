@@ -2446,6 +2446,13 @@ public partial class NNCrossEntropyIgnore999Loss
 }
 
 [Module]
+public partial class NNCrossEntropySmoothedLoss
+{
+    public static Scalar<float32> Inline(Tensor<float32> predictions, Tensor<int64> targets)
+        => CrossEntropyLoss.Reduced(predictions, targets, labelSmoothing: 0.1f);
+}
+
+[Module]
 public partial class NNNllIgnoreMinus100Loss
 {
     public static Scalar<float32> Inline(Tensor<float32> predictions, Tensor<int64> targets)

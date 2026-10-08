@@ -167,7 +167,8 @@ product's shapes, and ONNX Runtime folds it away when it builds the session wher
 follow from the model's stated input dimensions. Shorokoo works those shapes out itself first, by
 running the graph through its interpreter at the stated dimensions, and leaves a call whose operands
 it finds both nonempty as written, so a session is not built around an `If` for every product of a
-model that has none to correct. An `If` over a shape that depends on the data —
+model that has none to correct. A shape it can only estimate counts for nothing there: one that
+follows an `If` whose condition, or a `Loop` whose trip count or condition, depends on the data. An `If` over a shape that depends on the data —
 the output of a `NonZero`, of a `TopK` with a computed `k`, of a `Reshape` or `Expand` to a
 computed shape — is not folded: it runs on every run, at the cost of the few shape operations of its
 condition and the branch it takes. In the body of a `Loop` or `SequenceMap` the shapes are known

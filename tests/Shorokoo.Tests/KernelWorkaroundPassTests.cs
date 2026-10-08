@@ -409,7 +409,32 @@ public class KernelWorkaroundPassTests
         Assert.True(AsWritten(new([i], [OnnxOp.MatMul(i, i)]), [2L, 2L, 2L]));
         Assert.False(AsWritten(new([b, m], [OnnxOp.MatMul(b, m)]), [2L, 3L, 0L], [0L, 4L]));
         Assert.False(AsWritten(new([b, s], [OnnxOp.MatMul(b, OnnxOp.Reshape(b, s, allowZero: false))]), [2L, 2L, 2L], [3L]));
+        Assert.False(AsWritten(MatMulOfABranchesOperand(), [2L, 2L, 2L], [1L], [1L]));
+        Assert.False(AsWritten(Concrete(KernelWorkaroundMatMulOfALoopsCarry.ComputationGraph, Eights, TensorData(DType.Float32, [1L], 0f)), [2L, 2L, 2L], [1L]));
     }
+
+    [Fact]
+    public void TestAMatMulOfAnOperandEmptyOnlyAtRunTimeGivesZerosOnOnnxRuntimeWithConcreteShapes()
+    {
+        TensorData[] branch = [Eights, TensorData(DType.Float32, [1L], -1f), TensorData(DType.Int64, [1L], 0L)];
+        TensorData[] loop = [Eights, TensorData(DType.Float32, [1L], 0f)];
+        var looped = Concrete(KernelWorkaroundMatMulOfALoopsCarry.ComputationGraph, loop);
+        Assert.Equal(new byte[32], Run(MatMulOfABranchesOperand(), AtStatedDims(MatMulOfABranchesOperand(), branch), branch).Single());
+        Assert.Equal(new byte[32], Run(looped, AtStatedDims(looped, loop), loop).Single());
+    }
+
+    private static readonly TensorData Eights = TensorData(DType.Float32, [2L, 2L, 2L], 1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f);
+
+    private static InternalComputationGraph MatMulOfABranchesOperand()
+    {
+        var (b, x, e) = (InputTensor<float32>("b", rank: 3), InputTensor<float32>("x", rank: 1), InputTensor<int64>("e", rank: 1));
+        var m = Shorokoo.Core.Nodes.Ops.IfElse((Scalar<bit>)OnnxOp.Less(OnnxOp.ReduceMin(x, keepdims: false), Scalar(0f)),
+            OnnxOp.Slice(b, Vector(0L), e, Vector(2L)), OnnxOp.Identity(b, null));
+        return new([b, x, e], [OnnxOp.MatMul(m, OnnxOp.Transpose(m, [0L, 2L, 1L]))]);
+    }
+
+    private static ModelProto AtStatedDims(InternalComputationGraph g, TensorData[] x)
+        => FastOnnxModelBuilder.BuildInternalOnnxModel(g, prepForOnnx: true, inputDims: [.. x.Select(t => t.Shape.Dims)], workarounds: KernelWorkaroundRegistry.OnnxRuntime);
 
     [Fact]
     public void TestTheMatMulWorkaroundFiresWithShapesKnownOnlyAtRunTimeOnlyForAnEmptyConstantOperand()
@@ -503,6 +528,18 @@ public class KernelWorkaroundPassTests
         ModelProto Built(KernelWorkaroundSet set) => FastOnnxModelBuilder.BuildInternalOnnxModel(step, prepForOnnx: true, inputDims: dims, workarounds: set);
         Assert.Equal(Bytes(Session(step, WithoutTheMatMulWorkaround)), Bytes(Session(step, KernelWorkaroundRegistry.OnnxRuntime)));
         Assert.Equal(Bytes(Built(WithoutTheMatMulWorkaround)), Bytes(Built(KernelWorkaroundRegistry.OnnxRuntime)));
+        var shapes = FastApplyKernelWorkarounds.ConcreteShapes(step, KernelWorkaroundRegistry.OnnxRuntime, dims);
+        Assert.True(step.Nodes.Where(n => n.OpCode == MATMUL).SelectMany(n => n.Inputs).All(k => shapes!.ContainsKey(k!.Value)));
+    }
+
+    [Fact]
+    public void TestOnnxRuntimeFoldsAwayTheIfOfTheMatMulWorkaroundWhereTheShapesFollowFromTheStatedDimensions()
+    {
+        var (b, m) = (InputTensor<float32>("b", rank: 3), InputTensor<float32>("m", rank: 2));
+        var built = FastOnnxModelBuilder.BuildInternalOnnxModel(new([b, m], [OnnxOp.MatMul(b, m)]), prepForOnnx: true,
+            inputDims: [[2L, 3L, 0L], [0L, 4L]], workarounds: KernelWorkaroundRegistry.OnnxRuntime);
+        Assert.Equal(1, Ifs(built));
+        Assert.Equal(0, Ifs(Optimized(built)));
     }
 
     [Fact]
@@ -718,8 +755,8 @@ public class KernelWorkaroundPassTests
         finally { File.Delete(path); }
     }
 
-    private static InternalComputationGraph Concrete(ComputationGraph module, TensorData x)
-        => module.ToInternal().ToConcreteArchitecture([x]).ToConcreteModel();
+    private static InternalComputationGraph Concrete(ComputationGraph module, params TensorData[] x)
+        => module.ToInternal().ToConcreteArchitecture(x).ToConcreteModel();
 
     private static InternalComputationGraph TopKGraph()
     {
@@ -985,6 +1022,18 @@ public partial class KernelWorkaroundMulByOuterInLoop
         foreach (var ctx in LoopAPI.Iterate(x.Reduce(ReduceKind.Min, keepDims: false).Scalar().Cast<int64>()))
             a = (Tensor<float32>)OnnxOp.Mul(a, x);
         return a;
+    }
+}
+
+[Module]
+public partial class KernelWorkaroundMatMulOfALoopsCarry
+{
+    public static Tensor<float32> Inline(Tensor<float32> b, Tensor<float32> x)
+    {
+        var m = (Tensor<float32>)OnnxOp.Slice(b, Vector(0L), Vector(0L), Vector(2L));
+        foreach (var ctx in LoopAPI.Iterate(x.Reduce(ReduceKind.Min, keepDims: false).Scalar().Cast<int64>()))
+            m = b + m.Reduce(ReduceKind.Sum, keepDims: false);
+        return (Tensor<float32>)OnnxOp.MatMul(m, OnnxOp.Transpose(m, [0L, 2L, 1L]));
     }
 }
 

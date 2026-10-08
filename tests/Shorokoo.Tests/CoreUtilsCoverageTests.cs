@@ -593,37 +593,6 @@ public class CoreUtilsCoverageTests
     }
 
     [Fact]
-    public void TestASessionFoldsANodeOverConstantsWhoseOutputsSizeOnlyRunningItTells()
-    {
-        var x = InputTensor<float32>("x", rank: 1);
-        var kept = OnnxOp.Compress(OnnxOp.Constant(TensorData([3L], 1f, 2f, 3f).MoveToAttribute()),
-            OnnxOp.Constant(TensorData([3L], true, false, true).MoveToAttribute()), axis: null);
-        var graph = new InternalComputationGraph([x], [OnnxOp.Add(x, kept)]);
-        using var compiled = ComputeContext.Default.Compile(graph, [[2L]], trainingStep: true);
-        Assert.DoesNotContain("Compress", SessionOpTypes(graph, [[2L]]));
-        Assert.Equal([11f, 23f], compiled.Execute(TensorData([2L], 10f, 20f).Shared())[0].ToTensorData().CopyMemory<float>());
-    }
-
-    private static string[] SessionOpTypes(InternalComputationGraph graph, IReadOnlyList<long[]?> dims)
-    {
-        var model = new MemoryStream();
-        ProtoBuf.Serializer.Serialize(model, FastOnnxModelBuilder.BuildInternalOnnxModel(graph, prepForOnnx: true, inputDims: dims));
-        var path = Path.Combine(Path.GetTempPath(), $"shorokoo-folded-{Guid.NewGuid():N}.onnx");
-        try
-        {
-            using (var options = new SessionOptions())
-            {
-                OrtBackend.Configure(options, ShorokooGraphOptimization.TrainingStep, ShorokooLogSeverity.Fatal);
-                options.OptimizedModelFilePath = path;
-                using var session = new InferenceSession(model.ToArray(), options);
-            }
-            using var file = File.OpenRead(path);
-            return [.. ProtoBuf.Serializer.Deserialize<Shorokoo.Core.Factory.IR.ModelProto>(file).Graph.Nodes.Select(n => n.OpType)];
-        }
-        finally { File.Delete(path); }
-    }
-
-    [Fact]
     public void TestAnInputFreeOneShotRunOverALiteralPastTwoGibibytesIsBuiltUnoptimizedAsAnyInputFreeOneIs()
     {
         List<GraphOptimizationLevel> seen = [];

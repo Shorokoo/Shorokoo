@@ -154,6 +154,7 @@ session binds no output aliases.
 | **Cancellation** (`RunSettings.CancellationToken`) | a run cancelled before it starts is refused; a run is one XLA program and is not stopped part way | same |
 | **`DeviceMemory.LimitBytes`** | ignored | ignored: JAX's allocator is the process's and takes no per-run limit |
 | **`RunSettings.ShrinkArenaAfterRun`** | ignored | ignored |
+| **`RunSettings.Log`** | each Python warning the run raises, as a `Warning` from `JAX`; those raised compiling a session go to its context's settings (see [Log messages](backends-and-devices.md#log-messages)) | same |
 | **Arena statistics** | none | JAX's allocator on the device (`Device.memory_stats`) |
 | **`TraceNodePlacement`** | every node on `cpu` | every node on `cuda:N` |
 | **`DeterministicCompute`** | not applied | not applied: XLA's kernels run as they otherwise would |

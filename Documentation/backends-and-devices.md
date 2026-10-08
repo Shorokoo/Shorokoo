@@ -45,7 +45,8 @@ contract. In short, a backend provides:
   for strings and sequences.
 - **Sessions** (`CreateSession`) that read every input in the run memory, refuse any value
   outside it with an exception, and leave every output there (`IShorokooSession`). A session
-  never moves a value.
+  never moves a value. `CreateSession` is handed the `LogSettings` what its runtime says while
+  building goes to, and each run its own in `RunSettings.Log` ([Log messages](#log-messages)).
 - **The moves**, as operations of their own, which Shorokoo calls to place an input before a run
   and to bring a tensor home: into the backend's memory, `CreateTensorInBackendMemory`,
   `CreateUninitializedTensorInBackendMemory` and `TryCopyHostToTensorRange`; out of it,
@@ -90,42 +91,77 @@ its own of that size, and so does a session that traces its nodes
 (`DiagnosticSettings.TraceNodePlacement`), since ONNX Runtime profiles the pool a session runs on;
 where something else made ONNX Runtime's environment first, every session keeps its own.
 
-### ONNX Runtime's log messages
+### Log messages
 
-Where Shorokoo makes ONNX Runtime's environment, which it does when the first of the four ONNX
-Runtime backends is built, the environment logs through `OrtLog` (namespace
-`Shorokoo.Core.Backends`). Messages the environment logs and messages a session logs both go
-there, and nowhere else:
+What a backend's runtime says while it builds a session or runs one — a kernel's warning about an
+operator it is given, a Python warning a run raises — goes to the `LogSettings` of that build or run
+(namespace `Shorokoo.Core.Backends`), which a run carries as `RunSettings.Log`:
 
-- `OrtLog.Severity` is the least severe message passed on, `ShorokooLogSeverity.Warning` unless
-  set otherwise. ONNX Runtime's environment is set to the same level.
-- `OrtLog.Sink` receives each message passed on, as an `OrtLogMessage`: `Severity`, `Category`,
-  `LogId`, `CodeLocation` and `Message`, with no terminal colour codes. Its default,
-  `OrtLog.WriteToStandardError`, writes one line per message to the standard error stream
-  (`[ONNX Runtime Warning] <code location>: <message>`). Set it to `null` to drop every message.
+- `MinimumSeverity` is the least severe message passed on, `ShorokooLogSeverity.Warning` unless set
+  otherwise. A backend asks its runtime for nothing less severe.
+- `Sink` receives each message passed on, as a `RuntimeLogMessage`: `Severity`, `Source` (the
+  runtime: `ONNX Runtime`, `PyTorch` or `JAX`), `Category` (the runtime's own kind of message:
+  ONNX Runtime's logging category, or a Python warning's class), `Location` (where in the runtime it
+  was emitted, or empty) and `Text`, with no terminal colour codes. Its default,
+  `LogSettings.WriteToStandardError`, writes one line per message to the standard error stream
+  (`[ONNX Runtime Warning] <location>: <text>`). `null` drops every message; `LogSettings.None` is
+  settings with no sink.
+
+A context's own `RunSettings` carries the settings its sessions are built under, and those its runs
+use when a call names none; a `CompiledGraph` run handed a `RunSettings` of its own sends what that
+run emits to that run's settings alone, even while another run of the same session runs beside it:
 
 ```csharp
 using Shorokoo.Core.Backends;
+using Shorokoo.Runtime;
 
-OrtLog.Severity = ShorokooLogSeverity.Error;                          // warnings dropped
-OrtLog.Sink = m => logger.Log(m.Severity.ToString(), m.Message);      // your own logger
-OrtLog.Sink = null;                                                   // nothing at all
+var ctx = new ComputeContext
+{
+    RunSettings = new RunSettings { Log = new LogSettings { MinimumSeverity = ShorokooLogSeverity.Error } },
+};
+var compiled = ctx.Compile(graph);
+compiled.Execute(x.Shared());                                           // errors only, to stderr
+compiled.Execute([x.Shared()], ctx.RunSettings with
+{
+    Log = new LogSettings { Sink = m => logger.Log(m.Severity.ToString(), m.Text) },   // this run's warnings, to your logger
+});
+var quiet = new ComputeContext { RunSettings = new RunSettings { Log = LogSettings.None } };   // nothing at all
 ```
 
-Both settings can be changed at any time and apply to the next message. The sink is called on
-whichever thread ONNX Runtime logs from, possibly several at once, so it must be thread-safe. An
-exception it throws is dropped, because none can be raised through ONNX Runtime.
+The sink is called on whichever thread the runtime emits from — the one that builds or runs the
+session, or one of the runtime's own — possibly on several at once, so it must be thread-safe. An
+exception it throws is dropped, because none can be raised through a runtime's logging. Nothing
+here is process-wide: two contexts, or two runs, log under settings of their own.
 
-The sessions Shorokoo builds log only at `Fatal`. A session built through
-`IShorokooBackend.CreateSession` at a severity of its own passes on only what is at least as
-severe as both that severity and `OrtLog.Severity`.
+What reaches the sink, per backend:
 
-A backend loaded with `IsolatedBackend.Load` runs its own copy of ONNX Runtime, and that copy
-logs through the same `OrtLog`, at the same severity.
+- **ONNX Runtime** (the four `Shorokoo.{Platform}` backends, and those `IsolatedBackend.Load` loads,
+  each with a runtime of its own). Each session has ONNX Runtime log through a logger named for it,
+  and each run with settings other than its session's through one named for the run, so every
+  message goes to the build or run it came from. ONNX Runtime also logs much of what happens during
+  a run through the session's logger; that goes to the run in progress on the thread that logged it.
+  A session's and a run's loggers log only where the settings ask for `Info` or `Verbose`: what they
+  warn of is the graph Shorokoo lowered and handed the runtime (an initializer its rewrites left
+  unread, a custom operator constant folding has no kernel for), and what they report as an error is
+  a failure the run raises as an exception. A run asking for `Info` or `Verbose` gets what the
+  session's logger says during it from the level the session was built at, so compile on a context
+  asking for as much to see all of it.
 
-A program that makes ONNX Runtime's environment itself (`OrtEnv.CreateInstanceWithOptions`)
-before the first backend is built keeps the logging it made the environment with, and its
-sessions keep per-session thread pools ([The backend types](#the-backend-types)).
+  ONNX Runtime also logs for the whole process rather than for a session — a kernel's warning about
+  an operator it is handed, at any severity. Such a message goes to the settings of the session
+  build or run in progress on the thread that logged it, and where there is none, as on one of ONNX
+  Runtime's own worker threads, to `LogSettings.Default`: warnings and above, to the standard error
+  stream. So does what a session the program builds itself through ONNX Runtime's own API logs. A program that makes ONNX Runtime's environment itself (`OrtEnv.CreateInstanceWithOptions`)
+  before the first backend is built keeps the logging it made the environment with, so none of its
+  messages reach these settings, and its sessions keep per-session thread pools
+  ([The backend types](#the-backend-types)).
+- **PyTorch** and **JAX**. Each Python warning a run raises, as a `Warning` whose `Category` is the
+  warning's class and whose `Location` is the file and line that raised it; on JAX, also those raised
+  compiling a session whose inputs have fixed shapes, to the settings it is built under. A warning
+  Python raises outside a run is shown as Python shows it. Nothing the libraries log natively is
+  routed.
+
+A backend whose runtime emits nothing it can route still takes the settings, and delivers nothing.
 
 ### Auto-discovery
 

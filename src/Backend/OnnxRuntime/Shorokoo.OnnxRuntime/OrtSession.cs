@@ -74,6 +74,19 @@ internal sealed class OrtSession : IShorokooSession
     /// nothing. Set once, as the backend builds the session.</summary>
     internal OrtPlacements? Placements { get; set; }
 
+    /// <summary>The route ONNX Runtime names this session's logger by: what it logs goes to the
+    /// settings the session was built with, as does what a run logs whose
+    /// <see cref="RunSettings.Log"/> is the same. A session placing another's values logs through
+    /// that one's.</summary>
+    internal required RuntimeLogRoutes.Route Log { get; init; }
+
+    // Whether this session closes Log when it is disposed: the session a backend built, and not one
+    // it places values through.
+    private bool _ownsLogRoute;
+
+    /// <summary>Makes this session the one that closes <see cref="Log"/>.</summary>
+    internal void OwnLogRoute() => _ownsLogRoute = true;
+
     void IShorokooSession.StopPlacing()
     {
         Placements?.Dispose();
@@ -487,6 +500,8 @@ internal sealed class OrtSession : IShorokooSession
     {
         var abortToken = runSettings.CancellationToken;
         using var runOptions = new RunOptions();
+        using var runLog = RouteRun(runOptions, runSettings.Log);
+        using var inProgress = Log.Enter(runSettings.Log);
         using var abort = AbortWhenCancelled(runOptions, abortToken);
         using var charge = CachingAllocator.Charge(_hostAccount, _cardAccount);
         try
@@ -501,6 +516,32 @@ internal sealed class OrtSession : IShorokooSession
         {
             GC.KeepAlive(feeds);
         }
+    }
+
+    /// <summary>
+    /// Sets <paramref name="runOptions"/> to log where <paramref name="log"/> says: through the
+    /// session's own logger where they are the settings it was built with, and otherwise through a
+    /// logger of the run's own, named by a route the caller closes when the run is over — ONNX
+    /// Runtime names a run's logger by the session's id and the run's tag, so what the run logs
+    /// reaches this run's settings and no other run's, of this session or another, however many run
+    /// at once, on whichever thread. What ONNX Runtime logs during the run through the session's
+    /// logger instead — most of what it says about a run, an output of another shape than the model
+    /// states included — reaches the run's settings through the run being in progress on the
+    /// calling thread (<see cref="RuntimeLogRoutes.Route.Enter(LogSettings)"/>), from the level the
+    /// session's logger was built at (<see cref="OrtBackend.LoggerSeverity"/>).
+    /// </summary>
+    private RuntimeLogRoutes.Route? RouteRun(RunOptions runOptions, LogSettings log)
+    {
+        ArgumentNullException.ThrowIfNull(log);
+        if (log.Equals(Log.Log))
+        {
+            runOptions.LogSeverityLevel = (OrtLoggingLevel)OrtBackend.LoggerSeverity(Log.Log);
+            return null;
+        }
+        var route = RuntimeLogRoutes.Open(log);
+        runOptions.LogId = route.Id;
+        runOptions.LogSeverityLevel = (OrtLoggingLevel)OrtBackend.LoggerSeverity(log);
+        return route;
     }
 
     /// <summary>A run of a session whose outputs all stay in host memory, writing nothing into what
@@ -915,6 +956,8 @@ internal sealed class OrtSession : IShorokooSession
         }
         Placements?.Dispose();
         _session.Dispose();
+        // After the session, which may log as it is released.
+        if (_ownsLogRoute) Log.Dispose();
         foreach (var weight in SharedWeights) weight.Dispose();
         // After the session, whose release lets go of its weights through them.
         _accounts?.Close();

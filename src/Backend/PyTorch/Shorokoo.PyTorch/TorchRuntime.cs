@@ -81,6 +81,9 @@ internal sealed class TorchRuntime
     /// <summary>The name of the Python exception a run stopped between two nodes raises.</summary>
     public const string RunStopped = "RunStopped";
 
+    /// <summary>What a warning a run raises names as its source (<see cref="RuntimeLogMessage.Source"/>).</summary>
+    public const string Source = "PyTorch";
+
     /// <summary>
     /// torch in this process, started over the environment <paramref name="lockFile"/> and
     /// <paramref name="options"/> resolve to — or over the one already running, where they name

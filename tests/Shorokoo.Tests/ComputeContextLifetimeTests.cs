@@ -197,7 +197,7 @@ public class ComputeContextLifetimeCoverageTests
         Assert.Equal("Shorokoo.HostMemory", ComputeContext.Host.Backend.Name);
 
         var session = Assert.Throws<NotSupportedException>(() => backend.CreateSession(
-            default, ShorokooGraphOptimization.EnableAll, ShorokooLogSeverity.Fatal,
+            default, ShorokooGraphOptimization.EnableAll, LogSettings.None,
             DeviceMemorySettings.Default));
         Assert.Contains("Shorokoo.LinuxCPU", session.Message);
 
@@ -1410,7 +1410,7 @@ public class ComputeContextLifetimeCoverageTests
         Buffer.BlockCopy(w, 0, raw, 0, raw.Length);
         graph.Initializers.Add(new TensorProto { Name = "W", data_type = 1, Dims = [N, N], RawData = raw });
         using var session = (OrtSession)backend.CreateSession(
-            ModelOf(graph), ShorokooGraphOptimization.EnableAll, ShorokooLogSeverity.Fatal, new DeviceMemorySettings(), DiagnosticSettings.Default);
+            ModelOf(graph), ShorokooGraphOptimization.EnableAll, LogSettings.None, new DeviceMemorySettings(), DiagnosticSettings.Default);
         var input = backend.CreateTensorInBackendMemory(ShorokooTensorElementType.Float, MemoryMarshal.AsBytes(x.AsSpan()).ToArray(), [N, N]);
         var output = session.RunConsuming(new Dictionary<string, IShorokooTensorValue> { ["x"] = input }, [input], ["y"], RunSettings.Default, out _).Single();
         var bytes = backend.CopyTensorToHost(output);
@@ -1653,7 +1653,7 @@ public class ComputeContextLifetimeCoverageTests
         var large = GraphOf($"x:float[1,{N}]", $"y:float[1,{N}]", Op("Add", "x b", "y"));
         large.Initializers.Add(new TensorProto { Name = "b", data_type = 1, Dims = [1, N], RawData = new byte[4 * N] });
         Assert.Equal((true, 1), Sweeping(() => backend.CreateSession(
-            ModelOf(large), ShorokooGraphOptimization.EnableAll, ShorokooLogSeverity.Fatal, new DeviceMemorySettings(), DiagnosticSettings.Default)));
+            ModelOf(large), ShorokooGraphOptimization.EnableAll, LogSettings.None, new DeviceMemorySettings(), DiagnosticSettings.Default)));
         Assert.Equal((true, 1), Sweeping(() => Aliasing(backend, GraphOf("a:float[4] b:float[4]", "O:float[4]", Op("Sub", "a b", "O")))));
     }
 
@@ -1664,7 +1664,7 @@ public class ComputeContextLifetimeCoverageTests
         using var session = (OrtSession)backend.CreateSession(
             ModelOf(GraphOf("a:float[1024,1024] b:float[1024,1024] c:bool[1024,1024]", "O:float[1024,1024]",
                 Op("Neg", "a", "n"), Op("Neg", "b", "m"), Op("Where", "c n m", "O"))),
-            ShorokooGraphOptimization.EnableAll, ShorokooLogSeverity.Fatal, new DeviceMemorySettings(), DiagnosticSettings.Default);
+            ShorokooGraphOptimization.EnableAll, LogSettings.None, new DeviceMemorySettings(), DiagnosticSettings.Default);
         float[] ones = [.. Enumerable.Repeat(1f, 1 << 20)];
         IShorokooTensorValue Ones() => backend.CreateTensorInBackendMemory(ShorokooTensorElementType.Float, MemoryMarshal.AsBytes(ones.AsSpan()).ToArray(), [1024, 1024]);
         using var c = backend.CreateTensorInBackendMemory(ShorokooTensorElementType.Bool, [.. Enumerable.Repeat((byte)1, 1 << 20)], [1024, 1024]);
@@ -1701,7 +1701,7 @@ public class ComputeContextLifetimeCoverageTests
         var backend = DefaultBackend.Instance;
         using var session = (OrtSession)backend.CreateSession(
             ModelOf(GraphOf("x:float[1024,1024]", "y:float[1024,1024]", Op("Neg", "x", "y"))),
-            ShorokooGraphOptimization.EnableAll, ShorokooLogSeverity.Fatal, new DeviceMemorySettings(), DiagnosticSettings.Default);
+            ShorokooGraphOptimization.EnableAll, LogSettings.None, new DeviceMemorySettings(), DiagnosticSettings.Default);
         ((IShorokooSession)session).StopPlacing();
         var x = backend.CreateTensorInBackendMemory(ShorokooTensorElementType.Float, new byte[4 << 20], [1024, 1024]);
         var made = ((IShorokooSession)session).Run(new Dictionary<string, IShorokooTensorValue> { ["x"] = x }, ["y"], RunSettings.Default).Single();
@@ -1720,7 +1720,7 @@ public class ComputeContextLifetimeCoverageTests
         var backend = DefaultBackend.Instance;
         using var session = (OrtSession)backend.CreateSession(
             ModelOf(GraphOf("x:float[1024,1024]", "y:float[1024,1024]", Op("Neg", "x", "t"), Op("Exp", "t", "y"))),
-            ShorokooGraphOptimization.EnableAll, ShorokooLogSeverity.Fatal, new DeviceMemorySettings(), DiagnosticSettings.Default);
+            ShorokooGraphOptimization.EnableAll, LogSettings.None, new DeviceMemorySettings(), DiagnosticSettings.Default);
         using var stop = new CancellationTokenSource();
         stop.Cancel();
         var x = backend.CreateTensorInBackendMemory(ShorokooTensorElementType.Float, new byte[4 << 20], [1024, 1024]);
@@ -1771,13 +1771,14 @@ public class ComputeContextLifetimeCoverageTests
         List<(string[], string[])> orders = [];
         string[] directories = [.. Enumerable.Range(0, 2).Select(_ => Path.Combine(Path.GetTempPath(), $"run-order-{Guid.NewGuid():N}"))];
         foreach (var directory in directories) Directory.CreateDirectory(directory);
+        using var unlogged = RuntimeLogRoutes.Open(LogSettings.None);
         try
         {
             for (int build = 0; build < 2; build++)
             {
                 var built = backend.NewSession(
                     build == 0 ? stream.ToArray() : File.ReadAllBytes(Path.Combine(directories[0], OrtBackend.OptimizedModelFile)),
-                    build == 0 ? ShorokooGraphOptimization.EnableAll : ShorokooGraphOptimization.DisableAll, ShorokooLogSeverity.Fatal,
+                    build == 0 ? ShorokooGraphOptimization.EnableAll : ShorokooGraphOptimization.DisableAll, unlogged,
                     new DeviceMemorySettings(), new DiagnosticSettings { TraceNodePlacement = true }, directories[build], 0, [], PrecisionSettings.Default,
                     externalDataDirectory: build == 0 ? null : directories[0]);
                 using var session = backend.Wrap(built, []);
@@ -1915,7 +1916,7 @@ public class ComputeContextLifetimeCoverageTests
     /// write its output O into its input a.</summary>
     internal static OrtSession Aliasing(IShorokooBackend backend, GraphProto graph)
         => (OrtSession)backend.CreateSession(
-            ModelOf(graph), ShorokooGraphOptimization.EnableAll, ShorokooLogSeverity.Fatal,
+            ModelOf(graph), ShorokooGraphOptimization.EnableAll, LogSettings.None,
             new DeviceMemorySettings(), DiagnosticSettings.Default,
             [new OutputAlias("O", "a")]);
 
@@ -2266,7 +2267,7 @@ public class ComputeContextLifetimeCoverageTests
 
         public IShorokooSession CreateSession(
             ReadOnlyMemory<byte> modelBytes, ShorokooGraphOptimization graphOptimization,
-            ShorokooLogSeverity logSeverity,
+            LogSettings log,
             DeviceMemorySettings deviceMemory) => throw new NotSupportedException();
 
         public IShorokooTensorValue CreateTensor<T>(T[] data, long[] shape) where T : unmanaged

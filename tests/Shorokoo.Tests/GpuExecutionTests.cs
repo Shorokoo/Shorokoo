@@ -22,6 +22,15 @@ public partial class WideLinearModel
     public static Tensor<float32> Inline(Tensor<float32> x) => Linear.Model(Scalar(4096L), Scalar(true)).Call(x);
 }
 
+/// <summary>The gradient of the sum of a <c>[V, 4]</c> table's rows read at <c>ids</c>: each row
+/// counts the ids that read it.</summary>
+[Module]
+public partial class GatheredTableGradientModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> table, Tensor<int64> ids)
+        => Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(table, table.Gather(ids).Reduce(ReduceKind.Sum, keepDims: false).Scalar());
+}
+
 /// <summary>One pre-LayerNorm transformer encoder layer, 64 wide with four heads: its gradients
 /// reduce over every row of the batch, which is where the card's kernels add up in whatever order
 /// its threads finish.</summary>
@@ -323,6 +332,41 @@ public class GpuExecutionTests
 
         var (shared, providers) = Run(consume: false);
         return (shared, Run(consume: true).Item1, providers!);
+    }
+
+    [CudaFact]
+    public void CudaProvider_AGatheredTablesGradientSumsRepeatedIdsOnTheCardWithoutAWarning()
+    {
+        long[] ids = [5, 9, 5, 5, 0, 9, 5, 63];
+        var logged = new List<OrtLogMessage>();
+        float[] before, after, gradient;
+        NodePlacement placement;
+        using (OrtLog.CaptureOnThisThread(logged.Add, ShorokooLogSeverity.Warning))
+        {
+            var rig = TrainingRig.FromScratch(NNGatheredTableModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+                [TensorData([ids.Length], ids)], new SGDOptimizerHyperparameters { LearningRate = 1f }, runtimeContext: new ComputeContext());
+            var initial = rig.CreateInitialCheckpoint();
+            before = Weights(initial);
+            after = Weights(rig.TrainStep(initial, rig.InputDef.FromOrderedData(TensorData([ids.Length], ids)).Shared(),
+                rig.TargetDef.FromOrderedData(TensorData([ids.Length, 4L], new float[ids.Length * 4])).Shared()));
+
+            using var traced = new ComputeContext { Diagnostics = new DiagnosticSettings { TraceNodePlacement = true } };
+            var table = TensorData([64L, 4L], new float[256]);
+            var read = TensorData([ids.Length], ids);
+            using var compiled = traced.Compile(GatheredTableGradientModel.ComputationGraph.ToConcreteArchitecture([table, read]).ToConcreteModel());
+            gradient = compiled.Execute(table, read)[0].ToTensorData().CopyMemory<float>();
+            placement = compiled.ReadNodePlacement()!;
+        }
+
+        Assert.Empty(logged);
+        for (int i = 0; i < before.Length; i++)
+        {
+            int reads = ids.Count(id => id == i / 4);
+            Assert.Equal(before[i] * (1f - reads / (2f * ids.Length)), after[i], 1e-5f);
+            Assert.Equal(reads, gradient[i]);
+        }
+        Assert.All(placement.Nodes.Where(n => n.OpType is "ScatterElements" or "ScatterND"), n => Assert.Equal("CUDAExecutionProvider", n.Provider));
+        Assert.Contains(placement.Nodes, n => n.OpType == "ScatterElements");
     }
 
     [CudaFact]

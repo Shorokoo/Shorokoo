@@ -2520,6 +2520,16 @@ public partial class NNInstanceNormalizationOpModel
             x * Normal.Init(Vector(2L, 1L)), Normal.Init(Vector(2L)), Normal.Init(Vector(2L)), 1e-5f);
 }
 
+/// <summary>ONNX's own two-group <c>GroupNormalization</c> of <c>[N, 2, 3]</c> input scaled by a trainable
+/// <c>[2, 1]</c> factor, under a trainable per-channel scale and bias.</summary>
+[Module]
+public partial class NNGroupNormalizationOpModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+        => (Tensor<float32>)OnnxOp.GroupNormalization(
+            x * Normal.Init(Vector(2L, 1L)), Normal.Init(Vector(2L)), Normal.Init(Vector(2L)), 1e-5f, 2L);
+}
+
 /// <summary>ONNX's own inference-mode <c>BatchNormalization</c> of <c>[N, 2, ...]</c> input under a
 /// trainable per-channel scale and bias.</summary>
 [Module]

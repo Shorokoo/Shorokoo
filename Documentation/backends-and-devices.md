@@ -91,9 +91,10 @@ keeps its own.
 
 ### ONNX Runtime's log messages
 
-The four ONNX Runtime backends make ONNX Runtime's environment, when the first of them is
-built, to log through `OrtLog` (namespace `Shorokoo.OnnxRuntime`). Messages the environment logs
-and messages a session logs both go there, and nowhere else:
+Where Shorokoo makes ONNX Runtime's environment, which it does when the first of the four ONNX
+Runtime backends is built, the environment logs through `OrtLog` (namespace
+`Shorokoo.Core.Backends`). Messages the environment logs and messages a session logs both go
+there, and nowhere else:
 
 - `OrtLog.Severity` is the least severe message passed on, `ShorokooLogSeverity.Warning` unless
   set otherwise. ONNX Runtime's environment is set to the same level.
@@ -104,7 +105,6 @@ and messages a session logs both go there, and nowhere else:
 
 ```csharp
 using Shorokoo.Core.Backends;
-using Shorokoo.OnnxRuntime;
 
 OrtLog.Severity = ShorokooLogSeverity.Error;                          // warnings dropped
 OrtLog.Sink = m => logger.Log(m.Severity.ToString(), m.Message);      // your own logger
@@ -119,11 +119,12 @@ The sessions Shorokoo builds log only at `Fatal`. A session built through
 `IShorokooBackend.CreateSession` at a severity of its own passes on only what is at least as
 severe as both that severity and `OrtLog.Severity`.
 
-`OrtLog` covers the environment only where Shorokoo made it. A program that makes ONNX Runtime's
-environment itself (`OrtEnv.CreateInstanceWithOptions`) before the first backend is built keeps
-the logging it made the environment with, and its sessions keep per-session thread pools
-([The backend types](#the-backend-types)). A backend loaded with `IsolatedBackend.Load` runs its own
-copy of ONNX Runtime, which logs through its own `OrtLog` at the defaults above.
+A backend loaded with `IsolatedBackend.Load` runs its own copy of ONNX Runtime, and that copy
+logs through the same `OrtLog`, at the same severity.
+
+A program that makes ONNX Runtime's environment itself (`OrtEnv.CreateInstanceWithOptions`)
+before the first backend is built keeps the logging it made the environment with, and its
+sessions keep per-session thread pools ([The backend types](#the-backend-types)).
 
 ### Auto-discovery
 

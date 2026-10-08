@@ -135,13 +135,39 @@ return x.MatMul(emb).MatMul(wv) + x.MatMul(bank);   // every one of the three is
 
 - The **shape** input must fold to a constant at the call site. (A rank-0 initializer
   has no shape input, so its first input may be a parameter.) Chains of dependencies work.
-- The value may be **computed from parameters** (`emb * Scalar(2f)`, or a module's output
-  on one), as plain tensor arithmetic over parameters created outside any loop. A
-  computation through a loop or branch, over a per-iteration parameter, or that draws
-  randomness is refused at concretization, naming the initializer.
+- A value **passed in** may be **computed from parameters** (`emb * Scalar(2f)`, or a
+  module's output on one), as plain tensor arithmetic over parameters created outside any
+  loop. A passed-in value computed through a loop or branch, over a per-iteration
+  parameter, or that draws randomness is refused at concretization, naming the initializer.
+- The initializer's **own body** may still draw. Each `Init(...)` call in it draws from its
+  own sub-stream, keyed on the parameter being created, so two parameters built by the same
+  initializer get different draws.
 - A source the model reads **nowhere else**, or one created **inside a loop**, is refused
   by name. Create the source outside the loop and use it in the model, or fold its
-  computation into the reading initializer.
+  computation — a draw included — into the reading initializer's body.
+
+A table that starts as `E · W`, with `E` the token embedding the model starts from and `W` a
+fresh `N(0, 0.02)` matrix that is no parameter, draws `W` in the body:
+
+```csharp
+[TrainableParamInitializer]
+public static partial class ValueBankInit
+{
+    public static Tensor<float32> Inline(Vector<int64> shape, Tensor<float32> tokenEmbedding)
+    {
+        var d = tokenEmbedding.DimTensor(1);
+        return tokenEmbedding.MatMul(NormalDist.Init([d, d], Scalar(0f), Scalar(0.02f)));
+    }
+}
+
+var wte   = NormalDist02.Init([vocab, d]);
+var bank0 = ValueBankInit.Init([vocab, d], wte);   // wte · W0
+var bank1 = ValueBankInit.Init([vocab, d], wte);   // wte · W1, a different W
+```
+
+Drawing `W` at the call site instead —
+`wte.MatMul(RandomNormal([d, d], Scalar(0f), Scalar(0.02f)))` passed to an
+initializer that returns its argument — is refused: that draw is part of the value passed in.
 
 **It may not create or reference a model.** No `Foo.Model(...)`, no `Foo.Call(...)` of
 any `[Module]` (even a parameter-free one), no `ModelSequence`, no
@@ -882,7 +908,7 @@ Knobs are **build-time C# arguments** on two extra methods:
 - **`Reduced(…, LossReduction reduction = Mean)`** returns a `Scalar<float32>`
   (`Mean`/`Sum`; `None` throws).
 - **`PerElement(…)`** returns the unreduced `Tensor<float32>`. For
-  `CrossEntropyLoss`/`NLLLoss` it is zero at `ignore_index` positions.
+  `CrossEntropyLoss`/`NLLLoss` it is zero at `ignoreIndex` positions.
 
 `LossReduction` (`Shorokoo.Modules.Losses`) is `None | Mean | Sum`.
 
@@ -899,6 +925,12 @@ Knobs are **build-time C# arguments** on two extra methods:
 
 - **`labelSmoothing`** (CE): `loss = (1−α)·NLL + α·(−(1/K)·Σ_k log p_k)`, with
   `weight`/`ignoreIndex` applied to both terms.
+- **`ignoreIndex`** (CE, NLL): a target equal to it adds nothing to the loss or the gradient, and
+  `Mean` divides by the targets that are not ignored, as PyTorch does: by their count, or with
+  `weight` by the sum of their classes' weights. The sentinel is any `int64`, a negative one such
+  as PyTorch's `-100` included. A training step whose batch holds an ignored target currently
+  fails when the sentinel lies outside `[-C, C-1]` for `C` classes — `-100` below 100 classes,
+  say ([#499](https://github.com/Shorokoo/Shorokoo/issues/499)); evaluating the loss does not.
 - **SmoothL1 ↔ Huber**: `SmoothL1(e; β) = HuberLoss(δ = β) / β`. Huber's `delta` is a
   live, schedulable `[Hyper]`; SmoothL1's `beta` is baked.
 - **PoissonNLL**: the Keras `Poisson` form is

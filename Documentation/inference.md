@@ -1309,7 +1309,11 @@ Console.WriteLine($"the card at its peak {DeviceMemory.PeakUsedBytes / (1024 * 1
   sample cost about a microsecond on an RTX 4090 under WDDM, and NVML's process list about 120
   microseconds, so one per step is cheap — and, unlike an external poller
   such as `nvidia-smi`, cannot miss the step.
-- With no CUDA runtime both return `null`, so the calls can stay in CPU code.
+- The peaks are 0 until a sample folds into them, and `PeakProcessBytes` stays 0 while no sampled
+  reading carried a process figure — in a container with its own process-id namespace, say, where
+  neither DXGI nor NVML gives one. A 0 therefore means "no figure" as well as "nothing sampled".
+- With no CUDA runtime, `Read()` and `Sample()` return `null` and the peaks stay 0, so the calls
+  can stay in CPU code.
 - The first reading initializes this process's CUDA context (a few hundred MiB) if none exists;
   take it after the backend is up. Readings use the thread's current CUDA device (device 0
   for the shipped GPU backends).

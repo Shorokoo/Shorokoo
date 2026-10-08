@@ -53,11 +53,11 @@ hyperparameters are all tensor-shaped gets a source-generated, named, defaulted 
 
 A loss module has signature `(predictions, targets) -> Scalar<float32>` with exactly two tensor
 inputs; targets are typically `Tensor<float32>`, but class-index losses (`CrossEntropyLoss`,
-`NLLLoss`) take `Tensor<int64>`. The library losses' knobs (`reduction`, `ignore_index`,
-`label_smoothing`, class `weight`/`pos_weight`, SmoothL1 `beta`) live on extra
+`NLLLoss`) take `Tensor<int64>`. The library losses' knobs (`reduction`, `ignoreIndex`,
+`labelSmoothing`, class `weight`/`posWeight`, SmoothL1 `beta`) live on extra
 `Reduced`/`PerElement` methods, not on the rig-bound `Inline`. To use them in a rig, write a
 2-input wrapper `[Module]` whose `Inline` calls `Reduced(...)` with the knobs baked; a class
-`weight`/`pos_weight` must be **baked as a graph constant** there. See
+`weight`/`posWeight` must be **baked as a graph constant** there. See
 [Losses → Configurable knobs](nn-library.md#loss-configurable-knobs).
 
 <a id="loss-ignoring-targets"></a>
@@ -1159,9 +1159,15 @@ Console.WriteLine(save);
 fsync, `Commit` the rename plus sweeping stale staged files. They sum to `Elapsed`; `BytesWritten`
 is the file size and `BytesPerSecond` the achieved rate. `Persistence.SaveTrainingCheckpoint`,
 `Persistence.SaveTrainingCheckpointToSkpt` and the `Persistence.ForTrainingCheckpoint(...)`
-builder's `Save` return it too; the directory form (`SaveAsDirectory`) returns `void`. Save time
-varies between identical saves (mostly in `Flush`), and multi-GB saves can take tens of seconds, so
-exclude it from throughput measurements:
+builder's `Save` return it too; the directory form (`SaveAsDirectory`) returns `void`.
+
+The save is streamed through an ordinary buffered file, so `Write` only hands the bytes to the OS's
+page cache; `Flush` is where they reach the disk. What is still unwritten when it starts depends on
+the OS's background write-back (the lazy writer on Windows; on Linux a fast disk absorbs it in well
+under a second), and on a slow disk `Flush` approaches the file size divided by the disk's write
+bandwidth. A report such as `write 0.6s, flush 5.8s` therefore says the disk is the cost, not the
+fsync call. Save time varies between identical saves (mostly in `Flush`), and multi-GB saves can
+take tens of seconds, so exclude it from throughput measurements:
 
 ```csharp
 steady.Stop();                                   // saving is I/O, not training
@@ -1215,6 +1221,12 @@ checkpoint from `Persistence.LoadTrainingCheckpoint` needs a rig to bind.
 var model = Persistence.Load("run.skpt");                  // ConcreteModel, weights bound
 var eval  = Persistence.LoadEvaluationModel("run.skpt");   // [model inputs…, targets] → loss
 ```
+
+Each run of the evaluation model gives one batch's loss. Under a `Mean` loss with `ignoreIndex`,
+that figure is a mean over the batch's own targets that are not ignored (with a class `weight`,
+over their total weight), so batches are not interchangeable: weight each batch's figure by that
+count before combining, or give the loss `reduction: LossReduction.Sum` and divide the batches'
+total once, at the end, by the whole set's count.
 
 `ToInferenceModel()` binds the checkpoint's trainable params and model state into its `.Rig`'s
 retained concrete architecture (concretized once at build, at all inputs, so multi-input models

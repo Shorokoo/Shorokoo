@@ -331,7 +331,11 @@ for (int step = 0; step < 50_000; step++)
   ```
 - **A checkpoint handed out is yours.** The run goes on training from it but only reads it, and
   `Dispose` leaves it alone. A later step therefore writes its new state beside it rather than over
-  it: on a card that is a second copy of the state for as long as you hold the checkpoint.
+  it: on a card that is a second copy of the state for as long as you hold the checkpoint. Drop it
+  (a checkpoint you saved and no longer need) and the next step frees it: that step collects once it
+  has moved the run on, when the dropped state puts the rig over its 32 MiB budget
+  ([What construction costs](#what-construction-costs)). So a loop that saves and drops a
+  checkpoint every N steps holds two copies only from the checkpoint to the step after it.
 - **`Dispose`** discards what the run still holds; checkpoints it handed out stay valid.
 - **Each step consumes the state the previous step produced**, writing over it where it can
   ([below](#a-step-writes-its-state-over-the-state-it-consumed)). The starting checkpoint is
@@ -473,7 +477,8 @@ such state has accumulated across steps, and backs off (doubling the threshold) 
 reclaim nothing, e.g. when you keep every checkpoint. You need not collect yourself. Initial
 checkpoints count against the same budget. A resident run's `Step` bypasses it, but a checkpoint
 the run hands out — from `StepToCheckpoint` or `TakeCheckpoint` — counts once a later step has
-moved on from it.
+moved on from it, and the collection it triggers runs after that step, when the run no longer holds
+it, so a checkpoint you have dropped by then is freed by it.
 
 On a large model the build can take minutes; see [Watching a long build](#watching-a-long-build).
 

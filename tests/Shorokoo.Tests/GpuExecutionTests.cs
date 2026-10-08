@@ -31,6 +31,15 @@ public partial class GatheredTableGradientModel
         => Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(table, table.Gather(ids).Reduce(ReduceKind.Sum, keepDims: false).Scalar());
 }
 
+/// <summary>The gradient of the product of two scalars: a broadcasting op's gradient over operands
+/// of rank zero.</summary>
+[Module]
+public partial class ScalarProductGradientModel
+{
+    public static Scalar<float32> Inline(Scalar<float32> a, Scalar<float32> b)
+        => Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(a, a * b);
+}
+
 /// <summary>One pre-LayerNorm transformer encoder layer, 64 wide with four heads: its gradients
 /// reduce over every row of the batch, which is where the card's kernels add up in whatever order
 /// its threads finish.</summary>
@@ -1306,6 +1315,14 @@ public class GpuExecutionTests
     /// nothing but the output it copies onto the card, and one it runs whole is
     /// <see cref="SessionOutputPlacement.Device"/>. Every output comes back on the card.
     /// </summary>
+    [CudaFact]
+    public void CudaProvider_TheGradientOfAProductOfScalarsRunsOnTheCard()
+    {
+        using var compiled = new ComputeContext().Compile(
+            ScalarProductGradientModel.ComputationGraph.ToConcreteArchitecture([TensorData([], 2f), TensorData([], 3f)]).ToConcreteModel());
+        Assert.Equal([3f], compiled.Execute(TensorData([], 2f), TensorData([], 3f))[0].ToTensorData().CopyMemory<float>());
+    }
+
     private static string[] HostWorkOfAStep(ComputationGraph model, long[] rows, long[] targetRows)
     {
         System.Collections.Concurrent.ConcurrentQueue<RuntimeLogMessage> logged = [];

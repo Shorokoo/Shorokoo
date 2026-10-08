@@ -1318,7 +1318,7 @@ public class PyTorchBackendCoverageTests
     {
         using var context = new ComputeContext(Torch);
         Assert.Empty(TrainingRig.FromScratch(Benchmarks.MemoryPassMlp.ComputationGraph, Shorokoo.Modules.Losses.L2Loss.ComputationGraph,
-            Shorokoo.Modules.Optimizers.SGDOptimizer.ComputationGraph, [TensorData([64L, 256L], new float[64 * 256])],
+            Shorokoo.Modules.Optimizers.SGDOptimizer.ComputationGraph, [TensorData([4L, 32L], new float[4 * 32])],
             new Shorokoo.Modules.Optimizers.SGDOptimizerHyperparameters { LearningRate = 0.01f }, runtimeContext: context).RunModelAnswers);
     }
 

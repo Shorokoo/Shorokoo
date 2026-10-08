@@ -6488,6 +6488,21 @@ public class TrainingRigHyperparameterDTypeCoverageTests
     }
 
     [Fact]
+    public void TestAppliedScheduledHyperparameterIsTheScheduledValueOnEveryStepCoverage()
+    {
+        var (_, input, target) = ScalarMultiplyBatches();
+        var rig = MixedRig(new MixedDTypeHyperOptimizerHyperparameters { LearningRate = Schedules.Constant(0.1f) });
+        var ckpt = rig.CreateInitialCheckpoint();
+        var applied = new float[300];
+        for (int i = 0; i < applied.Length; i++)
+        {
+            ckpt = rig.TrainStep(ckpt, input.Shared(), target.Shared());
+            applied[i] = ckpt.AppliedHyperparameters!["learningRate"].ToSingle();
+        }
+        Assert.Equal(Enumerable.Repeat(0.1f, applied.Length), applied);
+    }
+
+    [Fact]
     public void TestHyperparameterDTypeConversionsAndRejectionsCoverage()
     {
         var runtimeRig = MixedRig(new MixedDTypeHyperOptimizerHyperparameters

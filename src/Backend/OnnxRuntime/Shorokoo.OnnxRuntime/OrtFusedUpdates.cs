@@ -105,10 +105,12 @@ internal static class OrtFusedUpdates
         private readonly Dictionary<string, ValueInfoProto> _stated = new(StringComparer.Ordinal);
 
         // The shape and element type of each value that follows from the dimensions the graph states
-        // for its inputs; worked out the first time a value of no stated type is asked about.
+        // for its inputs; worked out the first time a value is asked about that nothing else settles.
         private Dictionary<string, PlacementShapes.Value>? _inferred;
 
-        // Per value known to hold a single element, its rank.
+        // Per value known to hold a single element, its rank: as the graph states it or writes it
+        // (see SingleRank), or as its shape follows from the dimensions the graph states for its
+        // inputs (see IsSingle).
         private readonly Dictionary<string, int> _single = new(StringComparer.Ordinal);
 
         internal Index(GraphProto graph)
@@ -184,7 +186,7 @@ internal static class OrtFusedUpdates
             if (!Producer(denominator, "Add", 2, divAt, chain, out var denominatorAt)) return null;
             string? vNew = null, eps = null;
             foreach (var (a, b) in Pairs(_graph.Nodes[denominatorAt]))
-                if (_single.ContainsKey(b) && Producer(a, "Sqrt", 1, denominatorAt, chain, out var rootAt))
+                if (IsSingle(b, out _) && Producer(a, "Sqrt", 1, denominatorAt, chain, out var rootAt))
                 {
                     (vNew, eps) = (_graph.Nodes[rootAt].Inputs[0], b);
                     break;
@@ -237,13 +239,13 @@ internal static class OrtFusedUpdates
             // greater rank.
             if (!_inputs.TryGetValue(p, out var pInfo) || !_inputs.TryGetValue(m, out var mInfo) || !_inputs.TryGetValue(v, out var vInfo))
                 return null;
-            if (new HashSet<string>(StringComparer.Ordinal) { p, m, v, g }.Count != 4 || _single.ContainsKey(g)) return null;
+            if (new HashSet<string>(StringComparer.Ordinal) { p, m, v, g }.Count != 4 || IsSingle(g, out _)) return null;
             if (StatedDims(pInfo) is not { } dims || !IsFloat(pInfo) || !IsFloat(mInfo) || !IsFloat(vInfo)
                 || !SameDims(dims, StatedDims(mInfo)) || !SameDims(dims, StatedDims(vInfo))
                 || !IsFloatOf(g, dims))
                 return null;
             string[] coefficients = decay is null ? [beta1!, c1!, beta2!, c2!, eps!, step] : [beta1!, c1!, beta2!, c2!, eps!, step, decay];
-            if (coefficients.Any(c => !_single.TryGetValue(c, out var rank) || rank > dims.Count)) return null;
+            if (coefficients.Any(c => !IsSingle(c, out var rank) || rank > dims.Count)) return null;
             if (chain.Any(taken.Contains) || chain.Distinct().Count() != chain.Count) return null;
 
             // After everything it reads, and before everything that reads what it writes.
@@ -269,7 +271,7 @@ internal static class OrtFusedUpdates
             (tensor, single) = ("", "");
             if (!Producer(value, "Mul", 2, reader, chain, out var at)) return false;
             foreach (var (a, b) in Pairs(_graph.Nodes[at]))
-                if (_single.ContainsKey(b) && !_single.ContainsKey(a))
+                if (IsSingle(b, out _) && !IsSingle(a, out _))
                 {
                     (tensor, single) = (a, b);
                     return true;
@@ -327,6 +329,30 @@ internal static class OrtFusedUpdates
 
         private static bool IsFloat(ValueInfoProto info) => info.Type?.TensorType?.ElemType == 1;
 
+        /// <summary>Whether <paramref name="value"/> holds a single element, and its rank: as the
+        /// graph states or writes it, or, failing that, as its shape follows from the dimensions the
+        /// graph states for its inputs — a step size the schedule ties to another value, say, by a
+        /// <c>Concat</c> with an empty <c>Slice</c> of it.</summary>
+        private bool IsSingle(string value, out int rank)
+        {
+            if (_single.TryGetValue(value, out rank)) return true;
+            if (Inferred().TryGetValue(value, out var inferred) && inferred.Shape.All(d => d == 1))
+            {
+                rank = inferred.Shape.Length;
+                _single[value] = rank;
+                return true;
+            }
+            return false;
+        }
+
+        /// <summary>The shape and element type of each value that follows from the dimensions the
+        /// graph states for its inputs, worked out once.</summary>
+        private Dictionary<string, PlacementShapes.Value> Inferred()
+            => _inferred ??= PlacementShapes.Evaluate(_graph, _graph.Inputs
+                .Where(i => i.Type?.TensorType is { Shape: { } shape } && shape.Dims.All(d => d.DimValue > 0))
+                .ToDictionary(i => i.Name, i => (i.Type.TensorType.Shape.Dims.Select(d => d.DimValue).ToArray(), i.Type.TensorType.ElemType),
+                    StringComparer.Ordinal));
+
         /// <summary>Whether <paramref name="value"/> is a float32 value of <paramref name="dims"/>: as
         /// the graph states its type, or, where it states none, as its shape follows from the
         /// dimensions the graph states for its inputs.</summary>
@@ -335,11 +361,7 @@ internal static class OrtFusedUpdates
             if (_stated.TryGetValue(value, out var info) && info.Type?.TensorType is not null)
                 return IsFloat(info) && SameDims(dims, StatedDims(info));
             if (dims.Any(d => d.DimValue <= 0)) return false;
-            _inferred ??= PlacementShapes.Evaluate(_graph, _graph.Inputs
-                .Where(i => i.Type?.TensorType is { Shape: { } shape } && shape.Dims.All(d => d.DimValue > 0))
-                .ToDictionary(i => i.Name, i => (i.Type.TensorType.Shape.Dims.Select(d => d.DimValue).ToArray(), i.Type.TensorType.ElemType),
-                    StringComparer.Ordinal));
-            return _inferred.TryGetValue(value, out var inferred) && inferred.ElementType == 1
+            return Inferred().TryGetValue(value, out var inferred) && inferred.ElementType == 1
                 && inferred.Shape.AsSpan().SequenceEqual(dims.Select(d => d.DimValue).ToArray());
         }
 

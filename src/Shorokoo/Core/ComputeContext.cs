@@ -44,6 +44,10 @@ namespace Shorokoo.Runtime
         private readonly Dictionary<string, string> _onnxInputNameByOriginal;
         private readonly string[] _originalInputNames;
 
+        // What refuses a run fed an index outside what it indexes, or null where nothing is indexed
+        // by an input (IndexInputCheck).
+        private readonly IndexInputCheck? _indexCheck;
+
         // The session's outputs, by name, in its order -- every session this graph is ever built on
         // is the same model's, so they are taken once rather than asked of whichever is current.
         private readonly string[] _outputNames;
@@ -113,7 +117,8 @@ namespace Shorokoo.Runtime
             byte[]? model = null,
             IReadOnlyList<OutputAlias>? outputAliases = null,
             IReadOnlyList<(SuppliedInitializer Initializer, TensorData Tensor)>? supplied = null,
-            IReadOnlyList<(SuppliedInitializer Initializer, TensorAttribute Attribute)>? borrowed = null)
+            IReadOnlyList<(SuppliedInitializer Initializer, TensorAttribute Attribute)>? borrowed = null,
+            IndexInputCheck? indexCheck = null)
         {
             _supplied = supplied ?? [];
             _borrowed = borrowed ?? [];
@@ -141,6 +146,7 @@ namespace Shorokoo.Runtime
             Optimization = optimization;
             DefaultRunSettings = defaultRunSettings;
             _description = description;
+            _indexCheck = indexCheck;
             _model = model;
             _outputAliases = outputAliases ?? [];
         }
@@ -365,6 +371,7 @@ namespace Shorokoo.Runtime
 
                 // Everything that can refuse the run over what it is fed, before anything is taken.
                 feeds.Prepare(inputs);
+                _indexCheck?.Check(inputs);
 
                 // Under a budget, the session this run can use -- kept, or built again with the
                 // arena limit what the context now holds leaves -- decided before anything is
@@ -1944,7 +1951,8 @@ namespace Shorokoo.Runtime
 
             var graph = new CompiledGraph(
                 session, backend, onnxInputNameByOriginal, originalInputNames, optimization,
-                deviceMemory, RunSettings, this, description, kept, outputAliases, supplied, borrowed);
+                deviceMemory, RunSettings, this, description, kept, outputAliases, supplied, borrowed,
+                IndexInputCheck.Of(model.Graph, originalInputNames));
             // Enrolled under the same gate a disposal takes, so a compile racing a disposal either
             // lands before it and is released with everything else, or finds the context gone.
             lock (_gate)
@@ -2323,6 +2331,7 @@ namespace Shorokoo.Runtime
                 // Everything that can refuse the run over what it is fed, before a session is built
                 // for it and before anything is taken.
                 feeds.Prepare(inputs);
+                IndexInputCheck.Of(model.Graph, originalInputNames)?.Check(inputs);
 
                 // A one-shot session: built, fed once, and disposed, so no differing shapes can
                 // reach it -- and, under a budget, built with the arena limit a kept session would get

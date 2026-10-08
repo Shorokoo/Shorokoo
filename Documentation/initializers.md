@@ -72,11 +72,11 @@ equivalents are `OptimizerScalarZeros` / `OptimizerScalarOnes`
 ([Optimizers](losses-and-optimizers.md#optimizers-shorokoomodulesoptimizers)).
 
 **Writing your own.** An initializer states its parameter's shape either as its **first**
-`Inline` parameter (a shape vector) or, for rank 0, as its `Scalar<T>` return type. A
-shape baked into the body of a no-argument `Inline` is rejected by name when the model is
-lowered, and a shaped initializer whose first argument is not an `int64` shape vector
-(`Init(wte)` handing it another parameter's value, say) is refused by name at the `Init`
-call; any other input comes after the shape. An optimizer-owned `[StateInitializer]` is
+`Inline` parameter (a shape vector) or, for rank 0, as its `Scalar<T>` return type. Both
+misuses are refused by name at the `Init` call, even on a branch a specialization removes: a
+shape baked into the body of a no-argument `Inline`, and a shaped initializer whose first
+argument is not an `int64` shape vector (`Init(wte)` handing it another parameter's value,
+say). Any other input comes after the shape. An optimizer-owned `[StateInitializer]` is
 exempt: the rig calls it once per trainable parameter, and the state takes whatever shape
 it returns ([Training hyperparameters](training-hyperparameters.md)). The body is an ordinary
 graph body (tensor ops, loops, `IfElse`). The rules below apply to `[StateInitializer]` and

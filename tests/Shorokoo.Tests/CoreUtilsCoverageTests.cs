@@ -4,6 +4,7 @@ using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
 using Microsoft.ML.OnnxRuntime;
 using Shorokoo.Core.Factory;
+using Shorokoo.Core.Factory.IR;
 using Shorokoo.Core.Factory.OpsFactories;
 using Shorokoo.Core.Interpreter;
 using Shorokoo.Core.Backends;
@@ -1193,6 +1194,41 @@ public class CoreUtilsCoverageTests
         using var value = OrtValue.CreateTensorValueFromMemory([1f, 2f, 3f], [3L]);
         value.GetTensorMutableDataAsSpan<float>()[2] = 7f;
         Assert.Equal(BitConverter.SingleToInt32Bits(7f), Marshal.ReadInt32(OrtTensorAddress.Read(value)!.Value, 8));
+    }
+
+    internal static List<OrtLogMessage> LoggedBuildingASession(ShorokooLogSeverity session, ShorokooLogSeverity captured)
+        => LoggedBuildingASession(DefaultBackend.Instance, session, captured);
+
+    internal static List<OrtLogMessage> LoggedBuildingASession(IShorokooBackend backend, ShorokooLogSeverity session, ShorokooLogSeverity captured)
+    {
+        var x = InputTensor<float32>("x", rank: 1);
+        var proto = FastOnnxModelBuilder.BuildInternalOnnxModel(new InternalComputationGraph([x], [x + x]), prepForOnnx: true);
+        proto.Graph.Initializers.Add(new TensorProto { Name = "unused", data_type = 1, Dims = [1], FloatDatas = [1f] });
+        var model = new MemoryStream();
+        ProtoBuf.Serializer.Serialize(model, proto);
+        var logged = new List<OrtLogMessage>();
+        using (OrtLog.CaptureOnThisThread(logged.Add, captured))
+        using (backend.CreateSession(model.ToArray(), ShorokooGraphOptimization.EnableAll, session, DeviceMemorySettings.Default)) { }
+        return logged;
+    }
+
+    [Fact]
+    public void TestOnnxRuntimesMessagesReachTheOrtLogSinkAtItsSeverityWithoutColourCodes()
+    {
+        Assert.True(OrtEnvironment.LogsThroughOrtLog);
+        Assert.Equal(ShorokooLogSeverity.Warning, OrtLog.Severity);
+        Assert.Equal(OrtLog.WriteToStandardError, OrtLog.Sink);
+        OrtEnvironment.ApplyLogSeverity();
+        Assert.Equal(OrtLoggingLevel.ORT_LOGGING_LEVEL_WARNING, OrtEnv.Instance().EnvLogLevel);
+        Assert.Throws<ArgumentOutOfRangeException>(() => OrtLog.Severity = (ShorokooLogSeverity)5);
+
+        var warning = Assert.Single(LoggedBuildingASession(ShorokooLogSeverity.Warning, ShorokooLogSeverity.Warning));
+        Assert.Equal(ShorokooLogSeverity.Warning, warning.Severity);
+        Assert.Contains("'unused'", warning.Message);
+        Assert.Equal($"[ONNX Runtime Warning] {warning.CodeLocation}: {warning.Message}", warning.ToString());
+        Assert.DoesNotContain('\u001b', warning.ToString());
+        Assert.Empty(LoggedBuildingASession(ShorokooLogSeverity.Warning, ShorokooLogSeverity.Error));
+        Assert.Empty(LoggedBuildingASession(ShorokooLogSeverity.Fatal, ShorokooLogSeverity.Warning));
     }
 
     /// <summary>

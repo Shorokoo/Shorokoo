@@ -221,6 +221,14 @@ public class SideBySideBackendCoverageTests
     }
 
     [Fact]
+    public void TestAnIsolatedRuntimesMessagesReachTheProgramsOrtLog()
+    {
+        var warning = Assert.Single(CoreUtilsCoverageTests.LoggedBuildingASession(Alt.Value, ShorokooLogSeverity.Warning, ShorokooLogSeverity.Warning));
+        Assert.Contains("'unused'", warning.Message);
+        Assert.Empty(CoreUtilsCoverageTests.LoggedBuildingASession(Alt.Value, ShorokooLogSeverity.Warning, ShorokooLogSeverity.Error));
+    }
+
+    [Fact]
     public void TestALiteralFedToANonDefaultBackendIsBuiltByThatBackendsRuntime()
     {
         var (graph, a, b, expected) = Model();

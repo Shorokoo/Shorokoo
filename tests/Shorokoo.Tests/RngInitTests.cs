@@ -163,8 +163,10 @@ internal static class RngInitSameShapeStack
 {
     internal static Tensor<float32> Chain(Tensor<float32> x, int layers)
     {
+#pragma warning disable MSG007 // separate trace-order parameters are the shape under test
         for (int i = 0; i < layers; i++)
             x = x.MatMul(NormalDist.Init(Vector(4L, 4L), Scalar(0f), Scalar(0.02f)));
+#pragma warning restore MSG007
         return x;
     }
 }

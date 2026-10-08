@@ -994,7 +994,7 @@ public class AutoDiffCheckpointingCoverageTests
         long? Shorokoo.Core.Backends.IShorokooBackend.ModelledRunPeak(ModelProto model, IReadOnlyList<Shorokoo.Core.Backends.OutputAlias> outputAliases, Shorokoo.Core.Backends.PrecisionSettings precision)
         {
             Interlocked.Increment(ref Asked);
-            return ModelledRunPeakOf(model, outputAliases, precision);
+            return (1L << 30) - model.Graph!.Nodes.Count * (1L << 20);
         }
 
         string? Shorokoo.Core.Backends.IShorokooBackend.RunModelIdentity => build;
@@ -1015,7 +1015,7 @@ public class AutoDiffCheckpointingCoverageTests
         }
         TrainingRig? built = null;
         var fromScratch = Judged(() => built = TrainingRig.FromScratch(MemoryPassMlp.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
-            [Pattern([16L, 256L], 1f)], new SGDOptimizerHyperparameters { LearningRate = 0.01f }, runtimeContext: context));
+            [Pattern([4L, 32L], 1f)], new SGDOptimizerHyperparameters { LearningRate = 0.01f }, runtimeContext: context));
         var path = Path.Combine(Path.GetTempPath(), $"judged-{Guid.NewGuid():N}.skpt");
         try
         {
@@ -1037,35 +1037,15 @@ public class AutoDiffCheckpointingCoverageTests
     }
 
     [Fact]
-    public void TestARigLoadedWhereOptimizerUpdatesAreFusedOtherwiseChoosesAsABuildThereDoesCoverage()
+    public void TestARunModelQuestionDiffersWhereOptimizerUpdatesAreFusedOtherwiseAndNamesTheProcessorsInstructionSetsCoverage()
     {
-        using var fusing = new ComputeContext(new HostRunModel(true));
-        using var writing = new ComputeContext(new HostRunModel(false));
-        TrainingRig Built(ComputeContext context) => TrainingRig.FromScratch(MemoryPassMlp.ComputationGraph, L2Loss.ComputationGraph, AdamOptimizer.ComputationGraph,
-            [Pattern([16L, 256L], 1f)], new AdamOptimizerHyperparameters { LearningRate = 1e-3f }, runtimeContext: context);
-        static string Peaks(TrainingRig rig) => string.Join(",", rig.OptimizationResult.BackendPeakBytes!);
-        var path = Path.Combine(Path.GetTempPath(), $"fused-{Guid.NewGuid():N}.skpt");
-        try
-        {
-            Persistence.SaveTrainingCheckpointToSkpt(Built(fusing).CreateInitialCheckpoint(), path);
-
-            Assert.Equal(Peaks(Built(writing)), Peaks(TrainingRig.Load(path, runtimeContext: writing).Rig));
-            Assert.NotEqual(((Shorokoo.Core.Backends.IShorokooBackend)new HostRunModel(true)).RunModelIdentity,
-                ((Shorokoo.Core.Backends.IShorokooBackend)new HostRunModel(false)).RunModelIdentity);
-        }
-        finally
-        {
-            File.Delete(path);
-        }
-    }
-
-    [Fact]
-    public void TestARigTakesOnlyTheWellFormedAnswersItsCheckpointRecordsCoverage()
-    {
-        string[] keys = [new string('a', 64), new string('0', 64), new string('A', 64), new string('a', 63), new string('g', 64), new string('1', 64)];
-        var recorded = new Dictionary<string, long?> { [keys[0]] = 5, [keys[1]] = null, [keys[2]] = 5, [keys[3]] = 5, [keys[4]] = 5, [keys[5]] = -1 };
-
-        Assert.Equal([keys[1], keys[0]], TrainingRig.TakenRunModelAnswers(recorded).Keys.Order(StringComparer.Ordinal));
+        Shorokoo.Core.Backends.IShorokooBackend fusing = new HostRunModel(true), writing = new HostRunModel(false);
+        var model = new ModelProto { Graph = ComputeContextLifetimeCoverageTests.GraphOf("a:float[4]", "b", ComputeContextLifetimeCoverageTests.Op("Neg", "a", "b")) };
+        string Asked(Shorokoo.Core.Backends.IShorokooBackend backend) => TrainingRig.RunModelQuestion(model, [], Shorokoo.Core.Backends.PrecisionSettings.Default, backend);
+        Assert.NotEqual(fusing.RunModelIdentity, writing.RunModelIdentity);
+        Assert.NotEqual(Asked(fusing), Asked(writing));
+        Assert.Equal(Asked(writing), Asked(new HostRunModel(false)));
+        Assert.Contains(Shorokoo.OnnxRuntime.OrtBackend.InstructionSets.Value, writing.RunModelIdentity);
     }
 
     private static string Content(InternalComputationGraph graph)

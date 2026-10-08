@@ -181,9 +181,7 @@ public abstract class OrtBackend : IShorokooBackend
         try
         {
             Directory.CreateDirectory(directory);
-            using var stream = new MemoryStream();
-            ProtoBuf.Serializer.Serialize(stream, model);
-            Discard(NewSession(AsRun(stream.ToArray(), ShorokooGraphOptimization.TrainingStep), ShorokooGraphOptimization.TrainingStep, ShorokooLogSeverity.Fatal,
+            Discard(NewSession(SerializedAsRun(model), ShorokooGraphOptimization.TrainingStep, ShorokooLogSeverity.Fatal,
                 DeviceMemorySettings.Default, DiagnosticSettings.Default, directory, 0, [], precision));
             ModelProto run;
             using (var written = File.OpenRead(Path.Combine(directory, OptimizedModelFile)))
@@ -207,12 +205,45 @@ public abstract class OrtBackend : IShorokooBackend
 
     /// <summary>The build of this assembly, whose <see cref="OrtRunMemory"/> reads the graph a session
     /// writes out, the native ONNX Runtime's version, and the build and location of the managed
-    /// library over it, which decide that graph; and, where a training step's Adam and AdamW updates
-    /// run as the native library's operator (<see cref="FusesOptimizerUpdates"/>), which changes the
-    /// graph a step's session writes out, the build of that library.</summary>
-    string? IShorokooBackend.RunModelIdentity => FusesOptimizerUpdates && RegistersOperators
-        ? $"{RunModelBuild.Value}|fused|{FusedOperatorsBuild.Value}"
-        : RunModelBuild.Value;
+    /// library over it, which decide that graph; the instruction sets of the processor and, on a
+    /// card, its compute capability, which decide the layouts and packed weights ONNX Runtime's
+    /// optimizations choose; and, where a training step's Adam and AdamW updates run as the native
+    /// library's operator (<see cref="FusesOptimizerUpdates"/>), which changes the graph a step's
+    /// session writes out, the build of that library.</summary>
+    string? IShorokooBackend.RunModelIdentity
+    {
+        get
+        {
+            var hardware = _cudaDeviceId is { } device
+                ? $"{InstructionSets.Value}|cuda {CudaDriver.ComputeCapability(device) ?? "unknown"}"
+                : InstructionSets.Value;
+            return FusesOptimizerUpdates && RegistersOperators
+                ? $"{RunModelBuild.Value}|{hardware}|fused|{FusedOperatorsBuild.Value}"
+                : $"{RunModelBuild.Value}|{hardware}";
+        }
+    }
+
+    /// <summary>The instruction sets of this processor that ONNX Runtime's CPU kernels choose
+    /// between.</summary>
+    internal static readonly Lazy<string> InstructionSets = new(() =>
+    {
+        (string Name, bool Supported)[] sets =
+        [
+            ("sse4.1", System.Runtime.Intrinsics.X86.Sse41.IsSupported),
+            ("avx", System.Runtime.Intrinsics.X86.Avx.IsSupported),
+            ("avx2", System.Runtime.Intrinsics.X86.Avx2.IsSupported),
+            ("fma", System.Runtime.Intrinsics.X86.Fma.IsSupported),
+            ("avx-vnni", System.Runtime.Intrinsics.X86.AvxVnni.IsSupported),
+            ("avx512f", System.Runtime.Intrinsics.X86.Avx512F.IsSupported),
+            ("avx512bw", System.Runtime.Intrinsics.X86.Avx512BW.IsSupported),
+            ("avx512dq", System.Runtime.Intrinsics.X86.Avx512DQ.IsSupported),
+            ("avx512vbmi", System.Runtime.Intrinsics.X86.Avx512Vbmi.IsSupported),
+            ("neon", System.Runtime.Intrinsics.Arm.AdvSimd.IsSupported),
+            ("dotprod", System.Runtime.Intrinsics.Arm.Dp.IsSupported),
+            ("rdm", System.Runtime.Intrinsics.Arm.Rdm.IsSupported),
+        ];
+        return string.Join(",", sets.Where(set => set.Supported).Select(set => set.Name));
+    });
 
     private static readonly Lazy<string> FusedOperatorsBuild = new(() =>
     {
@@ -434,14 +465,18 @@ public abstract class OrtBackend : IShorokooBackend
     /// the CPU provider alone, where the library is deployed.</summary>
     private bool RegistersOperators => _cudaDeviceId is null && _stockProvider && NativeAllocator.Located is not null;
 
+    /// <summary>Whether a training step's session fuses its Adam and AdamW updates.</summary>
+    private bool FusesHere => FusesOptimizerUpdates && RegistersOperators;
+
     /// <summary>
     /// <paramref name="model"/> as a session built at <paramref name="graphOptimization"/> runs it:
     /// a training step's on the host with its Adam and AdamW updates fused
-    /// (<see cref="FusesOptimizerUpdates"/>), every other as it is, unparsed.
+    /// (<see cref="FusesOptimizerUpdates"/>), every other as it is, unparsed — as is one with no
+    /// <c>Sqrt</c>, which every update fused takes.
     /// </summary>
     private byte[] AsRun(byte[] model, ShorokooGraphOptimization graphOptimization)
     {
-        if (!FusesOptimizerUpdates || !RegistersOperators || graphOptimization != ShorokooGraphOptimization.TrainingStep)
+        if (!FusesHere || graphOptimization != ShorokooGraphOptimization.TrainingStep || model.AsSpan().IndexOf("Sqrt"u8) < 0)
             return model;
         ModelProto parsed;
         using (var stream = new MemoryStream(model, writable: false))
@@ -450,6 +485,30 @@ public abstract class OrtBackend : IShorokooBackend
         using var written = new MemoryStream();
         ProtoBuf.Serializer.Serialize(written, parsed);
         return written.ToArray();
+    }
+
+    /// <summary>The bytes of <paramref name="model"/>, a training step's, as its session runs it
+    /// (<see cref="AsRun"/>): fused before it is written, and left as it was.</summary>
+    private byte[] SerializedAsRun(ModelProto model)
+    {
+        List<NodeProto>? nodes = FusesHere && model.Graph is { } graph ? [.. graph.Nodes] : null;
+        var imports = model.OpsetImports.Count;
+        try
+        {
+            if (nodes is not null) OrtFusedUpdates.Fuse(model);
+            using var stream = new MemoryStream();
+            ProtoBuf.Serializer.Serialize(stream, model);
+            return stream.ToArray();
+        }
+        finally
+        {
+            if (nodes is not null)
+            {
+                model.Graph!.Nodes.Clear();
+                model.Graph.Nodes.AddRange(nodes);
+                model.OpsetImports.RemoveRange(imports, model.OpsetImports.Count - imports);
+            }
+        }
     }
 
     /// <summary>This backend's sessions take supplied initializers.</summary>

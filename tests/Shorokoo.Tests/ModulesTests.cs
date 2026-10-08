@@ -1144,8 +1144,11 @@ public class ModulesCoverageTests
 
     [Fact]
     public void TestAShapedInitializerWithoutAShapeVectorFirstIsRefused()
-        => Assert.ThrowsAny<InvalidOperationException>(() => Modules.ParamFromParamWithoutShapeLayer.ComputationGraph
+    {
+        var ex = Assert.Throws<InvalidOperationException>(() => Modules.ParamFromParamWithoutShapeLayer.ComputationGraph
             .ToConcreteArchitecture([TensorData([2L], 1L, 4L)]));
+        Assert.Contains(nameof(Modules.HalfOfParamWithoutShapeInit), ex.Message);
+    }
 
     [Fact]
     public void TestSpecializeFullPartialAndThenConcretizePipelineCoverage()

@@ -292,6 +292,24 @@ internal static class PlacementShapes
             if (x is null || In(1) is not { } logProbabilities) return [];
             return [new Value(logProbabilities.Shape, x.ElementType, null)];
         }
+        if (op == "SoftmaxCrossEntropyLoss")
+        {
+            // The loss, one per label without a reduction and a single value with one, and the
+            // log-probabilities, shaped as the scores; both typed as the scores.
+            if (x is null || In(1) is not { } labels) return [];
+            var reduction = node.Attributes.FirstOrDefault(a => a.Name == "reduction")?.S is { } named
+                ? System.Text.Encoding.UTF8.GetString(named) : "mean";
+            return [new Value(reduction == "none" ? labels.Shape : [], x.ElementType, null), new Value(x.Shape, x.ElementType, null)];
+        }
+        if (op == "OneHot")
+        {
+            // The indices' shape with the depth inserted at the axis, typed as the values.
+            if (x is null || In(1)?.Ints is not [var depth] || In(2) is not { } values) return [];
+            var rank = x.Shape.Length + 1;
+            var axisAttr = Attr(node, "axis") ?? -1;
+            var axis = (int)(axisAttr < 0 ? axisAttr + rank : axisAttr);
+            return [new Value([.. x.Shape[..axis], depth, .. x.Shape[axis..]], values.ElementType, null)];
+        }
         if (Broadcasting.Contains(op))
         {
             if (read.Length == 0 || read.Any(v => v is null)) return [];

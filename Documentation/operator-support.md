@@ -464,10 +464,12 @@ shape and type.
    give it the left operand's batch dimension where that is 1 and the right
    one's is not. Its backend corrects this when the session is built with every
    input's dimensions stated, as a training step is for the shapes it is fed,
-   outside a loop body: the product goes through an `If` on either operand or
-   the product being empty, giving zeros of the product's shape where one is,
-   which ONNX Runtime folds away wherever the shapes follow from those
-   dimensions. Where an operand's shape is computed from the data (a
+   outside a loop body. Two operands whose shapes Shorokoo works out from those
+   dimensions and that are not empty are multiplied as written; any other
+   product goes through an `If` on either operand or the product being empty,
+   giving zeros of the product's shape where one is, which ONNX Runtime folds
+   away wherever the shapes follow from those dimensions. Where an operand's
+   shape is computed from the data (a
    `NonZero`, a `TopK` with a computed `k`, a `Reshape` or `Expand` to a
    computed shape) that `If` runs on every run, at the cost of a few shape
    operations. A `Constant` operand with a dimension of 0 gives those zeros

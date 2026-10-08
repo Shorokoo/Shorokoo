@@ -45,6 +45,14 @@ internal abstract class KernelWorkaround
     /// </summary>
     public virtual bool ReadsBodies => false;
 
+    /// <summary>
+    /// Whether <see cref="Applies"/> asks <see cref="WorkaroundSite.ShapeOf"/>. Working that out
+    /// runs the graph through Shorokoo's interpreter at the dimensions its inputs are stated with,
+    /// so a site of a workaround that does not ask answers null for every slot and the build does
+    /// no such work for it.
+    /// </summary>
+    public virtual bool ReadsShapes => false;
+
     /// <summary>The name this workaround is known by in a plan cache key and a message.</summary>
     public virtual string Name => GetType().FullName ?? GetType().Name;
 }

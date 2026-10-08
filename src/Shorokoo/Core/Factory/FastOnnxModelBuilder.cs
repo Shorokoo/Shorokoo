@@ -252,9 +252,13 @@ namespace Shorokoo.Core.Factory
             // outputs derived from it.
             if (vanillaExport) DeclareRepresentativeRanks(prepFast);
 
+            // The shapes the stated dimensions fix, which a workaround may decide by rather than leave
+            // to the backend: read before the pre-passes rewrite the graph.
+            var shapes = FastApplyKernelWorkarounds.ConcreteShapes(prepFast, workarounds, inputDims);
+
             // ----- 2. Run the Fast pre-passes in place. Capture the rename map
             // so we can also remap the tensor-info lookup we'll build below.
-            var tensorInfoLookup = RunPrePasses(prepFast, prepForOnnx, applyExecutionLowerings, workarounds, shapesAreConcrete, static _ => true)!;
+            var tensorInfoLookup = RunPrePasses(prepFast, prepForOnnx, applyExecutionLowerings, workarounds, shapesAreConcrete, static _ => true, shapes: shapes)!;
 
             // Each output likewise takes its declared rank, else the rank it recorded at the samples,
             // so an exported file gives every output a shape too (Shorokoo/Shorokoo#387).
@@ -1594,7 +1598,8 @@ namespace Shorokoo.Core.Factory
         /// </summary>
         private static Dictionary<FastTensorKey, FastTensorInfo>? RunPrePasses(
             InternalComputationGraph graph, bool prepForOnnx, bool applyExecutionLowerings, KernelWorkaroundSet? workarounds,
-            bool shapesAreConcrete, Func<InternalComputationGraph, bool> needsLookup, bool isFunctionBody = false)
+            bool shapesAreConcrete, Func<InternalComputationGraph, bool> needsLookup, bool isFunctionBody = false,
+            IReadOnlyDictionary<FastTensorKey, Shape>? shapes = null)
         {
             FastLowerAttributeTensorOps.Process(graph);
             if (applyExecutionLowerings) FastLowerStateUpdateLinksForInference.Process(graph);
@@ -1624,7 +1629,7 @@ namespace Shorokoo.Core.Factory
             // the export lowerings sit before them. What it splices in, and what the later passes
             // add only for that, is numbered last, so every value the graph holds without it keeps
             // its name.
-            var splices = FastApplyKernelWorkarounds.Process(graph, workarounds, shapesAreConcrete, isFunctionBody);
+            var splices = FastApplyKernelWorkarounds.Process(graph, workarounds, shapesAreConcrete, isFunctionBody, shapes);
             FastAddIdentityForOuterScopeValues.Process(graph);
             if (prepForOnnx) FastPrepForOnnx.Process(graph);
             var preRenameLookup = !needsLookup(graph) ? null

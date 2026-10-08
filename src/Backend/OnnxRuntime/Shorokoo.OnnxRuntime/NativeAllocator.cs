@@ -56,9 +56,24 @@ internal static unsafe class NativeAllocator
             : throw new OutOfMemoryException("There was no memory for Shorokoo's native allocator itself.");
     }
 
+    /// <summary>The CUDA build of the library's operators (<c>native/shorokoo_adam_update.cu</c>),
+    /// which a CUDA session registers in place of the CPU one.</summary>
+    internal const string CudaOperatorsLibraryName = "shorokoo_ort_cuda_ops";
+
+    private static readonly Lazy<string?> _locatedCudaOperators = new(
+        () => LocateFile(OperatingSystem.IsWindows() ? CudaOperatorsLibraryName + ".dll" : "lib" + CudaOperatorsLibraryName + ".so"),
+        LazyThreadSafetyMode.ExecutionAndPublication);
+
+    /// <summary>The path a CUDA session registers the operators from, found as the library is, or
+    /// null where that build is not deployed: it is made only where the build finds a CUDA toolkit
+    /// to make it with.</summary>
+    internal static string? LocatedCudaOperators => _locatedCudaOperators.Value;
+
     /// <summary>The path the library is deployed at, beside this assembly or under
     /// <c>runtimes/&lt;rid&gt;/native/</c> there, or null where it is in neither.</summary>
-    internal static string? Locate()
+    internal static string? Locate() => LocateFile(FileName);
+
+    private static string? LocateFile(string fileName)
     {
         var location = typeof(NativeAllocator).Assembly.Location;
         string[] directories = !string.IsNullOrEmpty(location) && Path.GetDirectoryName(location) is { Length: > 0 } dir
@@ -68,9 +83,9 @@ internal static unsafe class NativeAllocator
             + RuntimeInformation.ProcessArchitecture.ToString().ToLowerInvariant();
         foreach (var directory in directories)
         {
-            var flat = Path.Combine(directory, FileName);
+            var flat = Path.Combine(directory, fileName);
             if (File.Exists(flat)) return flat;
-            var underRuntimes = Path.Combine(directory, "runtimes", rid, "native", FileName);
+            var underRuntimes = Path.Combine(directory, "runtimes", rid, "native", fileName);
             if (File.Exists(underRuntimes)) return underRuntimes;
         }
         return null;

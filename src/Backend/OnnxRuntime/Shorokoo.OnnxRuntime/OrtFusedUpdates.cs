@@ -6,8 +6,9 @@ namespace Shorokoo.OnnxRuntime;
 /// <summary>
 /// Writes each Adam or AdamW parameter update of a training step's model as one
 /// <see cref="AdamUpdate"/> node, an operator the native library adds to ONNX Runtime's CPU
-/// provider (<c>native/shorokoo_ort_ops.cpp</c>), in place of the chain of element-wise operators
-/// the optimizer is built of.
+/// provider (<c>native/shorokoo_ort_ops.cpp</c>), and its CUDA build to the CUDA provider
+/// (<c>native/shorokoo_adam_update.cu</c>), in place of the chain of element-wise operators the
+/// optimizer is built of.
 ///
 /// <para><b>Why.</b> Written out, the update is twelve operators over the parameter's size —
 /// thirteen with a weight decay — and ONNX Runtime runs each as a pass that streams tensors of
@@ -33,9 +34,10 @@ namespace Shorokoo.OnnxRuntime;
 /// <para>Each intermediate value is read by the chain alone; <c>m'</c> and <c>v'</c> may be read
 /// elsewhere too, as the step's state outputs are. Anything else is left as written.</para>
 ///
-/// <para><b>Where.</b> Only in a training step's session on the host
-/// (<see cref="Core.Backends.ShorokooGraphOptimization.TrainingStep"/>), of a backend that runs the
-/// CPU provider alone. A CUDA session has no such kernel and keeps the chain.</para>
+/// <para><b>Where.</b> Only in a training step's session
+/// (<see cref="Core.Backends.ShorokooGraphOptimization.TrainingStep"/>), of a backend that runs
+/// ONNX Runtime's CPU provider alone or its CUDA provider, where the library for that provider is
+/// deployed. A CUDA session whose library was not built keeps the chain.</para>
 /// </summary>
 internal static class OrtFusedUpdates
 {

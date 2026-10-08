@@ -1,5 +1,7 @@
 // The operators Shorokoo adds to ONNX Runtime's CPU execution provider, registered on a session's
 // options through RegisterCustomOps (OrtApi::RegisterCustomOpsLibrary_V2 calls it by that name).
+// Built a second time with SHOROKOO_CUDA defined, into a library of its own beside the CUDA kernel
+// (shorokoo_adam_update.cu), it adds the same operator to the CUDA execution provider instead.
 //
 // AdamUpdate, in the ai.shorokoo domain, is one Adam or AdamW step over one float32 parameter, in a
 // single pass: it reads the parameter, its gradient and both moments once and writes the parameter
@@ -18,6 +20,10 @@
 // element each. Outputs: p', m', v', of p's shape. Output k may be bound to the memory of input k
 // (k < 3): each element is read before the same element is written.
 //
+// On the CUDA provider every input is device memory, the coefficients included: the kernel reads
+// them there, and the operator queues it on the stream the runtime hands its kernels and returns,
+// so that a step's updates wait for nothing and read nothing back.
+//
 // Like the allocator, it links nothing of ONNX Runtime's: the runtime that registers it hands it
 // the API it calls, and each runtime in the process gets an operator and a domain of its own, which
 // call that runtime's API and no other.
@@ -30,6 +36,10 @@
 #include <vector>
 
 #include "onnxruntime_c_api.h"
+
+#if defined(SHOROKOO_CUDA)
+#include "shorokoo_adam_update.h"
+#endif
 
 #if defined(_WIN32)
 #define SHOROKOO_EXPORT extern "C" __declspec(dllexport)
@@ -45,13 +55,14 @@ constexpr uint32_t ApiVersion = 17;
 
 constexpr const char* Domain = "ai.shorokoo";
 
+enum Input : size_t { P, M, V, G, Beta1, C1, Beta2, C2, Eps, Step, Decay, InputCount };
+constexpr size_t OutputCount = 3;
+
+#if !defined(SHOROKOO_CUDA)
 // Elements per task handed to the runtime's thread pool: large enough that a task's overhead is
 // nothing beside streaming it, small enough to spread a parameter of a few hundred thousand
 // elements over every core.
 constexpr size_t Chunk = 1 << 14;
-
-enum Input : size_t { P, M, V, G, Beta1, C1, Beta2, C2, Eps, Step, Decay, InputCount };
-constexpr size_t OutputCount = 3;
 
 struct Update {
     const float* p;
@@ -97,6 +108,7 @@ void Run(void* state, size_t task) {
         u.pOut[i] = p - step;
     }
 }
+#endif
 
 // The operator as one runtime holds it, with that runtime's API: what the entry points below are
 // handed back is the OrtCustomOp, the first member.
@@ -163,6 +175,16 @@ OrtStatus* Tensor(const OrtApi* api, OrtKernelContext* context, size_t index, co
     return nullptr;
 }
 
+OrtStatus* Output(const OrtApi* api, OrtKernelContext* context, size_t index, const Shape& shape, float*& data) {
+    OrtValue* value = nullptr;
+    SHOROKOO_TRY(api->KernelContext_GetOutput(context, index, shape.dims, shape.rank, &value));
+    void* raw = nullptr;
+    SHOROKOO_TRY(api->GetTensorMutableData(value, &raw));
+    data = static_cast<float*>(raw);
+    return nullptr;
+}
+
+#if !defined(SHOROKOO_CUDA)
 OrtStatus* Single(const OrtApi* api, OrtKernelContext* context, size_t index, float& out, bool& present) {
     const OrtValue* value = nullptr;
     SHOROKOO_TRY(api->KernelContext_GetInput(context, index, &value));
@@ -174,15 +196,6 @@ OrtStatus* Single(const OrtApi* api, OrtKernelContext* context, size_t index, fl
     const void* raw = nullptr;
     SHOROKOO_TRY(api->GetTensorData(value, &raw));
     out = *static_cast<const float*>(raw);
-    return nullptr;
-}
-
-OrtStatus* Output(const OrtApi* api, OrtKernelContext* context, size_t index, const Shape& shape, float*& data) {
-    OrtValue* value = nullptr;
-    SHOROKOO_TRY(api->KernelContext_GetOutput(context, index, shape.dims, shape.rank, &value));
-    void* raw = nullptr;
-    SHOROKOO_TRY(api->GetTensorMutableData(value, &raw));
-    data = static_cast<float*>(raw);
     return nullptr;
 }
 
@@ -221,6 +234,54 @@ OrtStatus* ORT_API_CALL Compute(void* kernel, OrtKernelContext* context) {
     }
     return api->KernelContext_ParallelFor(context, run, tasks, 0, &u);
 }
+#else
+// A coefficient's device memory, or null where an optional one is absent.
+OrtStatus* Single(const OrtApi* api, OrtKernelContext* context, size_t index, const float*& out) {
+    out = nullptr;
+    const OrtValue* value = nullptr;
+    SHOROKOO_TRY(api->KernelContext_GetInput(context, index, &value));
+    if (value == nullptr) return nullptr;
+    Shape shape;
+    SHOROKOO_TRY(ShapeOf(api, value, shape));
+    if (!shape.isFloat || shape.count != 1) return Fail(api, "AdamUpdate's coefficients must be float32 values of one element.");
+    const void* raw = nullptr;
+    SHOROKOO_TRY(api->GetTensorData(value, &raw));
+    out = static_cast<const float*>(raw);
+    return nullptr;
+}
+
+OrtStatus* ORT_API_CALL Compute(void* kernel, OrtKernelContext* context) {
+    const OrtApi* api = static_cast<Kernel*>(kernel)->api;
+    const OrtValue* parameter = nullptr;
+    SHOROKOO_TRY(api->KernelContext_GetInput(context, P, &parameter));
+    if (parameter == nullptr) return Fail(api, "AdamUpdate's parameter is required.");
+    Shape shape;
+    SHOROKOO_TRY(ShapeOf(api, parameter, shape));
+    if (!shape.isFloat) return Fail(api, "AdamUpdate updates float32 parameters.");
+
+    ShorokooAdamUpdate u{};
+    u.count = shape.count;
+    SHOROKOO_TRY(Tensor(api, context, P, shape, u.p));
+    SHOROKOO_TRY(Tensor(api, context, M, shape, u.m));
+    SHOROKOO_TRY(Tensor(api, context, V, shape, u.v));
+    SHOROKOO_TRY(Tensor(api, context, G, shape, u.g));
+    const float** coefficients[] = {&u.beta1, &u.c1, &u.beta2, &u.c2, &u.eps, &u.step};
+    for (size_t k = 0; k < 6; ++k) {
+        SHOROKOO_TRY(Single(api, context, Beta1 + k, *coefficients[k]));
+        if (*coefficients[k] == nullptr) return Fail(api, "AdamUpdate's coefficients other than the decay are required.");
+    }
+    SHOROKOO_TRY(Single(api, context, Decay, u.decay));
+    SHOROKOO_TRY(Output(api, context, 0, shape, u.pOut));
+    SHOROKOO_TRY(Output(api, context, 1, shape, u.mOut));
+    SHOROKOO_TRY(Output(api, context, 2, shape, u.vOut));
+    if (u.count == 0) return nullptr;
+
+    void* stream = nullptr;
+    SHOROKOO_TRY(api->KernelContext_GetGPUComputeStream(context, &stream));
+    const int failed = shorokoo_adam_update_launch(&u, stream);
+    return failed == 0 ? nullptr : api->CreateStatus(ORT_FAIL, shorokoo_cuda_error_text(failed));
+}
+#endif
 
 OrtStatus* ORT_API_CALL CreateKernel(const OrtCustomOp* op, const OrtApi*, const OrtKernelInfo*, void** kernel) {
     auto* made = new (std::nothrow) Kernel{ApiOf(op)};
@@ -233,7 +294,11 @@ void ORT_API_CALL DestroyKernel(void* kernel) { delete static_cast<Kernel*>(kern
 
 const char* ORT_API_CALL Name(const OrtCustomOp*) { return "AdamUpdate"; }
 
+#if defined(SHOROKOO_CUDA)
+const char* ORT_API_CALL Provider(const OrtCustomOp*) { return "CUDAExecutionProvider"; }
+#else
 const char* ORT_API_CALL Provider(const OrtCustomOp*) { return "CPUExecutionProvider"; }
+#endif
 
 ONNXTensorElementDataType ORT_API_CALL FloatType(const OrtCustomOp*, size_t) {
     return ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT;

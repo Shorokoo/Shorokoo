@@ -254,7 +254,14 @@ namespace Shorokoo.Core.Factory
 
             // The shapes the stated dimensions fix, which a workaround may decide by rather than leave
             // to the backend: read before the pre-passes rewrite the graph.
-            var shapes = FastApplyKernelWorkarounds.ConcreteShapes(prepFast, workarounds, inputDims);
+            var values = prepForOnnx && !vanillaExport && shapesAreConcrete ? ConcreteValues.At(prepFast, inputDims) : null;
+            var shapes = FastApplyKernelWorkarounds.ConcreteShapes(prepFast, workarounds, inputDims, values);
+
+            // A session built for these dimensions computes nothing it can work out from them
+            // alone: the shape arithmetic that would otherwise run on every step -- the axes a
+            // broadcast gradient is summed over, above all -- is baked in as constants, and what it
+            // made a no-op is dropped.
+            if (values is not null) FastBakeShapeArithmetic.Process(prepFast, values);
 
             // ----- 2. Run the Fast pre-passes in place. Capture the rename map
             // so we can also remap the tensor-info lookup we'll build below.

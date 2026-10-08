@@ -885,7 +885,7 @@ public class NNLibraryOptimizerTrainingCoverageTests
     public void TestATrainingStepReducesABroadcastGradientOverAxesItsInputShapesDecideAndAnUnbroadcastOneNotAtAll()
     {
         Assert.Equal([0, 0, 0], OpsRunByAStep(NNChainedBatchedProjectionModel.ComputationGraph, [2L, 3L, 4L], "Compress", "Range", "ReduceSum"));
-        Assert.Equal([0, 0, 2], OpsRunByAStep(NNResidualBiasedProjectionModel.ComputationGraph, [2L, 3L, 4L], "Compress", "Range", "ReduceSum"));
+        Assert.Equal([0, 0, 2], OpsRunByAStep(NNResidualBiasedProjectionModel.ComputationGraph, [1L, 2L, 3L, 4L], "Compress", "Range", "ReduceSum"));
     }
 
     [Fact]

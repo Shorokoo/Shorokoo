@@ -1296,6 +1296,33 @@ public class GpuExecutionTests
     /// nothing but the output it copies onto the card, and one it runs whole is
     /// <see cref="SessionOutputPlacement.Device"/>. Every output comes back on the card.
     /// </summary>
+    private static string[] HostWorkOfAStep(ComputationGraph model, long[] rows, long[] targetRows)
+    {
+        System.Collections.Concurrent.ConcurrentQueue<RuntimeLogMessage> logged = [];
+        using var context = new ComputeContext
+        {
+            Diagnostics = new DiagnosticSettings { TraceNodePlacement = true },
+            RunSettings = new RunSettings { Log = new LogSettings { Sink = logged.Enqueue } },
+        };
+        var x = NNLibraryFixtures.RangeTensor(rows, 0.01f);
+        var rig = TrainingRig.FromScratch(model, L2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph, [x.CopyTo(ComputeContext.Host)],
+            new AdamWOptimizerHyperparameters { LearningRate = 0.01f }, runtimeContext: context);
+        rig.TrainStep(rig.CreateInitialCheckpoint(), rig.InputDef.FromOrderedData(x), rig.TargetDef.FromOrderedData(NNLibraryFixtures.RangeTensor(targetRows, 0.02f)));
+        var steps = (System.Collections.IDictionary)typeof(TrainingRig)
+            .GetField("_compiledTrainSteps", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(rig)!;
+        var nodes = steps.Values.Cast<CompiledGraph>().Single().ReadNodePlacement()!.Nodes;
+        return [.. nodes.Where(n => n.Provider != "CUDAExecutionProvider").Select(n => n.OpType),
+            .. logged.Select(m => m.Text).Where(t => t.Contains("Memcpy", StringComparison.Ordinal))];
+    }
+
+    [CudaFact]
+    public void CudaProvider_ATrainingStepRunsEveryNodeOnTheCardWithNoCopyToTheHost()
+    {
+        Assert.Empty(HostWorkOfAStep(Modules.PlainTinyMlpStack.ComputationGraph, [2L, 8L], [2L, 16L]));
+        Assert.Empty(HostWorkOfAStep(AttentionLayerModel.ComputationGraph, [2L, 8L, 64L], [2L, 8L, 64L]));
+        Assert.Empty(HostWorkOfAStep(NNResidualBiasedProjectionModel.ComputationGraph, [1L, 2L, 3L, 4L], [1L, 2L, 3L, 4L]));
+    }
+
     [CudaFact]
     public void CudaProvider_OutputPlacementSeparatesADeviceGraphAPartitionedOneAndOneThatFellBack()
     {

@@ -2528,8 +2528,9 @@ public partial class NNChainedBatchedProjectionModel
     }
 }
 
-/// <summary>A residual stack of biased linear layers: each layer's bias is broadcast over the
-/// batch's rows, and each residual sum and gate adds or multiplies two operands of one shape.</summary>
+/// <summary>A residual stack of biased linear layers under a rotary embedding: each layer's bias
+/// is broadcast over the batch's rows, each residual sum and gate adds or multiplies two operands of
+/// one shape, and the rotation slices the last axis in halves.</summary>
 [Module]
 public partial class NNResidualBiasedProjectionModel
 {
@@ -2538,7 +2539,7 @@ public partial class NNResidualBiasedProjectionModel
         for (int layer = 0; layer < 2; layer++)
         {
             var h = x.MatMul(Normal.Init(Vector(4L, 4L)).Named($"w{layer}")) + Normal.Init(Vector(4L)).Named($"b{layer}");
-            x = x + h * x;
+            x = x + Shorokoo.Modules.Layers.Attention.ApplyRoPE(h) * x;
         }
         return x;
     }

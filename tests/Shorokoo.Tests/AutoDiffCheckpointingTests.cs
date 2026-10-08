@@ -1031,6 +1031,34 @@ public class AutoDiffCheckpointingCoverageTests
         }
     }
 
+    private sealed class HostRunModel : Shorokoo.OnnxRuntime.OrtBackend
+    {
+        public HostRunModel(bool fuses) => FusesOptimizerUpdates = fuses;
+    }
+
+    [Fact]
+    public void TestARigLoadedWhereOptimizerUpdatesAreFusedOtherwiseChoosesAsABuildThereDoesCoverage()
+    {
+        using var fusing = new ComputeContext(new HostRunModel(true));
+        using var writing = new ComputeContext(new HostRunModel(false));
+        TrainingRig Built(ComputeContext context) => TrainingRig.FromScratch(MemoryPassMlp.ComputationGraph, L2Loss.ComputationGraph, AdamOptimizer.ComputationGraph,
+            [Pattern([16L, 256L], 1f)], new AdamOptimizerHyperparameters { LearningRate = 1e-3f }, runtimeContext: context);
+        static string Peaks(TrainingRig rig) => string.Join(",", rig.OptimizationResult.BackendPeakBytes!);
+        var path = Path.Combine(Path.GetTempPath(), $"fused-{Guid.NewGuid():N}.skpt");
+        try
+        {
+            Persistence.SaveTrainingCheckpointToSkpt(Built(fusing).CreateInitialCheckpoint(), path);
+
+            Assert.Equal(Peaks(Built(writing)), Peaks(TrainingRig.Load(path, runtimeContext: writing).Rig));
+            Assert.NotEqual(((Shorokoo.Core.Backends.IShorokooBackend)new HostRunModel(true)).RunModelIdentity,
+                ((Shorokoo.Core.Backends.IShorokooBackend)new HostRunModel(false)).RunModelIdentity);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
     [Fact]
     public void TestARigTakesOnlyTheWellFormedAnswersItsCheckpointRecordsCoverage()
     {

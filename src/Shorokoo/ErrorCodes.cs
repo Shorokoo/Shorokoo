@@ -484,7 +484,7 @@ namespace Shorokoo
         
         #endregion
 
-        #region Core Error Codes (CR001-CR014)
+        #region Core Error Codes (CR001-CR013)
         
         /// <summary>Invalid IModuleParam type</summary>
         public const string CR001 = "CR001";
@@ -522,10 +522,6 @@ namespace Shorokoo
 
         /// <summary>Variable→handle conversion: tensor rank mismatch (scalar/vector handle over a wrongly-ranked node)</summary>
         public const string CR013 = "CR013";
-
-        /// <summary>An integer input holds an index outside the range of what it indexes: a Gather's
-        /// table, or a cross-entropy / negative-log-likelihood loss's classes</summary>
-        public const string CR014 = "CR014";
 
         #endregion
 

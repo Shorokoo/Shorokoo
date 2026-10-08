@@ -196,10 +196,6 @@ None of these shows in a small first run. Each can end a long one.
   size; see [Loading a saved model onto the device](inference.md#loading-a-saved-model-onto-the-device).
 - **Save cost.** What a save allocates and how long it takes grow with the checkpoint:
   [What a save costs](training-checkpoints.md#what-a-save-costs).
-- **Token ids and class targets out of range.** A step fed, from the host, a token id outside an
-  embedding's table or a class target outside the loss's classes is refused as `CR014`, naming the
-  input, the element and the range, on every backend. A batch already in a device's memory is not
-  checked: [Target range](losses-and-optimizers.md#loss-target-range).
 - **Out of memory.** A failed allocation arrives as `CR009` and says which pool ran out:
   [When a training step runs out of memory](training-memory.md#when-a-training-step-runs-out-of-memory).
 - **Process memory limit.** On a WDDM-driven card (Windows), a limit on the process's memory bounds

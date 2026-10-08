@@ -247,32 +247,6 @@ public class NNLibraryDropoutAndEmbeddingCoverageTests
             hyperparamInputs: [], runtimeInputs: [TensorData(DType.Int64, [2L, 3L], 0L, 1L, 2L, 1L, 3L, 0L)]));
     }
 
-    private static float[] GatheredRows(long[] shape, long[] tokens)
-    {
-        var model = NNZeroLogitsTokenClassifier.ComputationGraph.Specialize(
-            NNZeroLogitsTokenClassifier.ComputationGraph.FromOrderedInputs([TensorData([], 5L)]));
-        var concrete = model.ToConcreteArchitecture([TensorData(shape, tokens)]).ToConcreteModel();
-        return Floats(ComputeContext.Default.Execute(concrete, TensorData(shape, tokens))[0].ToTensorData());
-    }
-
-    private static void AssertGatherRefused(long[] shape, long[] tokens, long[] position, long value)
-    {
-        var refused = Assert.Throws<IndexOutOfRangeInputException>(() => GatheredRows(shape, tokens));
-        Assert.Equal(("input 'tokens'", value, -5L, 4L, (long?)null),
-            (refused.Input, refused.Value, refused.Minimum, refused.Maximum, refused.IgnoreIndex));
-        Assert.Equal(position, refused.Position);
-    }
-
-    [Fact]
-    public void TestOutOfRangeGatherIndicesAreRefusedByName()
-    {
-        Assert.Equal(20, GatheredRows([4L], [-5, -1, 0, 4]).Length);
-        AssertGatherRefused([3L], [0, 4, 5], [2], 5);
-        AssertGatherRefused([2L], [-6, 0], [0], -6);
-        AssertGatherRefused([4L], [0, 1, 50286, 7], [2], 50286);
-        AssertGatherRefused([2L, 2L], [0, 1, 2, 9], [1, 1], 9);
-    }
-
     [Fact]
     public void TestSpatialAlphaAndFeatureAlphaDropoutCoverage()
     {
@@ -370,37 +344,6 @@ public class NNLibraryLossCoverageTests
             hyperparamInputs: [], runtimeInputs: [dummy]));
         Assert.True(AutoTest.AdvancedTestGraph<NNRegressionReductionChecks>(
             hyperparamInputs: [], runtimeInputs: [dummy]));
-    }
-
-    private static float ZeroLogitLoss(ComputationGraph loss, long[] targets)
-    {
-        TensorData Logits() => TensorData([targets.Length, 5L], new float[targets.Length * 5]);
-        var concrete = loss.ToConcreteArchitecture([Logits(), TensorData([targets.Length], targets)]).ToConcreteModel();
-        return Floats(ComputeContext.Default.Execute(concrete, Logits(), TensorData([targets.Length], targets))[0].ToTensorData())[0];
-    }
-
-    private static void AssertTargetRefused(ComputationGraph loss, long[] targets, long[] position, long value, long? ignoreIndex)
-    {
-        var refused = Assert.Throws<IndexOutOfRangeInputException>(() => ZeroLogitLoss(loss, targets));
-        Assert.Equal(("input 'targets'", value, 0L, 4L, ignoreIndex),
-            (refused.Input, refused.Value, refused.Minimum, refused.Maximum, refused.IgnoreIndex));
-        Assert.Equal(position, refused.Position);
-    }
-
-    [Fact]
-    public void TestOutOfRangeClassTargetsAreRefusedByName()
-    {
-        Assert.Equal(MathF.Log(5f), ZeroLogitLoss(NNCrossEntropyIgnoreMinus100Loss.ComputationGraph, [0, 1, 2, -100]), 1e-5f);
-        Assert.Equal(MathF.Log(5f), ZeroLogitLoss(NNCrossEntropyIgnore999Loss.ComputationGraph, [999, 1, 2, 4]), 1e-5f);
-        AssertTargetRefused(NNCrossEntropyIgnoreMinus100Loss.ComputationGraph, [0, 1, 2, 7], [3], 7, -100);
-        AssertTargetRefused(NNCrossEntropyIgnoreMinus100Loss.ComputationGraph, [0, 1, 2, 50286], [3], 50286, -100);
-        AssertTargetRefused(NNCrossEntropyIgnoreMinus100Loss.ComputationGraph, [0, 1, 2, -1], [3], -1, -100);
-        AssertTargetRefused(CrossEntropyLoss.ComputationGraph, [0, -1, 2, 3], [1], -1, null);
-        AssertTargetRefused(NLLLoss.ComputationGraph, [5, 0, 0, 0], [0], 5, null);
-        AssertTargetRefused(NNNllIgnoreMinus100Loss.ComputationGraph, [0, 1, 2, -5], [3], -5, -100);
-        Assert.Equal("[CR014] input 'targets' holds 5 at [1], outside [0, 4]: it indexes the 5 classes of the loss. "
-            + "The run was refused before anything was computed.",
-            Assert.Throws<IndexOutOfRangeInputException>(() => ZeroLogitLoss(NNCrossEntropySmoothedLoss.ComputationGraph, [0, 5, 2, 3])).Message);
     }
 
     [Fact]
@@ -1318,24 +1261,6 @@ public class NNLibraryLayerTrainingCoverageTests
     private static void AssertIgnoredTargetLeavesTheStepAsIfAbsent(ComputationGraph loss, long classes, long ignoreIndex)
         => Assert.Equal(IgnoredTargetLossAndTrainedTable(loss, classes, [0, 1, 2], [1, 2, 3]),
             IgnoredTargetLossAndTrainedTable(loss, classes, [0, 1, 2, 3], [1, 2, 3, ignoreIndex]));
-
-    private static void AssertStepRefused(long[] tokens, long[] targets, string input, long[] position, long value, long minimum, long? ignoreIndex)
-    {
-        var refused = Assert.Throws<IndexOutOfRangeInputException>(() => IgnoredTargetLossAndTrainedTable(
-            NNCrossEntropyIgnoreMinus100Loss.ComputationGraph, 5, tokens, targets));
-        Assert.Equal((input, value, minimum, 4L, ignoreIndex),
-            (refused.Input, refused.Value, refused.Minimum, refused.Maximum, refused.IgnoreIndex));
-        Assert.Equal(position, refused.Position);
-    }
-
-    [Fact]
-    public void TestTrainingStepRefusesOutOfRangeTokensAndTargetsByName()
-    {
-        AssertStepRefused([0, 1, 2, 7], [1, 2, 3, 4], "the training input 'tokens'", [3], 7, -5, null);
-        AssertStepRefused([0, 1, 2, 3], [1, 2, 3, 7], "the training target 'targets'", [3], 7, 0, -100);
-        AssertStepRefused([0, 1, 2, 3], [1, 2, 3, -1], "the training target 'targets'", [3], -1, 0, -100);
-        AssertStepRefused([0, 1, 2, -6], [1, 2, 3, 4], "the training input 'tokens'", [3], -6, -5, null);
-    }
 
     [Fact]
     public void TestOutOfRangeIgnoreIndexTrainsWithTheIgnoredTargetExcluded()

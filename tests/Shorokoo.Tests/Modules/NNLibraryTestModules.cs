@@ -2510,6 +2510,26 @@ public partial class NNGatheredTableProjectionModel
         => Normal.Init(Vector(64L, 4L)).Gather(tokens).MatMul(Normal.Init(Vector(4L, 48L)));
 }
 
+/// <summary>ONNX's own <c>InstanceNormalization</c> of <c>[N, 2, 3]</c> input scaled by a trainable
+/// <c>[2, 1]</c> factor, under a trainable per-channel scale and bias.</summary>
+[Module]
+public partial class NNInstanceNormalizationOpModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+        => (Tensor<float32>)OnnxOp.InstanceNormalization(
+            x * Normal.Init(Vector(2L, 1L)), Normal.Init(Vector(2L)), Normal.Init(Vector(2L)), 1e-5f);
+}
+
+/// <summary>ONNX's own inference-mode <c>BatchNormalization</c> of <c>[N, 2, ...]</c> input under a
+/// trainable per-channel scale and bias.</summary>
+[Module]
+public partial class NNBatchNormalizationOpModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+        => (Tensor<float32>)OnnxOp.BatchNormalization(x, Normal.Init(Vector(2L)), Normal.Init(Vector(2L)),
+            Vector(0.5f, -0.5f), Vector(2f, 0.5f), 1e-5f, null, null);
+}
+
 /// <summary>Tiny conv net: Conv2d(2, k3, s1, p1) → ReLU → GlobalAvgPool → [N, 2] logits.</summary>
 [Module]
 public partial class NNTinyConvClassifier

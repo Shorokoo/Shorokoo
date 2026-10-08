@@ -779,6 +779,24 @@ public class NNLibraryOptimizerTrainingCoverageTests
         Assert.Equal(4, StepOpsSized(64, NNGatheredBiasModel.ComputationGraph, [3L], SGDOptimizer.ComputationGraph, 0.1f));
     }
 
+    private static int StepScatterNDsWithoutReduction(ComputationGraph model, TensorData sample)
+    {
+        var rig = TrainingRig.FromScratch(model, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, [sample], 0.1f);
+        var onnx = Benchmarks.MemoryPassBenchmarkTests.RigModel(rig.TrainingStepPureGraph, rig.OptimizationInputShapes);
+        return onnx.Graph!.Nodes.Concat(onnx.Functions.SelectMany(f => f.Nodes)).Count(n => n.OpType == "ScatterND"
+            && (n.Attributes.FirstOrDefault(a => a.Name == "reduction")?.S ?? "none"u8.ToArray()).SequenceEqual("none"u8.ToArray()));
+    }
+
+    [Fact]
+    public void TestATrainingStepScattersNothingWithoutAReduction()
+    {
+        Assert.Equal(0, StepScatterNDsWithoutReduction(NNGatheredTableModel.ComputationGraph, TensorData([2L, 3L], [5L, 9L, 5L, 5L, 0L, 9L])));
+        Assert.Equal(0, StepScatterNDsWithoutReduction(NNGatheredBiasModel.ComputationGraph, TensorData([3L], [7L, 7L, 1L])));
+        Assert.Equal(0, StepScatterNDsWithoutReduction(NNGatheredTableProjectionModel.ComputationGraph, TensorData([4L], [3L, 3L, 3L, 3L])));
+        Assert.Equal(0, StepScatterNDsWithoutReduction(NNInstanceNormalizationOpModel.ComputationGraph, TensorData([2L, 2L, 3L], new float[12])));
+        Assert.Equal(0, StepScatterNDsWithoutReduction(NNBatchNormalizationOpModel.ComputationGraph, TensorData([2L, 2L, 3L], new float[12])));
+    }
+
     [Fact]
     public void TestAMatMulWeightStepMakesOneWeightSizedGradientAndTransposesTheWeightOnce()
     {

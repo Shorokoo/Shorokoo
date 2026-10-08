@@ -1338,6 +1338,60 @@ public class GpuExecutionTests
     }
 
     [CudaFact]
+    public void CudaProvider_ASliceOfAConstantFromAStartReadAtRunTimeRunsOnTheCard()
+    {
+        var x = InputTensor<float32>("x", rank: 1);
+        Assert.Equal([1L], OnTheCard(x, OnnxOp.Slice(Vector(1L), OnnxOp.Sub(OnnxOp.Shape(x), Vector(3L)), Vector(1L)), TensorData([3L], [1f, 2f, 3f])).CopyMemory<long>());
+        Assert.Equal([7L], OnTheCard(x, OnnxOp.Slice(Vector(7L), OnnxOp.Sub(OnnxOp.Shape(x), Vector(3L)), Vector(7L)), TensorData([3L], [1f, 2f, 3f])).CopyMemory<long>());
+    }
+
+    // Shorokoo/Shorokoo#536: the CUDA reduction kernels refuse keepdims 0 over an axis of extent 0.
+    [CudaFact(Skip = "Shorokoo/Shorokoo#536")]
+    public void CudaProvider_AReductionOverAnEmptyAxisGivesItsIdentityOnTheCard()
+    {
+        var i = InputTensor<int32>("i", rank: 2);
+        var f = InputTensor<float32>("f", rank: 2);
+        var v = InputTensor<float32>("v", rank: 1);
+        Assert.Equal(Enumerable.Repeat(int.MinValue, 40), OnTheCard(i, i.Reduce(ReduceKind.Max, Vector(0L)), TensorData(DType.Int32, [0L, 40L], Array.Empty<object>())).CopyMemory<int>());
+        Assert.Equal([float.NegativeInfinity, float.NegativeInfinity, float.NegativeInfinity], OnTheCard(f, f.Reduce(ReduceKind.Max, Vector(0L)), TensorData(DType.Float32, [0L, 3L], Array.Empty<object>())).CopyMemory<float>());
+        Assert.Equal([0f], OnTheCard(v, v.Reduce(ReduceKind.Sum), TensorData(DType.Float32, [0L], Array.Empty<object>())).CopyMemory<float>());
+        Assert.Equal([1f, 1f], OnTheCard(f, f.Reduce(ReduceKind.Prod, Vector(1L)), TensorData(DType.Float32, [2L, 0L], Array.Empty<object>())).CopyMemory<float>());
+    }
+
+    // Shorokoo/Shorokoo#537: the CUDA reduction kernels pass the input through when no axis is reduced.
+    [CudaFact(Skip = "Shorokoo/Shorokoo#537")]
+    public void CudaProvider_ANoopReductionComputesEachElementsOwnGroupOnTheCard()
+    {
+        var x = InputTensor<float32>("x", rank: 1);
+        var data = TensorData([4L], [-2f, -1f, 1f, 3f]);
+        Variable Noop(ReduceKind kind) => NN.Reduce(kind, x, null, keepDims: true, noOp: true);
+        Assert.Equal([2f, 1f, 1f, 3f], OnTheCard(x, Noop(ReduceKind.L1), data).CopyMemory<float>());
+        Assert.Equal([2f, 1f, 1f, 3f], OnTheCard(x, Noop(ReduceKind.L2), data).CopyMemory<float>());
+        Assert.Equal([4f, 1f, 1f, 9f], OnTheCard(x, Noop(ReduceKind.SumSquare), data).CopyMemory<float>());
+        Assert.Equal([0f, MathF.Log(3f)], OnTheCard(x, Noop(ReduceKind.LogSum), TensorData([2L], [1f, 3f])).CopyMemory<float>());
+    }
+
+    // Shorokoo/Shorokoo#538: building the session crashes the process.
+    [CudaFact(Skip = "Shorokoo/Shorokoo#538")]
+    public void CudaProvider_ACropAndResizeWithAnAspectRatioPolicyBuildsItsSessionOnTheCard()
+    {
+        var x = InputTensor<float32>("x", rank: 4);
+        Variable Crop(ResizeMode mode) => OnnxOp.Resize(x, roi: Vector(-0.2f, 0.05f, 1.1f, 0.95f), scales: null, sizes: Vector(3L, 4L),
+            antialias: null, axes: [1L, 2L], coordinateTransformationMode: CoordinateTransformationMode.Tf_crop_and_resize,
+            cubicCoeffA: null, excludeOutside: null, extrapolationValue: -1f,
+            keepAspectRatioPolicy: KeepAspectRatioPolicy.not_larger, mode: mode, nearestMode: null);
+        var data = TensorData([1L, 4L, 6L, 2L], [.. Enumerable.Range(0, 48).Select(i => (float)(i % 7))]);
+        Assert.Equal([1L, 3L, 4L, 2L], OnTheCard(x, Crop(ResizeMode.Linear), data).Shape.Dims);
+        Assert.Equal([1L, 3L, 4L, 2L], OnTheCard(x, Crop(ResizeMode.Cubic), data).Shape.Dims);
+    }
+
+    private static TensorData OnTheCard<T>(Tensor<T> x, Variable output, TensorData data) where T : IVarType
+    {
+        using var context = new ComputeContext();
+        return context.Execute(new InternalComputationGraph([x], [output]), data.Shared())[0].ToTensorData();
+    }
+
+    [CudaFact]
     public void CudaProvider_ATrainingStepRunsEveryNodeOnTheCardWithNoCopyToTheHost()
     {
         Assert.Empty(HostWorkOfAStep(Modules.PlainTinyMlpStack.ComputationGraph, [2L, 8L], [2L, 16L]));

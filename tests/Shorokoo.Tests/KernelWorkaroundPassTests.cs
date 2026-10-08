@@ -391,23 +391,50 @@ public class KernelWorkaroundPassTests
     }
 
     [Fact]
-    public void TestTheMatMulWorkaroundFiresWithConcreteShapesOnlyWhereTheProductIsBatchedOrOfAVector()
+    public void TestTheMatMulWorkaroundFiresWithConcreteShapesOnlyWhereABatchedOrVectorProductsOperandMayBeEmpty()
     {
         var v = InputTensor<float32>("v", rank: 1);
         var m = InputTensor<float32>("m", rank: 2);
         var b = InputTensor<float32>("b", rank: 3);
         var u = InputTensor<float32>("u");
         var i = InputTensor<int64>("i", rank: 3);
+        var s = InputTensor<int64>("s", rank: 1);
         Assert.True(AsWritten(new([m], [OnnxOp.MatMul(m, m)]), [2L, 2L]));
         Assert.True(AsWritten(new([v, m], [OnnxOp.MatMul(v, m)]), [2L], [2L, 3L]));
         Assert.True(AsWritten(new([v], [OnnxOp.MatMul(v, v)]), [2L]));
-        Assert.False(AsWritten(new([m, v], [OnnxOp.MatMul(m, v)]), [3L, 2L], [2L]));
-        Assert.False(AsWritten(new([b], [OnnxOp.MatMul(b, b)]), [2L, 2L, 2L]));
+        Assert.True(AsWritten(new([m, v], [OnnxOp.MatMul(m, v)]), [3L, 2L], [2L]));
+        Assert.True(AsWritten(new([b], [OnnxOp.MatMul(b, b)]), [2L, 2L, 2L]));
+        Assert.True(AsWritten(new([m, b], [OnnxOp.MatMul(m, b)]), [3L, 2L], [4L, 2L, 5L]));
+        Assert.True(AsWritten(new([u, m], [OnnxOp.MatMul(m, u)]), [2L, 2L], [2L, 2L]));
+        Assert.True(AsWritten(new([i], [OnnxOp.MatMul(i, i)]), [2L, 2L, 2L]));
         Assert.False(AsWritten(new([b, m], [OnnxOp.MatMul(b, m)]), [2L, 3L, 0L], [0L, 4L]));
-        Assert.False(AsWritten(new([m, b], [OnnxOp.MatMul(m, b)]), [3L, 2L], [4L, 2L, 5L]));
-        Assert.False(AsWritten(new([u, m], [OnnxOp.MatMul(m, u)]), [2L, 2L], [2L, 2L]));
-        Assert.False(AsWritten(new([i], [OnnxOp.MatMul(i, i)]), [2L, 2L, 2L]));
+        Assert.False(AsWritten(new([b, s], [OnnxOp.MatMul(b, OnnxOp.Reshape(b, s, allowZero: false))]), [2L, 2L, 2L], [3L]));
+        Assert.False(AsWritten(MatMulOfABranchesOperand(), [2L, 2L, 2L], [1L], [1L]));
+        Assert.False(AsWritten(Concrete(KernelWorkaroundMatMulOfALoopsCarry.ComputationGraph, Eights, TensorData(DType.Float32, [1L], 0f)), [2L, 2L, 2L], [1L]));
     }
+
+    [Fact]
+    public void TestAMatMulOfAnOperandEmptyOnlyAtRunTimeGivesZerosOnOnnxRuntimeWithConcreteShapes()
+    {
+        TensorData[] branch = [Eights, TensorData(DType.Float32, [1L], -1f), TensorData(DType.Int64, [1L], 0L)];
+        TensorData[] loop = [Eights, TensorData(DType.Float32, [1L], 0f)];
+        var looped = Concrete(KernelWorkaroundMatMulOfALoopsCarry.ComputationGraph, loop);
+        Assert.Equal(new byte[32], Run(MatMulOfABranchesOperand(), AtStatedDims(MatMulOfABranchesOperand(), branch), branch).Single());
+        Assert.Equal(new byte[32], Run(looped, AtStatedDims(looped, loop), loop).Single());
+    }
+
+    private static readonly TensorData Eights = TensorData(DType.Float32, [2L, 2L, 2L], 1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f);
+
+    private static InternalComputationGraph MatMulOfABranchesOperand()
+    {
+        var (b, x, e) = (InputTensor<float32>("b", rank: 3), InputTensor<float32>("x", rank: 1), InputTensor<int64>("e", rank: 1));
+        var m = Shorokoo.Core.Nodes.Ops.IfElse((Scalar<bit>)OnnxOp.Less(OnnxOp.ReduceMin(x, keepdims: false), Scalar(0f)),
+            OnnxOp.Slice(b, Vector(0L), e, Vector(2L)), OnnxOp.Identity(b, null));
+        return new([b, x, e], [OnnxOp.MatMul(m, OnnxOp.Transpose(m, [0L, 2L, 1L]))]);
+    }
+
+    private static ModelProto AtStatedDims(InternalComputationGraph g, TensorData[] x)
+        => FastOnnxModelBuilder.BuildInternalOnnxModel(g, prepForOnnx: true, inputDims: [.. x.Select(t => t.Shape.Dims)], workarounds: KernelWorkaroundRegistry.OnnxRuntime);
 
     [Fact]
     public void TestTheMatMulWorkaroundFiresWithShapesKnownOnlyAtRunTimeOnlyForAnEmptyConstantOperand()
@@ -494,16 +521,25 @@ public class KernelWorkaroundPassTests
     }
 
     [Fact]
-    public void TestOnnxRuntimeFoldsEveryIfOfTheMatMulWorkaroundInAnAttentionTrainingStepWithConcreteShapes()
+    public void TestAnAttentionTrainingStepKeepsEveryMatMulAsWrittenWithOrWithoutConcreteShapes()
     {
         var step = AttentionTrainingStep();
         List<long[]?> dims = [.. step.InputNodes.Select(RepresentativeInputShapes.Get)];
-        var concrete = FastOnnxModelBuilder.BuildInternalOnnxModel(step, prepForOnnx: true, inputDims: dims, workarounds: KernelWorkaroundRegistry.OnnxRuntime);
-        var withoutIt = FastOnnxModelBuilder.BuildInternalOnnxModel(step, prepForOnnx: true, inputDims: dims, workarounds: WithoutTheMatMulWorkaround);
+        ModelProto Built(KernelWorkaroundSet set) => FastOnnxModelBuilder.BuildInternalOnnxModel(step, prepForOnnx: true, inputDims: dims, workarounds: set);
         Assert.Equal(Bytes(Session(step, WithoutTheMatMulWorkaround)), Bytes(Session(step, KernelWorkaroundRegistry.OnnxRuntime)));
-        Assert.True(Ifs(concrete) > Ifs(withoutIt));
-        Assert.Equal(0, Ifs(Optimized(concrete)));
-        Assert.Equal(OpTypes(Optimized(withoutIt)), OpTypes(Optimized(concrete)));
+        Assert.Equal(Bytes(Built(WithoutTheMatMulWorkaround)), Bytes(Built(KernelWorkaroundRegistry.OnnxRuntime)));
+        var shapes = FastApplyKernelWorkarounds.ConcreteShapes(step, KernelWorkaroundRegistry.OnnxRuntime, dims);
+        Assert.True(step.Nodes.Where(n => n.OpCode == MATMUL).SelectMany(n => n.Inputs).All(k => shapes!.ContainsKey(k!.Value)));
+    }
+
+    [Fact]
+    public void TestOnnxRuntimeFoldsAwayTheIfOfTheMatMulWorkaroundWhereTheShapesFollowFromTheStatedDimensions()
+    {
+        var (b, m) = (InputTensor<float32>("b", rank: 3), InputTensor<float32>("m", rank: 2));
+        var built = FastOnnxModelBuilder.BuildInternalOnnxModel(new([b, m], [OnnxOp.MatMul(b, m)]), prepForOnnx: true,
+            inputDims: [[2L, 3L, 0L], [0L, 4L]], workarounds: KernelWorkaroundRegistry.OnnxRuntime);
+        Assert.Equal(1, Ifs(built));
+        Assert.Equal(0, Ifs(Optimized(built)));
     }
 
     [Fact]
@@ -661,8 +697,6 @@ public class KernelWorkaroundPassTests
     private static readonly KernelWorkaroundSet WithoutTheMatMulWorkaround = new("without-matmul",
         [.. KernelWorkaroundRegistry.OnnxRuntime.Workarounds.Where(w => w is not Shorokoo.Core.Lowering.KernelWorkarounds.OnnxRuntime.MatMulEmptyOperandWorkaround)]);
 
-    private static string[] OpTypes(ModelProto model) => [.. AllNodes(model).Select(n => $"{n.Domain}:{n.OpType}").Order()];
-
     private static Variable Constant(long[] dims, params float[] values) => OnnxOp.Constant(TensorAttribute.Create(new Shape(dims), values));
 
     private static MethodInfo Method(string name) => typeof(KernelWorkaroundPassTests).GetMethod(name, BindingFlags.NonPublic | BindingFlags.Static)!;
@@ -721,8 +755,8 @@ public class KernelWorkaroundPassTests
         finally { File.Delete(path); }
     }
 
-    private static InternalComputationGraph Concrete(ComputationGraph module, TensorData x)
-        => module.ToInternal().ToConcreteArchitecture([x]).ToConcreteModel();
+    private static InternalComputationGraph Concrete(ComputationGraph module, params TensorData[] x)
+        => module.ToInternal().ToConcreteArchitecture(x).ToConcreteModel();
 
     private static InternalComputationGraph TopKGraph()
     {
@@ -988,6 +1022,18 @@ public partial class KernelWorkaroundMulByOuterInLoop
         foreach (var ctx in LoopAPI.Iterate(x.Reduce(ReduceKind.Min, keepDims: false).Scalar().Cast<int64>()))
             a = (Tensor<float32>)OnnxOp.Mul(a, x);
         return a;
+    }
+}
+
+[Module]
+public partial class KernelWorkaroundMatMulOfALoopsCarry
+{
+    public static Tensor<float32> Inline(Tensor<float32> b, Tensor<float32> x)
+    {
+        var m = (Tensor<float32>)OnnxOp.Slice(b, Vector(0L), Vector(0L), Vector(2L));
+        foreach (var ctx in LoopAPI.Iterate(x.Reduce(ReduceKind.Min, keepDims: false).Scalar().Cast<int64>()))
+            m = b + m.Reduce(ReduceKind.Sum, keepDims: false);
+        return (Tensor<float32>)OnnxOp.MatMul(m, OnnxOp.Transpose(m, [0L, 2L, 1L]));
     }
 }
 

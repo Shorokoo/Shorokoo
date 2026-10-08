@@ -241,6 +241,10 @@ internal static class PlacementShapes
 
         if (op == "Constant")
             return [ConstantOf(node)];
+        // Shorokoo's fused optimizer update: the parameter and the two moments it updates, each of
+        // the shape and type it came in.
+        if (node.Domain == "ai.shorokoo" && op == "AdamUpdate")
+            return [In(0), In(1), In(2)];
         if (op == "Shape")
         {
             if (x is null) return [];

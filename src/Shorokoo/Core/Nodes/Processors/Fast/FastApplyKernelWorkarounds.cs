@@ -5,6 +5,8 @@ using System.Linq;
 using System.Text;
 using Shorokoo.Core.Factory;
 using Shorokoo.Core.Graph;
+using Shorokoo.Core.Interpreter;
+using Shorokoo.Core.Interpreter.Helpers;
 using Shorokoo.Core.Lowering.KernelWorkarounds;
 using Shorokoo.Core.Nodes.NodeDefinitions;
 using Shorokoo.Graph;
@@ -64,10 +66,13 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// reports as <see cref="WorkaroundSite.ShapesAreConcrete"/>; a site inside one reports
         /// false (<see cref="WorkaroundSite.IsInLoopBody"/>). <paramref name="isFunctionBody"/> says
         /// the graph is a function's body, whose inputs are values from wherever it is called
-        /// (<see cref="WorkaroundSite.IsFromOutsideBody"/>).
+        /// (<see cref="WorkaroundSite.IsFromOutsideBody"/>). <paramref name="shapes"/> are what
+        /// <see cref="ConcreteShapes"/> worked out of the graph, which
+        /// <see cref="WorkaroundSite.ShapeOf"/> answers from.
         /// </summary>
         public static Splices Process(
-            InternalComputationGraph graph, KernelWorkaroundSet? set, bool shapesAreConcrete = false, bool isFunctionBody = false)
+            InternalComputationGraph graph, KernelWorkaroundSet? set, bool shapesAreConcrete = false, bool isFunctionBody = false,
+            IReadOnlyDictionary<FastTensorKey, Shape>? shapes = null)
         {
             if (graph is null) throw new ArgumentNullException(nameof(graph));
             if (set is null || set.IsEmpty) return Splices.None;
@@ -107,7 +112,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                         loops--;
 
                     if (!workaround.OpCodes.Contains(node.OpCode)
-                        || WorkaroundSite.TryCreate(node, tensorInfo, producers, read, shapesAreConcrete, inLoopBody: loops > 0, outsideBody: outsideBody?.Invoke(node)) is not { } site
+                        || WorkaroundSite.TryCreate(node, tensorInfo, producers, read, shapesAreConcrete, inLoopBody: loops > 0, outsideBody: outsideBody?.Invoke(node), shapes: workaround.ReadsShapes ? shapes : null) is not { } site
                         || !Applies(workaround, site, node))
                     {
                         newNodes.Add(node);
@@ -154,6 +159,111 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             return tensorInfo is null
                 ? Splices.None
                 : new Splices(minted, hosts, [.. graph.Nodes.Select(n => n.Key)], gaps, leadingGap, tensorInfo);
+        }
+
+        /// <summary>
+        /// The dimensions of the values of <paramref name="graph"/> that follow from
+        /// <paramref name="inputDims"/>, the dimensions of its inputs, positionally: what
+        /// <see cref="WorkaroundSite.ShapeOf"/> answers. Shorokoo's interpreter works them out from
+        /// the dimensions alone, leaving out every value whose shape it cannot tell without the
+        /// data. Null where <paramref name="set"/> holds no workaround that asks
+        /// (<see cref="KernelWorkaround.ReadsShapes"/>) of an operator the graph calls, or an
+        /// input's dimensions are not stated.
+        ///
+        /// <para>Left out too is every value computed from a scope's result the interpreter
+        /// estimated rather than worked out (<see cref="Estimated"/>): an <c>If</c> it could not
+        /// tell the branch of, and a <c>Loop</c> it could not tell the end of. The interpreter
+        /// gives each a shape all the same — the one branch's it knows, the shape a loop carries
+        /// after the few iterations it walks — which a run can contradict.</para>
+        ///
+        /// <para>Read off the graph before the pre-passes rewrite it: they keep each value they do
+        /// not replace under its key, and a value they add has no shape here.</para>
+        /// </summary>
+        public static IReadOnlyDictionary<FastTensorKey, Shape>? ConcreteShapes(
+            InternalComputationGraph graph, KernelWorkaroundSet? set, IReadOnlyList<long[]?>? inputDims)
+        {
+            if (graph is null) throw new ArgumentNullException(nameof(graph));
+            if (set is null || inputDims is null || inputDims.Any(d => d is null)
+                || !set.Workarounds.Any(w => w.ReadsShapes && graph.Nodes.Any(n => w.OpCodes.Contains(n.OpCode))))
+                return null;
+
+            var inputNodes = graph.InputNodes;
+            if (inputNodes.Count != inputDims.Count) return null;
+            var initial = new Dictionary<FastTensorKey, IRuntimeTensor>();
+            for (int i = 0; i < inputNodes.Count; i++)
+                if (inputNodes[i].OpCode == InternalOpCodes.MODEL_TENSOR_INPUT
+                    && inputNodes[i].Attributes.GetDTypeVal(OnnxOpAttributeNames.AttrDtype) is { IsGenericType: false } dtype)
+                    initial[InternalComputationGraph.InputKeyOf(inputNodes[i])] = RuntimeTensorFactory.Create(dtype, new Shape(inputDims[i]!));
+
+            Dictionary<FastTensorKey, IRuntimeTensor> values;
+            try
+            {
+                values = new QuickExecutionEngine().Run(graph, initial);
+            }
+            // The shapes only spare the backend decisions it would otherwise make itself: a graph the
+            // interpreter cannot walk leaves every one of them to it.
+            catch (Exception ex) when (ex is not OutOfMemoryException)
+            {
+                return null;
+            }
+
+            var estimated = Estimated(graph, values);
+            var shapes = new Dictionary<FastTensorKey, Shape>(values.Count);
+            foreach (var (key, value) in values)
+                if (!estimated.Contains(key) && value is RuntimeTensor { Shape: { } shape } && shape.Dims.All(d => d >= 0))
+                    shapes[key] = shape;
+            return shapes;
+        }
+
+        /// <summary>
+        /// The values of <paramref name="graph"/> whose shape in <paramref name="values"/> the
+        /// interpreter estimated: each output of a scope it did not work out, and every value
+        /// computed from one. An <c>If</c> is worked out where its condition's value is known
+        /// and the branch that holds gives the output; a <c>Loop</c> where its trip count is
+        /// known and each condition it has is too, so its walk ran to the loop's end. Any other
+        /// scope is taken as estimated.
+        /// </summary>
+        private static HashSet<FastTensorKey> Estimated(
+            InternalComputationGraph graph, Dictionary<FastTensorKey, IRuntimeTensor> values)
+        {
+            var nodeByKey = new Dictionary<FastNodeKey, FastNode>(graph.Nodes.Count);
+            foreach (var node in graph.Nodes) nodeByKey[node.Key] = node;
+            var estimated = new HashSet<FastTensorKey>();
+
+            bool Known(FastTensorKey? key, Func<RuntimeTensor, bool> hasValue)
+                => key is { IsEmpty: false } k && values.TryGetValue(k, out var v) && v is RuntimeTensor t && hasValue(t);
+            static bool IsBool(RuntimeTensor t) => t.BoolData is { Length: > 0 };
+            static bool IsInt(RuntimeTensor t) => t.IntData is { Length: > 0 };
+            bool AbsentOrBool(IReadOnlyList<FastTensorKey?> keys, int slot)
+                => slot >= keys.Count || keys[slot] is not { IsEmpty: false } || Known(keys[slot], IsBool);
+
+            foreach (var node in graph.Nodes)
+            {
+                var outputs = node.Outputs;
+                if (node.Inputs.Any(k => k is { } key && estimated.Contains(key)))
+                {
+                    foreach (var key in outputs) if (key is { } k) estimated.Add(k);
+                    continue;
+                }
+                if (!FastOpsetResolver.IsCloseOpCode(node.OpCode)) continue;
+
+                var open = node.GraphOpenNodeKey is { } openKey && nodeByKey.TryGetValue(openKey, out var o) ? o.Inputs : null;
+                if (node.OpCode == OpCodes.IF_CLOSE && open is [{ } condition, ..]
+                    && values.TryGetValue(condition, out var c) && c is RuntimeTensor { BoolData: { Length: > 0 } taken })
+                {
+                    var branch = node.FullInputs.TryGetValue(taken[0] ? OnnxOpAttributeNames.AttrThenBranch : OnnxOpAttributeNames.AttrElseBranch, out var b) ? b : [];
+                    for (int i = 0; i < outputs.Count; i++)
+                        if (outputs[i] is { } key && (i >= branch.Count || branch[i] is not { } from
+                            || estimated.Contains(from) || !values.ContainsKey(from)))
+                            estimated.Add(key);
+                    continue;
+                }
+                if (node.OpCode == OpCodes.LOOP_CLOSE && open is { Count: >= 2 }
+                    && Known(open[0], IsInt) && AbsentOrBool(open, 1) && AbsentOrBool(node.Inputs, 0))
+                    continue;
+                foreach (var key in outputs) if (key is { } k) estimated.Add(k);
+            }
+            return estimated;
         }
 
         /// <summary>

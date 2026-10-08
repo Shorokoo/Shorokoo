@@ -25,18 +25,28 @@ permissions:
   packages: write       # mirror the packages to GitHub Packages
 
 jobs:
-  # Shorokoo.OnnxRuntime carries a native library of its own, the allocator it hands ONNX Runtime
-  # (src/Backend/OnnxRuntime/Shorokoo.OnnxRuntime/native), for every platform the backends target.
-  # A build makes only its own platform's, so the Windows one is built here and handed to the
-  # publish job, which builds the Linux one as part of its own build and packs both.
+  # Shorokoo.OnnxRuntime carries a native library of its own, the allocator and operators it hands
+  # ONNX Runtime (src/Backend/OnnxRuntime/Shorokoo.OnnxRuntime/native), for every platform the
+  # backends target. A build makes only its own platform's, so the Windows one is built here and
+  # handed to the publish job, which builds the Linux one as part of its own build and packs both.
   native-allocator-windows:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      # The library is compiled against ONNX Runtime's C API header, which the project's restore
+      # brings in the Microsoft.ML.OnnxRuntime package.
       - name: Build the native allocator (win-x64)
         run: |
-          cmake -S src/Backend/OnnxRuntime/Shorokoo.OnnxRuntime/native -B build/allocator -DSHOROKOO_OUTPUT_DIR="${{ github.workspace }}/artifacts/native/win-x64"
+          $project = "src/Backend/OnnxRuntime/Shorokoo.OnnxRuntime/Shorokoo.OnnxRuntime.csproj"
+          dotnet restore $project
+          $env:DOTNET_NOLOGO = "1"
+          $include = (dotnet msbuild $project -getProperty:PkgMicrosoft_ML_OnnxRuntime | Select-Object -Last 1).Trim() + "/build/native/include"
+          cmake -S src/Backend/OnnxRuntime/Shorokoo.OnnxRuntime/native -B build/allocator -DSHOROKOO_OUTPUT_DIR="${{ github.workspace }}/artifacts/native/win-x64" -DSHOROKOO_ORT_INCLUDE_DIR="$include"
           cmake --build build/allocator --config Release
 
       - uses: actions/upload-artifact@v4

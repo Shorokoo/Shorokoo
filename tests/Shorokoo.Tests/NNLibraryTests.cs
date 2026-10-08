@@ -855,6 +855,88 @@ public class NNLibraryOptimizerTrainingCoverageTests
         Assert.Equal(0, StepScatterNDsWithoutReduction(NNGroupNormalizationOpModel.ComputationGraph, TensorData([2L, 2L, 3L], new float[12])));
     }
 
+    private sealed class HostBackend : Shorokoo.OnnxRuntime.OrtBackend
+    {
+        public HostBackend(bool fuses) => FusesOptimizerUpdates = fuses;
+    }
+
+    private static (Dictionary<string, int> TableSized, float[][] State, long InPlace) ResidentStepsOnHost(
+        bool fuses, ComputationGraph optimizer, Hyperparameter[] hyperparameters, float? runtimeValue)
+    {
+        using var context = new ComputeContext(new HostBackend(fuses)) { Diagnostics = new Shorokoo.Core.Backends.DiagnosticSettings { TraceNodePlacement = true } };
+        var rig = TrainingRig.FromScratch(NNGatheredTableProjectionModel.ComputationGraph, L2Loss.ComputationGraph, optimizer,
+            [new TensorDataModelParam("tokens", ModelParamType.InputParam, TensorData([3L], 1L, 5L, 9L))],
+            hyperparameters, runtimeContext: context);
+        using var run = rig.BeginResidentRun();
+        for (long s = 0; s < 3; s++)
+        {
+            var x = rig.InputDef.FromOrderedData(TensorData([3L], s, 5 + s, 63L));
+            var y = rig.TargetDef.FromOrderedData(RangeTensor([3L, 48L], 0.01f, s));
+            if (runtimeValue is { } value) run.Step(rig.MakeHyperparameters(value), x, y);
+            else run.Step(x, y);
+        }
+        var steps = (System.Collections.IDictionary)typeof(TrainingRig)
+            .GetField("_compiledTrainSteps", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(rig)!;
+        var nodes = steps.Values.Cast<CompiledGraph>().Single().ReadNodePlacement()!.Nodes;
+        var checkpoint = run.TakeCheckpoint();
+        return (nodes.Where(n => n.OutputBytes % (64 * 4 * 4) == 0 && n.OutputBytes > 0 && n.OpType != "Gather")
+                .GroupBy(n => n.OpType).ToDictionary(g => g.Key, g => g.Count()),
+            [.. checkpoint.TrainableParams.Fields.Values.Concat(checkpoint.OptimizerState.Fields.Values).Select(Floats)],
+            context.AliasedOutputs);
+    }
+
+    private static void AssertFusedToTheBit(ComputationGraph optimizer, Hyperparameter[] hyperparameters, float? runtimeValue = null)
+    {
+        var fused = ResidentStepsOnHost(true, optimizer, hyperparameters, runtimeValue);
+        var written = ResidentStepsOnHost(false, optimizer, hyperparameters, runtimeValue);
+        Assert.Equal(new Dictionary<string, int> { ["AdamUpdate"] = 1 }, fused.TableSized);
+        Assert.DoesNotContain("AdamUpdate", written.TableSized.Keys);
+        Assert.Equal(written.State, fused.State);
+        Assert.Equal(written.InPlace, fused.InPlace);
+        Assert.NotEqual(0, fused.InPlace);
+    }
+
+    [Fact]
+    public void TestAnAdamOrAdamWStepOnTheHostUpdatesATableInOneFusedPassToTheBit()
+    {
+        AssertFusedToTheBit(AdamOptimizer.ComputationGraph, [0.001f, 0.9f, 0.999f, 1e-8f]);
+        AssertFusedToTheBit(AdamWOptimizer.ComputationGraph, [0.001f, 0.9f, 0.999f, 1e-8f, 0.01f]);
+    }
+
+    [Fact]
+    public void TestAnAdamWStepOnTheHostFusesItsUpdateWithNoDecayOrADecayFedEachStep()
+    {
+        AssertFusedToTheBit(AdamWOptimizer.ComputationGraph, [0.01f, 0.8f, 0.9f, 1e-6f, 0f]);
+        AssertFusedToTheBit(AdamWOptimizer.ComputationGraph,
+            new AdamWOptimizerHyperparameters { WeightDecay = Hyperparameter.Runtime() }.InOptimizerOrder(), 0.1f);
+    }
+
+    private static int IfsRunByAStep(long[] rows)
+    {
+        using var context = new ComputeContext { Diagnostics = new Shorokoo.Core.Backends.DiagnosticSettings { TraceNodePlacement = true } };
+        var x = RangeTensor(rows, 0.01f);
+        var rig = TrainingRig.FromScratch(NNChainedBatchedProjectionModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            [new TensorDataModelParam("x", ModelParamType.InputParam, x)], [0.1f], runtimeContext: context);
+        rig.TrainStep(rig.CreateInitialCheckpoint(), rig.InputDef.FromOrderedData(x), rig.TargetDef.FromOrderedData(RangeTensor(rows)));
+        var steps = (System.Collections.IDictionary)typeof(TrainingRig)
+            .GetField("_compiledTrainSteps", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(rig)!;
+        return steps.Values.Cast<CompiledGraph>().Single().ReadNodePlacement()!.Nodes.Count(n => n.OpType == "If");
+    }
+
+    [Fact]
+    public void TestATrainingStepRunsNoIfItsInputShapesDecide()
+    {
+        Assert.Equal(0, IfsRunByAStep([2L, 3L, 4L]));
+    }
+
+    [Fact]
+    public void TestOnlyAnAdamOrAdamWUpdateIsFused()
+    {
+        Assert.DoesNotContain("AdamUpdate", ResidentStepsOnHost(true, SGDMomentumOptimizer.ComputationGraph, [0.1f, 0.9f], null).TableSized.Keys);
+        Assert.DoesNotContain("AdamUpdate", ResidentStepsOnHost(true, NAdamOptimizer.ComputationGraph, [0.002f, 0.9f, 0.999f, 1e-8f, 0.004f], null).TableSized.Keys);
+        Assert.DoesNotContain("AdamUpdate", ResidentStepsOnHost(true, AdamaxOptimizer.ComputationGraph, [0.002f, 0.9f, 0.999f, 1e-8f], null).TableSized.Keys);
+    }
+
     [Fact]
     public void TestAMatMulWeightStepMakesOneWeightSizedGradientAndTransposesTheWeightOnce()
     {

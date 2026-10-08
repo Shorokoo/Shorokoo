@@ -1,5 +1,6 @@
 using System;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using Shorokoo.Core.Factory;
 using Shorokoo.Core.Rng;
 using Shorokoo.Modules.Layers;
@@ -235,6 +236,27 @@ public class RngAlgorithmTests
         var second = FastOnnxModelBuilder.BuildInternalOnnxModel(concrete, prepForOnnx: true);
         Assert.Equal(bytes, Serialized(second));
         Assert.All(second.Functions, f => Assert.NotEmpty(f.Nodes));
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static WeakReference[] LoadedRngFunctionsBuiltIntoASessionModel(byte[] bytes)
+    {
+        var loaded = OnnxModelImporter.FromOnnxModelToInternalGraph(bytes);
+        FastOnnxModelBuilder.BuildInternalOnnxModel(loaded, prepForOnnx: true);
+        return [.. loaded.Nodes.Select(n => n.TargetFunction).Where(f => f?.RngAlgorithm is not null).Select(f => new WeakReference(f))];
+    }
+
+    [Fact]
+    public void TestBuildingASessionModelDoesNotKeepALoadedModelsRngFunctionsAlive()
+    {
+        var g = (ComputationGraph)typeof(RngSplitThenDraw).GetProperty("ComputationGraph")!.GetValue(null)!;
+        var bytes = Serialized(FastOnnxModelBuilder.BuildOnnxModel(g.ToConcreteArchitecture([TensorData([2L, 2L], 0f, 0f, 0f, 0f)]).ToConcreteModel()));
+        var functions = LoadedRngFunctionsBuiltIntoASessionModel(bytes);
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        GC.Collect();
+        Assert.Equal(2, functions.Length);
+        Assert.All(functions, f => Assert.False(f.IsAlive));
     }
 
     private static string[] RngTags(Shorokoo.Core.Factory.IR.ModelProto proto)

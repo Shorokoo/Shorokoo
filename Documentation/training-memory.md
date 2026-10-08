@@ -70,9 +70,10 @@ shape (the case for a model built by Shorokoo): it computes them the first time 
 since the checkpoint it loads replaces them. A resident run holds the state on its device; each
 checkpoint it hands out is that state where it is, which the run then only reads, so its next step
 writes beside it: a second copy of the state on the device for as long as you hold the checkpoint.
-Once you drop it, the step that moves the run on from it frees it, by the collection the rig makes
-when superseded state passes its 32 MiB budget, so a run that saves and drops a checkpoint every N
-steps peaks at two copies of the state.
+Once you drop it, the step that moves the run on from it frees it when the dropped state puts the
+rig over its budget for superseded state (32 MiB, doubled while the rig finds you keeping your
+checkpoints), so a run that saves and drops a checkpoint every N steps peaks at two copies of the
+state.
 
 ## Sizing a process memory limit
 

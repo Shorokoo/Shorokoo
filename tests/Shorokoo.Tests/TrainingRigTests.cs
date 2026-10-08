@@ -4405,14 +4405,14 @@ public class TrainingRigCheckpointCoverageTests
         using var run = rig.BeginResidentRun();
         run.Step(input.Shared(), target.Shared());
 
-        Assert.False(Dropped(run, r => r.StepToCheckpoint(input.Shared(), target.Shared()), r => r.Step(input.Shared(), target.Shared())).IsAlive);
-        Assert.False(Dropped(run, r => r.TakeCheckpoint(), r => r.Step(input.Shared(), target.Shared())).IsAlive);
-        Assert.False(Dropped(run, r => r.StepToCheckpoint(input.Shared(), target.Shared()), r => r.StepToCheckpoint(input.Shared(), target.Shared())).IsAlive);
-        Assert.False(Dropped(run, r => r.StepToCheckpoint(batch), r => r.Step(batch)).IsAlive);
+        Assert.DoesNotContain(Dropped(run, r => r.StepToCheckpoint(input.Shared(), target.Shared()), r => r.Step(input.Shared(), target.Shared())), w => w.IsAlive);
+        Assert.DoesNotContain(Dropped(run, r => r.TakeCheckpoint(), r => r.Step(input.Shared(), target.Shared())), w => w.IsAlive);
+        Assert.DoesNotContain(Dropped(run, r => r.StepToCheckpoint(input.Shared(), target.Shared()), r => r.StepToCheckpoint(input.Shared(), target.Shared())), w => w.IsAlive);
+        Assert.DoesNotContain(Dropped(run, r => r.StepToCheckpoint(batch), r => r.Step(batch)), w => w.IsAlive);
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private static WeakReference Dropped(
+    private static WeakReference[] Dropped(
         ResidentTrainingRun run, Func<ResidentTrainingRun, TrainingCheckpoint> handOut, Action<ResidentTrainingRun> next)
     {
         var weak = HandOut(run, handOut);
@@ -4421,8 +4421,12 @@ public class TrainingRigCheckpointCoverageTests
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private static WeakReference HandOut(ResidentTrainingRun run, Func<ResidentTrainingRun, TrainingCheckpoint> handOut)
-        => new(handOut(run));
+    private static WeakReference[] HandOut(ResidentTrainingRun run, Func<ResidentTrainingRun, TrainingCheckpoint> handOut)
+    {
+        var c = handOut(run);
+        return [new(c), .. ((TensorDataStruct[])[c.TrainableParams, c.ModelState, c.OptimizerState])
+            .SelectMany(s => s.Fields.Values.OfType<TensorData>()).Select(t => new WeakReference(t))];
+    }
 
     /// <summary>A caller that keeps no checkpoint, and one that keeps a single older checkpoint,
     /// both supersede everything else — so every collection reclaims and the budget must stay at its

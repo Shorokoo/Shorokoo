@@ -19,7 +19,8 @@
     <PackageReadmeFile>README.md</PackageReadmeFile>
   </PropertyGroup>
   <ItemGroup Condition="'$(IsPackable)' == 'true'">
-    <ShorokooVersionedPackFile Include="$(MSBuildProjectDirectory)/README.md" PackagePath="/" PackSubdir="" />
+    <ShorokooVersionedPackFile Include="$(MSBuildProjectDirectory)/README.md" PackagePath="/" PackSubdir=""
+                               Condition="Exists('$(MSBuildProjectDirectory)/README.md')" />
   </ItemGroup>
 
   <!-- Versioned links. A ShorokooVersionedPackFile is packed as a copy of itself in
@@ -30,7 +31,9 @@
        it exists for every build, tagged or not, whereas a release's tag is pushed only
        once the release is published. A build with no git revision keeps main. Items
        with RebaseParentLinks="true" also have their relative "](../" links, which
-       leave the packed folder, made absolute at the same commit.
+       leave the packed folder, made absolute at the same commit: a link whose target,
+       resolved against the source file's folder, is a directory becomes a tree/ link,
+       any other a blob/ link.
        Metadata: PackagePath (where NuGet puts the file), PackSubdir (the copy's
        folder under obj/.../versioned-pack/, matching PackagePath). -->
   <UsingTask TaskName="ShorokooVersionRepoLinks"
@@ -50,7 +53,15 @@ foreach (var file in Files)
     var text = File.ReadAllText(file.ItemSpec);
     text = Regex.Replace(text, Regex.Escape(Repo) + "(blob|tree)/main/", m => Repo + m.Groups[1].Value + "/" + Ref + "/");
     if (string.Equals(file.GetMetadata("RebaseParentLinks"), "true", StringComparison.OrdinalIgnoreCase))
-        text = text.Replace("](../", "](" + Repo + "blob/" + Ref + "/");
+    {
+        var parent = Path.GetDirectoryName(Path.GetDirectoryName(Path.GetFullPath(file.ItemSpec)));
+        text = Regex.Replace(text, @"\]\(\.\./([^)#?\s]*)", m =>
+        {
+            var target = m.Groups[1].Value;
+            var kind = Directory.Exists(Path.Combine(parent, target)) ? "tree/" : "blob/";
+            return "](" + Repo + kind + Ref + "/" + target;
+        });
+    }
     var destination = file.GetMetadata("VersionedCopyTo");
     Directory.CreateDirectory(Path.GetDirectoryName(destination));
     if (!File.Exists(destination) || File.ReadAllText(destination) != text)

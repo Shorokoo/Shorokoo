@@ -136,7 +136,8 @@ they pull in themselves — you never install it directly.)
 ## Building from source
 
 Building the repository takes the .NET 10 SDK and, for the native library the
-ONNX Runtime backends allocate through, CMake and a C++ compiler:
+ONNX Runtime backends allocate through and whose operators their CPU sessions
+register, CMake and a C++ compiler:
 
 - **Windows:** Visual Studio 2019 or later — the Build Tools will do — with the
   *Desktop development with C++* workload, which brings both. The build finds the

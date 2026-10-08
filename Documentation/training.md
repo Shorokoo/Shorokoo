@@ -331,11 +331,14 @@ for (int step = 0; step < 50_000; step++)
   ```
 - **A checkpoint handed out is yours.** The run goes on training from it but only reads it, and
   `Dispose` leaves it alone. A later step therefore writes its new state beside it rather than over
-  it: on a card that is a second copy of the state for as long as you hold the checkpoint. Drop it
-  (a checkpoint you saved and no longer need) and the next step frees it: that step collects once it
-  has moved the run on, when the dropped state puts the rig over its 32 MiB budget
-  ([What construction costs](#what-construction-costs)). So a loop that saves and drops a
-  checkpoint every N steps holds two copies only from the checkpoint to the step after it.
+  it: on a card that is a second copy of the state for as long as you hold the checkpoint. A
+  checkpoint you drop is freed by the collection the rig triggers once the state dropped since the
+  last one exceeds its budget for superseded state: 32 MiB, doubling up to 8 GiB while the rig finds
+  you keeping your checkpoints ([What construction costs](#what-construction-costs)). Until then it
+  stays beside the run's own state. So a loop that saves and drops a checkpoint every N steps holds,
+  besides the run's state, at most that budget of dropped state: a state larger than the budget is
+  freed by the step after the checkpoint, so two copies are held only in between, while the dropped
+  copies of a smaller state add up to the budget before they are collected.
 - **`Dispose`** discards what the run still holds; checkpoints it handed out stay valid.
 - **Each step consumes the state the previous step produced**, writing over it where it can
   ([below](#a-step-writes-its-state-over-the-state-it-consumed)). The starting checkpoint is
@@ -465,7 +468,10 @@ one chunk's working memory.
 the model's initializers: it uses zero stand-ins of the declared shape, since the checkpoint
 overwrites them. The first call that needs initial *values* — `CreateInitialCheckpoint()`, or a
 load that falls back on the rig for an omitted component — runs the initializers then, with the
-values an eager build would produce, and re-seeds the optimizer state.
+values an eager build would produce, and re-seeds the optimizer state. On the same build of the
+same backend, `Load` takes the answers the backend's model of a run gave the saved rig's
+memory-aware pass from the checkpoint instead of asking it again, and so chooses as that build did;
+anywhere else it asks anew.
 
 The first `TrainStep` at each input shape compiles the step graph and caches it, so expect the first
 step to be much slower. Neither cost recurs during the loop or scales with the dataset.
@@ -473,7 +479,7 @@ step to be much slower. Neither cost recurs during the loop or scales with the d
 Steady-state memory is flat: consumed state is freed as each step returns. Checkpoints you drop but
 did not let a step consume (fed `.Shared()`, or `.TryConsume()` while shared) hold backend memory
 behind small managed handles, so the rig triggers a garbage collection once more than 32 MiB of
-such state has accumulated across steps, and backs off (doubling the threshold) while collections
+such state has accumulated across steps, and backs off (doubling the threshold, up to 8 GiB) while collections
 reclaim nothing, e.g. when you keep every checkpoint. You need not collect yourself. Initial
 checkpoints count against the same budget. A resident run's `Step` bypasses it, but a checkpoint
 the run hands out — from `StepToCheckpoint` or `TakeCheckpoint` — counts once a later step has

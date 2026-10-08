@@ -19,9 +19,9 @@ namespace Shorokoo.Tests.Benchmarks;
 /// chains of the same total length but different kernel sizes say whether the wait tracks one
 /// kernel or the whole run, and a one-kernel chain says what happens when there is no boundary.
 /// <c>run took</c> against <c>uninterrupted</c> is the reading that matters — a terminated run is
-/// one that came back early. The figures this prints, and what they decide, are recorded once —
-/// in <c>Documentation/inference.md</c> — rather than also here, so that a machine disagreeing
-/// with them has only one place to correct.</para>
+/// one that came back early. The conclusion the figures support — the wait is up to the
+/// model's longest single operator — is stated in <c>Documentation/inference.md</c>; the
+/// figures themselves depend on the machine and are not recorded.</para>
 /// </summary>
 [Trait("Domain", "Core")]
 [Trait("Purpose", "Manual")]

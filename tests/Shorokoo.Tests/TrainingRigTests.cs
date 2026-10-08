@@ -4394,6 +4394,40 @@ public class TrainingRigCheckpointCoverageTests
         Assert.Equal(Bytes(handed) + Bytes(taken), rig.SupersededStateBytesPending);
     }
 
+    [Fact]
+    public void TestAResidentRunReleasesADroppedCheckpointAtTheStepThatMovesOnFromIt()
+    {
+        var rig = ShapeRig(ParamOrderAModel.ComputationGraph);
+        var input = rig.InputDef.FromOrderedData(TensorData([4L], [1f, 2f, 3f, 4f]));
+        var target = rig.TargetDef.FromOrderedData(TensorData([4L], [1f, 2f, 3f, 4f]));
+        var batch = new DataBatch(input.Shared(), target.Shared(), new DataLoaderPosition(0, 0));
+        rig.SetReclaimBudgetForTests(1);
+        using var run = rig.BeginResidentRun();
+        run.Step(input.Shared(), target.Shared());
+
+        Assert.DoesNotContain(Dropped(run, r => r.StepToCheckpoint(input.Shared(), target.Shared()), r => r.Step(input.Shared(), target.Shared())), w => w.IsAlive);
+        Assert.DoesNotContain(Dropped(run, r => r.TakeCheckpoint(), r => r.Step(input.Shared(), target.Shared())), w => w.IsAlive);
+        Assert.DoesNotContain(Dropped(run, r => r.StepToCheckpoint(input.Shared(), target.Shared()), r => r.StepToCheckpoint(input.Shared(), target.Shared())), w => w.IsAlive);
+        Assert.DoesNotContain(Dropped(run, r => r.StepToCheckpoint(batch), r => r.Step(batch)), w => w.IsAlive);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static WeakReference[] Dropped(
+        ResidentTrainingRun run, Func<ResidentTrainingRun, TrainingCheckpoint> handOut, Action<ResidentTrainingRun> next)
+    {
+        var weak = HandOut(run, handOut);
+        next(run);
+        return weak;
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static WeakReference[] HandOut(ResidentTrainingRun run, Func<ResidentTrainingRun, TrainingCheckpoint> handOut)
+    {
+        var c = handOut(run);
+        return [new(c), .. ((TensorDataStruct[])[c.TrainableParams, c.ModelState, c.OptimizerState])
+            .SelectMany(s => s.Fields.Values.OfType<TensorData>()).Select(t => new WeakReference(t))];
+    }
+
     /// <summary>A caller that keeps no checkpoint, and one that keeps a single older checkpoint,
     /// both supersede everything else — so every collection reclaims and the budget must stay at its
     /// base. Neither is distinguishable by watching one recent checkpoint: the one handed back at a

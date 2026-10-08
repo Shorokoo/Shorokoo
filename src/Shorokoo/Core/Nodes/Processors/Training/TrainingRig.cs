@@ -3110,7 +3110,7 @@ namespace Shorokoo
         /// because the caller may still be holding it. Nothing here disposes anything the caller
         /// can still see — it schedules a collection, and only unreachable state is affected.</para>
         /// </summary>
-        private void ReclaimSupersededState(long stepBytes, TrainingCheckpoint produced)
+        internal void ReclaimSupersededState(long stepBytes, TrainingCheckpoint produced)
         {
             if (System.Threading.Interlocked.Add(ref _supersededStateBytes, stepBytes)
                 < System.Threading.Interlocked.Read(ref _reclaimBudgetBytes)) return;
@@ -3152,6 +3152,11 @@ namespace Shorokoo
                              : System.Threading.Interlocked.Read(ref _baseReclaimBudgetBytes));
             }
         }
+
+        /// <summary>Backend bytes <paramref name="checkpoint"/>'s state still holds; see
+        /// <see cref="SupersededBytes"/>.</summary>
+        internal static long StateBytes(TrainingCheckpoint checkpoint)
+            => SupersededBytes(checkpoint.TrainableParams, checkpoint.ModelState, checkpoint.OptimizerState);
 
         /// <summary>Backend bytes the tensor fields of <paramref name="structs"/> that are still
         /// alive hold. A field whose size is not derivable — a dtype with no fixed byte stride, a
@@ -3238,10 +3243,10 @@ namespace Shorokoo
         /// The loss is read where the step left it — a read copies it to the host — since every step
         /// reports it, and its tensor is released once read.
         /// <paramref name="call"/> is how a message about the run names it, <c>TrainStep</c> where
-        /// none is given. <paramref name="reclaimSuperseded"/> says whether the state this step
-        /// supersedes is a checkpoint the caller holds, garbage only once the caller drops it
-        /// (<see cref="ReclaimSupersededState"/>): every step's but a resident run's, which owns its
-        /// state itself.
+        /// none is given. <paramref name="reclaimSuperseded"/> says whether to count the state this
+        /// step supersedes without consuming it towards a collection
+        /// (<see cref="ReclaimSupersededState"/>): every step's but a resident run's, which counts
+        /// it itself once it has let go of that state.
         /// </summary>
         private TrainingCheckpoint RunStep(
             TrainingCheckpoint checkpoint,
@@ -3462,15 +3467,7 @@ namespace Shorokoo
             };
 
             // Only state this step superseded and left alive: what it consumed is released already.
-            // State a resident run keeps to itself belongs to the run, which consumes it with the
-            // next step or releases it itself, so counting it here would buy a forced blocking gen-2
-            // collection per step -- on a model whose state crosses the budget every step, that is a
-            // full-heap collection with nothing to collect, in the loop whose whole point is that
-            // per-step overhead dominates.
-            if (reclaimSuperseded)
-                ReclaimSupersededState(
-                    SupersededBytes(checkpoint.TrainableParams, checkpoint.ModelState, checkpoint.OptimizerState),
-                    newCheckpoint);
+            if (reclaimSuperseded) ReclaimSupersededState(StateBytes(checkpoint), newCheckpoint);
 
             return newCheckpoint;
         }
@@ -3628,24 +3625,24 @@ namespace Shorokoo
         /// <summary>
         /// One step of a <see cref="ResidentTrainingRun"/> on caller-supplied data. Applies the same
         /// no-runtime-hyperparameter guard the schedule-driven <c>TrainStep</c> does when
-        /// <paramref name="hyperparams"/> is absent, so a rig that needs values still says so.
+        /// <paramref name="hyperparams"/> is absent, so a rig that needs values still says so. The
+        /// state it supersedes is the run's to count, once the run has let go of it.
         /// </summary>
         internal TrainingCheckpoint ResidentStep(
             TrainingCheckpoint checkpoint,
             IData? hyperparams,
             IData trainingInput,
-            IData trainingOutput,
-            bool reclaimSuperseded)
+            IData trainingOutput)
         {
             if (hyperparams is null) RequireNoRuntimeHyperparameters();
-            return RunStep(checkpoint, hyperparams, trainingInput, trainingOutput, ResidentStepCall, reclaimSuperseded);
+            return RunStep(checkpoint, hyperparams, trainingInput, trainingOutput, ResidentStepCall, reclaimSuperseded: false);
         }
 
         /// <summary>One step of a <see cref="ResidentTrainingRun"/> on an already-drawn batch; see
         /// <see cref="BatchStep"/>.</summary>
         internal TrainingCheckpoint ResidentBatchStep(
-            TrainingCheckpoint checkpoint, DataBatch batch, bool reclaimSuperseded)
-            => BatchStep(checkpoint, batch, ResidentStepCall, reclaimSuperseded);
+            TrainingCheckpoint checkpoint, DataBatch batch)
+            => BatchStep(checkpoint, batch, ResidentStepCall, reclaimSuperseded: false);
 
         /// <summary>
         /// One step on an already-drawn batch, and the one place the loader-step-and-counter

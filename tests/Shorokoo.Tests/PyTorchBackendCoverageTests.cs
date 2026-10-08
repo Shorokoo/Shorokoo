@@ -1047,8 +1047,28 @@ public class PyTorchBackendCoverageTests
         Assert.Equal([5f], Count(5, CancellationToken.None)[0].GetTensorDataAsSpan<float>().ToArray());
     }
 
+    private static readonly Lock WarningSpyGate = new();
+
     internal static (string[] Shown, RuntimeLogMessage[] Collected) WarningsRaised(string module, string source)
     {
+        lock (WarningSpyGate)
+            using (PythonRuntime.Gil())
+            {
+                using var install = Py.CreateScope();
+                install.Exec($$"""
+                    import threading
+                    from {{module}} import runtime as rt
+                    if not hasattr(rt, "_spied"):
+                        rt._spied = threading.local()
+                        def spy(message, *rest, original=rt._show_warning, spied=rt._spied):
+                            shown = getattr(spied, "shown", None)
+                            if shown is None:
+                                original(message, *rest)
+                            else:
+                                shown.append(str(message))
+                        rt._show_warning = spy
+                    """);
+            }
         using (PythonRuntime.Gil())
         {
             using var scope = Py.CreateScope();
@@ -1057,8 +1077,7 @@ public class PyTorchBackendCoverageTests
                 from {{module}} import runtime as rt
                 shown = []
                 collected = []
-                original = rt._show_warning
-                rt._show_warning = lambda message, *rest: shown.append(str(message))
+                rt._spied.shown = shown
                 try:
                     warnings.warn_explicit("outside", UserWarning, "model", 1)
                     token = rt._warnings_collected.set(collected)
@@ -1067,7 +1086,7 @@ public class PyTorchBackendCoverageTests
                     finally:
                         rt._warnings_collected.reset(token)
                 finally:
-                    rt._show_warning = original
+                    rt._spied.shown = None
                 """);
             using var collected = new PyList(scope.Get("collected"));
             return (scope.Get<string[]>("shown"), PythonWarnings.Read(collected, source));

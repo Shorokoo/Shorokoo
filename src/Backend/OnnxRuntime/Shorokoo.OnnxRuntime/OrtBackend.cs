@@ -379,8 +379,11 @@ public abstract class OrtBackend : IShorokooBackend
     /// measured on the host, a two-layer encoder ran a consuming and a shared run in 385–450 ms
     /// that way against 113–118 on shared pools, and a session run alone took as long either way.
     /// A session built with an intra-op thread count of its own — one run side by side with others
-    /// on a thread each — keeps a pool of its own of that size whatever this says. Where something
-    /// else made the process's ONNX Runtime environment first, every session keeps its own.
+    /// on a thread each — keeps a pool of its own of that size whatever this says. So does a session
+    /// that traces its nodes (<see cref="DiagnosticSettings.TraceNodePlacement"/>): ONNX Runtime
+    /// profiles the pool a session runs on, and a shared pool's profiler would serve every
+    /// session's runs at once. Where something else made the process's ONNX Runtime environment
+    /// first, every session keeps its own.
     /// </summary>
     public bool SessionsShareThreadPools { get; init; } = true;
 
@@ -645,6 +648,10 @@ public abstract class OrtBackend : IShorokooBackend
         /// <summary>The weights the session reads from copies of this backend's (see
         /// <see cref="WeightsToShare"/>), which the session owns.</summary>
         internal IReadOnlyList<OrtTensorValue> SharedWeights { get; init; } = [];
+
+        /// <summary>Whether the session runs its operators on the process's thread pools rather than
+        /// pools of its own (see <see cref="SessionsShareThreadPools"/>).</summary>
+        internal bool OnSharedThreadPools { get; init; }
     }
 
     /// <summary>
@@ -713,8 +720,12 @@ public abstract class OrtBackend : IShorokooBackend
         // A session with no thread count of its own runs its operators on the process's pools, so
         // that two sessions run one after another -- a session and the one it places values
         // through, or two compiles -- do not each keep a pool whose threads spin against the
-        // other's (see SessionsShareThreadPools).
-        var sharedPools = SessionsShareThreadPools && intraOpThreads == 0 && OrtEnvironment.SharedThreadPools;
+        // other's (see SessionsShareThreadPools). A session that traces its nodes keeps pools of its
+        // own: ONNX Runtime starts and stops profiling on the session's pool around every run, and on
+        // the process's pools that profiler would be shared, unsynchronized, with every other
+        // session's runs.
+        var sharedPools = SessionsShareThreadPools && intraOpThreads == 0 && OrtEnvironment.SharedThreadPools
+            && !diagnostics.TraceNodePlacement;
         if (sharedPools) options.DisablePerSessionThreads();
         if (diagnostics.DeterministicCompute) UseDeterministicCompute(options);
         // Named before anything can throw, and made inside the try, by the call that points the
@@ -770,7 +781,7 @@ public abstract class OrtBackend : IShorokooBackend
             // The values themselves are the caller's to keep alive for the session's life; this
             // keeps them reachable across the constructor, which takes them as bare handles.
             GC.KeepAlive(suppliedInitializers);
-            return new BuiltSession(session, profileDirectory, views, host, card, accounts is null) { SharedWeights = shared };
+            return new BuiltSession(session, profileDirectory, views, host, card, accounts is null) { SharedWeights = shared, OnSharedThreadPools = sharedPools };
         }
         catch
         {
@@ -807,6 +818,7 @@ public abstract class OrtBackend : IShorokooBackend
                 SuppliedViews = views,
                 SharedWeights = built.SharedWeights,
                 OnOrtArena = SessionsUseOrtArena,
+                OnSharedThreadPools = built.OnSharedThreadPools,
             };
         }
         catch

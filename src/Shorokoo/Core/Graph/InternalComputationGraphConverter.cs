@@ -110,7 +110,7 @@ namespace Shorokoo.Graph
                     OpCode = node.OpCode,
                     Attributes = node.Attributes,
                     FriendlyName = node.FriendlyName,
-                    StackTrace = node.StackTrace,
+                    CallStack = node.CallStack,
                     GraphOpenNodeKey = graphOpenNodeKey,
                     IdentifierTemplate = node.IdentifierTemplate?.ToString(),
                     TargetFunction = node.TargetFunction,
@@ -345,7 +345,7 @@ namespace Shorokoo.Graph
                     NodeDef = nodeDef,
                     FullInputs = fullInputs,
                     ProtoAttributes = attributes.ToProto(),
-                    StackTrace = fastNode.StackTrace,
+                    StackTrace = fastNode.CallStack,
                 };
 
                 ImmutableDictionary<string, int?>? knownVariadicCounts = null;
@@ -357,7 +357,7 @@ namespace Shorokoo.Graph
                         NodeDef = openNode.NodeDef,
                         FullInputs = openNode.FullInputs,
                         ProtoAttributes = openNode.Attributes.ToProto(),
-                        StackTrace = openNode.StackTrace,
+                        StackTrace = openNode.CallStack,
                     }.InferVariadicCounts(openNode.FullOutputs.Values.Select(x => x.Length).Max());
                 }
 
@@ -389,12 +389,13 @@ namespace Shorokoo.Graph
                     attributes: attributes,
                     inputs: fullInputs,
                     outputs: fullOutputs,
-                    stackTrace: fastNode.StackTrace,
+                    callStack: fastNode.CallStack,
                     defaultName: fastNode.FriendlyName,
                     identifierTemplateString: fastNode.IdentifierTemplate,
                     targetFunction: fastNode.TargetFunction,
                     openNode: openNode,
-                    existingKey: fastNode.Key.ToCgKey());
+                    existingKey: fastNode.Key.ToCgKey(),
+                    captureCallStack: false);
 
                 // If this is a close node whose open node hasn't been built yet,
                 // defer the GraphOpenNode / ConnectingTensor linkage.

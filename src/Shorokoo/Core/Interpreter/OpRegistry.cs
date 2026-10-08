@@ -21,6 +21,9 @@ internal static class OpRegistry
     [ThreadStatic]
     private static Dictionary<string, QuickOp>? _overrides;
 
+    /// <summary>Whether the calling thread has a handler override in place.</summary>
+    internal static bool IsOverridden => _overrides is not null;
+
     public static QuickOp? Get(string opCode)
     {
         if (_overrides is { } o && o.TryGetValue(opCode, out var overridden))

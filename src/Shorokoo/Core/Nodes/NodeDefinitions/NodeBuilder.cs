@@ -482,7 +482,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
 
         public required ImmutableDictionary<string, Variable?[]> FullInputs { get; init; }
 
-        public string? StackTrace { get; init; }
+        public CallStack? StackTrace { get; init; }
 
 
 
@@ -1205,7 +1205,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                                 NodeDef = nodeDef,
                                 FullInputs = fullInputs.ToImmutableDictionary(),
                                 ProtoAttributes = attributes,
-                                StackTrace = new StackTrace(fNeedFileInfo: true).ToString()
+                                StackTrace = CallStack.Capture()
                             } :
                             new InputOutputNodeDataProcessor
                             {
@@ -1213,7 +1213,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                                 NodeDef = nodeDef,
                                 FullInputs = fullInputs.ToImmutableDictionary(),
                                 ProtoAttributes = attributes,
-                                StackTrace = new StackTrace(fNeedFileInfo: true).ToString(),
+                                StackTrace = CallStack.Capture(),
                                 FullOutputNames = ImmutableDictionary.Create<string, string?[]>().Add("", outputNames)
                             };
 
@@ -1226,7 +1226,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                     NodeDef = openNode.NodeDef,
                     FullInputs = openNode.FullInputs,
                     ProtoAttributes = openNode.Attributes.ToProto(),
-                    StackTrace = openNode.StackTrace
+                    StackTrace = openNode.CallStack
                 }.InferVariadicCounts(openNode.FullOutputs.Values.Select(x => x.Length).Max());
             }
 

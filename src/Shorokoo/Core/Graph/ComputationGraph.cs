@@ -46,7 +46,7 @@ namespace Shorokoo.Graph
             public required string OpCode { get; init; }
             public required OnnxCSharpAttributes Attributes { get; init; }
             public string? FriendlyName { get; init; }
-            public string? StackTrace { get; init; }
+            public Shorokoo.Core.Nodes.CallStack? CallStack { get; init; }
             public FastNodeKey? GraphOpenNodeKey { get; init; }
             public string? IdentifierTemplate { get; init; }
             public Function? TargetFunction { get; init; }
@@ -114,7 +114,7 @@ namespace Shorokoo.Graph
             OpCode = node.OpCode,
             Attributes = node.Attributes,
             FriendlyName = node.FriendlyName,
-            StackTrace = node.StackTrace,
+            CallStack = node.CallStack,
             GraphOpenNodeKey = node.GraphOpenNodeKey,
             IdentifierTemplate = node.IdentifierTemplate,
             TargetFunction = node.TargetFunction,
@@ -137,7 +137,7 @@ namespace Shorokoo.Graph
                 OpCode = node.OpCode,
                 Attributes = node.Attributes,
                 FriendlyName = node.FriendlyName,
-                StackTrace = node.StackTrace,
+                CallStack = node.CallStack,
                 GraphOpenNodeKey = node.GraphOpenNodeKey,
                 IdentifierTemplate = node.IdentifierTemplate,
                 TargetFunction = node.TargetFunction,

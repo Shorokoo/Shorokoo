@@ -6395,7 +6395,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                         OpCode = b.OpCode,
                         Attributes = b.Attributes,
                         FriendlyName = b.FriendlyName,
-                        StackTrace = b.StackTrace,
+                        CallStack = b.CallStack,
                         GraphOpenNodeKey = clonedGraphOpenKey,
                         IdentifierTemplate = b.IdentifierTemplate,
                         TargetFunction = b.TargetFunction,

@@ -437,7 +437,7 @@ namespace Shorokoo.Graph
                 OpCode = node.OpCode,
                 Attributes = node.Attributes,
                 FriendlyName = node.FriendlyName,
-                StackTrace = node.StackTrace,
+                CallStack = node.CallStack,
                 GraphOpenNodeKey = node.GraphOpenNodeKey,
                 IdentifierTemplate = node.IdentifierTemplate,
                 TargetFunction = node.TargetFunction,

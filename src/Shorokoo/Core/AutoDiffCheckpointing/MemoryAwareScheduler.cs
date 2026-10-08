@@ -222,12 +222,31 @@ internal class MemoryAwareScheduler
         // consumer be picked before its input node.
         var available = new HashSet<FastTensorKey>();
 
-        bool DepsMet(FastNode n)
+        // The nodes whose every input is available, by position: each node waits on the distinct
+        // inputs not yet available, and joins when the last of them is. A round picks among these
+        // in the order the nodes came, as it would walking every pending node.
+        var ready = new SortedSet<int>();
+        var missing = new int[nodes.Count];
+        var waiting = new Dictionary<FastTensorKey, List<int>>();
+        for (int i = 0; i < nodes.Count; i++)
         {
-            foreach (var input in inputsOf[n])
-                if (input is not null && !available.Contains(input.Value))
-                    return false;
-            return true;
+            foreach (var input in inputsOf[nodes[i]])
+            {
+                if (input is null) continue;
+                if (!waiting.TryGetValue(input.Value, out var waiters))
+                    waiting[input.Value] = waiters = [];
+                if (waiters.Count > 0 && waiters[^1] == i) continue;
+                waiters.Add(i);
+                missing[i]++;
+            }
+            if (missing[i] == 0) ready.Add(i);
+        }
+        var ownerScopeAt = new FastNodeKey?[nodes.Count];
+        var indexOf = new Dictionary<FastNode, int>(nodes.Count);
+        for (int i = 0; i < nodes.Count; i++)
+        {
+            ownerScopeAt[i] = nodeOwnerScope[nodes[i]];
+            indexOf[nodes[i]] = i;
         }
 
         // Runtime scope stack mirrored as the schedule unfolds.
@@ -238,17 +257,17 @@ internal class MemoryAwareScheduler
         // memory heuristic to recognize last-consumer events.
         var remainingConsumers = new Dictionary<FastTensorKey, int>(consumerCount);
 
-        var pending = new HashSet<FastNode>(nodes);
         var scheduled = new List<FastNode>(nodes.Count);
+        var eligible = new List<FastNode>();
 
-        while (pending.Count > 0)
+        while (scheduled.Count < nodes.Count)
         {
-            var eligible = new List<FastNode>();
+            eligible.Clear();
             var currentScope = CurrentScope();
-            foreach (var n in pending)
+            foreach (var i in ready)
             {
-                if (!Equals(nodeOwnerScope[n], currentScope)) continue;
-                if (!DepsMet(n)) continue;
+                if (!Equals(ownerScopeAt[i], currentScope)) continue;
+                var n = nodes[i];
                 // For an OPEN, also require all of its body's external inputs to be
                 // available — otherwise descending into the scope would leave body
                 // nodes with unmet deps from outside.
@@ -274,7 +293,7 @@ internal class MemoryAwareScheduler
 
             FastNode best = PickBestNode(eligible, remainingConsumers, tensorMemory, inputsOf, outputsOf);
 
-            pending.Remove(best);
+            ready.Remove(indexOf[best]);
             scheduled.Add(best);
 
             // Decrement consumer counts for inputs
@@ -286,10 +305,12 @@ internal class MemoryAwareScheduler
             }
 
             // Mark this node's outputs as available for downstream consumers.
-            foreach (var output in best.Outputs)
+            foreach (var output in outputsOf[best])
             {
-                if (output is null) continue;
-                available.Add(output.Value);
+                if (output is null || !available.Add(output.Value)) continue;
+                if (waiting.TryGetValue(output.Value, out var waiters))
+                    foreach (var waiter in waiters)
+                        if (--missing[waiter] == 0) ready.Add(waiter);
             }
 
             // Update runtime scope stack so the next iteration's eligibility check
@@ -325,7 +346,7 @@ internal class MemoryAwareScheduler
         {
             // Memory freed: inputs where this node is the last remaining consumer
             long memoryFreed = 0;
-            foreach (var input in node.Inputs)
+            foreach (var input in inputsOf[node])
             {
                 if (input is null) continue;
                 if (remainingConsumers.TryGetValue(input.Value, out var remaining) && remaining == 1)

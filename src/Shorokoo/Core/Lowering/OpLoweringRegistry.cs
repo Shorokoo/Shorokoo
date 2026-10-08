@@ -31,6 +31,9 @@ internal static class OpLoweringRegistry
     [ThreadStatic]
     private static ImmutableDictionary<string, OpLowering>? overrides;
 
+    /// <summary>Whether the calling thread has a lowering override in place.</summary>
+    internal static bool IsOverridden => overrides is not null;
+
     /// <summary>
     /// Finds the lowering for <paramref name="opCode"/>, or returns false when the operator has
     /// none — which is the ordinary case and not an error: a domain that names an operator it

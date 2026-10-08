@@ -307,7 +307,7 @@ namespace Shorokoo.Core.Factory
             // a FunctionProto for each.
             var functions = CollectFunctionsPostOrder(prepFast);
             var functionProtos = functions
-                .Select(fn => BuildFunctionProto(fn, prepForOnnx, applyExecutionLowerings, stripCheckpointStamp, flattenFunctionBodies, forSession, workarounds, shapesAreConcrete))
+                .Select(fn => FunctionProtoFor(fn, prepForOnnx, applyExecutionLowerings, stripCheckpointStamp, flattenFunctionBodies, forSession, workarounds, shapesAreConcrete))
                 .ToArray();
 
             var model = (ModelProto)OnnxIRFactory.CreateModel(graphProto, functionProtos);
@@ -808,12 +808,10 @@ namespace Shorokoo.Core.Factory
             void VisitFunction(Function fn)
             {
                 if (!seenFunctions.Add(fn)) return;
-                var fnGraph = fn.OriginalFastGraph;
-                var fnInfo = FastTensorInfoProcessor.BuildTensorInfoLookup(fnGraph);
-                CollectStructDTypesFromGraph(fnGraph, fnInfo, seen);
-                foreach (var node in fnGraph.Nodes)
-                    if (node.TargetFunction is not null)
-                        VisitFunction(node.TargetFunction);
+                foreach (var dtype in StructDTypesOfBody(fn))
+                    seen.Add(dtype);
+                foreach (var callee in fn.DirectlyReferencedFunctions)
+                    VisitFunction(callee);
             }
             foreach (var node in fast.Nodes)
                 if (node.TargetFunction is not null)
@@ -831,10 +829,29 @@ namespace Shorokoo.Core.Factory
             }
         }
 
+        /// <summary>
+        /// The TensorStruct dtypes a function's own body names, in the order
+        /// <see cref="CollectStructDTypesFromGraph"/> meets them. A body is immutable, and the
+        /// functions that the runtime random draws and the initializers call are part of nearly every
+        /// model built for a session, so it is worked out once per function rather than on every build.
+        /// </summary>
+        private static DType[] StructDTypesOfBody(Function fn)
+            => StructDTypesByFunction.GetValue(fn, static f =>
+            {
+                var fnGraph = f.OriginalFastGraph;
+                var found = new HashSet<DType>();
+                var inOrder = new List<DType>();
+                CollectStructDTypesFromGraph(fnGraph, FastTensorInfoProcessor.BuildTensorInfoLookup(fnGraph), found, inOrder);
+                return [.. inOrder];
+            });
+
+        private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<Function, DType[]> StructDTypesByFunction = new();
+
         private static void CollectStructDTypesFromGraph(
             InternalComputationGraph graph,
             Dictionary<FastTensorKey, FastTensorInfo> infoLookup,
-            HashSet<DType> seen)
+            HashSet<DType> seen,
+            List<DType>? inOrder = null)
         {
             // Walk every tensor in the graph (inputs, outputs, and all node-output keys)
             // — a TensorStruct DType can show up purely as the output of an internal
@@ -843,7 +860,7 @@ namespace Shorokoo.Core.Factory
             {
                 if (!infoLookup.TryGetValue(key, out var info)) return;
                 if (info.DType is null || !info.DType.IsTensorStructType) return;
-                seen.Add(info.DType);
+                if (seen.Add(info.DType)) inOrder?.Add(info.DType);
             }
             foreach (var key in graph.Inputs.Concat(graph.Outputs))
                 AddIfStruct(key);
@@ -1610,9 +1627,6 @@ namespace Shorokoo.Core.Factory
             var splices = FastApplyKernelWorkarounds.Process(graph, workarounds, shapesAreConcrete, isFunctionBody);
             FastAddIdentityForOuterScopeValues.Process(graph);
             if (prepForOnnx) FastPrepForOnnx.Process(graph);
-            // The lookup before the call-stack strip: the Variable-level rebuild it takes gives a
-            // node without a stack trace a freshly captured one, which costs several times the rest
-            // of the rebuild, and a stack trace types nothing.
             var preRenameLookup = !needsLookup(graph) ? null
                 : splices.TensorInfo(graph) ?? FastTensorInfoProcessor.BuildTensorInfoLookup(graph);
             FastStripCallStacks.Process(graph);
@@ -1670,6 +1684,46 @@ namespace Shorokoo.Core.Factory
         }
 
         // ----------- function emission -----------
+
+        /// <summary>
+        /// <see cref="BuildFunctionProto"/>, worked out once per RNG algorithm function and dialect.
+        /// Every model with a runtime random draw or a drawing initializer calls one of these
+        /// functions (see <see cref="Shorokoo.Core.Rng.RngAlgorithms"/>), whose bodies are large and
+        /// never change once built, so a session's model would otherwise lower the same body again
+        /// on every build. A function is held weakly: a loaded or rewritten model carries RNG
+        /// functions of its own, and their entries go when they do. Each caller gets a copy of its
+        /// own, since a model is rewritten after its functions are built.
+        ///
+        /// <para>A build is a function of the body and the arguments only while nothing on the
+        /// calling thread changes how bodies lower or fold — a lowering, export-list or operator
+        /// override — and no graph is being traced, whose bookkeeping sees every node a build
+        /// creates; a build under any of those is made afresh and not kept.</para>
+        /// </summary>
+        private static FunctionProto FunctionProtoFor(
+            Function function, bool prepForOnnx, bool applyExecutionLowerings,
+            bool stripCheckpointStamp, bool flattenBody, bool forSession,
+            KernelWorkaroundSet? workarounds, bool shapesAreConcrete)
+        {
+            if (function.RngAlgorithm is null || exportLoweredOpCodesOverride is not null
+                || Shorokoo.Core.Lowering.OpLoweringRegistry.IsOverridden
+                || Shorokoo.Core.Interpreter.OpRegistry.IsOverridden || GraphTrace.IsTracing)
+                return BuildFunctionProto(function, prepForOnnx, applyExecutionLowerings, stripCheckpointStamp,
+                    flattenBody, forSession, workarounds, shapesAreConcrete);
+
+            var built = RngFunctionProtos.GetValue(function, static _ => new()).GetOrAdd(
+                (prepForOnnx, applyExecutionLowerings, stripCheckpointStamp, flattenBody, forSession,
+                    workarounds, shapesAreConcrete),
+                static (k, fn) => BuildFunctionProto(fn, k.PrepForOnnx, k.ApplyExecutionLowerings,
+                    k.StripCheckpointStamp, k.FlattenBody, k.ForSession, k.Workarounds, k.ShapesAreConcrete),
+                function);
+            return ProtoBuf.Serializer.DeepClone(built);
+        }
+
+        private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<Function,
+            System.Collections.Concurrent.ConcurrentDictionary<
+                (bool PrepForOnnx, bool ApplyExecutionLowerings, bool StripCheckpointStamp, bool FlattenBody,
+                    bool ForSession, KernelWorkaroundSet? Workarounds, bool ShapesAreConcrete),
+                FunctionProto>> RngFunctionProtos = new();
 
         private static FunctionProto BuildFunctionProto(
             Function function, bool prepForOnnx, bool applyExecutionLowerings,

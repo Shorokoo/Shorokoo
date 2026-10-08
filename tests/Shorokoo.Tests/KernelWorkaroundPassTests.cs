@@ -410,6 +410,7 @@ public class KernelWorkaroundPassTests
         Assert.False(AsWritten(new([b, m], [OnnxOp.MatMul(b, m)]), [2L, 3L, 0L], [0L, 4L]));
         Assert.False(AsWritten(new([b, s], [OnnxOp.MatMul(b, OnnxOp.Reshape(b, s, allowZero: false))]), [2L, 2L, 2L], [3L]));
         Assert.False(AsWritten(MatMulOfABranchesOperand(), [2L, 2L, 2L], [1L], [1L]));
+        Assert.False(AsWritten(MatMulOfAnExpandedSlice(), [1L, 1L, 4L], [1L]));
         Assert.False(AsWritten(Concrete(KernelWorkaroundMatMulOfALoopsCarry.ComputationGraph, Eights, TensorData(DType.Float32, [1L], 0f)), [2L, 2L, 2L], [1L]));
     }
 
@@ -421,6 +422,8 @@ public class KernelWorkaroundPassTests
         var looped = Concrete(KernelWorkaroundMatMulOfALoopsCarry.ComputationGraph, loop);
         Assert.Equal(new byte[32], Run(MatMulOfABranchesOperand(), AtStatedDims(MatMulOfABranchesOperand(), branch), branch).Single());
         Assert.Equal(new byte[32], Run(looped, AtStatedDims(looped, loop), loop).Single());
+        TensorData[] expanded = [TensorData(DType.Float32, [1L, 1L, 4L], 1f, 2f, 3f, 4f), TensorData(DType.Int64, [1L], 0L)];
+        Assert.Equal(new byte[32], Run(MatMulOfAnExpandedSlice(), AtStatedDims(MatMulOfAnExpandedSlice(), expanded), expanded).Single());
     }
 
     private static readonly TensorData Eights = TensorData(DType.Float32, [2L, 2L, 2L], 1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f);
@@ -431,6 +434,13 @@ public class KernelWorkaroundPassTests
         var m = Shorokoo.Core.Nodes.Ops.IfElse((Scalar<bit>)OnnxOp.Less(OnnxOp.ReduceMin(x, keepdims: false), Scalar(0f)),
             OnnxOp.Slice(b, Vector(0L), e, Vector(2L)), OnnxOp.Identity(b, null));
         return new([b, x, e], [OnnxOp.MatMul(m, OnnxOp.Transpose(m, [0L, 2L, 1L]))]);
+    }
+
+    private static InternalComputationGraph MatMulOfAnExpandedSlice()
+    {
+        var (b, e) = (InputTensor<float32>("b", rank: 3), InputTensor<int64>("e", rank: 1));
+        var m = OnnxOp.Expand(OnnxOp.Slice(b, Vector(0L), e, Vector(2L)), Vector(2L, 2L, 1L));
+        return new([b, e], [OnnxOp.MatMul(m, OnnxOp.Transpose(m, [0L, 2L, 1L]))]);
     }
 
     private static ModelProto AtStatedDims(InternalComputationGraph g, TensorData[] x)

@@ -373,13 +373,14 @@ public partial class SequenceOffsetModel
         => x * InitScalarWeight.Init(Vector(4L)) + offsets[Scalar(0L)];
 }
 
-/// <summary>A weight read at indices the batch supplies, so an index out of range fails a step
-/// inside the runtime, after the step has taken what it was fed.</summary>
+/// <summary>A weight read at indices the graph computes from the batch, so an index out of range
+/// passes the check a run makes of the indices it is fed and fails a step inside the runtime, after
+/// the step has taken what it was fed.</summary>
 [Module]
 public partial class IndexedWeightModel
 {
     public static Tensor<float32> Inline(Tensor<float32> x, Tensor<int64> index)
-        => x * InitScalarWeight.Init(Vector(4L)).Gather(index, axis: 0);
+        => x * InitScalarWeight.Init(Vector(4L)).Gather(index.Abs(), axis: 0);
 }
 
 /// <summary>One weight over the representative-input threshold and one under it, so a rig built

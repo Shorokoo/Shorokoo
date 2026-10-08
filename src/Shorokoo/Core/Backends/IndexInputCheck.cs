@@ -212,6 +212,7 @@ internal sealed class IndexInputCheck
                 for (int i = 0; i < elements.Length; i++)
                     if ((elements[i] < minimum || elements[i] > maximum) && elements[i] != ignoreIndex) return (i, (long)elements[i]);
             }
+            GC.KeepAlive(tensor);
             return (-1L, 0L);
         });
 

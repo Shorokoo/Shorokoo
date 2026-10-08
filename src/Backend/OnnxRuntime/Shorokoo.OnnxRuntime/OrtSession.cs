@@ -791,6 +791,10 @@ internal sealed class OrtSession : IShorokooSession
     /// Shorokoo's allocator (<see cref="OrtBackend.SessionsUseOrtArena"/>).</summary>
     internal bool OnOrtArena { get; init; }
 
+    /// <summary>Whether this session runs its operators on the process's thread pools rather than
+    /// pools of its own (<see cref="OrtBackend.SessionsShareThreadPools"/>).</summary>
+    internal bool OnSharedThreadPools { get; init; }
+
     /// <summary>The figures of the arena ONNX Runtime made for this session: the card's for a CUDA
     /// session, the host's otherwise.</summary>
     private ArenaStatistics? ReadOrtArenaStatistics()

@@ -1930,6 +1930,19 @@ public class CoreUtilsCoverageTests
     }
 
     [Fact]
+    public void TestATracedSessionKeepsThreadPoolsOfItsOwn()
+    {
+        using var plain = new ComputeContext();
+        using var traced = new ComputeContext { Diagnostics = new DiagnosticSettings { TraceNodePlacement = true } };
+        var untraced = Doubling(plain);
+        var profiled = Doubling(traced);
+        untraced.Execute(ThreeFloats());
+        profiled.Execute(ThreeFloats());
+        Assert.Equal(OrtEnvironment.SharedThreadPools, ((OrtSession)untraced.Session).OnSharedThreadPools);
+        Assert.False(((OrtSession)profiled.Session).OnSharedThreadPools);
+    }
+
+    [Fact]
     public void TestADeterministicContextBuildsAndRunsItsSessionsAndComputesWhatAnyOtherDoes()
     {
         using var deterministic = new ComputeContext { Diagnostics = new DiagnosticSettings { DeterministicCompute = true } };

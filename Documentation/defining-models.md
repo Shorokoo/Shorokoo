@@ -157,15 +157,16 @@ How a hyper is supplied depends on the route:
 
   The generator reports a plain `for`, `foreach`, `while` or `do` that stacks layers as
   the Info diagnostic `MSG007`, at the loop. A loop stacks layers when its body, directly
-  or through a method it calls, runs `Init(...)` on an initializer class or `Model(...)` /
-  `Call(...)` on a `[Module]` class, without naming the result with `.Named(...)`. The
-  loop may sit in `Inline` or in a helper it calls. A model created before the loop and
-  called inside it is reused, not stacked, and is not reported. Info diagnostics show in
-  the IDE, not in `dotnet build` output; set `dotnet_diagnostic.MSG007.severity = warning`
-  in `.editorconfig` to see them there. For a loop that must stay plain, such as one
-  whose iterations build parameters of different shapes, name each item with
-  `.Named($"layer{i}")`, or wrap the loop in `#pragma warning disable MSG007` /
-  `#pragma warning restore MSG007`.
+  or through a method or local function it calls, runs `Init(...)` on an initializer class
+  or `Model(...)` / `Call(...)` on a `[Module]` class, and does not name the parameter or
+  sub-model (`Init(...)` / `Model(...)`) with `.Named(...)`, on the call or on the local
+  that holds it. The loop may sit in `Inline` or in a helper it calls. A model created
+  before the loop and called inside it is reused, not stacked, and is not reported. Info
+  diagnostics show in the IDE, not in `dotnet build` output; set
+  `dotnet_diagnostic.MSG007.severity = warning` in `.editorconfig` to see them there. For
+  a loop that must stay plain, such as one whose iterations build parameters of different
+  shapes, name each parameter or sub-model with `.Named($"layer{i}")`, or wrap the loop in
+  `#pragma warning disable MSG007` / `#pragma warning restore MSG007`.
 
   Simple — add `x` to itself `n` times:
   ```csharp

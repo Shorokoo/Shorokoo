@@ -153,19 +153,22 @@ How a hyper is supplied depends on the route:
   ([onnx-and-weights.md](onnx-and-weights.md#naming)); under a plain `for`, adding or
   removing one `Init(...)` renumbers every later parameter. Iterations that differ are no
   reason for a plain `for`: gate the difference on `ctx.IterationIndex` with an `IfElse`
-  ([Per-layer variants](#per-layer-variants)).
+  ([Per-layer variants](#per-layer-variants)). The one exception is iterations whose
+  parameters differ in shape, which one loop body cannot build.
 
   The generator reports a plain `for`, `foreach`, `while` or `do` that stacks layers as
   the Info diagnostic `MSG007`, at the loop. A loop stacks layers when its body, directly
   or through a method or local function it calls, runs `Init(...)` on an initializer class
   or `Model(...)` / `Call(...)` on a `[Module]` class, and does not name the parameter or
   sub-model (`Init(...)` / `Model(...)`) with `.Named(...)`, on the call or on the local
-  that holds it. The loop may sit in `Inline` or in a helper it calls. A model created
-  before the loop and called inside it is reused, not stacked, and is not reported. Info
+  that holds it. The loop may sit in `Inline` or in a helper it calls. Code inside a
+  lambda is not looked into, since whether it runs once per pass does not show in the
+  source. A model created before the loop and called inside it is reused, not stacked,
+  and is not reported. Info
   diagnostics show in the IDE, not in `dotnet build` output; set
   `dotnet_diagnostic.MSG007.severity = warning` in `.editorconfig` to see them there. For
-  a loop that must stay plain, such as one whose iterations build parameters of different
-  shapes, name each parameter or sub-model with `.Named($"layer{i}")`, or wrap the loop in
+  a loop that must stay plain — one whose iterations build parameters of different
+  shapes — name each parameter or sub-model with `.Named($"layer{i}")`, or wrap the loop in
   `#pragma warning disable MSG007` / `#pragma warning restore MSG007`.
 
   Simple — add `x` to itself `n` times:

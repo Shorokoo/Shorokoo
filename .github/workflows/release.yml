@@ -39,9 +39,11 @@ jobs:
           dotnet-version: 10.0.x
 
       # The library is compiled against ONNX Runtime's C API header, which the project's restore
-      # brings in the Microsoft.ML.OnnxRuntime package.
+      # brings in the Microsoft.ML.OnnxRuntime package. A command that fails stops the step there,
+      # rather than leaving the next to fail on what it did not do.
       - name: Build the native allocator (win-x64)
         run: |
+          $PSNativeCommandUseErrorActionPreference = $true
           $project = "src/Backend/OnnxRuntime/Shorokoo.OnnxRuntime/Shorokoo.OnnxRuntime.csproj"
           dotnet restore $project
           $env:DOTNET_NOLOGO = "1"

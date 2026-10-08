@@ -98,9 +98,9 @@ builder's `Save` return it too; the directory form (`SaveAsDirectory`) returns `
 
 The save is streamed through an ordinary buffered file, so `Write` only hands the bytes to the OS's
 page cache; `Flush` is where they reach the disk. What is still unwritten when it starts depends on
-the OS's background write-back (the lazy writer on Windows; on Linux a fast disk absorbs it in well
-under a second), and on a slow disk `Flush` approaches the file size divided by the disk's write
-bandwidth. A report such as `write 0.6s, flush 5.8s` therefore says the disk is the cost, not the
+how much the OS has written back in the background while the bytes were produced (on Windows, the
+cache manager's lazy writer). On a fast disk the flush takes well under a second; on a slow disk
+`Flush` approaches the file size divided by the disk's write bandwidth. A report such as `write 0.6s, flush 5.8s` therefore says the disk is the cost, not the
 fsync call. Save time varies between identical saves (mostly in `Flush`), and multi-GB saves can
 take tens of seconds, so exclude it from throughput measurements:
 
@@ -160,8 +160,9 @@ var eval  = Persistence.LoadEvaluationModel("run.skpt");   // [model inputs…, 
 Each run of the evaluation model gives one batch's loss. Under a `Mean` loss with `ignoreIndex`,
 that figure is a mean over the batch's own targets that are not ignored (with a class `weight`,
 over their total weight), so batches are not interchangeable: weight each batch's figure by that
-count before combining, or give the loss `reduction: LossReduction.Sum` and divide the batches'
-total once, at the end, by the whole set's count.
+count (or total weight) before combining, or give the loss `reduction: LossReduction.Sum` and
+divide the batches' total once, at the end, by the whole set's count of targets that are not
+ignored (with a class `weight`, by their total weight).
 
 `ToInferenceModel()` binds the checkpoint's trainable params and model state into its `.Rig`'s
 retained concrete architecture (concretized once at build, at all inputs, so multi-input models

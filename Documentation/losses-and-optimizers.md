@@ -71,9 +71,11 @@ Knobs are **build-time C# arguments** on two extra methods:
 - **`ignoreIndex`** (CE, NLL): a target equal to it adds nothing to the loss or the gradient, and
   `Mean` divides by the targets that are not ignored, as PyTorch does: by their count, or with
   `weight` by the sum of their classes' weights. The sentinel is any `int64`, a negative one such
-  as PyTorch's `-100` included. A training step whose batch holds an ignored target currently
-  fails when the sentinel lies outside `[-C, C-1]` for `C` classes — `-100` below 100 classes,
-  say ([#499](https://github.com/Shorokoo/Shorokoo/issues/499)); evaluating the loss does not.
+  as PyTorch's `-100` included. On the CPU backend, a training step whose batch holds an ignored
+  target fails when the sentinel lies outside `[-C, C-1]` for `C` classes — `-100` below 100
+  classes, say — because the gradient indexes the class weights with it
+  ([#499](https://github.com/Shorokoo/Shorokoo/issues/499)); evaluating the loss does not. Until
+  that is fixed, pick a sentinel inside `[-C, C-1]` for a model you train.
 - **SmoothL1 ↔ Huber**: `SmoothL1(e; β) = HuberLoss(δ = β) / β`. Huber's `delta` is a
   live, schedulable `[Hyper]`; SmoothL1's `beta` is baked.
 - **PoissonNLL**: the Keras `Poisson` form is
@@ -86,7 +88,8 @@ Knobs are **build-time C# arguments** on two extra methods:
 The rig gives the loss graph exactly **two tensor inputs** and expects a
 **`Scalar<float32>`**.
 
-- **Rig-safe**: `reduction = Mean`/`Sum`, `ignoreIndex`, `labelSmoothing` — through a
+- **Rig-safe**: `reduction = Mean`/`Sum`, `ignoreIndex` (with a sentinel inside `[-C, C-1]`;
+  see [`ignoreIndex`](#loss-configurable-knobs) above), `labelSmoothing` — through a
   **wrapper module**, since the generated `ComputationGraph` uses the bare `Inline`:
 
   ```csharp

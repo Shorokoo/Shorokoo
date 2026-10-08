@@ -198,8 +198,9 @@ None of these shows in a small first run. Each can end a long one.
   [What a save costs](training-checkpoints.md#what-a-save-costs).
 - **Out of memory.** A failed allocation arrives as `CR009` and says which pool ran out:
   [When a training step runs out of memory](training-memory.md#when-a-training-step-runs-out-of-memory).
-- **Process memory limit.** On Windows, a limit on the process's memory bounds what it holds on the
-  card as well, so it must cover host commit plus this process's device memory:
+- **Process memory limit.** On a WDDM-driven card (Windows), a limit on the process's memory bounds
+  what it holds on the card as well, so it must cover the process's peak commit charge, which
+  includes that device memory:
   [Sizing a process memory limit](training-memory.md#sizing-a-process-memory-limit).
 - **Device-memory readings.** They are one record for the whole process and read device 0 only,
   and this process's share of the card can be unavailable in a container:

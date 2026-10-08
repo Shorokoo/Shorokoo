@@ -78,7 +78,7 @@ shape baked into the body of a no-argument `Inline`, and a shaped initializer wh
 argument is not an `int64` shape vector (`Init(wte)` handing it another parameter's value,
 say). Any other input comes after the shape. An optimizer-owned `[StateInitializer]` is
 exempt: the rig calls it once per trainable parameter, and the state takes whatever shape
-it returns ([Training hyperparameters](training-hyperparameters.md)). The body is an ordinary
+it returns ([Custom optimizers](training-hyperparameters.md#custom-optimizers)). The body is an ordinary
 graph body (tensor ops, loops, `IfElse`). The rules below apply to `[StateInitializer]` and
 `[TrainableParamInitializer]` alike.
 
@@ -137,7 +137,7 @@ fresh `N(0, 0.02)` matrix that is no parameter, draws `W` in the body:
 
 ```csharp
 [TrainableParamInitializer]
-public static partial class ValueBankInit
+public static partial class NormalValueBankInit
 {
     public static Tensor<float32> Inline(Vector<int64> shape, Tensor<float32> tokenEmbedding)
     {
@@ -147,8 +147,8 @@ public static partial class ValueBankInit
 }
 
 var wte   = NormalDist02.Init([vocab, d]);
-var bank0 = ValueBankInit.Init([vocab, d], wte);   // wte · W0
-var bank1 = ValueBankInit.Init([vocab, d], wte);   // wte · W1, a different W
+var bank0 = NormalValueBankInit.Init([vocab, d], wte);   // wte · W0
+var bank1 = NormalValueBankInit.Init([vocab, d], wte);   // wte · W1, a different W
 ```
 
 Drawing `W` at the call site instead —

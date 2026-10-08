@@ -13,7 +13,7 @@ further:
 - [training-memory.md](training-memory.md) — out-of-memory reports, what a process's memory holds,
   and sizing a process memory limit.
 
-Related: [defining-models.md](defining-models.md) · [nn-library.md](nn-library.md) · [inference.md](inference.md) · [training-backends.md](training-backends.md)
+Related: [defining-models.md](defining-models.md) · [nn-library.md](nn-library.md) · [losses-and-optimizers.md](losses-and-optimizers.md) · [inference.md](inference.md) · [training-backends.md](training-backends.md)
 
 ## Facts
 

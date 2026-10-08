@@ -147,8 +147,10 @@ Limits of training on JAX, besides those of [the native path](#what-differs-on-t
 | `TrainingBackend.Native` | `OnnxAutoGrad` = `"onnx-autograd/1"` | the execution backend, when it runs the step | a backend that accepts the format |
 
 Both are ONNX, compiled and run through the same path (one compiled session per input shape, output
-aliasing of the updated state, resident runs), so the rest of [training.md](training.md) holds for
-both.
+aliasing of the updated state, resident runs), so the training guides — [training.md](training.md),
+[training-hyperparameters.md](training-hyperparameters.md), [training-data.md](training-data.md),
+[training-checkpoints.md](training-checkpoints.md) and [training-memory.md](training-memory.md) —
+hold for both.
 
 ## What an `onnx-autograd/1` step contains
 

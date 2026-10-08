@@ -23,7 +23,7 @@ The guides for this version ship inside the package, in its `docs/` folder: star
 to the default global packages folder, they are in `~/.nuget/packages/shorokoo/<version>/docs/`
 (`%UserProfile%\.nuget\packages\shorokoo\<version>\docs\` on Windows).
 
-The same guides online, at the version of this package:
+The same guides online (in the package, this link names the commit the package was built from):
 https://github.com/Shorokoo/Shorokoo/tree/main/Documentation
 
 Samples: https://github.com/Shorokoo/Shorokoo/tree/main/samples

@@ -79,9 +79,10 @@ the card, the blocks its allocator keeps for reuse among it, and a process memor
 Object's, or a container's — bounds the card's memory along with the host's: a device allocation
 that would take the process past the limit fails as though the card were full.
 
-**Such a limit must cover the process's host commit plus the device memory this process holds**, both
-at their peaks. The device share is usually the larger: training runs of 49M, 88M and 164M parameters
-on one card peaked at 13.2, 15.4 and 20.3 GiB of commit while holding 10.4, 12.6 and 16.9 GiB on the
-card, so a limit sized from the host side alone fails them early in the run. Read this process's
+**Such a limit must cover the process's peak commit charge**, which on a WDDM-driven card already
+includes the device memory the process holds (`ProcessBytes`). The device share is usually the larger
+part of it: training runs of 49M, 88M and 164M parameters on one card peaked at 13.2, 15.4 and
+20.3 GiB of commit, of which 10.4, 12.6 and 16.9 GiB was held on the card. A limit sized from a
+host-only figure — a CPU run's commit, say — must add the device peak, or it fails such a run early. Read this process's
 device share as `DeviceMemory.Read()?.ProcessBytes` ([Device memory](gpu-backends.md#device-memory-gpu-backends));
 a `CR009` report gives both figures at the moment an allocation fails.

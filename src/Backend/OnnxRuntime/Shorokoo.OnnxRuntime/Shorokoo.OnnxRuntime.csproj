@@ -93,7 +93,7 @@
           Condition="'$(ShorokooAllocatorRid)' != ''"
           DependsOnTargets="LocateShorokooCMake"
           BeforeTargets="BeforeBuild"
-          Inputs="$(ShorokooAllocatorSource)/shorokoo_ort_allocator.cpp;$(ShorokooAllocatorSource)/shorokoo_ort_ops.cpp;$(ShorokooAllocatorSource)/CMakeLists.txt"
+          Inputs="$(ShorokooAllocatorSource)/shorokoo_ort_allocator.cpp;$(ShorokooAllocatorSource)/shorokoo_ort_ops.cpp;$(ShorokooAllocatorSource)/CMakeLists.txt;$(PkgMicrosoft_ML_OnnxRuntime)/build/native/include/onnxruntime_c_api.h"
           Outputs="$(ShorokooAllocatorOutDir)/$(ShorokooAllocatorFile)">
     <Exec Command="&quot;$(ShorokooCMake)&quot; --version" ConsoleToMSBuild="true" StandardOutputImportance="low"
           IgnoreExitCode="true" IgnoreStandardErrorWarningFormat="true" EchoOff="true">

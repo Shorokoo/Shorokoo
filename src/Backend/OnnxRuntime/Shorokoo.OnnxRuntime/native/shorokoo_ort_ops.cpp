@@ -72,7 +72,9 @@ struct Update {
 // or apart from every input, so no element depends on another and the loop is vectorized as such;
 // told so, since the compiler cannot see it and would otherwise run an output written in place one
 // element at a time.
-#if defined(_MSC_VER)
+#if defined(__clang__)
+#define SHOROKOO_INDEPENDENT _Pragma("clang loop vectorize(assume_safety)")
+#elif defined(_MSC_VER)
 #define SHOROKOO_INDEPENDENT __pragma(loop(ivdep))
 #else
 #define SHOROKOO_INDEPENDENT _Pragma("GCC ivdep")

@@ -1599,13 +1599,13 @@ public class CrossDeviceRoutingCoverageTests
 
         public IShorokooSession CreateSession(
             ReadOnlyMemory<byte> modelBytes, ShorokooGraphOptimization graphOptimization,
-            ShorokooLogSeverity logSeverity,
+            LogSettings log,
             DeviceMemorySettings deviceMemory)
             => Build(modelBytes, deviceMemory, []);
 
         IShorokooSession IShorokooBackend.CreateSession(
             ReadOnlyMemory<byte> modelBytes, ShorokooGraphOptimization graphOptimization,
-            ShorokooLogSeverity logSeverity, DeviceMemorySettings deviceMemory,
+            LogSettings log, DeviceMemorySettings deviceMemory,
             DiagnosticSettings diagnostics, IReadOnlyList<OutputAlias> outputAliases)
             => Build(modelBytes, deviceMemory, Aliases ? outputAliases : []);
 

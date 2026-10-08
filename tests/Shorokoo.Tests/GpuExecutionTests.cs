@@ -321,7 +321,7 @@ public class GpuExecutionTests
         byte[] x = [.. MemoryMarshal.AsBytes(Enumerable.Range(0, N * N).Select(i => (i % 13) * 0.25f - 1.5f).ToArray().AsSpan())];
         (byte[], ILookup<string, string>?) Run(bool consume)
         {
-            using var session = backend.CreateSession(model, ShorokooGraphOptimization.EnableAll, ShorokooLogSeverity.Fatal, new DeviceMemorySettings(),
+            using var session = backend.CreateSession(model, ShorokooGraphOptimization.EnableAll, LogSettings.None, new DeviceMemorySettings(),
                 new DiagnosticSettings { TraceNodePlacement = !consume });
             var fed = inputs.ToDictionary(name => name, _ => backend.CreateTensorInBackendMemory(ShorokooTensorElementType.Float, x, [N, N]));
             var feeds = fed.ToDictionary(f => f.Key, f => f.Value);
@@ -340,25 +340,21 @@ public class GpuExecutionTests
     public void CudaProvider_AGatheredTablesGradientSumsRepeatedIdsOnTheCardWithoutAWarning()
     {
         long[] ids = [5, 9, 5, 5, 0, 9, 5, 63];
-        var logged = new List<OrtLogMessage>();
-        float[] before, after, gradient;
-        NodePlacement placement;
-        using (OrtLog.CaptureOnThisThread(logged.Add, ShorokooLogSeverity.Warning))
-        {
-            var rig = TrainingRig.FromScratch(NNGatheredTableModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
-                [TensorData([ids.Length], ids)], new SGDOptimizerHyperparameters { LearningRate = 1f }, runtimeContext: new ComputeContext());
-            var initial = rig.CreateInitialCheckpoint();
-            before = Weights(initial);
-            after = Weights(rig.TrainStep(initial, rig.InputDef.FromOrderedData(TensorData([ids.Length], ids)).Shared(),
-                rig.TargetDef.FromOrderedData(TensorData([ids.Length, 4L], new float[ids.Length * 4])).Shared()));
+        System.Collections.Concurrent.ConcurrentQueue<RuntimeLogMessage> logged = [];
+        var warnings = new RunSettings { Log = new LogSettings { Sink = logged.Enqueue } };
+        var rig = TrainingRig.FromScratch(NNGatheredTableModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            [TensorData([ids.Length], ids)], new SGDOptimizerHyperparameters { LearningRate = 1f }, runtimeContext: new ComputeContext { RunSettings = warnings });
+        var initial = rig.CreateInitialCheckpoint();
+        var before = Weights(initial);
+        var after = Weights(rig.TrainStep(initial, rig.InputDef.FromOrderedData(TensorData([ids.Length], ids)).Shared(),
+            rig.TargetDef.FromOrderedData(TensorData([ids.Length, 4L], new float[ids.Length * 4])).Shared()));
 
-            using var traced = new ComputeContext { Diagnostics = new DiagnosticSettings { TraceNodePlacement = true } };
-            var table = TensorData([64L, 4L], new float[256]);
-            var read = TensorData([ids.Length], ids);
-            using var compiled = traced.Compile(GatheredTableGradientModel.ComputationGraph.ToConcreteArchitecture([table, read]).ToConcreteModel());
-            gradient = compiled.Execute(table, read)[0].ToTensorData().CopyMemory<float>();
-            placement = compiled.ReadNodePlacement()!;
-        }
+        using var traced = new ComputeContext { Diagnostics = new DiagnosticSettings { TraceNodePlacement = true }, RunSettings = warnings };
+        var table = TensorData([64L, 4L], new float[256]);
+        var read = TensorData([ids.Length], ids);
+        using var compiled = traced.Compile(GatheredTableGradientModel.ComputationGraph.ToConcreteArchitecture([table, read]).ToConcreteModel());
+        var gradient = compiled.Execute(table, read)[0].ToTensorData().CopyMemory<float>();
+        var placement = compiled.ReadNodePlacement()!;
 
         Assert.Empty(logged);
         for (int i = 0; i < before.Length; i++)
@@ -521,7 +517,7 @@ public class GpuExecutionTests
         var model = new MemoryStream();
         ProtoBuf.Serializer.Serialize(model, proto);
         using var session = backend.CreateSession(
-            model.ToArray(), ShorokooGraphOptimization.EnableAll, ShorokooLogSeverity.Fatal,
+            model.ToArray(), ShorokooGraphOptimization.EnableAll, LogSettings.None,
             new DeviceMemorySettings { LimitBytes = 32 * MiB });
         var bytes = new byte[64 * MiB];
         IReadOnlyList<IShorokooTensorValue> Run(IShorokooTensorValue input) => session.Run(

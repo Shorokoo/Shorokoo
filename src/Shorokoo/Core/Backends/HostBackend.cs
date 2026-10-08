@@ -62,7 +62,7 @@ public sealed class HostBackend : IShorokooBackend
     public IShorokooSession CreateSession(
         ReadOnlyMemory<byte> modelBytes,
         ShorokooGraphOptimization graphOptimization,
-        ShorokooLogSeverity logSeverity,
+        LogSettings log,
         DeviceMemorySettings deviceMemory)
         => throw new NotSupportedException(
             "The framework's host memory holds tensors and runs nothing, so it cannot build a "
@@ -174,7 +174,7 @@ internal sealed class UnrecordedBackend : IShorokooBackend
     public IShorokooSession CreateSession(
         ReadOnlyMemory<byte> modelBytes,
         ShorokooGraphOptimization graphOptimization,
-        ShorokooLogSeverity logSeverity,
+        LogSettings log,
         DeviceMemorySettings deviceMemory)
         => throw Unnamed();
 

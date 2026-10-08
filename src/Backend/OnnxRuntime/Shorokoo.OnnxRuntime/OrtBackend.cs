@@ -37,7 +37,7 @@ public abstract class OrtBackend : IShorokooBackend
     /// <summary>
     /// The constructor for a subclass that appends an execution provider of its own. Its sessions
     /// are never built a second time to save memory, as those of the CPU and CUDA constructors
-    /// may be (see <see cref="CreateSession(ReadOnlyMemory{byte}, ShorokooGraphOptimization, ShorokooLogSeverity, DeviceMemorySettings, DiagnosticSettings, IReadOnlyList{OutputAlias})"/>):
+    /// may be (see <see cref="CreateSession(ReadOnlyMemory{byte}, ShorokooGraphOptimization, LogSettings, DeviceMemorySettings, DiagnosticSettings, IReadOnlyList{OutputAlias})"/>):
     /// nothing here knows what that provider does to a graph.
     /// </summary>
     /// <param name="configureExecutionProvider">
@@ -181,8 +181,9 @@ public abstract class OrtBackend : IShorokooBackend
         try
         {
             Directory.CreateDirectory(directory);
-            Discard(NewSession(SerializedAsRun(model), ShorokooGraphOptimization.TrainingStep, ShorokooLogSeverity.Fatal,
-                DeviceMemorySettings.Default, DiagnosticSettings.Default, directory, 0, [], precision));
+            using (var unlogged = RuntimeLogRoutes.Open(LogSettings.None))
+                Discard(NewSession(SerializedAsRun(model), ShorokooGraphOptimization.TrainingStep, unlogged,
+                    DeviceMemorySettings.Default, DiagnosticSettings.Default, directory, 0, [], precision));
             ModelProto run;
             using (var written = File.OpenRead(Path.Combine(directory, OptimizedModelFile)))
                 run = Shorokoo.Onnx.OnnxProtobuf.ReadModel(written);
@@ -270,26 +271,28 @@ public abstract class OrtBackend : IShorokooBackend
     /// </summary>
     /// <param name="modelBytes">The serialized ONNX model.</param>
     /// <param name="graphOptimization">The ORT graph-optimization level to apply.</param>
-    /// <param name="logSeverity">The minimum severity ORT logs at.</param>
+    /// <param name="log">Where what ONNX Runtime logs while it builds the session goes, and what its
+    /// runs log where their <see cref="RunSettings.Log"/> is the same.</param>
     /// <param name="deviceMemory">The device-memory settings this session is built with, which
     /// limit what it allocates from its first block on.</param>
     public IShorokooSession CreateSession(
         ReadOnlyMemory<byte> modelBytes,
         ShorokooGraphOptimization graphOptimization,
-        ShorokooLogSeverity logSeverity,
+        LogSettings log,
         DeviceMemorySettings deviceMemory)
         => CreateSession(
-            modelBytes, graphOptimization, logSeverity, deviceMemory, DiagnosticSettings.Default);
+            modelBytes, graphOptimization, log, deviceMemory, DiagnosticSettings.Default);
 
     /// <summary>
-    /// <see cref="CreateSession(ReadOnlyMemory{byte}, ShorokooGraphOptimization, ShorokooLogSeverity, DeviceMemorySettings)"/>,
+    /// <see cref="CreateSession(ReadOnlyMemory{byte}, ShorokooGraphOptimization, LogSettings, DeviceMemorySettings)"/>,
     /// also recording what <paramref name="diagnostics"/> asks for. ORT reads the profiler switch
     /// while the session is being created and the session keeps it for life, which is why it
     /// arrives here and not per run.
     /// </summary>
     /// <param name="modelBytes">The serialized ONNX model.</param>
     /// <param name="graphOptimization">The ORT graph-optimization level to apply.</param>
-    /// <param name="logSeverity">The minimum severity ORT logs at.</param>
+    /// <param name="log">Where what ONNX Runtime logs while it builds the session goes, and what its
+    /// runs log where their <see cref="RunSettings.Log"/> is the same.</param>
     /// <param name="deviceMemory">The device-memory settings this session is built with.</param>
     /// <param name="diagnostics">What the session records about itself, and whether it computes
     /// deterministically. Its default records nothing and leaves the runtime's kernels as they are,
@@ -297,14 +300,14 @@ public abstract class OrtBackend : IShorokooBackend
     public IShorokooSession CreateSession(
         ReadOnlyMemory<byte> modelBytes,
         ShorokooGraphOptimization graphOptimization,
-        ShorokooLogSeverity logSeverity,
+        LogSettings log,
         DeviceMemorySettings deviceMemory,
         DiagnosticSettings diagnostics)
-        => Build(modelBytes, graphOptimization, logSeverity, deviceMemory, diagnostics, outputAliases: null, intraOpThreads: 0, [],
+        => Build(modelBytes, graphOptimization, log, deviceMemory, diagnostics, outputAliases: null, intraOpThreads: 0, [],
             PrecisionSettings.Default);
 
     /// <summary>
-    /// <see cref="CreateSession(ReadOnlyMemory{byte}, ShorokooGraphOptimization, ShorokooLogSeverity, DeviceMemorySettings, DiagnosticSettings)"/>,
+    /// <see cref="CreateSession(ReadOnlyMemory{byte}, ShorokooGraphOptimization, LogSettings, DeviceMemorySettings, DiagnosticSettings)"/>,
     /// for a session that may write the outputs <paramref name="outputAliases"/> names into the
     /// memory of the inputs it pairs them with, on a run that consumed those inputs.
     ///
@@ -342,16 +345,16 @@ public abstract class OrtBackend : IShorokooBackend
     public IShorokooSession CreateSession(
         ReadOnlyMemory<byte> modelBytes,
         ShorokooGraphOptimization graphOptimization,
-        ShorokooLogSeverity logSeverity,
+        LogSettings log,
         DeviceMemorySettings deviceMemory,
         DiagnosticSettings diagnostics,
         IReadOnlyList<OutputAlias> outputAliases)
         => CreateSession(
-            modelBytes, graphOptimization, logSeverity, deviceMemory, diagnostics, outputAliases,
+            modelBytes, graphOptimization, log, deviceMemory, diagnostics, outputAliases,
             intraOpThreads: 0);
 
     /// <summary>
-    /// <see cref="CreateSession(ReadOnlyMemory{byte}, ShorokooGraphOptimization, ShorokooLogSeverity, DeviceMemorySettings, DiagnosticSettings, IReadOnlyList{OutputAlias})"/>,
+    /// <see cref="CreateSession(ReadOnlyMemory{byte}, ShorokooGraphOptimization, LogSettings, DeviceMemorySettings, DiagnosticSettings, IReadOnlyList{OutputAlias})"/>,
     /// with ONNX Runtime's intra-op thread pool sized to <paramref name="intraOpThreads"/>: 1 runs
     /// every operator on the thread that called the run, for sessions run side by side; 0 leaves
     /// ONNX Runtime's own default, a thread per core.
@@ -359,7 +362,7 @@ public abstract class OrtBackend : IShorokooBackend
     public IShorokooSession CreateSession(
         ReadOnlyMemory<byte> modelBytes,
         ShorokooGraphOptimization graphOptimization,
-        ShorokooLogSeverity logSeverity,
+        LogSettings log,
         DeviceMemorySettings deviceMemory,
         DiagnosticSettings diagnostics,
         IReadOnlyList<OutputAlias> outputAliases,
@@ -368,12 +371,12 @@ public abstract class OrtBackend : IShorokooBackend
         ArgumentNullException.ThrowIfNull(outputAliases);
         ArgumentOutOfRangeException.ThrowIfNegative(intraOpThreads);
         return Build(
-            modelBytes, graphOptimization, logSeverity, deviceMemory, diagnostics,
+            modelBytes, graphOptimization, log, deviceMemory, diagnostics,
             outputAliases.Count == 0 ? null : outputAliases, intraOpThreads, [], PrecisionSettings.Default);
     }
 
     /// <summary>
-    /// <see cref="CreateSession(ReadOnlyMemory{byte}, ShorokooGraphOptimization, ShorokooLogSeverity, DeviceMemorySettings, DiagnosticSettings, IReadOnlyList{OutputAlias}, int)"/>,
+    /// <see cref="CreateSession(ReadOnlyMemory{byte}, ShorokooGraphOptimization, LogSettings, DeviceMemorySettings, DiagnosticSettings, IReadOnlyList{OutputAlias}, int)"/>,
     /// with the initializers <paramref name="suppliedInitializers"/> names taken as the values they
     /// are, where they are — on a card, weights loaded straight into its memory, which ONNX Runtime
     /// then reads in place rather than copying from the model (Shorokoo/Shorokoo#436).
@@ -381,18 +384,18 @@ public abstract class OrtBackend : IShorokooBackend
     public IShorokooSession CreateSession(
         ReadOnlyMemory<byte> modelBytes,
         ShorokooGraphOptimization graphOptimization,
-        ShorokooLogSeverity logSeverity,
+        LogSettings log,
         DeviceMemorySettings deviceMemory,
         DiagnosticSettings diagnostics,
         IReadOnlyList<OutputAlias> outputAliases,
         int intraOpThreads,
         IReadOnlyList<SuppliedInitializer> suppliedInitializers)
         => CreateSession(
-            modelBytes, graphOptimization, logSeverity, deviceMemory, diagnostics, outputAliases, intraOpThreads,
+            modelBytes, graphOptimization, log, deviceMemory, diagnostics, outputAliases, intraOpThreads,
             suppliedInitializers, PrecisionSettings.Default);
 
     /// <summary>
-    /// <see cref="CreateSession(ReadOnlyMemory{byte}, ShorokooGraphOptimization, ShorokooLogSeverity, DeviceMemorySettings, DiagnosticSettings, IReadOnlyList{OutputAlias}, int, IReadOnlyList{SuppliedInitializer})"/>,
+    /// <see cref="CreateSession(ReadOnlyMemory{byte}, ShorokooGraphOptimization, LogSettings, DeviceMemorySettings, DiagnosticSettings, IReadOnlyList{OutputAlias}, int, IReadOnlyList{SuppliedInitializer})"/>,
     /// computing in <paramref name="precision"/>, which reaches the execution-provider step with
     /// <paramref name="deviceMemory"/>. On a CUDA backend
     /// <see cref="PrecisionSettings.AllowTensorFloat32"/> is the CUDA provider's <c>use_tf32</c>
@@ -402,7 +405,7 @@ public abstract class OrtBackend : IShorokooBackend
     public IShorokooSession CreateSession(
         ReadOnlyMemory<byte> modelBytes,
         ShorokooGraphOptimization graphOptimization,
-        ShorokooLogSeverity logSeverity,
+        LogSettings log,
         DeviceMemorySettings deviceMemory,
         DiagnosticSettings diagnostics,
         IReadOnlyList<OutputAlias> outputAliases,
@@ -415,7 +418,7 @@ public abstract class OrtBackend : IShorokooBackend
         ArgumentNullException.ThrowIfNull(precision);
         ArgumentOutOfRangeException.ThrowIfNegative(intraOpThreads);
         return Build(
-            modelBytes, graphOptimization, logSeverity, deviceMemory, diagnostics,
+            modelBytes, graphOptimization, log, deviceMemory, diagnostics,
             outputAliases.Count == 0 ? null : outputAliases, intraOpThreads, suppliedInitializers, precision);
     }
 
@@ -518,10 +521,44 @@ public abstract class OrtBackend : IShorokooBackend
     // built, holding them twice, rather than being built again without writing (see CreateSession).
     private const long InitializersKeptTwice = 16L << 20;
 
-    private IShorokooSession Build(
+    /// <summary>
+    /// A session over <paramref name="modelBytes"/>, logging through a route of its own to
+    /// <paramref name="log"/> (<see cref="RuntimeLogRoutes"/>): ONNX Runtime names the session's
+    /// logger, and the loggers of the sessions it places values through, by the route's id. The
+    /// session closes the route when it is disposed, and a build that fails closes it here.
+    /// </summary>
+    private OrtSession Build(
         ReadOnlyMemory<byte> modelBytes,
         ShorokooGraphOptimization graphOptimization,
-        ShorokooLogSeverity logSeverity,
+        LogSettings log,
+        DeviceMemorySettings deviceMemory,
+        DiagnosticSettings diagnostics,
+        IReadOnlyList<OutputAlias>? outputAliases,
+        int intraOpThreads,
+        IReadOnlyList<SuppliedInitializer> suppliedInitializers,
+        PrecisionSettings precision)
+    {
+        ArgumentNullException.ThrowIfNull(log);
+        var route = RuntimeLogRoutes.Open(log);
+        try
+        {
+            var session = BuildRouted(
+                modelBytes, graphOptimization, route, deviceMemory, diagnostics, outputAliases, intraOpThreads,
+                suppliedInitializers, precision);
+            session.OwnLogRoute();
+            return session;
+        }
+        catch
+        {
+            route.Dispose();
+            throw;
+        }
+    }
+
+    private OrtSession BuildRouted(
+        ReadOnlyMemory<byte> modelBytes,
+        ShorokooGraphOptimization graphOptimization,
+        RuntimeLogRoutes.Route log,
         DeviceMemorySettings deviceMemory,
         DiagnosticSettings diagnostics,
         IReadOnlyList<OutputAlias>? outputAliases,
@@ -535,10 +572,10 @@ public abstract class OrtBackend : IShorokooBackend
         var model = modelBytes.ToArray();
         model = AsRun(model, graphOptimization);
         if (!SessionPlacing.Suppressed && WeightsToShare(model, outputAliases, suppliedInitializers) is { } weights
-            && BuildSharingWeights(model, weights, graphOptimization, logSeverity, deviceMemory, diagnostics, intraOpThreads, suppliedInitializers, precision) is { } sharing)
+            && BuildSharingWeights(model, weights, graphOptimization, log, deviceMemory, diagnostics, intraOpThreads, suppliedInitializers, precision) is { } sharing)
             return sharing;
         BuiltSession New(string? optimizedDirectory) => NewSession(
-            model, graphOptimization, logSeverity, deviceMemory, diagnostics, optimizedDirectory, intraOpThreads,
+            model, graphOptimization, log, deviceMemory, diagnostics, optimizedDirectory, intraOpThreads,
             suppliedInitializers, precision);
         var placing = _stockProvider && !SessionsUseOrtArena && !SessionPlacing.Suppressed;
         var session = BuildSession(model, New, outputAliases, placing, out var written);
@@ -553,7 +590,7 @@ public abstract class OrtBackend : IShorokooBackend
             session.Placements = new OrtPlacements(
                 model,
                 written,
-                VariantBuilderFor(session, graphOptimization, logSeverity, deviceMemory, diagnostics, intraOpThreads, suppliedInitializers, precision),
+                VariantBuilderFor(session, graphOptimization, log, deviceMemory, diagnostics, intraOpThreads, suppliedInitializers, precision),
                 this,
                 HeldBy(session));
         return session;
@@ -567,11 +604,11 @@ public abstract class OrtBackend : IShorokooBackend
     /// hold the model's bytes too, for as long as the placements live.
     /// </summary>
     private OrtPlacements.VariantBuilder VariantBuilderFor(
-        OrtSession session, ShorokooGraphOptimization graphOptimization, ShorokooLogSeverity logSeverity,
+        OrtSession session, ShorokooGraphOptimization graphOptimization, RuntimeLogRoutes.Route log,
         DeviceMemorySettings deviceMemory, DiagnosticSettings diagnostics, int intraOpThreads,
         IReadOnlyList<SuppliedInitializer> suppliedInitializers, PrecisionSettings precision)
         => (variant, modelFile, directory, externalData, shared) => Wrap(NewSession(
-            variant, externalData is null ? graphOptimization : ShorokooGraphOptimization.DisableAll, logSeverity,
+            variant, externalData is null ? graphOptimization : ShorokooGraphOptimization.DisableAll, log,
             deviceMemory, diagnostics with { TraceNodePlacement = false },
             directory, intraOpThreads, suppliedInitializers, precision,
             accounts: shared ? (session.HostAccount, session.CardAccount) : null, externalDataDirectory: externalData,
@@ -627,7 +664,7 @@ public abstract class OrtBackend : IShorokooBackend
     /// the caller to build the session as any other.
     /// </summary>
     private OrtSession? BuildSharingWeights(
-        byte[] model, IReadOnlyList<TensorProto> weights, ShorokooGraphOptimization graphOptimization, ShorokooLogSeverity logSeverity,
+        byte[] model, IReadOnlyList<TensorProto> weights, ShorokooGraphOptimization graphOptimization, RuntimeLogRoutes.Route log,
         DeviceMemorySettings deviceMemory, DiagnosticSettings diagnostics, int intraOpThreads,
         IReadOnlyList<SuppliedInitializer> suppliedInitializers, PrecisionSettings precision)
     {
@@ -645,7 +682,7 @@ public abstract class OrtBackend : IShorokooBackend
         List<(string Name, OrtTensorValue Value)> kept = [];
         try
         {
-            var built = NewSession(model, graphOptimization, logSeverity, deviceMemory, diagnostics, directory, intraOpThreads,
+            var built = NewSession(model, graphOptimization, log, deviceMemory, diagnostics, directory, intraOpThreads,
                 suppliedInitializers, precision, weightsToShare: weights);
             try
             {
@@ -673,7 +710,7 @@ public abstract class OrtBackend : IShorokooBackend
         IReadOnlyList<SuppliedInitializer> handed = [.. suppliedInitializers, .. kept.Select(k => new SuppliedInitializer(k.Name, k.Value))];
         session.Placements = new OrtPlacements(
             directory, runs, kept.Select(k => k.Name).ToHashSet(StringComparer.Ordinal),
-            VariantBuilderFor(session, graphOptimization, logSeverity, deviceMemory, diagnostics, intraOpThreads, handed, precision),
+            VariantBuilderFor(session, graphOptimization, log, deviceMemory, diagnostics, intraOpThreads, handed, precision),
             this,
             HeldBy(session));
         return session;
@@ -774,6 +811,9 @@ public abstract class OrtBackend : IShorokooBackend
         /// <summary>Whether the session runs its operators on the process's thread pools rather than
         /// pools of its own (see <see cref="SessionsShareThreadPools"/>).</summary>
         internal bool OnSharedThreadPools { get; init; }
+
+        /// <summary>The route the session's logger is named by (see <see cref="Build"/>).</summary>
+        internal required RuntimeLogRoutes.Route Log { get; init; }
     }
 
     /// <summary>
@@ -786,7 +826,7 @@ public abstract class OrtBackend : IShorokooBackend
     internal BuiltSession NewSession(
         byte[]? model,
         ShorokooGraphOptimization graphOptimization,
-        ShorokooLogSeverity logSeverity,
+        RuntimeLogRoutes.Route log,
         DeviceMemorySettings deviceMemory,
         DiagnosticSettings diagnostics,
         string? optimizedDirectory,
@@ -800,7 +840,7 @@ public abstract class OrtBackend : IShorokooBackend
     {
         try
         {
-            return NewSessionOnce(model, graphOptimization, logSeverity, deviceMemory, diagnostics, optimizedDirectory,
+            return NewSessionOnce(model, graphOptimization, log, deviceMemory, diagnostics, optimizedDirectory,
                 intraOpThreads, suppliedInitializers, precision, accounts, externalDataDirectory, weightsToShare, modelFile);
         }
         catch (OnnxRuntimeException refused) when (refused.Message.Contains("CreateEnvWithGlobalThreadPools", StringComparison.Ordinal))
@@ -808,7 +848,7 @@ public abstract class OrtBackend : IShorokooBackend
             // An environment made elsewhere with no pools of its own refuses a session asked to run
             // on them: from now on every session keeps its own.
             OrtEnvironment.NoSharedThreadPools();
-            return NewSessionOnce(model, graphOptimization, logSeverity, deviceMemory, diagnostics, optimizedDirectory,
+            return NewSessionOnce(model, graphOptimization, log, deviceMemory, diagnostics, optimizedDirectory,
                 intraOpThreads, suppliedInitializers, precision, accounts, externalDataDirectory, weightsToShare, modelFile);
         }
     }
@@ -816,7 +856,7 @@ public abstract class OrtBackend : IShorokooBackend
     private BuiltSession NewSessionOnce(
         byte[]? model,
         ShorokooGraphOptimization graphOptimization,
-        ShorokooLogSeverity logSeverity,
+        RuntimeLogRoutes.Route log,
         DeviceMemorySettings deviceMemory,
         DiagnosticSettings diagnostics,
         string? optimizedDirectory,
@@ -837,7 +877,8 @@ public abstract class OrtBackend : IShorokooBackend
         // (core/session/utils.cc, InitializeSession) -- a use-after-free that segfaults the
         // process. Disposing in a finally keeps them rooted across the constructor.
         using var options = new SessionOptions();
-        Configure(options, graphOptimization, logSeverity);
+        Configure(options, graphOptimization, LoggerSeverity(log.Log));
+        options.LogId = log.Id;
         // Every session that may run one of the operators: a graph the runtime wrote out, which a
         // session is also built from, holds them as it was given them.
         if (RegistersOperators) options.RegisterCustomOpLibrary(NativeAllocator.Located!);
@@ -909,6 +950,7 @@ public abstract class OrtBackend : IShorokooBackend
             if (gate is not null) Monitor.Enter(gate);
             try
             {
+                using (log.Enter())
                 using (CachingAllocator.Charge(host, card))
                     session = model is null ? new InferenceSession(modelFile!, options) : new InferenceSession(model, options);
                 if (gate is not null) _operatorsAdded = true;
@@ -920,7 +962,7 @@ public abstract class OrtBackend : IShorokooBackend
             // The values themselves are the caller's to keep alive for the session's life; this
             // keeps them reachable across the constructor, which takes them as bare handles.
             GC.KeepAlive(suppliedInitializers);
-            return new BuiltSession(session, profileDirectory, views, host, card, accounts is null) { SharedWeights = shared, OnSharedThreadPools = sharedPools };
+            return new BuiltSession(session, profileDirectory, views, host, card, accounts is null) { SharedWeights = shared, OnSharedThreadPools = sharedPools, Log = log };
         }
         catch
         {
@@ -958,6 +1000,7 @@ public abstract class OrtBackend : IShorokooBackend
                 SharedWeights = built.SharedWeights,
                 OnOrtArena = SessionsUseOrtArena,
                 OnSharedThreadPools = built.OnSharedThreadPools,
+                Log = built.Log,
             };
         }
         catch
@@ -966,6 +1009,19 @@ public abstract class OrtBackend : IShorokooBackend
             throw;
         }
     }
+
+    /// <summary>
+    /// The level the logger of a session or of a run logs from, for settings <paramref name="log"/>:
+    /// theirs where they ask for <see cref="ShorokooLogSeverity.Info"/> or
+    /// <see cref="ShorokooLogSeverity.Verbose"/>, and <see cref="ShorokooLogSeverity.Fatal"/>
+    /// otherwise. What those loggers warn of is the graph Shorokoo lowered and handed the runtime — an
+    /// initializer its rewrites left unread, a custom operator constant folding has no kernel for, the
+    /// optimized graph Shorokoo has it write out — and what they report as an error is a failure the
+    /// run raises as an exception, so settings that ask for warnings get what ONNX Runtime logs for
+    /// the process instead: a kernel's warning about an operator it is given.
+    /// </summary>
+    internal static ShorokooLogSeverity LoggerSeverity(LogSettings log)
+        => log.EffectiveSeverity < ShorokooLogSeverity.Warning ? log.EffectiveSeverity : ShorokooLogSeverity.Fatal;
 
     /// <summary>Releases a session nothing will own, and its profile folder.</summary>
     private static void Discard(BuiltSession built)

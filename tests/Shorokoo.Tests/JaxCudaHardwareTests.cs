@@ -57,7 +57,7 @@ public class JaxCudaHardwareTests
     [JaxCudaFact]
     public void TestEveryOutputStaysOnTheCardAnInputInHostMemoryIsRefusedAndTheSessionReadsTheAllocator()
     {
-        using var session = Cuda.Value.CreateSession(PyTorchBackendCoverageTests.Onnx("Neg", 1), default, default, DeviceMemorySettings.Default);
+        using var session = Cuda.Value.CreateSession(PyTorchBackendCoverageTests.Onnx("Neg", 1), default, LogSettings.Default, DeviceMemorySettings.Default);
         using var x = Cuda.Value.CreateTensorInBackendMemory(ShorokooTensorElementType.Float, [.. MemoryMarshal.AsBytes<float>([1f, -2f])], [2]);
         using var onHost = Cuda.Value.CreateTensor([1f, -2f], [2]);
         using var y = session.Run(new Dictionary<string, IShorokooTensorValue> { ["x0"] = x }, ["y"], RunSettings.Default)[0];
@@ -96,7 +96,7 @@ public class JaxCudaHardwareTests
     private static (long Allocations, float First, float Last) ReadWhole(int count)
     {
         using var session = Cuda.Value.CreateSession(PyTorchBackendCoverageTests.Serialize(
-            ComputeContextLifetimeCoverageTests.GraphOf("x", "y", ComputeContextLifetimeCoverageTests.Op("Neg", "x", "y"))), default, default, DeviceMemorySettings.Default);
+            ComputeContextLifetimeCoverageTests.GraphOf("x", "y", ComputeContextLifetimeCoverageTests.Op("Neg", "x", "y"))), default, LogSettings.Default, DeviceMemorySettings.Default);
         var tensor = OnCard(count, 1);
         var before = session.ReadArenaStatistics()!.Value.AllocationCount;
         var read = tensor.CopyMemory<float>();

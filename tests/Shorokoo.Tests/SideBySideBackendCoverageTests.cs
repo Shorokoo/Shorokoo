@@ -221,11 +221,13 @@ public class SideBySideBackendCoverageTests
     }
 
     [Fact]
-    public void TestAnIsolatedRuntimesMessagesReachTheProgramsOrtLog()
+    public void TestAnIsolatedRuntimesMessagesReachTheLogSettingsOfTheSessionOrRunTheyCameFrom()
     {
-        var warning = Assert.Single(CoreUtilsCoverageTests.LoggedBuildingASession(Alt.Value, ShorokooLogSeverity.Warning, ShorokooLogSeverity.Warning));
-        Assert.Contains("'unused'", warning.Message);
-        Assert.Empty(CoreUtilsCoverageTests.LoggedBuildingASession(Alt.Value, ShorokooLogSeverity.Warning, ShorokooLogSeverity.Error));
+        var info = new LogSettings { MinimumSeverity = ShorokooLogSeverity.Info };
+        var (built, ran) = CoreUtilsCoverageTests.Logged(Alt.Value, info, sink => CoreUtilsCoverageTests.Into(sink, ShorokooLogSeverity.Warning));
+        Assert.Single(built, m => m.Text.Contains("'unused'"));
+        Assert.Contains("actual shape", Assert.Single(ran).Text);
+        Assert.Empty(CoreUtilsCoverageTests.Logged(Alt.Value, info, sink => CoreUtilsCoverageTests.Into(sink, ShorokooLogSeverity.Error)).Ran);
     }
 
     [Fact]
@@ -369,11 +371,11 @@ public class SideBySideBackendCoverageTests
 
         public IShorokooSession CreateSession(
             ReadOnlyMemory<byte> modelBytes, ShorokooGraphOptimization graphOptimization,
-            ShorokooLogSeverity logSeverity, DeviceMemorySettings deviceMemory)
+            LogSettings log, DeviceMemorySettings deviceMemory)
         {
             Sessions.Add(graphOptimization);
             return new RecordingSession(
-                inner.CreateSession(modelBytes, graphOptimization, logSeverity, deviceMemory), Fed);
+                inner.CreateSession(modelBytes, graphOptimization, log, deviceMemory), Fed);
         }
 
         public IShorokooTensorValue CreateTensor<T>(T[] data, long[] shape) where T : unmanaged

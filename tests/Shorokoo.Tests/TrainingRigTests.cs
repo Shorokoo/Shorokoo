@@ -7131,23 +7131,23 @@ public class TrainingRigTrainingBackendCoverageTests
 
         public IShorokooSession CreateSession(
             ReadOnlyMemory<byte> modelBytes, ShorokooGraphOptimization graphOptimization,
-            ShorokooLogSeverity logSeverity, DeviceMemorySettings deviceMemory)
-            => inner.CreateSession(modelBytes, graphOptimization, logSeverity, deviceMemory);
+            LogSettings log, DeviceMemorySettings deviceMemory)
+            => inner.CreateSession(modelBytes, graphOptimization, log, deviceMemory);
 
         public IShorokooSession CreateSession(
             ReadOnlyMemory<byte> modelBytes, ShorokooGraphOptimization graphOptimization,
-            ShorokooLogSeverity logSeverity, DeviceMemorySettings deviceMemory, DiagnosticSettings diagnostics)
-            => inner.CreateSession(modelBytes, graphOptimization, logSeverity, deviceMemory, diagnostics);
+            LogSettings log, DeviceMemorySettings deviceMemory, DiagnosticSettings diagnostics)
+            => inner.CreateSession(modelBytes, graphOptimization, log, deviceMemory, diagnostics);
 
         public IShorokooSession CreateSession(
             ReadOnlyMemory<byte> modelBytes, ShorokooGraphOptimization graphOptimization,
-            ShorokooLogSeverity logSeverity, DeviceMemorySettings deviceMemory, DiagnosticSettings diagnostics,
+            LogSettings log, DeviceMemorySettings deviceMemory, DiagnosticSettings diagnostics,
             IReadOnlyList<OutputAlias> outputAliases)
         {
             var model = ProtoBuf.Serializer.Deserialize<ModelProto>(modelBytes);
             if (model.OpsetImports.All(o => o.Domain != "ai.shorokoo.training"))
                 return inner.CreateSession(
-                    modelBytes, graphOptimization, logSeverity, deviceMemory, diagnostics, outputAliases);
+                    modelBytes, graphOptimization, log, deviceMemory, diagnostics, outputAliases);
             Handed.Add((model, outputAliases));
             throw new NotSupportedException();
         }

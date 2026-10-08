@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -761,7 +762,7 @@ public class CoreUtilsCoverageTests
 
         public IShorokooSession CreateSession(
             ReadOnlyMemory<byte> modelBytes, ShorokooGraphOptimization graphOptimization,
-            ShorokooLogSeverity logSeverity, DeviceMemorySettings deviceMemory)
+            LogSettings log, DeviceMemorySettings deviceMemory)
             => throw new NotSupportedException();
 
         public IShorokooTensorValue CreateTensor<T>(T[] data, long[] shape) where T : unmanaged
@@ -954,13 +955,13 @@ public class CoreUtilsCoverageTests
         var budget = new DeviceMemorySettings { LimitBytes = 8L << 30 };
         var tensorFloat32 = new PrecisionSettings { AllowTensorFloat32 = true };
 
-        using (probe.CreateSession(model.ToArray(), ShorokooGraphOptimization.EnableAll, ShorokooLogSeverity.Fatal, budget)) { }
-        using (probe.CreateSession(model.ToArray(), ShorokooGraphOptimization.EnableAll, ShorokooLogSeverity.Fatal, budget,
+        using (probe.CreateSession(model.ToArray(), ShorokooGraphOptimization.EnableAll, LogSettings.None, budget)) { }
+        using (probe.CreateSession(model.ToArray(), ShorokooGraphOptimization.EnableAll, LogSettings.None, budget,
             DiagnosticSettings.Default, [], 0, [], tensorFloat32)) { }
         Assert.Equal([(budget, PrecisionSettings.Default), (budget, tensorFloat32)], seen);
 
         Assert.Throws<ArgumentNullException>(() => probe.CreateSession(
-            model.ToArray(), ShorokooGraphOptimization.EnableAll, ShorokooLogSeverity.Fatal, null!));
+            model.ToArray(), ShorokooGraphOptimization.EnableAll, LogSettings.None, null!));
     }
 
     [Fact]
@@ -1196,39 +1197,133 @@ public class CoreUtilsCoverageTests
         Assert.Equal(BitConverter.SingleToInt32Bits(7f), Marshal.ReadInt32(OrtTensorAddress.Read(value)!.Value, 8));
     }
 
-    internal static List<OrtLogMessage> LoggedBuildingASession(ShorokooLogSeverity session, ShorokooLogSeverity captured)
-        => LoggedBuildingASession(DefaultBackend.Instance, session, captured);
-
-    internal static List<OrtLogMessage> LoggedBuildingASession(IShorokooBackend backend, ShorokooLogSeverity session, ShorokooLogSeverity captured)
+    internal static byte[] LoggingModel(string output)
     {
-        var x = InputTensor<float32>("x", rank: 1);
-        var proto = FastOnnxModelBuilder.BuildInternalOnnxModel(new InternalComputationGraph([x], [x + x]), prepForOnnx: true);
-        proto.Graph.Initializers.Add(new TensorProto { Name = "unused", data_type = 1, Dims = [1], FloatDatas = [1f] });
-        var model = new MemoryStream();
-        ProtoBuf.Serializer.Serialize(model, proto);
-        var logged = new List<OrtLogMessage>();
-        using (OrtLog.CaptureOnThisThread(logged.Add, captured))
-        using (backend.CreateSession(model.ToArray(), ShorokooGraphOptimization.EnableAll, session, DeviceMemorySettings.Default)) { }
-        return logged;
+        TypeProto Floats(TensorShapeProto.Dimension dim)
+        {
+            var tensor = new TypeProto.Tensor { ElemType = 1, Shape = new TensorShapeProto() };
+            tensor.Shape.Dims.Add(dim);
+            return new TypeProto { TensorType = tensor };
+        }
+        var graph = new GraphProto();
+        graph.Inputs.Add(new ValueInfoProto { Name = "x", Type = Floats(new TensorShapeProto.Dimension { DimParam = "N" }) });
+        graph.Outputs.Add(new ValueInfoProto { Name = output, Type = Floats(new TensorShapeProto.Dimension { DimValue = 3 }) });
+        graph.Nodes.Add(ComputeContextLifetimeCoverageTests.Op("Relu", "x", output));
+        graph.Initializers.Add(new TensorProto { Name = "unused", data_type = 1, Dims = [1], FloatDatas = [1f] });
+        return ComputeContextLifetimeCoverageTests.ModelOf(graph);
+    }
+
+    internal static LogSettings Into(ConcurrentQueue<RuntimeLogMessage> sink, ShorokooLogSeverity severity)
+        => new() { MinimumSeverity = severity, Sink = sink.Enqueue };
+
+    internal static void RunLogging(IShorokooBackend backend, IShorokooSession session, RunSettings settings)
+    {
+        using var x = backend.CreateTensorInBackendMemory(ShorokooTensorElementType.Float, [.. MemoryMarshal.AsBytes<float>([1f, -1f])], [2]);
+        foreach (var output in session.Run(new Dictionary<string, IShorokooTensorValue> { ["x"] = x }, session.OutputNames, settings))
+            output.Dispose();
+    }
+
+    internal static (RuntimeLogMessage[] Built, RuntimeLogMessage[] Ran) Logged(
+        IShorokooBackend backend, LogSettings built, Func<ConcurrentQueue<RuntimeLogMessage>, LogSettings>? ran)
+    {
+        ConcurrentQueue<RuntimeLogMessage> onBuild = [], onRun = [];
+        var log = built.Sink is null ? built : built with { Sink = onBuild.Enqueue };
+        using (var session = backend.CreateSession(LoggingModel("y"), ShorokooGraphOptimization.EnableAll, log, DeviceMemorySettings.Default))
+            RunLogging(backend, session, new RunSettings { Log = ran?.Invoke(onRun) ?? log });
+        return ([.. onBuild], [.. onRun]);
+    }
+
+    private static bool Unused(RuntimeLogMessage m) => m.Text.Contains("'unused'");
+    private static bool Misshapen(RuntimeLogMessage m) => m.Text.Contains("actual shape");
+
+    [Fact]
+    public void TestARuntimesMessagesReachTheLogSettingsOfTheSessionOrRunTheyCameFromAtTheirSeverity()
+    {
+        var backend = DefaultBackend.Instance;
+        var info = new LogSettings { MinimumSeverity = ShorokooLogSeverity.Info };
+        Assert.True(OrtEnvironment.LogsThroughRoutes);
+        Assert.Equal(LogSettings.WriteToStandardError, LogSettings.Default.Sink);
+        Assert.Equal(ShorokooLogSeverity.Warning, LogSettings.Default.MinimumSeverity);
+        Assert.Null(LogSettings.None.Sink);
+        Assert.Same(LogSettings.Default, RunSettings.Default.Log);
+        Assert.Throws<ArgumentOutOfRangeException>(() => new LogSettings { MinimumSeverity = (ShorokooLogSeverity)5 });
+        Assert.Throws<ArgumentNullException>(() => new RunSettings { Log = null! });
+        Assert.Equal(
+            [ShorokooLogSeverity.Verbose, ShorokooLogSeverity.Info, ShorokooLogSeverity.Fatal, ShorokooLogSeverity.Fatal, ShorokooLogSeverity.Fatal],
+            [.. Enum.GetValues<ShorokooLogSeverity>().Take(4).Select(s => OrtBackend.LoggerSeverity(new LogSettings { MinimumSeverity = s })),
+                OrtBackend.LoggerSeverity(info with { Sink = null })]);
+
+        var (built, ran) = Logged(backend, info, sink => Into(sink, ShorokooLogSeverity.Warning));
+        var unused = Assert.Single(built, Unused);
+        Assert.Equal(ShorokooLogSeverity.Warning, unused.Severity);
+        Assert.Equal("ONNX Runtime", unused.Source);
+        Assert.Equal($"[ONNX Runtime Warning] {unused.Location}: {unused.Text}", unused.ToString());
+        Assert.DoesNotContain('\u001b', unused.ToString());
+        Assert.DoesNotContain(built, Misshapen);
+        Assert.True(Misshapen(Assert.Single(ran)));
+
+        (built, ran) = Logged(backend, info, null);
+        Assert.Single(built, Misshapen);
+        (built, ran) = Logged(backend, info, sink => Into(sink, ShorokooLogSeverity.Error));
+        Assert.Empty(ran);
+        (built, ran) = Logged(backend, info, _ => LogSettings.None);
+        Assert.DoesNotContain(built, Misshapen);
+        (built, ran) = Logged(backend, new LogSettings(), sink => Into(sink, ShorokooLogSeverity.Warning));
+        Assert.Empty(built.Concat(ran));
     }
 
     [Fact]
-    public void TestOnnxRuntimesMessagesReachTheOrtLogSinkAtItsSeverityWithoutColourCodes()
+    public void TestConcurrentRunsEachDeliverTheirOwnMessagesAndCloseTheirRoutes()
     {
-        Assert.True(OrtEnvironment.LogsThroughOrtLog);
-        Assert.Equal(ShorokooLogSeverity.Warning, OrtLog.Severity);
-        Assert.Equal(OrtLog.WriteToStandardError, OrtLog.Sink);
-        OrtEnvironment.ApplyLogSeverity();
-        Assert.Equal(OrtLoggingLevel.ORT_LOGGING_LEVEL_WARNING, OrtEnv.Instance().EnvLogLevel);
-        Assert.Throws<ArgumentOutOfRangeException>(() => OrtLog.Severity = (ShorokooLogSeverity)5);
+        var backend = DefaultBackend.Instance;
+        string[] outputs = ["first", "second"];
+        ConcurrentQueue<RuntimeLogMessage> onBuild = [];
+        ConcurrentQueue<RuntimeLogMessage>[] sinks = [new(), new()];
+        var sessions = outputs.Select(o => backend.CreateSession(
+            LoggingModel(o), ShorokooGraphOptimization.EnableAll, Into(onBuild, ShorokooLogSeverity.Info), DeviceMemorySettings.Default)).ToArray();
+        var route = ((OrtSession)sessions[0]).Log;
+        Parallel.For(0, 40, i => RunLogging(backend, sessions[i % 2], new RunSettings { Log = Into(sinks[i % 2], ShorokooLogSeverity.Warning) }));
+        Assert.True(RuntimeLogRoutes.IsOpen(route.Id));
+        foreach (var session in sessions) session.Dispose();
 
-        var warning = Assert.Single(LoggedBuildingASession(ShorokooLogSeverity.Warning, ShorokooLogSeverity.Warning));
-        Assert.Equal(ShorokooLogSeverity.Warning, warning.Severity);
-        Assert.Contains("'unused'", warning.Message);
-        Assert.Equal($"[ONNX Runtime Warning] {warning.CodeLocation}: {warning.Message}", warning.ToString());
-        Assert.DoesNotContain('\u001b', warning.ToString());
-        Assert.Empty(LoggedBuildingASession(ShorokooLogSeverity.Warning, ShorokooLogSeverity.Error));
-        Assert.Empty(LoggedBuildingASession(ShorokooLogSeverity.Fatal, ShorokooLogSeverity.Warning));
+        Assert.False(RuntimeLogRoutes.IsOpen(route.Id));
+        Assert.DoesNotContain(onBuild, Misshapen);
+        for (int i = 0; i < 2; i++)
+        {
+            Assert.Equal(20, sinks[i].Count);
+            Assert.All(sinks[i], m => Assert.Contains($"output {outputs[i]}", m.Text));
+        }
+        using (var verbose = RuntimeLogRoutes.Open(new LogSettings { MinimumSeverity = ShorokooLogSeverity.Verbose }))
+        {
+            Assert.Equal(ShorokooLogSeverity.Verbose, RuntimeLogRoutes.Floor);
+            Assert.Equal(OrtLoggingLevel.ORT_LOGGING_LEVEL_VERBOSE, OrtEnv.Instance().EnvLogLevel);
+            Assert.Same(verbose.Log, RuntimeLogRoutes.Resolve(verbose.Id));
+            Assert.Same(verbose.Log, RuntimeLogRoutes.Resolve($"unknown:{verbose.Id}"));
+            Assert.Same(verbose.Log, RuntimeLogRoutes.Resolve($"{verbose.Id}:unknown"));
+            Assert.Same(LogSettings.Default, RuntimeLogRoutes.Resolve("unknown"));
+            using (verbose.Enter())
+                Assert.Same(verbose.Log, RuntimeLogRoutes.Resolve("unknown"));
+            using (verbose.Enter(LogSettings.None))
+                Assert.Equal([LogSettings.None, LogSettings.None], [RuntimeLogRoutes.Resolve(verbose.Id), RuntimeLogRoutes.Resolve("unknown")]);
+            Assert.Same(LogSettings.Default, RuntimeLogRoutes.Resolve("unknown"));
+        }
+    }
+
+    [Fact]
+    public void TestAContextsLogSettingsReachItsSessionsAndRunsUnlessARunNamesItsOwn()
+    {
+        var recording = new SessionCountingBackend(DefaultBackend.Instance);
+        LogSettings onContext = new() { MinimumSeverity = ShorokooLogSeverity.Error }, onRun = new() { MinimumSeverity = ShorokooLogSeverity.Info };
+        using var context = new ComputeContext(recording) { RunSettings = new RunSettings { Log = onContext } };
+        var x = InputVector<float32>("x");
+        float[] values = [1f, 2f];
+        var input = TensorData([2L], values);
+        using var compiled = context.Compile(new InternalComputationGraph([x], [x + x]));
+        compiled.Execute(input.Shared());
+        compiled.Execute([input.Shared()], context.RunSettings with { Log = onRun });
+
+        Assert.All(recording.Built, log => Assert.Same(onContext, log));
+        Assert.Equal([onContext, onRun], recording.Ran);
     }
 
     /// <summary>
@@ -2062,7 +2157,7 @@ public class CoreUtilsCoverageTests
         var context = StripCommentsAndStrings(File.ReadAllText(
             Path.Combine(ProductSourceRoot(), "Shorokoo", "Core", "ComputeContext.cs")));
         Assert.Matches(@"BuildSession\s*\(\s*backend\s*,\s*modelData\s*,\s*optimization\s*,\s*deviceMemory\s*[,)]", context);
-        Assert.Matches(@"backend\.CreateSession\s*\(\s*modelData\s*,\s*optimization\s*,\s*ShorokooLogSeverity\.Fatal\s*,\s*deviceMemory\s*,", context);
+        Assert.Matches(@"backend\.CreateSession\s*\(\s*modelData\s*,\s*optimization\s*,\s*RunSettings\.Log\s*,\s*deviceMemory\s*,", context);
         Assert.Matches(@"TryLimitDeviceMemory\s*\(\s*room\s*\)", context);
 
         var session = Source("Shorokoo.OnnxRuntime", "OrtSession.cs");

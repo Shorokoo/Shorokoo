@@ -1054,7 +1054,7 @@ public abstract class OrtBackend : IShorokooBackend
     /// Applies the settings every session this backend creates runs with — the log severity
     /// and the graph-optimization level, plus the session configuration entry that
     /// <see cref="ShorokooGraphOptimization.TrainingStep"/> stands for, ONNX Runtime's memory pattern
-    /// off, its nodes run one at a time, and its constant folding of any node — to <paramref name="options"/>. Public so a diagnostic can build an ORT session
+    /// off, and its nodes run one at a time — to <paramref name="options"/>. Public so a diagnostic can build an ORT session
     /// with exactly the product's configuration plus its own (profiling, an optimized-model dump).
     ///
     /// <para><b>The memory pattern is off</b> (<c>EnableMemoryPattern</c>). With it on, ONNX Runtime
@@ -1085,15 +1085,6 @@ public abstract class OrtBackend : IShorokooBackend
     /// everything else in ORT_ENABLE_ALL — constant folding, the MatMul/Gelu/LayerNorm fusions,
     /// layout transforms — stays on.</para>
     ///
-    /// <para><b>Constant folding folds a node whatever the size of its output</b>
-    /// (<c>optimization.constant_folding_max_output_size_in_bytes</c> = 0). Otherwise ONNX Runtime
-    /// leaves to every run a node over constants whose output's size it can tell only by running
-    /// it — a <c>Compress</c>, say — and everything computed from it. A graph's shape arithmetic is
-    /// full of such nodes once its inputs' dimensions are stated: a 6-layer GPT's training step
-    /// measured 555 of them, and kept 4187 nodes against 2707 with the folding, which built its
-    /// session in 1.1 s against 2.3. A folded node computes what it would on every run, once, with
-    /// the kernel that would run it.</para>
-    ///
     /// <para>Deliberately absent: <c>session.set_denormal_as_zero</c>. ORT applies that entry to
     /// the constructing thread once per process (first session wins) by setting FTZ/DAZ in its
     /// MXCSR, which then flushes every later float and double operation on that thread — the
@@ -1114,7 +1105,6 @@ public abstract class OrtBackend : IShorokooBackend
         // One node at a time, in the order of the graph the session writes out, on each stream:
         // what a run placing its values relies on (see OrtPlacements).
         options.ExecutionMode = ExecutionMode.ORT_SEQUENTIAL;
-        options.AddSessionConfigEntry("optimization.constant_folding_max_output_size_in_bytes", "0");
         if (graphOptimization == ShorokooGraphOptimization.TrainingStep)
         {
             options.GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL;

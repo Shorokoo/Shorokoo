@@ -577,6 +577,28 @@ public class ModulesCoverageTests
         Assert.Equal(["Add"], lowered.Nodes.GetRange(open + 1, close - open - 1).Select(n => n.OpCode));
     }
 
+    [Fact]
+    public void TestScopingMovesIntoAnIfWhatOnlyOneOfItsBranchesReads()
+    {
+        var (x, c, d) = (InputTensor<float32>("x", rank: 1), InputScalar<bit>("c"), InputScalar<bit>("d"));
+        var s = OnnxOp.Exp(x);
+        Assert.Equal("Exp ( Neg Abs )1", Layout(x, c, d, Shorokoo.Core.Nodes.Ops.IfElse(c, OnnxOp.Neg(s), OnnxOp.Abs(s))));
+        Assert.Equal("Exp ( Neg )1 Add", Layout(x, c, d, OnnxOp.Add(Shorokoo.Core.Nodes.Ops.IfElse(c, OnnxOp.Neg(s), x), s)));
+        Assert.Equal("( Exp ( Neg )1 Add )1", Layout(x, c, d, Shorokoo.Core.Nodes.Ops.IfElse(c, OnnxOp.Add(Shorokoo.Core.Nodes.Ops.IfElse(d, OnnxOp.Neg(s), x), s), x)));
+        Assert.Equal("( ( Exp Neg )1 )1", Layout(x, c, d, Shorokoo.Core.Nodes.Ops.IfElse(c, Shorokoo.Core.Nodes.Ops.IfElse(d, OnnxOp.Neg(s), x), x)));
+        Assert.Equal("( Exp Neg )2 ( Abs )1 Add", Layout(x, c, d, OnnxOp.Add(Shorokoo.Core.Nodes.Ops.IfElse(c, OnnxOp.Neg(s), x), Shorokoo.Core.Nodes.Ops.IfElse(c, OnnxOp.Abs(s), x))));
+        Assert.Equal("Exp ( Neg )1 ( Abs )1 Add", Layout(x, c, d, OnnxOp.Add(Shorokoo.Core.Nodes.Ops.IfElse(c, OnnxOp.Neg(s), x), Shorokoo.Core.Nodes.Ops.IfElse(d, OnnxOp.Abs(s), x))));
+    }
+
+    private static string Layout(Variable x, Variable c, Variable d, Variable output)
+    {
+        var graph = new InternalComputationGraph([x, c, d], [output]);
+        graph.ConfigureScopes();
+        return string.Join(" ", graph.Nodes.Where(n => n.OpCode is not (OpCodes.IDENTITY or OpCodes.CONSTANT)
+            && !InternalOpCodes.IsModelInputOp(n.OpCode) && !InternalOpCodes.IsGraphOutputOp(n.OpCode))
+            .Select(n => n.OpCode switch { OpCodes.IF_OPEN => "(", OpCodes.IF_CLOSE => $"){n.Outputs.Count}", var op => op }));
+    }
+
     /// <summary>A draw has no inputs to be loop-dependent on, but a second execution of one is a
     /// second sample, so shrinking the loop must not lift it out either — the same wrong answer
     /// <see cref="TestAZeroInputOpInALoopBodyStaysInTheLoopBody"/> guards, reached through

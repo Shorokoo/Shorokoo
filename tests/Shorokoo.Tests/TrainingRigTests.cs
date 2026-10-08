@@ -5571,6 +5571,34 @@ public class TrainingRigSkptCheckpointCoverageTests
     }
 
     [Fact]
+    public void TestARigBlockRecordingAMalformedRunModelAnswerIsRefusedCoverage()
+    {
+        var (_, trained, _, _) = BuildTrainedAdamWRig(steps: 1);
+        var path = TempPath("skpt_answers") + ".skpt";
+        bool Refused(string question, long? peak)
+        {
+            Persistence.SaveTrainingCheckpointToSkpt(trained, path);
+            RewriteSkptManifest(path, n => n["training"]!["rig"]!["runModelAnswers"] = new System.Text.Json.Nodes.JsonObject { [question] = peak });
+            return Record.Exception(() => TrainingRig.Load(path)) is InvalidDataException;
+        }
+        try
+        {
+            Assert.Equal<bool>([false, false, true, true, true, true], [
+                Refused(new string('a', 64), 5),
+                Refused(new string('0', 64), null),
+                Refused(new string('A', 64), 5),
+                Refused(new string('a', 63), 5),
+                Refused(new string('g', 64), 5),
+                Refused(new string('1', 64), -1),
+            ]);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
     public void TestSkptCheckpointRoundTripResumeModelStateAndInspectCoverage()
     {
         var (rigA, ckpt, inBatch, outBatch) = BuildTrainedAdamWRig(steps: 2);

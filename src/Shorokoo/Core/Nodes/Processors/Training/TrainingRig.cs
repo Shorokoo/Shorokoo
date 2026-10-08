@@ -207,17 +207,10 @@ namespace Shorokoo
         /// which its pass takes in place of asking; none for a rig built from its sources.</summary>
         private IReadOnlyDictionary<string, long?> _recordedRunModelAnswers = new Dictionary<string, long?>();
 
-        /// <summary>The answers of <paramref name="recorded"/> a rig's pass takes in place of asking: each
-        /// a peak of no fewer than zero bytes, or none, under a question's key — 64 lowercase hex
-        /// digits, as <see cref="RunModelQuestion"/> writes it.</summary>
-        internal static IReadOnlyDictionary<string, long?> TakenRunModelAnswers(IReadOnlyDictionary<string, long?>? recorded)
-        {
-            var taken = new Dictionary<string, long?>(StringComparer.Ordinal);
-            foreach (var (question, peak) in recorded ?? new Dictionary<string, long?>())
-                if (peak is not < 0 && question.Length == 64 && question.All(c => c is >= '0' and <= '9' or >= 'a' and <= 'f'))
-                    taken[question] = peak;
-            return taken;
-        }
+        /// <summary>Whether <paramref name="key"/> is a key a recorded answer can stand under: 64
+        /// lowercase hex digits, as <see cref="RunModelQuestion"/> writes it.</summary>
+        internal static bool IsRunModelQuestion(string key)
+            => key.Length == 64 && key.All(c => c is >= '0' and <= '9' or >= 'a' and <= 'f');
 
         /// <summary>
         /// A question to a backend's model of a run, as the key its answer is recorded under: the
@@ -230,7 +223,7 @@ namespace Shorokoo
         /// <c>If</c>'s two branches in either order from one process to the next, and a model that
         /// differs only in its names is the same question.
         /// </summary>
-        private static string RunModelQuestion(Shorokoo.Core.Factory.IR.ModelProto model, IReadOnlyList<OutputAlias> aliases,
+        internal static string RunModelQuestion(Shorokoo.Core.Factory.IR.ModelProto model, IReadOnlyList<OutputAlias> aliases,
             PrecisionSettings precision, IShorokooBackend backend)
         {
             var names = new Dictionary<string, string>(StringComparer.Ordinal);
@@ -1361,7 +1354,7 @@ namespace Shorokoo
                 RuntimeContext = runtimeContext,
                 TrainingBackend = trainingBackend,
             };
-            rig._recordedRunModelAnswers = TakenRunModelAnswers(runModelAnswers);
+            rig._recordedRunModelAnswers = new Dictionary<string, long?>(runModelAnswers ?? new Dictionary<string, long?>(), StringComparer.Ordinal);
             // One thaw of the loss, read by both halves of the build: composition splices a clone of
             // it into the training graph and leaves it as it found it, and the initialization half
             // reads its target declaration back off it (see DeriveTargetExemplar).

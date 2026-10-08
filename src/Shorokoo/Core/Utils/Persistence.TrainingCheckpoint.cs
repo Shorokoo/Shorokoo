@@ -568,6 +568,11 @@ namespace Shorokoo
             }
 
             var rngConfig = DeserializeRngConfig(rig.Rng, filePath);
+            foreach (var (question, peak) in rig.RunModelAnswers ?? new Dictionary<string, long?>())
+                if (peak < 0 || !TrainingRig.IsRunModelQuestion(question))
+                    throw new InvalidDataException(
+                        $"'{filePath}': the rig block records the run-model answer '{question}': {peak?.ToString() ?? "null"}, " +
+                        "which is not a peak of zero or more bytes under 64 lowercase hex digits — the manifest is malformed.");
 
             // Everything the rebuild needs is read, so the file is let go before the rebuild, which
             // can take minutes: while it is open, Windows refuses to save a checkpoint over it.

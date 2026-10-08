@@ -1325,21 +1325,16 @@ public class GpuExecutionTests
 
     private static string[] HostWorkOfAStep(ComputationGraph model, long[] rows, long[] targetRows)
     {
-        System.Collections.Concurrent.ConcurrentQueue<RuntimeLogMessage> logged = [];
-        using var context = new ComputeContext
-        {
-            Diagnostics = new DiagnosticSettings { TraceNodePlacement = true },
-            RunSettings = new RunSettings { Log = new LogSettings { Sink = logged.Enqueue } },
-        };
+        using var context = new ComputeContext { Diagnostics = new DiagnosticSettings { TraceNodePlacement = true } };
         var x = NNLibraryFixtures.RangeTensor(rows, 0.01f);
         var rig = TrainingRig.FromScratch(model, L2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph, [x.CopyTo(ComputeContext.Host)],
             new AdamWOptimizerHyperparameters { LearningRate = 0.01f }, runtimeContext: context);
         rig.TrainStep(rig.CreateInitialCheckpoint(), rig.InputDef.FromOrderedData(x), rig.TargetDef.FromOrderedData(NNLibraryFixtures.RangeTensor(targetRows, 0.02f)));
         var steps = (System.Collections.IDictionary)typeof(TrainingRig)
             .GetField("_compiledTrainSteps", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(rig)!;
-        var nodes = steps.Values.Cast<CompiledGraph>().Single().ReadNodePlacement()!.Nodes;
-        return [.. nodes.Where(n => n.Provider != "CUDAExecutionProvider").Select(n => n.OpType),
-            .. logged.Select(m => m.Text).Where(t => t.Contains("Memcpy", StringComparison.Ordinal))];
+        return [.. steps.Values.Cast<CompiledGraph>().Single().ReadNodePlacement()!.Nodes
+            .Where(n => n.Provider != "CUDAExecutionProvider" || n.OpType.StartsWith("Memcpy", StringComparison.Ordinal))
+            .Select(n => n.OpType)];
     }
 
     [CudaFact]

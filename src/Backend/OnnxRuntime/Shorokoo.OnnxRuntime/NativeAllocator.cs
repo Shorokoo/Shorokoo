@@ -42,14 +42,16 @@ internal static unsafe class NativeAllocator
     /// A native <c>OrtAllocator</c> over the managed allocator <paramref name="state"/> names,
     /// whose requests go to the entry points <paramref name="allocate"/>
     /// (<c>(state, size, reason, capacity)</c>, answering a block or null with the reason written
-    /// down) and <paramref name="free"/> (<c>(state, block)</c>), describing itself with the native
-    /// memory info <paramref name="info"/>. It lives for the life of the process.
+    /// down), <paramref name="allocateOnStream"/> (<c>(state, size, stream, reason, capacity)</c>,
+    /// the same for a request ONNX Runtime makes on one of its streams) and <paramref name="free"/>
+    /// (<c>(state, block)</c>), describing itself with the native memory info <paramref name="info"/>.
+    /// It lives for the life of the process.
     /// </summary>
     /// <exception cref="DllNotFoundException">The library is not deployed.</exception>
-    internal static IntPtr Create(IntPtr state, IntPtr allocate, IntPtr free, IntPtr info)
+    internal static IntPtr Create(IntPtr state, IntPtr allocate, IntPtr allocateOnStream, IntPtr free, IntPtr info)
     {
-        var create = (delegate* unmanaged<IntPtr, IntPtr, IntPtr, IntPtr, IntPtr>)_create.Value;
-        var made = create(state, allocate, free, info);
+        var create = (delegate* unmanaged<IntPtr, IntPtr, IntPtr, IntPtr, IntPtr, IntPtr>)_create.Value;
+        var made = create(state, allocate, allocateOnStream, free, info);
         return made != IntPtr.Zero ? made
             : throw new OutOfMemoryException("There was no memory for Shorokoo's native allocator itself.");
     }

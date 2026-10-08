@@ -1602,6 +1602,22 @@ public class CoreUtilsCoverageTests
         Assert.Equal((2 * G, 3, 0), TheCardIsWaitedForOutsideTheAllocatorsLockAndOnlyForWhatTheAskingCallLetGoOf());
         Assert.True(ReleasingWhatACardKeepsAnswersTheBytesItsMemoryShrankBy());
         Assert.Equal((0L, 4 * G, 4 * G), MemoryTheSystemWouldNotTakeBackStaysCountedAsCommitted());
+        Assert.Equal((false, false, true), ABlockACallLetGoOfGoesBackWithinItOnlyToARequestOnTheStreamItWasTakenOn());
+    }
+
+    private static (bool, bool, bool) ABlockACallLetGoOfGoesBackWithinItOnlyToARequestOnTheStreamItWasTakenOn()
+    {
+        const long G = FakeCard.GranuleBytes;
+        var card = new FakeCard();
+        var account = card.Allocator.Open("probe");
+        using (CachingAllocator.Charge(null, account))
+        {
+            var block = card.Allocator.Allocate(G, out _, stream: 1);
+            card.Allocator.Free(block);
+            return (card.Allocator.Allocate(G, out _) == block,
+                card.Allocator.Allocate(G, out _, stream: 2) == block,
+                card.Allocator.Allocate(G, out _, stream: 1) == block);
+        }
     }
 
     private static (long, bool, long) ABlockHandsBackItsFirstGranulesMemoryButKeepsItsAddressUntilItGoes()

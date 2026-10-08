@@ -398,6 +398,9 @@ public class NNLibraryLossCoverageTests
         AssertTargetRefused(CrossEntropyLoss.ComputationGraph, [0, -1, 2, 3], [1], -1, null);
         AssertTargetRefused(NLLLoss.ComputationGraph, [5, 0, 0, 0], [0], 5, null);
         AssertTargetRefused(NNNllIgnoreMinus100Loss.ComputationGraph, [0, 1, 2, -5], [3], -5, -100);
+        Assert.Equal("[CR014] input 'targets' holds 5 at [1], outside [0, 4]: it indexes the 5 classes of the loss. "
+            + "The run was refused before anything was computed.",
+            Assert.Throws<IndexOutOfRangeInputException>(() => ZeroLogitLoss(NNCrossEntropySmoothedLoss.ComputationGraph, [0, 5, 2, 3])).Message);
     }
 
     [Fact]

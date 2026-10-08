@@ -350,8 +350,8 @@ shape and type.
     between integer types — every backend refuses a run fed one outside, before it
     computes anything, with `IndexOutOfRangeInputException` (`CR014`), which names
     the input, the element's position, its value and the range. The check reads
-    the indices the host holds. Indices in a device's memory, or computed in the
-    graph, are not checked, and an index outside is then the backend's to handle:
+    the indices the host holds, wherever `n` follows from the shapes the run is
+    fed. Indices in a device's memory, or computed in the graph, are not checked, and an index outside is then the backend's to handle:
     ONNX Runtime's CPU kernel refuses it, its CUDA kernel can read a zero row.
 
 ## Convolution & pooling

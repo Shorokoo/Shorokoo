@@ -987,35 +987,35 @@ public class AutoDiffCheckpointingCoverageTests
         Assert.Equal(("RematReorder", 438, "64,52,56,52", 11, 11), Optimize(added => Math.Max(Mb, 64 * Mb - added * 4 * Mb)));
     }
 
-    private sealed class CountingRunModel() : Shorokoo.OnnxRuntime.OrtBackend(), Shorokoo.Core.Backends.IShorokooBackend
+    private sealed class CountingRunModel(string build = "") : Shorokoo.OnnxRuntime.OrtBackend(), Shorokoo.Core.Backends.IShorokooBackend
     {
-        private static readonly System.Reflection.MethodInfo OrtsModel = typeof(Shorokoo.OnnxRuntime.OrtBackend)
-            .GetInterfaceMap(typeof(Shorokoo.Core.Backends.IShorokooBackend)).TargetMethods.Single(m => m.Name.EndsWith(nameof(Shorokoo.Core.Backends.IShorokooBackend.ModelledRunPeak)));
-
         internal int Asked;
 
         long? Shorokoo.Core.Backends.IShorokooBackend.ModelledRunPeak(ModelProto model, IReadOnlyList<Shorokoo.Core.Backends.OutputAlias> outputAliases, Shorokoo.Core.Backends.PrecisionSettings precision)
         {
             Interlocked.Increment(ref Asked);
-            return (long?)OrtsModel.Invoke(this, [model, outputAliases, precision]);
+            return ModelledRunPeakOf(model, outputAliases, precision);
         }
+
+        string? Shorokoo.Core.Backends.IShorokooBackend.RunModelIdentity => build;
     }
 
     [Fact]
-    public void TestALoadedRigAsksTheBackendsModelOnlyWhatItsCheckpointDoesNotAnswerAndChoosesAsItsBuildDidCoverage()
+    public void TestALoadedRigAsksTheBackendsModelOnlyWhatItsCheckpointAnswersAndChoosesAsItsBuildDidCoverage()
     {
         var backend = new CountingRunModel();
+        var otherBuild = new CountingRunModel("another build");
         using var context = new ComputeContext(backend);
-        using var tf32 = new ComputeContext(backend) { Precision = new Shorokoo.Core.Backends.PrecisionSettings { AllowTensorFloat32 = true } };
+        using var elsewhere = new ComputeContext(otherBuild);
         (string Strategy, string Peaks, int Asked) Judged(Func<TrainingRig> build)
         {
-            var before = backend.Asked;
+            var before = backend.Asked + otherBuild.Asked;
             var rig = build();
-            return (rig.OptimizationResult.StrategyName, string.Join(",", rig.OptimizationResult.BackendPeakBytes!), backend.Asked - before);
+            return (rig.OptimizationResult.StrategyName, string.Join(",", rig.OptimizationResult.BackendPeakBytes!), backend.Asked + otherBuild.Asked - before);
         }
         TrainingRig? built = null;
         var fromScratch = Judged(() => built = TrainingRig.FromScratch(MemoryPassMlp.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
-            [Pattern([64L, 256L], 1f)], new SGDOptimizerHyperparameters { LearningRate = 0.01f }, runtimeContext: context));
+            [Pattern([16L, 256L], 1f)], new SGDOptimizerHyperparameters { LearningRate = 0.01f }, runtimeContext: context));
         var path = Path.Combine(Path.GetTempPath(), $"judged-{Guid.NewGuid():N}.skpt");
         try
         {
@@ -1023,12 +1023,21 @@ public class AutoDiffCheckpointingCoverageTests
 
             Assert.True(fromScratch.Asked > 0);
             Assert.Equal(fromScratch with { Asked = 0 }, Judged(() => TrainingRig.Load(path, runtimeContext: context).Rig));
-            Assert.Equal(fromScratch, Judged(() => TrainingRig.Load(path, runtimeContext: tf32).Rig));
+            Assert.Equal(fromScratch, Judged(() => TrainingRig.Load(path, runtimeContext: elsewhere).Rig));
         }
         finally
         {
             File.Delete(path);
         }
+    }
+
+    [Fact]
+    public void TestARigTakesOnlyTheWellFormedAnswersItsCheckpointRecordsCoverage()
+    {
+        string[] keys = [new string('a', 64), new string('0', 64), new string('A', 64), new string('a', 63), new string('g', 64), new string('1', 64)];
+        var recorded = new Dictionary<string, long?> { [keys[0]] = 5, [keys[1]] = null, [keys[2]] = 5, [keys[3]] = 5, [keys[4]] = 5, [keys[5]] = -1 };
+
+        Assert.Equal([keys[1], keys[0]], TrainingRig.TakenRunModelAnswers(recorded).Keys.Order(StringComparer.Ordinal));
     }
 
     private static string Content(InternalComputationGraph graph)

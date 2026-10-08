@@ -295,6 +295,14 @@ public interface IShorokooBackend
     // A decorator forwards this, as it forwards every member with a default body.
     internal bool ModelsARunQuickly => false;
 
+    // The build of what ModelledRunPeak answers from -- for ONNX Runtime, the native runtime and the
+    // managed library over it -- or null where nothing beyond this backend's type and assembly
+    // decides its answers. The training rig keys the answers it records by it, so that an answer
+    // recorded on one build is never taken on another.
+    //
+    // A decorator forwards this, as it forwards every member with a default body.
+    internal string? RunModelIdentity => null;
+
     // How this backend lays a run's values out in memory, as the training rig's memory-aware pass
     // charges them while it searches (see ModelledRunPeak for how it then judges). ONNX Runtime's
     // allocation plan is the default; ONNX Runtime on the host adds what its CPU kernels hold beside

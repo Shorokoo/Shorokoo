@@ -501,10 +501,12 @@ public class ModuleSourceGenerator : IIncrementalGenerator
     /// loop numbers those items in trace order, which <c>LoopAPI.Iterate</c> names by iteration.
     ///
     /// <para>The loops are looked for in <paramref name="roots"/> and in the source methods they
-    /// call, up to <see cref="MaxHelperDepth"/> calls deep. A qualifying loop is reported alone,
-    /// not the loops nested in it. Lambdas and local functions are not looked into: whether they run
-    /// once per pass is not visible from the syntax. A model reused across passes
-    /// (<c>m.Call(x)</c> on a local) creates nothing and is not counted.</para>
+    /// call, local functions included, up to <see cref="MaxHelperDepth"/> calls deep. A qualifying
+    /// loop is reported alone, not the loops nested in it. A lambda is not looked into: whether it
+    /// runs once per pass is not visible from the syntax. A model reused across passes
+    /// (<c>m.Call(x)</c> on a local) creates nothing and is not counted. A name counts only on an
+    /// <c>Init(...)</c> or <c>Model(...)</c> result, or on the local it is stored in; a
+    /// <c>Call(...)</c> result is neither, so naming it names no sub-model.</para>
     /// </summary>
     internal static List<Location> FindPlainLoopsStackingLayers(IEnumerable<IMethodSymbol> roots, Compilation compilation)
     {
@@ -549,7 +551,7 @@ public class ModuleSourceGenerator : IIncrementalGenerator
         {
             foreach (var inv in DescendantsOutsideFunctions(scope).OfType<InvocationExpressionSyntax>())
             {
-                if (CreatesUnnamedItem(inv)) return true;
+                if (CreatesUnnamedItem(inv, scope)) return true;
                 if (depth < MaxHelperDepth && SourceHelper(inv) is { } helper && HelperCreates(helper, depth + 1))
                     return true;
             }
@@ -563,12 +565,11 @@ public class ModuleSourceGenerator : IIncrementalGenerator
             return creates[helper] = BodiesOf(helper).Any(b => Creates(b, depth));
         }
 
-        bool CreatesUnnamedItem(InvocationExpressionSyntax inv)
+        bool CreatesUnnamedItem(InvocationExpressionSyntax inv, SyntaxNode scope)
         {
             if (inv.Expression is not MemberAccessExpressionSyntax { Name.Identifier.Text: var name } ma) return false;
             if (name is not ("Init" or "Model" or "Call")) return false;
-            if (inv.Parent is MemberAccessExpressionSyntax { Name.Identifier.Text: "Named", Parent: InvocationExpressionSyntax })
-                return false;
+            if (name != "Call" && IsNamed(inv, scope)) return false;
             if (ModelOf(inv.SyntaxTree).GetSymbolInfo(ma.Expression).Symbol is not INamedTypeSymbol type) return false;
             var attributes = type.GetAttributes().Select(a => a.AttributeClass?.Name).ToList();
             return name == "Init"
@@ -583,10 +584,34 @@ public class ModuleSourceGenerator : IIncrementalGenerator
 
         IEnumerable<SyntaxNode> BodiesOf(IMethodSymbol method)
             => method.DeclaringSyntaxReferences
-                .Select(r => r.GetSyntax())
-                .OfType<BaseMethodDeclarationSyntax>()
-                .Select(d => (SyntaxNode?)d.Body ?? d.ExpressionBody)
+                .Select(r => r.GetSyntax() switch
+                {
+                    BaseMethodDeclarationSyntax d => (SyntaxNode?)d.Body ?? d.ExpressionBody,
+                    LocalFunctionStatementSyntax f => (SyntaxNode?)f.Body ?? f.ExpressionBody,
+                    _ => null,
+                })
                 .Where(b => b is not null && compilation.ContainsSyntaxTree(b.SyntaxTree))!;
+    }
+
+    /// <summary>Whether the parameter or sub-model <paramref name="inv"/> creates is given a name
+    /// with <c>.Named(...)</c>: on the call itself, or on the local it is stored in, anywhere in
+    /// <paramref name="scope"/>.</summary>
+    private static bool IsNamed(InvocationExpressionSyntax inv, SyntaxNode scope)
+    {
+        if (inv.Parent is MemberAccessExpressionSyntax { Name.Identifier.Text: "Named", Parent: InvocationExpressionSyntax })
+            return true;
+        var local = inv.Parent switch
+        {
+            EqualsValueClauseSyntax { Parent: VariableDeclaratorSyntax v } => v.Identifier.Text,
+            AssignmentExpressionSyntax { Left: IdentifierNameSyntax id } a when a.Right == inv => id.Identifier.Text,
+            _ => null,
+        };
+        return local is not null && scope.DescendantNodes().OfType<InvocationExpressionSyntax>().Any(named =>
+            named.Expression is MemberAccessExpressionSyntax
+            {
+                Name.Identifier.Text: "Named",
+                Expression: IdentifierNameSyntax receiver,
+            } && receiver.Identifier.Text == local);
     }
 
     private static IEnumerable<SyntaxNode> DescendantsOutsideFunctions(SyntaxNode scope)

@@ -167,7 +167,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// <see cref="WorkaroundSite.ShapeOf"/> answers. Shorokoo's interpreter works them out from
         /// the dimensions alone, leaving out every value whose shape it cannot tell without the
         /// data. Null where <paramref name="set"/> holds no workaround that asks
-        /// (<see cref="KernelWorkaround.ReadsShapes"/>) of an operator the graph calls, or an
+        /// (<see cref="KernelWorkaround.ReadsShapes"/>) of an operator the graph calls outside a
+        /// loop body — <see cref="WorkaroundSite.ShapeOf"/> answers nothing inside one — or an
         /// input's dimensions are not stated.
         ///
         /// <para>Left out too is every value computed from a scope's result the interpreter
@@ -184,7 +185,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         {
             if (graph is null) throw new ArgumentNullException(nameof(graph));
             if (set is null || inputDims is null || inputDims.Any(d => d is null)
-                || !set.Workarounds.Any(w => w.ReadsShapes && graph.Nodes.Any(n => w.OpCodes.Contains(n.OpCode))))
+                || !CalledOutsideLoopBodies(graph, set.Workarounds.Where(w => w.ReadsShapes).SelectMany(w => w.OpCodes).ToHashSet()))
                 return null;
 
             var inputNodes = graph.InputNodes;
@@ -195,24 +196,35 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     && inputNodes[i].Attributes.GetDTypeVal(OnnxOpAttributeNames.AttrDtype) is { IsGenericType: false } dtype)
                     initial[InternalComputationGraph.InputKeyOf(inputNodes[i])] = RuntimeTensorFactory.Create(dtype, new Shape(inputDims[i]!));
 
-            Dictionary<FastTensorKey, IRuntimeTensor> values;
-            try
-            {
-                values = new QuickExecutionEngine().Run(graph, initial);
-            }
-            // The shapes only spare the backend decisions it would otherwise make itself: a graph the
-            // interpreter cannot walk leaves every one of them to it.
-            catch (Exception ex) when (ex is not OutOfMemoryException)
-            {
-                return null;
-            }
-
+            var values = new QuickExecutionEngine().Run(graph, initial);
             var estimated = Estimated(graph, values);
             var shapes = new Dictionary<FastTensorKey, Shape>(values.Count);
             foreach (var (key, value) in values)
                 if (!estimated.Contains(key) && value is RuntimeTensor { Shape: { } shape } && shape.Dims.All(d => d >= 0))
                     shapes[key] = shape;
             return shapes;
+        }
+
+        /// <summary>Whether <paramref name="graph"/> calls one of <paramref name="opCodes"/> outside
+        /// every loop body.</summary>
+        private static bool CalledOutsideLoopBodies(InternalComputationGraph graph, HashSet<string> opCodes)
+        {
+            if (opCodes.Count == 0) return false;
+            var scopes = new Stack<bool>();
+            int loops = 0;
+            foreach (var node in graph.Nodes)
+            {
+                if (FastOpsetResolver.IsOpenOpCode(node.OpCode))
+                {
+                    bool loop = node.OpCode is OpCodes.LOOP_OPEN or OpCodes.SEQUENCE_MAP_OPEN;
+                    scopes.Push(loop);
+                    if (loop) loops++;
+                }
+                else if (FastOpsetResolver.IsCloseOpCode(node.OpCode) && scopes.TryPop(out var closed) && closed)
+                    loops--;
+                if (loops == 0 && opCodes.Contains(node.OpCode)) return true;
+            }
+            return false;
         }
 
         /// <summary>

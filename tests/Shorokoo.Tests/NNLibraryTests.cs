@@ -862,22 +862,30 @@ public class NNLibraryOptimizerTrainingCoverageTests
             new AdamWOptimizerHyperparameters { WeightDecay = Hyperparameter.Runtime() }.InOptimizerOrder(), 0.1f);
     }
 
-    private static int IfsRunByAStep(long[] rows)
+    private static int[] OpsRunByAStep(ComputationGraph model, long[] rows, params string[] opTypes)
     {
         using var context = new ComputeContext { Diagnostics = new Shorokoo.Core.Backends.DiagnosticSettings { TraceNodePlacement = true } };
         var x = RangeTensor(rows, 0.01f);
-        var rig = TrainingRig.FromScratch(NNChainedBatchedProjectionModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+        var rig = TrainingRig.FromScratch(model, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
             [new TensorDataModelParam("x", ModelParamType.InputParam, x)], [0.1f], runtimeContext: context);
         rig.TrainStep(rig.CreateInitialCheckpoint(), rig.InputDef.FromOrderedData(x), rig.TargetDef.FromOrderedData(RangeTensor(rows)));
         var steps = (System.Collections.IDictionary)typeof(TrainingRig)
             .GetField("_compiledTrainSteps", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(rig)!;
-        return steps.Values.Cast<CompiledGraph>().Single().ReadNodePlacement()!.Nodes.Count(n => n.OpType == "If");
+        var nodes = steps.Values.Cast<CompiledGraph>().Single().ReadNodePlacement()!.Nodes;
+        return [.. opTypes.Select(op => nodes.Count(n => n.OpType == op))];
     }
 
     [Fact]
     public void TestATrainingStepRunsNoIfItsInputShapesDecide()
     {
-        Assert.Equal(0, IfsRunByAStep([2L, 3L, 4L]));
+        Assert.Equal([0], OpsRunByAStep(NNChainedBatchedProjectionModel.ComputationGraph, [2L, 3L, 4L], "If"));
+    }
+
+    [Fact]
+    public void TestATrainingStepReducesABroadcastGradientOverAxesItsInputShapesDecideAndAnUnbroadcastOneNotAtAll()
+    {
+        Assert.Equal([0, 0, 0], OpsRunByAStep(NNChainedBatchedProjectionModel.ComputationGraph, [2L, 3L, 4L], "Compress", "Range", "ReduceSum"));
+        Assert.Equal([0, 0, 2], OpsRunByAStep(NNResidualBiasedProjectionModel.ComputationGraph, [2L, 3L, 4L], "Compress", "Range", "ReduceSum"));
     }
 
     [Fact]

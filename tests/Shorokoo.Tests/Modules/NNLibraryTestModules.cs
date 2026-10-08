@@ -2528,6 +2528,22 @@ public partial class NNChainedBatchedProjectionModel
     }
 }
 
+/// <summary>A residual stack of biased linear layers: each layer's bias is broadcast over the
+/// batch's rows, and each residual sum and gate adds or multiplies two operands of one shape.</summary>
+[Module]
+public partial class NNResidualBiasedProjectionModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+    {
+        for (int layer = 0; layer < 2; layer++)
+        {
+            var h = x.MatMul(Normal.Init(Vector(4L, 4L)).Named($"w{layer}")) + Normal.Init(Vector(4L)).Named($"b{layer}");
+            x = x + h * x;
+        }
+        return x;
+    }
+}
+
 /// <summary><see cref="NNGatheredTableModel"/> projected by a <c>[4, 48]</c> weight: the shape of
 /// an embedding feeding a linear layer.</summary>
 [Module]

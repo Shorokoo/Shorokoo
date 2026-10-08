@@ -1161,9 +1161,7 @@ public class NNLibraryLayerTrainingCoverageTests
         => Assert.Equal(IgnoredTargetLossAndTrainedTable(loss, classes, [0, 1, 2], [1, 2, 3]),
             IgnoredTargetLossAndTrainedTable(loss, classes, [0, 1, 2, 3], [1, 2, 3, ignoreIndex]));
 
-    // https://github.com/Shorokoo/Shorokoo/issues/499: the CrossEntropyLoss / NLLLoss gradients
-    // gather the class weight on the raw labels before masking, so an ignoreIndex outside [-C, C-1] is an out-of-range Gather.
-    [Fact(Skip = "Pinned bug #499: loss gradients gather raw labels before masking ignoreIndex")]
+    [Fact]
     public void TestOutOfRangeIgnoreIndexTrainsWithTheIgnoredTargetExcluded()
     {
         AssertIgnoredTargetLeavesTheStepAsIfAbsent(NNCrossEntropyIgnoreMinus100Loss.ComputationGraph, 5, -100);

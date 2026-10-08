@@ -127,20 +127,15 @@ namespace Shorokoo.Core.Nodes.AutoDiff
                 wVec = weight;
             }
 
-            // weightPerSample[i, d1, ...] = weight[target[i, d1, ...]]  (gather along axis 0)
-            var weightPerSample = OnnxOp.Gather(wVec, target, axis: 0);
+            // ignore_index masking: an ignored sample indexes class 0 instead of the sentinel
+            // (which may lie outside [-C, C-1]), and its per-class weight is zeroed so it
+            // contributes neither to dInput nor to totalWeight.
+            var (classIndex, activeMask) = IgnoreIndexMask(target, ignoreIndex, floatType);
 
-            // ignore_index masking: zero out the per-class weight at samples whose target
-            // equals ignore_index so they contribute neither to dInput nor to totalWeight.
-            // Cast target to int64 explicitly so the stand-in dtype (which the variadic
-            // gradient dispatcher defaults to float32) doesn't break the Equal-op type check.
-            if (ignoreIndex is long ig)
-            {
-                var targetInt = OnnxOp.Cast(target, saturate: null, to: DType.Int64);
-                var notIgnored = OnnxOp.Not(OnnxOp.Equal(targetInt, Scalar(ig)));
-                var activeMask = OnnxOp.Cast(notIgnored, saturate: null, to: floatType);
+            // weightPerSample[i, d1, ...] = weight[target[i, d1, ...]]  (gather along axis 0)
+            var weightPerSample = OnnxOp.Gather(wVec, classIndex, axis: 0);
+            if (activeMask is not null)
                 weightPerSample = OnnxOp.Mul(weightPerSample, activeMask);
-            }
 
             // upstream gradient shaped [N, d1, ...]
             Variable upstream;
@@ -166,7 +161,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
             // OneHot the target along the channel axis (axis=1 in input). values = [0, 1] in input dtype.
             var depthScalar = OnnxOp.Gather(OnnxOp.Shape(input), Scalar(1L), axis: 0);
             var values = OnnxOp.Cast(Vector(0.0f, 1.0f), saturate: null, to: floatType);
-            var onehot = OnnxOp.OneHot(target, depthScalar, values, axis: 1);
+            var onehot = OnnxOp.OneHot(classIndex, depthScalar, values, axis: 1);
 
             // Broadcast perSample to [N, 1, d1, ...] and multiply by onehot to get dinput shape [N, C, d1, ...].
             var perSampleExp = OnnxOp.Unsqueeze(perSample, Vector(1L));
@@ -177,6 +172,24 @@ namespace Shorokoo.Core.Nodes.AutoDiff
             // target gradient = null (integer indices, non-diff)
             // weight gradient = null (treated as constant)
             return result;
+        }
+
+        // The class index a loss gradient gathers and one-hots for each sample, plus the
+        // [labels]-shaped 0/1 mask of non-ignored samples (null without ignore_index).
+        // An ignored sample's index is replaced by class 0 so the sentinel itself is never
+        // used as an index; the mask zeroes that sample's contribution. The labels are cast
+        // to int64 explicitly because the variadic gradient dispatcher's stand-in dtype
+        // defaults to float32, which would break the Equal-op type check.
+        private static (Variable classIndex, Variable? activeMask) IgnoreIndexMask(
+            Variable labels, long? ignoreIndex, DType floatType)
+        {
+            if (ignoreIndex is not long ig)
+                return (labels, null);
+            var labelsInt = OnnxOp.Cast(labels, saturate: null, to: DType.Int64);
+            var ignored = OnnxOp.Equal(labelsInt, Scalar(ig));
+            var classIndex = OnnxOp.Where(ignored, Scalar(0L), labelsInt);
+            var activeMask = OnnxOp.Cast(OnnxOp.Not(ignored), saturate: null, to: floatType);
+            return (classIndex, activeMask);
         }
 
         // ===== SoftmaxCrossEntropyLoss =====
@@ -221,15 +234,10 @@ namespace Shorokoo.Core.Nodes.AutoDiff
             {
                 wVec = weight;
             }
-            var weightPerSample = OnnxOp.Gather(wVec, labels, axis: 0);
-
-            if (ignoreIndex is long ig)
-            {
-                var labelsInt = OnnxOp.Cast(labels, saturate: null, to: DType.Int64);
-                var notIgnored = OnnxOp.Not(OnnxOp.Equal(labelsInt, Scalar(ig)));
-                var activeMaskFloat = OnnxOp.Cast(notIgnored, saturate: null, to: floatType);
-                weightPerSample = OnnxOp.Mul(weightPerSample, activeMaskFloat);
-            }
+            var (classIndex, activeMask) = IgnoreIndexMask(labels, ignoreIndex, floatType);
+            var weightPerSample = OnnxOp.Gather(wVec, classIndex, axis: 0);
+            if (activeMask is not null)
+                weightPerSample = OnnxOp.Mul(weightPerSample, activeMask);
 
             // Upstream gradient (shape of labels) for the loss path
             Variable upstream;
@@ -256,7 +264,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
             // OneHot the labels along axis 1 in scores' shape.
             var depthScalar = OnnxOp.Gather(OnnxOp.Shape(scores), Scalar(1L), axis: 0);
             var values = OnnxOp.Cast(Vector(0.0f, 1.0f), saturate: null, to: floatType);
-            var onehot = OnnxOp.OneHot(labels, depthScalar, values, axis: 1);
+            var onehot = OnnxOp.OneHot(classIndex, depthScalar, values, axis: 1);
 
             // dscores from the loss term: (softmax - onehot) * weight[labels] * upstream
             var scale1d = OnnxOp.Mul(weightPerSample, upstream);

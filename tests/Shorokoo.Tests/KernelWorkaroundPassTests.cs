@@ -337,6 +337,20 @@ public class KernelWorkaroundPassTests
     }
 
     [Fact]
+    public void TestASessionModelHoldsNoConstantNothingReads()
+    {
+        var x = InputTensor<float32>("x", rank: 1);
+        var x23 = TensorData(DType.Float32, [2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f);
+        IEnumerable<string> Noop(ComputationGraph module)
+            => UnreadConstants(FastOnnxModelBuilder.BuildInternalOnnxModel(Concrete(module, x23), prepForOnnx: true, inputDims: [[2L, 3L]], workarounds: KernelWorkaroundRegistry.OnnxRuntime));
+        Assert.Equal<string>([], [
+            .. Noop(NoopReduceOfEachElementCheck.ComputationGraph),
+            .. Noop(NoopReduceOfEachElementByShapeCheck.ComputationGraph),
+            .. Noop(NoopReduceAxesFormsCheck.ComputationGraph),
+            .. UnreadConstants(Session(Graph(x, OnnxOp.Mul(OnnxOp.Add(x, Scalar(1f)), OnnxOp.Add(x, Scalar(2f)))), AddConstantSet))]);
+    }
+
+    [Fact]
     public void TestANoopReductionComputesItsGroupsOnOnnxRuntimeWithConcreteShapes()
     {
         var x = TensorData(DType.Float32, [2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f);
@@ -827,6 +841,14 @@ public class KernelWorkaroundPassTests
 
     private static IEnumerable<NodeProto> Within(NodeProto node)
         => node.Attributes.Where(a => a.G is not null).SelectMany(a => a.G!.Nodes.SelectMany(Within)).Prepend(node);
+
+    private static IEnumerable<string> UnreadConstants(ModelProto model)
+    {
+        var read = AllNodes(model).SelectMany(n => n.Inputs)
+            .Concat(AllNodes(model).SelectMany(n => n.Attributes).Where(a => a.G is not null).SelectMany(a => a.G!.Outputs.Select(o => o.Name)))
+            .Concat(model.Graph.Outputs.Select(o => o.Name)).Concat(model.Functions.SelectMany(f => f.Outputs)).ToHashSet();
+        return AllNodes(model).Where(n => n.OpType == CONSTANT && !read.Contains(n.Outputs[0])).Select(n => n.Outputs[0]);
+    }
 
     private static IEnumerable<string> Signatures(ModelProto model)
         => model.Graph.Nodes.Select(n => $"{n.OpType}({string.Join(",", n.Inputs)})->{string.Join(",", n.Outputs)}")

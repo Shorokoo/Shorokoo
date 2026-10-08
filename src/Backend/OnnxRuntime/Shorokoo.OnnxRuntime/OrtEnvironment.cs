@@ -92,6 +92,7 @@ internal static class OrtEnvironment
 
     private static readonly object _environmentGate = new();
     private static bool? _sharedThreadPools;
+    private static bool _logsThroughOrtLog;
 
     /// <summary>
     /// Whether the process's ONNX Runtime environment has thread pools of its own, which a session
@@ -117,8 +118,29 @@ internal static class OrtEnvironment
         lock (_environmentGate) _sharedThreadPools = false;
     }
 
-    /// <summary>The process's ONNX Runtime environment, made with thread pools of its own where
-    /// nothing has made it yet (<see cref="SharedThreadPools"/>).</summary>
+    /// <summary>Whether the process's ONNX Runtime environment logs through <see cref="OrtLog"/>:
+    /// true where it was made here, false where something else made it first.</summary>
+    internal static bool LogsThroughOrtLog
+    {
+        get
+        {
+            Environment();
+            lock (_environmentGate) return _logsThroughOrtLog;
+        }
+    }
+
+    /// <summary>Sets the level the environment logs from to <see cref="OrtLog.Severity"/>, where the
+    /// environment was made here; one made later is made at that level.</summary>
+    internal static void ApplyLogSeverity()
+    {
+        lock (_environmentGate)
+            if (_logsThroughOrtLog)
+                OrtEnv.Instance().EnvLogLevel = OrtLog.EnvironmentLevel;
+    }
+
+    /// <summary>The process's ONNX Runtime environment, made with thread pools of its own and
+    /// logging through <see cref="OrtLog"/> where nothing has made it yet
+    /// (<see cref="SharedThreadPools"/>).</summary>
     internal static OrtEnv Environment()
     {
         lock (_environmentGate)
@@ -133,11 +155,13 @@ internal static class OrtEnvironment
                     var options = new EnvironmentCreationOptions
                     {
                         logId = "CSharpOnnxRuntime",
-                        logLevel = OrtLoggingLevel.ORT_LOGGING_LEVEL_WARNING,
+                        logLevel = OrtLog.EnvironmentLevel,
+                        loggingFunction = OrtLog.Forward,
                         threadOptions = threads,
                     };
                     OrtEnv.CreateInstanceWithOptions(ref options);
                     _sharedThreadPools = true;
+                    _logsThroughOrtLog = true;
                 }
             }
         }

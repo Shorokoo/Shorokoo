@@ -89,6 +89,42 @@ built with an intra-op thread count of its own (`CreateSession`'s `intraOpThread
 its own of that size; where something else made ONNX Runtime's environment first, every session
 keeps its own.
 
+### ONNX Runtime's log messages
+
+The four ONNX Runtime backends make ONNX Runtime's environment, when the first of them is
+built, to log through `OrtLog` (namespace `Shorokoo.OnnxRuntime`). Messages the environment logs
+and messages a session logs both go there, and nowhere else:
+
+- `OrtLog.Severity` is the least severe message passed on, `ShorokooLogSeverity.Warning` unless
+  set otherwise. ONNX Runtime's environment is set to the same level.
+- `OrtLog.Sink` receives each message passed on, as an `OrtLogMessage`: `Severity`, `Category`,
+  `LogId`, `CodeLocation` and `Message`, with no terminal colour codes. Its default,
+  `OrtLog.WriteToStandardError`, writes one line per message to the standard error stream
+  (`[ONNX Runtime Warning] <code location>: <message>`). Set it to `null` to drop every message.
+
+```csharp
+using Shorokoo.Core.Backends;
+using Shorokoo.OnnxRuntime;
+
+OrtLog.Severity = ShorokooLogSeverity.Error;                          // warnings dropped
+OrtLog.Sink = m => logger.Log(m.Severity.ToString(), m.Message);      // your own logger
+OrtLog.Sink = null;                                                   // nothing at all
+```
+
+Both settings can be changed at any time and apply to the next message. The sink is called on
+whichever thread ONNX Runtime logs from, possibly several at once, so it must be thread-safe. An
+exception it throws is dropped, because none can be raised through ONNX Runtime.
+
+The sessions Shorokoo builds log only at `Fatal`. A session built through
+`IShorokooBackend.CreateSession` at a severity of its own passes on only what is at least as
+severe as both that severity and `OrtLog.Severity`.
+
+`OrtLog` covers the environment only where Shorokoo made it. A program that makes ONNX Runtime's
+environment itself (`OrtEnv.CreateInstanceWithOptions`) before the first backend is built keeps
+the logging it made the environment with, and its sessions keep per-session thread pools
+([The backend types](#the-backend-types)). A backend loaded with `IsolatedBackend.Load` runs its own
+copy of ONNX Runtime, which logs through its own `OrtLog` at the defaults above.
+
 ### Auto-discovery
 
 If `DefaultBackend.Instance` is never assigned, its first read resolves and caches a backend:

@@ -532,10 +532,10 @@ namespace Shorokoo.Core.Nodes.AutoDiff
             // Build broadcast shape [1, C, 1, 1, ...] matching x's rank for channel tensors
             var xShape = OnnxOp.Shape(x);                                                    // [N, C, H, W, ...]
             var xRank = OnnxOp.Shape(xShape);                                                // [1] containing rank
-            var onesShape = OnnxOp.Expand(Scalar(1L), xRank);                                // [1, 1, 1, ...] (rank elements)
             var cDim = OnnxOp.Slice(xShape, Vector(1L), Vector(2L));                          // [1] containing C
-            var scatterIdx = OnnxOp.Reshape(Vector(1L), Vector(1L, 1L), allowZero: false);    // [[1]]
-            var broadcastShape = OnnxOp.ScatterND(onesShape, scatterIdx, cDim);               // [1, C, 1, 1, ...]
+            Tensor<int64> rank = xRank;
+            var trailingOnes = OnnxOp.Expand(Scalar(1L), rank - Vector(2L));                  // [1, 1, ...] (rank - 2 elements)
+            var broadcastShape = OnnxOp.Concat([Vector(1L), cDim, trailingOnes], axis: 0);    // [1, C, 1, 1, ...]
 
             // Reshape 1-d channel tensors to broadcast shape
             var scaleBC = OnnxOp.Reshape(scale, broadcastShape, allowZero: false);

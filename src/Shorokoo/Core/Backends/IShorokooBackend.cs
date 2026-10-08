@@ -126,10 +126,15 @@ public interface IShorokooBackend
     // deviceMemory configures the arena this one session allocates in. It is a parameter, not
     // process state, because that is what ORT's own shape is: each session gets its own arena,
     // built from the values read here and kept for the session's life.
+    //
+    // log is where what the runtime emits while it builds the session goes, and what the session's
+    // runs emit when their RunSettings carry the same settings; a run whose RunSettings.Log differs
+    // sends what it emits there instead. A backend whose runtime emits nothing it can route still
+    // takes it, and delivers nothing.
     IShorokooSession CreateSession(
         ReadOnlyMemory<byte> modelBytes,
         ShorokooGraphOptimization graphOptimization,
-        ShorokooLogSeverity logSeverity,
+        LogSettings log,
         DeviceMemorySettings deviceMemory);
 
     // The same session, told what the caller wants recorded about it -- today, whether it keeps a
@@ -143,10 +148,10 @@ public interface IShorokooBackend
     IShorokooSession CreateSession(
         ReadOnlyMemory<byte> modelBytes,
         ShorokooGraphOptimization graphOptimization,
-        ShorokooLogSeverity logSeverity,
+        LogSettings log,
         DeviceMemorySettings deviceMemory,
         DiagnosticSettings diagnostics)
-        => CreateSession(modelBytes, graphOptimization, logSeverity, deviceMemory);
+        => CreateSession(modelBytes, graphOptimization, log, deviceMemory);
 
     // The same session, told which of its outputs it may write into the memory of which of its
     // inputs (output aliasing, see OutputAlias): pairs the model's lowering proved -- nothing reads
@@ -164,11 +169,11 @@ public interface IShorokooBackend
     IShorokooSession CreateSession(
         ReadOnlyMemory<byte> modelBytes,
         ShorokooGraphOptimization graphOptimization,
-        ShorokooLogSeverity logSeverity,
+        LogSettings log,
         DeviceMemorySettings deviceMemory,
         DiagnosticSettings diagnostics,
         IReadOnlyList<OutputAlias> outputAliases)
-        => CreateSession(modelBytes, graphOptimization, logSeverity, deviceMemory, diagnostics);
+        => CreateSession(modelBytes, graphOptimization, log, deviceMemory, diagnostics);
 
     // The same session, told how many threads one run of it may spread an operator over:
     // intraOpThreads of 1 runs each operator on the calling thread alone, for a caller that runs
@@ -180,12 +185,12 @@ public interface IShorokooBackend
     IShorokooSession CreateSession(
         ReadOnlyMemory<byte> modelBytes,
         ShorokooGraphOptimization graphOptimization,
-        ShorokooLogSeverity logSeverity,
+        LogSettings log,
         DeviceMemorySettings deviceMemory,
         DiagnosticSettings diagnostics,
         IReadOnlyList<OutputAlias> outputAliases,
         int intraOpThreads)
-        => CreateSession(modelBytes, graphOptimization, logSeverity, deviceMemory, diagnostics, outputAliases);
+        => CreateSession(modelBytes, graphOptimization, log, deviceMemory, diagnostics, outputAliases);
 
     // The same session, with some of the model's initializers supplied as values already in this
     // backend's memory -- weights loaded straight onto the card, which the model's bytes then need
@@ -198,7 +203,7 @@ public interface IShorokooBackend
     IShorokooSession CreateSession(
         ReadOnlyMemory<byte> modelBytes,
         ShorokooGraphOptimization graphOptimization,
-        ShorokooLogSeverity logSeverity,
+        LogSettings log,
         DeviceMemorySettings deviceMemory,
         DiagnosticSettings diagnostics,
         IReadOnlyList<OutputAlias> outputAliases,
@@ -209,7 +214,7 @@ public interface IShorokooBackend
         if (suppliedInitializers.Count > 0)
             throw new NotSupportedException(
                 $"{Description} cannot take a model's initializers as values it already holds.");
-        return CreateSession(modelBytes, graphOptimization, logSeverity, deviceMemory, diagnostics, outputAliases, intraOpThreads);
+        return CreateSession(modelBytes, graphOptimization, log, deviceMemory, diagnostics, outputAliases, intraOpThreads);
     }
 
     // The same session, told the floating-point precision it computes in: whether a CUDA card may
@@ -224,7 +229,7 @@ public interface IShorokooBackend
     IShorokooSession CreateSession(
         ReadOnlyMemory<byte> modelBytes,
         ShorokooGraphOptimization graphOptimization,
-        ShorokooLogSeverity logSeverity,
+        LogSettings log,
         DeviceMemorySettings deviceMemory,
         DiagnosticSettings diagnostics,
         IReadOnlyList<OutputAlias> outputAliases,
@@ -234,7 +239,7 @@ public interface IShorokooBackend
     {
         ArgumentNullException.ThrowIfNull(precision);
         return CreateSession(
-            modelBytes, graphOptimization, logSeverity, deviceMemory, diagnostics, outputAliases, intraOpThreads,
+            modelBytes, graphOptimization, log, deviceMemory, diagnostics, outputAliases, intraOpThreads,
             suppliedInitializers);
     }
 

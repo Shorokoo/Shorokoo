@@ -18,12 +18,19 @@ public class JaxBackendCoverageTests
     private static readonly JaxCpuBackend Jax = new();
 
     [Fact]
+    public void TestAWarningARunRaisesReachesItsRunsLogSettingsAndOneOutsideARunIsShown()
+    {
+        Jax.Start();
+        AssertWarningsReachTheirLogSettings("shorokoo_jax", JaxRuntime.Source);
+    }
+
+    [Fact]
     public void TestEveryJaxElementTypeRoundTripsThroughATensorAndASession()
     {
         foreach (var type in EveryTorchType)
         {
             var bytes = Enumerable.Range(0, 3 * ElementSize(type)).Select(i => (byte)(type == ShorokooTensorElementType.Bool ? i % 2 : i * 7 % 64)).ToArray();
-            using var session = Jax.CreateSession(PyTorchBackendCoverageTests.Onnx("Identity", (int)type), default, default, DeviceMemorySettings.Default);
+            using var session = Jax.CreateSession(PyTorchBackendCoverageTests.Onnx("Identity", (int)type), default, LogSettings.Default, DeviceMemorySettings.Default);
             using var host = Jax.CreateTensorFromRawBytes(type, bytes, [3]);
             using var device = Jax.CreateTensorInBackendMemory(type, bytes, [3]);
             var outputs = session.Run(new Dictionary<string, IShorokooTensorValue> { ["x0"] = host }, ["y"], RunSettings.Default);
@@ -155,7 +162,7 @@ public class JaxBackendCoverageTests
             Node("Cast", ["delta"], ["d"], attributes: Int("to", type)),
             Node("Range", ["s", "l", "d"], ["r"]),
             Node("Cast", ["r"], ["y"], attributes: Int("to", 7)));
-        using var session = Jax.CreateSession(Serialize(graph), default, default, DeviceMemorySettings.Default);
+        using var session = Jax.CreateSession(Serialize(graph), default, LogSettings.Default, DeviceMemorySettings.Default);
         using var y = session.Run(new Dictionary<string, IShorokooTensorValue>(), ["y"], RunSettings.Default)[0];
         return y.GetTensorDataAsSpan<long>().ToArray();
     }
@@ -182,7 +189,7 @@ public class JaxBackendCoverageTests
             Node("ReduceSum", ["tp"], ["loss"]),
             AutoGrad(["loss", "w", "b", "p", "u"], ["gw", "gb", "gp", "gu"]),
             Node("Sub", ["w", "gw"], ["w2"]));
-        using var session = Jax.CreateSession(TrainingStep(step), ShorokooGraphOptimization.TrainingStep, default, DeviceMemorySettings.Default);
+        using var session = Jax.CreateSession(TrainingStep(step), ShorokooGraphOptimization.TrainingStep, LogSettings.Default, DeviceMemorySettings.Default);
         var outputs = RunFloats(session, new() { ["w"] = w, ["b"] = b, ["x"] = x, ["c"] = c, ["u"] = [4f] }, ["w2", "gb", "gp", "gu", "loss"]);
 
         var t = w.Select((wi, i) => MathF.Tanh(wi * x[i] + b[i])).ToArray();
@@ -207,13 +214,13 @@ public class JaxBackendCoverageTests
         Assert.Equal(("SequenceLength", JaxUnsupportedReason.UnknownOperator), Refusal(PyTorchBackendCoverageTests.Onnx("SequenceLength", 1)));
         Assert.Equal(((string?)null, JaxUnsupportedReason.UnsupportedModel), Refusal(PyTorchBackendCoverageTests.Onnx("Identity", (int)ShorokooTensorElementType.String)));
         Assert.Equal(("Reshape", JaxUnsupportedReason.UnsupportedUsage), Refusal(Serialize(reshapedByValue)));
-        Jax.CreateSession(Serialize(reshapedByShape), default, default, DeviceMemorySettings.Default).Dispose();
+        Jax.CreateSession(Serialize(reshapedByShape), default, LogSettings.Default, DeviceMemorySettings.Default).Dispose();
     }
 
     [Fact]
     public void TestAModelOfUnfixedShapeIsCompiledForEachShapeItIsFed()
     {
-        using var session = Jax.CreateSession(Serialize(PyTorchBackendCoverageTests.Graph(["x"], ["y"], Node("Shape", ["x"], ["s"]), Node("Cast", ["s"], ["f"], attributes: Int("to", 1)), Node("Mul", ["x", "f"], ["y"]))), default, default, DeviceMemorySettings.Default);
+        using var session = Jax.CreateSession(Serialize(PyTorchBackendCoverageTests.Graph(["x"], ["y"], Node("Shape", ["x"], ["s"]), Node("Cast", ["s"], ["f"], attributes: Int("to", 1)), Node("Mul", ["x", "f"], ["y"]))), default, LogSettings.Default, DeviceMemorySettings.Default);
 
         Assert.Equal([2f, 4f], RunFloats(session, new() { ["x"] = [1f, 2f] }, ["y"])[0]);
         Assert.Equal([3f, 6f, 9f], RunFloats(session, new() { ["x"] = [1f, 2f, 3f] }, ["y"])[0]);
@@ -225,10 +232,10 @@ public class JaxBackendCoverageTests
         var then = PyTorchBackendCoverageTests.Graph([], ["y"], Node("Add", ["x", "x"], ["y"]));
         var otherwise = PyTorchBackendCoverageTests.Graph([], ["e"], Node("Neg", ["x"], ["e"]));
         var longer = PyTorchBackendCoverageTests.Graph([], ["e"], Node("Concat", ["x", "x"], ["e"], attributes: Int("axis", 0)));
-        using var branch = Jax.CreateSession(Serialize(PyTorchBackendCoverageTests.Graph(["c", "x"], ["y"], Branch("c", then, otherwise))), default, default, DeviceMemorySettings.Default);
-        using var counting = Jax.CreateSession(Serialize(CountingLoop()), default, default, DeviceMemorySettings.Default);
-        using var scanning = Jax.CreateSession(Serialize(ScanLoop(typed: true)), default, default, DeviceMemorySettings.Default);
-        using var uneven = Jax.CreateSession(Serialize(PyTorchBackendCoverageTests.Graph(["c", "x"], ["y"], Branch("c", then, longer))), default, default, DeviceMemorySettings.Default);
+        using var branch = Jax.CreateSession(Serialize(PyTorchBackendCoverageTests.Graph(["c", "x"], ["y"], Branch("c", then, otherwise))), default, LogSettings.Default, DeviceMemorySettings.Default);
+        using var counting = Jax.CreateSession(Serialize(CountingLoop()), default, LogSettings.Default, DeviceMemorySettings.Default);
+        using var scanning = Jax.CreateSession(Serialize(ScanLoop(typed: true)), default, LogSettings.Default, DeviceMemorySettings.Default);
+        using var uneven = Jax.CreateSession(Serialize(PyTorchBackendCoverageTests.Graph(["c", "x"], ["y"], Branch("c", then, longer))), default, LogSettings.Default, DeviceMemorySettings.Default);
 
         Assert.Equal([2f, 4f], Branched(branch, true));
         Assert.Equal([-1f, -2f], Branched(branch, false));
@@ -240,7 +247,7 @@ public class JaxBackendCoverageTests
     [Fact]
     public void TestARunCancelledBeforeItStartsIsRefusedAndOneWithALiveTokenRuns()
     {
-        using var session = Jax.CreateSession(PyTorchBackendCoverageTests.Onnx("Neg", 1), default, default, DeviceMemorySettings.Default);
+        using var session = Jax.CreateSession(PyTorchBackendCoverageTests.Onnx("Neg", 1), default, LogSettings.Default, DeviceMemorySettings.Default);
         using var x = Jax.CreateTensor([1f], [1]);
         using var cancelled = new CancellationTokenSource();
         cancelled.Cancel();
@@ -255,7 +262,7 @@ public class JaxBackendCoverageTests
     {
         var graph = ComputeContextLifetimeCoverageTests.GraphOf("a:float[2] b:float[2]", "O:float[2]",
             ComputeContextLifetimeCoverageTests.Op("Sub", "a b", "t"), ComputeContextLifetimeCoverageTests.Op("Neg", "t", "O"));
-        using var traced = Jax.CreateSession(Serialize(graph), default, default, DeviceMemorySettings.Default, new DiagnosticSettings { TraceNodePlacement = true }, [new OutputAlias("O", "a")]);
+        using var traced = Jax.CreateSession(Serialize(graph), default, LogSettings.Default, DeviceMemorySettings.Default, new DiagnosticSettings { TraceNodePlacement = true }, [new OutputAlias("O", "a")]);
         using var a = Jax.CreateTensor([5f, 7f], [2]);
         using var b = Jax.CreateTensor([1f, 2f], [2]);
         var consumed = Jax.CreateTensor([5f, 7f], [2]);
@@ -331,7 +338,7 @@ public class JaxBackendCoverageTests
 
     private static (string? Operator, JaxUnsupportedReason Reason) Refusal(byte[] model)
     {
-        var refused = Assert.Throws<JaxUnsupportedModelException>(() => Jax.CreateSession(model, default, default, DeviceMemorySettings.Default));
+        var refused = Assert.Throws<JaxUnsupportedModelException>(() => Jax.CreateSession(model, default, LogSettings.Default, DeviceMemorySettings.Default));
         return (refused.Operator, refused.Reason);
     }
 
@@ -374,8 +381,8 @@ public class JaxBackendCoverageTests
         var negated = PyTorchBackendCoverageTests.Graph([], ["e"], Node("Neg", ["x"], ["e"]));
         var branched = PyTorchBackendCoverageTests.Graph(["c", "x"], ["y"], Branch("c", drawn, negated), Node("RandomUniform", [], ["u"], attributes: Ints("shape", 2)), Node("Add", ["t", "u"], ["y"]));
         branched.Nodes[0].Outputs[0] = "t";
-        using var loop = Jax.CreateSession(Serialize(scanned), default, default, DeviceMemorySettings.Default);
-        using var branch = Jax.CreateSession(Serialize(branched), default, default, DeviceMemorySettings.Default);
+        using var loop = Jax.CreateSession(Serialize(scanned), default, LogSettings.Default, DeviceMemorySettings.Default);
+        using var branch = Jax.CreateSession(Serialize(branched), default, LogSettings.Default, DeviceMemorySettings.Default);
 
         Assert.Equal(100, RunFloats(loop, new() { ["v"] = [0f] }, ["s"])[0].Distinct().Count());
         Assert.Equal(2, Branched(branch, true).Length);
@@ -387,8 +394,8 @@ public class JaxBackendCoverageTests
         var step = PyTorchBackendCoverageTests.Graph(["w"], ["gw", "gv"],
             Node("Relu", ["w"], ["a"]), Node("Neg", ["a"], ["v"]), Node("Mul", ["a", "v"], ["p"]), Node("ReduceSum", ["p"], ["loss"]),
             AutoGrad(["loss", "w", "v"], ["gw", "gv"]));
-        using var onJax = Jax.CreateSession(TrainingStep(step), default, default, DeviceMemorySettings.Default);
-        using var onTorch = new TorchCpuBackend().CreateSession(TrainingStep(step), default, default, DeviceMemorySettings.Default);
+        using var onJax = Jax.CreateSession(TrainingStep(step), default, LogSettings.Default, DeviceMemorySettings.Default);
+        using var onTorch = new TorchCpuBackend().CreateSession(TrainingStep(step), default, LogSettings.Default, DeviceMemorySettings.Default);
 
         Assert.Equal([[-1f, -2f], [1f, 2f]], RunFloats(onJax, new() { ["w"] = [1f, 2f] }, ["gw", "gv"]));
         Assert.Equal([[-1f, -2f], [1f, 2f]], PyTorchBackendCoverageTests.RunFloats(onTorch, new() { ["w"] = [1f, 2f] }, ["gw", "gv"]));
@@ -403,7 +410,7 @@ public class JaxBackendCoverageTests
         counting.Outputs[0].Name = "g";
         var sequence = PyTorchBackendCoverageTests.Graph(["s"], ["t"], Node("Identity", ["s"], ["t"]));
         sequence.Inputs[0].Type = new TypeProto { SequenceType = new TypeProto.Sequence { ElemType = FloatTensor } };
-        using var differentiated = Jax.CreateSession(TrainingStep(counting), default, default, DeviceMemorySettings.Default);
+        using var differentiated = Jax.CreateSession(TrainingStep(counting), default, LogSettings.Default, DeviceMemorySettings.Default);
 
         Assert.Equal("Loop", Assert.Throws<JaxUnsupportedModelException>(() => Counted(differentiated, "g", 3)).Operator);
         Assert.Equal(((string?)null, JaxUnsupportedReason.UnsupportedModel), Refusal(Serialize(sequence)));
@@ -456,11 +463,11 @@ public class JaxBackendCoverageTests
     {
         var scatter = PyTorchBackendCoverageTests.Graph(["w"], ["g"], Node("Constant", [], ["i"], attributes: Tensor("value", 7, [2], [0, 0])),
             Node("ScatterElements", ["w", "i", "w"], ["s"], attributes: Str("reduction", "mul")), Node("ReduceSum", ["s"], ["loss"]), AutoGrad(["loss", "w"], ["g"]));
-        using var counting = Jax.CreateSession(Serialize(CountingLoop()), default, default, DeviceMemorySettings.Default);
+        using var counting = Jax.CreateSession(Serialize(CountingLoop()), default, LogSettings.Default, DeviceMemorySettings.Default);
         using var m = Jax.CreateTensor([5L], [1]);
         using var v = Jax.CreateTensor([0f], []);
         using var y = counting.Run(new Dictionary<string, IShorokooTensorValue> { ["m"] = m, ["v"] = v }, ["y"], RunSettings.Default)[0];
-        using var scattered = Jax.CreateSession(TrainingStep(scatter), default, default, DeviceMemorySettings.Default);
+        using var scattered = Jax.CreateSession(TrainingStep(scatter), default, LogSettings.Default, DeviceMemorySettings.Default);
 
         Assert.Equal([5f], y.GetTensorDataAsSpan<float>().ToArray());
         Assert.IsType<JaxUnsupportedModelException>(Assert.ThrowsAny<NotSupportedException>(() => RunFloats(scattered, new() { ["w"] = [2f, 3f] }, ["g"])));
@@ -471,7 +478,7 @@ public class JaxBackendCoverageTests
 
     private static float[] GradientOf(IShorokooBackend backend, GraphProto step, float at)
     {
-        using var session = backend.CreateSession(TrainingStep(step), default, default, DeviceMemorySettings.Default);
+        using var session = backend.CreateSession(TrainingStep(step), default, LogSettings.Default, DeviceMemorySettings.Default);
         using var v = backend.CreateTensor([at], [1]);
         using var g = session.Run(new Dictionary<string, IShorokooTensorValue> { ["v"] = v }, ["g"], RunSettings.Default)[0];
         return g.GetTensorDataAsSpan<float>().ToArray();
@@ -496,7 +503,7 @@ public class JaxBackendCoverageTests
     private static (ShorokooTensorElementType Type, long[] Shape, byte[] Bytes) Run(
         IShorokooBackend backend, byte[] model, (string Name, ShorokooTensorElementType Type, long[] Shape, double[] Values)[] inputs)
     {
-        using var session = backend.CreateSession(model, default, default, DeviceMemorySettings.Default);
+        using var session = backend.CreateSession(model, default, LogSettings.Default, DeviceMemorySettings.Default);
         var feeds = inputs.ToDictionary(i => i.Name, i => backend.CreateTensorFromRawBytes(i.Type, Bytes(i.Type, i.Values), i.Shape));
         try
         {
@@ -533,7 +540,7 @@ public class JaxBackendCoverageTests
             var body = PyTorchBackendCoverageTests.Graph(["i", "c", "s"], ["c2", "s2"], Node("Identity", ["c"], ["c2"]), Node("Reshape", ["x", "s"], ["r"]), Node("Shape", ["r"], ["s2"]));
             var graph = PyTorchBackendCoverageTests.Graph(["x"], ["y"], Node("Loop", ["n", "", "s0"], ["y"], attributes: new AttributeProto { Name = "body", Type = AttributeProto.AttributeType.Graph, G = body }));
             graph.Initializers.AddRange([trips, start]);
-            using var session = Jax.CreateSession(Serialize(graph), default, default, DeviceMemorySettings.Default);
+            using var session = Jax.CreateSession(Serialize(graph), default, LogSettings.Default, DeviceMemorySettings.Default);
             using var x = Jax.CreateTensor(new float[6], [6]);
             using var y = session.Run(new Dictionary<string, IShorokooTensorValue> { ["x"] = x }, ["y"], RunSettings.Default)[0];
 

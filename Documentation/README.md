@@ -28,7 +28,7 @@ Which document covers what. For an overview of Shorokoo and an end-to-end exampl
 ## 3. Run on CPU or GPU
 
 - [inference.md](inference.md) — execute a model (`OnnxEngine.Eval`, `ComputeContext`), compile once and run many times, fix or hardcode `[Hyper]` parameters, stop a run, and use the CPU interpreter for debugging.
-- [backends-and-devices.md](backends-and-devices.md) — pick the backend, let auto-discovery find it or load one at runtime, route ONNX Runtime's log messages, and run one model on two devices.
+- [backends-and-devices.md](backends-and-devices.md) — pick the backend, let auto-discovery find it or load one at runtime, route the runtimes' log messages, and run one model on two devices.
 - [tensors-in-a-run.md](tensors-in-a-run.md) — feed a run (consumed, `.Shared()` or `.TryConsume()`), where its outputs are, when it writes into its inputs' memory, a tensor's lifetime, and moving data between contexts.
 - [gpu-backends.md](gpu-backends.md) — the NVIDIA libraries the CUDA backends run on, `float32` precision and TensorFloat-32, device-memory budgets, and what a run did on the card.
 - [pytorch-backend.md](pytorch-backend.md) — run a model on PyTorch (CPU or CUDA) instead of ONNX Runtime: the `Shorokoo.PyTorch.*` packages, the Python environment they provision or use, and what they do not run yet.

@@ -36,7 +36,6 @@ internal sealed class JaxSession : IShorokooSession
     private readonly string[] _inputNames;
     private readonly string[] _outputNames;
     private readonly Dictionary<string, int> _outputIndex;
-    private readonly ShorokooLogSeverity _logSeverity;
     private readonly NodePlacement? _nodePlacement;
 
     // The loaded model: its code, its constants and the programs compiled from it. Held for the
@@ -45,7 +44,7 @@ internal sealed class JaxSession : IShorokooSession
     private int _disposed;
 
     private JaxSession(
-        JaxBackend backend, JaxRuntime runtime, TranslatedModel model, ShorokooLogSeverity logSeverity,
+        JaxBackend backend, JaxRuntime runtime, TranslatedModel model,
         NodePlacement? nodePlacement, PyObject loaded)
     {
         _backend = backend;
@@ -54,7 +53,6 @@ internal sealed class JaxSession : IShorokooSession
         _outputNames = model.OutputNames;
         _outputIndex = new Dictionary<string, int>(StringComparer.Ordinal);
         for (int i = 0; i < _outputNames.Length; i++) _outputIndex.TryAdd(_outputNames[i], i);
-        _logSeverity = logSeverity;
         _nodePlacement = nodePlacement;
         _model = loaded;
     }
@@ -70,9 +68,10 @@ internal sealed class JaxSession : IShorokooSession
     /// <summary>Translates <paramref name="modelBytes"/>, loads it, and compiles it where its inputs'
     /// shapes are fixed.</summary>
     public static JaxSession Create(
-        JaxBackend backend, ReadOnlyMemory<byte> modelBytes, ShorokooLogSeverity logSeverity, DiagnosticSettings diagnostics,
+        JaxBackend backend, ReadOnlyMemory<byte> modelBytes, LogSettings log, DiagnosticSettings diagnostics,
         PrecisionSettings precision)
     {
+        ArgumentNullException.ThrowIfNull(log);
         ArgumentNullException.ThrowIfNull(diagnostics);
         ArgumentNullException.ThrowIfNull(precision);
         ModelProto proto;
@@ -86,8 +85,26 @@ internal sealed class JaxSession : IShorokooSession
         var signature = FixedSignature(proto.Graph!, model.InputNames);
 
         var runtime = backend.Runtime;
+        RuntimeLogMessage[] warnings = [];
+        try
+        {
+            return Load(backend, runtime, model, hash, placement, signature, precision, out warnings);
+        }
+        finally
+        {
+            PythonWarnings.Deliver(log, warnings);
+        }
+    }
+
+    private static JaxSession Load(
+        JaxBackend backend, JaxRuntime runtime, TranslatedModel model, string hash, NodePlacement? placement,
+        List<(ShorokooTensorElementType, long[])>? signature, PrecisionSettings precision,
+        out RuntimeLogMessage[] warnings)
+    {
+        warnings = [];
         using (PythonRuntime.Gil())
         {
+            using var warned = new PyList();
             PyObject? loaded = null;
             try
             {
@@ -109,9 +126,16 @@ internal sealed class JaxSession : IShorokooSession
                         using var entry = new PyTuple([code, dims]);
                         inputs.Append(entry);
                     }
-                    PyCall.Invoke(runtime.Prepare, loaded, inputs, (int)logSeverity).Dispose();
+                    try
+                    {
+                        PyCall.Invoke(runtime.Prepare, loaded, inputs, warned).Dispose();
+                    }
+                    finally
+                    {
+                        warnings = PythonWarnings.Read(warned, JaxRuntime.Source);
+                    }
                 }
-                return new JaxSession(backend, runtime, model, logSeverity, placement, loaded);
+                return new JaxSession(backend, runtime, model, placement, loaded);
             }
             catch (PythonException ex)
             {
@@ -231,7 +255,7 @@ internal sealed class JaxSession : IShorokooSession
                 throw new ArgumentException($"The model's input '{_inputNames[i]}' was not fed.", nameof(inputs));
             feeds[i] = Fed(_inputNames[i], value);
         }
-        return Invoke(feeds, wanted);
+        return Invoke(feeds, wanted, runSettings.Log);
     }
 
     /// <summary>Runs with <paramref name="consumed"/> handed over: each is released through the
@@ -276,7 +300,33 @@ internal sealed class JaxSession : IShorokooSession
             + "own moves (IShorokooBackend.CreateTensorInBackendMemory).");
     }
 
-    private IReadOnlyList<IShorokooTensorValue> Invoke(JaxTensorValue[] feeds, int[] wanted)
+    /// <summary>The run, with the Python warnings it raised delivered to <paramref name="log"/> once
+    /// it is over, however it ended (see <see cref="PythonWarnings"/>).</summary>
+    private IReadOnlyList<IShorokooTensorValue> Invoke(JaxTensorValue[] feeds, int[] wanted, LogSettings log)
+    {
+        RuntimeLogMessage[] warnings = [];
+        try
+        {
+            using (PythonRuntime.Gil())
+            {
+                using var warned = new PyList();
+                try
+                {
+                    return InvokeWarning(feeds, wanted, warned);
+                }
+                finally
+                {
+                    warnings = PythonWarnings.Read(warned, JaxRuntime.Source);
+                }
+            }
+        }
+        finally
+        {
+            PythonWarnings.Deliver(log, warnings);
+        }
+    }
+
+    private IReadOnlyList<IShorokooTensorValue> InvokeWarning(JaxTensorValue[] feeds, int[] wanted, PyList warned)
     {
         using (PythonRuntime.Gil())
         {
@@ -288,7 +338,7 @@ internal sealed class JaxSession : IShorokooSession
             PyObject results;
             try
             {
-                results = PyCall.Invoke(_runtime.Run, _model, args, wantedList, (int)_logSeverity);
+                results = PyCall.Invoke(_runtime.Run, _model, args, wantedList, warned);
             }
             catch (PythonException ex)
             {

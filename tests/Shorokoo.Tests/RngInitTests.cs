@@ -335,6 +335,8 @@ internal sealed class SessionCountingBackend(IShorokooBackend inner) : IShorokoo
     internal int Disposed;
     internal int ModelledPeaks;
     internal int Live => Sessions - Disposed;
+    internal readonly System.Collections.Concurrent.ConcurrentQueue<LogSettings> Built = [];
+    internal readonly System.Collections.Concurrent.ConcurrentQueue<LogSettings> Ran = [];
 
     long? IShorokooBackend.ModelledRunPeak(Shorokoo.Core.Factory.IR.ModelProto model, IReadOnlyList<OutputAlias> outputAliases, PrecisionSettings precision)
     {
@@ -351,21 +353,23 @@ internal sealed class SessionCountingBackend(IShorokooBackend inner) : IShorokoo
 
     public IShorokooSession CreateSession(
         ReadOnlyMemory<byte> modelBytes, ShorokooGraphOptimization graphOptimization,
-        ShorokooLogSeverity logSeverity, DeviceMemorySettings deviceMemory)
+        LogSettings log, DeviceMemorySettings deviceMemory)
     {
         System.Threading.Interlocked.Increment(ref Sessions);
-        return new CountedSession(inner.CreateSession(modelBytes, graphOptimization, logSeverity, deviceMemory), this);
+        Built.Enqueue(log);
+        return new CountedSession(inner.CreateSession(modelBytes, graphOptimization, log, deviceMemory), this);
     }
 
     public IShorokooSession CreateSession(
         ReadOnlyMemory<byte> modelBytes, ShorokooGraphOptimization graphOptimization,
-        ShorokooLogSeverity logSeverity, DeviceMemorySettings deviceMemory, DiagnosticSettings diagnostics,
+        LogSettings log, DeviceMemorySettings deviceMemory, DiagnosticSettings diagnostics,
         IReadOnlyList<OutputAlias> outputAliases, int intraOpThreads)
     {
         System.Threading.Interlocked.Increment(ref Sessions);
+        Built.Enqueue(log);
         if (intraOpThreads == 1) System.Threading.Interlocked.Increment(ref SingleThreaded);
         return new CountedSession(inner.CreateSession(
-            modelBytes, graphOptimization, logSeverity, deviceMemory, diagnostics, outputAliases, intraOpThreads), this);
+            modelBytes, graphOptimization, log, deviceMemory, diagnostics, outputAliases, intraOpThreads), this);
     }
 
     private sealed class CountedSession(IShorokooSession inner, SessionCountingBackend owner) : IShorokooSession
@@ -376,7 +380,10 @@ internal sealed class SessionCountingBackend(IShorokooBackend inner) : IShorokoo
         public IReadOnlyList<IShorokooTensorValue> Run(
             IReadOnlyDictionary<string, IShorokooTensorValue> inputs, IReadOnlyList<string> outputNames,
             RunSettings runSettings)
-            => inner.Run(inputs, outputNames, runSettings);
+        {
+            owner.Ran.Enqueue(runSettings.Log);
+            return inner.Run(inputs, outputNames, runSettings);
+        }
 
         public void Dispose()
         {

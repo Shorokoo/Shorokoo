@@ -395,24 +395,24 @@ def load_model(source, filename, constants, device_name, precision="HIGHEST"):
     return Model(namespace["main"], constants, device_of(device_name), jax.lax.Precision[precision])
 
 
-def prepare(model, inputs, severity=None):
-    token = _warning_severity.set(severity)
+def prepare(model, inputs, warned=None):
+    token = _warnings_collected.set(warned)
     try:
         model.prepare(inputs)
     finally:
-        _warning_severity.reset(token)
+        _warnings_collected.reset(token)
 
 
-def run(model, args, wanted, severity=None):
+def run(model, args, wanted, warned=None):
     """Runs a model and hands over the outputs at indices `wanted`, each where the .NET side reads
     the model's inputs and leaves its outputs: in the device's memory on a card, and a host value of
     its own on the CPU. Returns (value, description) per output. Every output is ready when this
     returns: nothing the run reads or writes is still in flight."""
-    token = _warning_severity.set(severity)
+    token = _warnings_collected.set(warned)
     try:
         outputs = model(args)
     finally:
-        _warning_severity.reset(token)
+        _warnings_collected.reset(token)
     on_device = model.device.platform != "cpu"
     results = []
     for index in wanted:
@@ -510,20 +510,22 @@ def _fresh_key():
 
 # ---- warnings ---------------------------------------------------------------------------------
 
-WARNING = 2
-_warning_severity = contextvars.ContextVar("shorokoo_jax_warning_severity", default=None)
+_warnings_collected = contextvars.ContextVar("shorokoo_jax_warnings_collected", default=None)
 _show_warning = warnings.showwarning
 
 
-def _show_warning_at_jax_severity(message, category, filename, lineno, file=None, line=None):
-    """Shows a warning unless the run that raised it asked only for errors: the session's log
-    severity, read per run, since the interpreter's warning filters are the whole process's. It
-    hands on to whatever showed warnings before, another backend's filter included."""
-    severity = _warning_severity.get()
-    if severity is not None and severity > WARNING:
+def _collect_jax_warning(message, category, filename, lineno, file=None, line=None):
+    """Appends a warning a call raises to the list the .NET side handed that call, as (category,
+    message, location), rather than showing it: the .NET side delivers it to the call's own log
+    settings. The interpreter's warning machinery is the whole process's, so the list is read per
+    call. A warning raised outside a call goes on to whatever showed warnings when this hook was
+    installed, another backend's hook included."""
+    collected = _warnings_collected.get()
+    if collected is None:
+        _show_warning(message, category, filename, lineno, file, line)
         return
-    _show_warning(message, category, filename, lineno, file, line)
+    collected.append((getattr(category, "__name__", str(category)), str(message), f"{filename}:{lineno}"))
 
 
-if getattr(warnings.showwarning, "__name__", "") != "_show_warning_at_jax_severity":
-    warnings.showwarning = _show_warning_at_jax_severity
+if getattr(warnings.showwarning, "__name__", "") != "_collect_jax_warning":
+    warnings.showwarning = _collect_jax_warning

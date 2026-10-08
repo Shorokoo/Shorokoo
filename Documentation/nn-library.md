@@ -632,11 +632,9 @@ arguments are [required](#nullable-hypers); knobs-off call:
   modified (PyTorch renormalizes it in place, so stored weights diverge in training).
 - `scale_grad_by_freq` and `sparse` are not supported.
 - **Index range**: an index must lie in `[-numEmbeddings, numEmbeddings-1]`; a negative one counts
-  from the end, as ONNX's `Gather` does (PyTorch refuses negative indices). A run fed an index
-  outside it is refused on every backend before anything is computed, with an
-  `IndexOutOfRangeInputException` (`CR014`) naming the input, the element's position, its value
-  and the range; see [operator-support.md](operator-support.md#shape--data-movement) for what is
-  checked.
+  from the end, as ONNX's `Gather` does (PyTorch refuses negative indices). An index outside is the
+  backend's to handle: ONNX Runtime's CPU kernel raises its own error, and its CUDA kernel does not
+  check and can read a zero row ([#501](https://github.com/Shorokoo/Shorokoo/issues/501)).
 - For another initializer use `EmbeddingHelpers.Embed(indices, numEmbeddings,
   embeddingDim, embeddingInit, paddingIdx, maxNorm, normType)`, e.g.
   `EmbeddingHelpers.Embed(idx, V, D, s => XavierUniform.Init(s))` (default `Normal`).

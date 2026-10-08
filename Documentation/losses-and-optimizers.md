@@ -72,15 +72,10 @@ Knobs are **build-time C# arguments** on two extra methods:
   `Mean` divides by the targets that are not ignored, as PyTorch does: by their count, or with
   `weight` by the sum of their classes' weights. The sentinel is any `int64`, a negative one such
   as PyTorch's `-100` included, in evaluation and training alike.
-- <a id="loss-target-range"></a>**Target range** (CE, NLL): every other target must lie in
-  `[0, C-1]` for `C` classes. A run fed a target outside it — `C` or above, or a negative one that
-  is not `ignoreIndex` — is refused on every backend before anything is computed or any parameter
-  updated, with an `IndexOutOfRangeInputException` (`CR014`) that names the input, the element's
-  position, its value and the range. The check reads the targets the host holds, fed to the loss
-  as they are or reshaped, wherever the class count follows from the shapes the run is fed;
-  targets in a device's memory, or computed in the graph, are not checked, and an out-of-range one is then the backend's to handle: ONNX Runtime's CPU kernel
-  refuses one of `C` or above and reads a negative `t` as class `C + t`, and its CUDA kernel can
-  count one of `C` or above as a zero loss.
+- **Target range** (CE, NLL): every other target must lie in `[0, C-1]` for `C` classes. A
+  target outside it is the backend's to handle: ONNX Runtime's CPU kernel raises its own error for
+  one of `C` or above and reads a negative `t` as class `C + t`, and its CUDA kernel does not check
+  and can count one of `C` or above as a zero loss ([#501](https://github.com/Shorokoo/Shorokoo/issues/501)).
 - **SmoothL1 ↔ Huber**: `SmoothL1(e; β) = HuberLoss(δ = β) / β`. Huber's `delta` is a
   live, schedulable `[Hyper]`; SmoothL1's `beta` is baked.
 - **PoissonNLL**: the Keras `Poisson` form is

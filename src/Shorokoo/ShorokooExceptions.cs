@@ -157,51 +157,6 @@ namespace Shorokoo
     }
 
     /// <summary>
-    /// Thrown before a run when an integer input it is fed holds an index outside the range of what
-    /// that input indexes: the rows of a <c>Gather</c>'s table (an embedding's, say), which take
-    /// <c>[-rows, rows - 1]</c>, or the classes of a <c>CrossEntropyLoss</c> / <c>NLLLoss</c>, whose
-    /// targets take <c>[0, classes - 1]</c> and the loss's <c>ignoreIndex</c>. Every backend refuses
-    /// the run alike, before anything is computed or any parameter updated.
-    /// </summary>
-    public class IndexOutOfRangeInputException : ShorokooException
-    {
-        /// <summary>The input as the message names it, e.g. <c>input 'tokens'</c> or
-        /// <c>the training target 'targets'</c>.</summary>
-        public string Input { get; }
-
-        /// <summary>The position of the offending element in the input, one index per dimension.</summary>
-        public long[] Position { get; }
-
-        /// <summary>The offending value.</summary>
-        public long Value { get; }
-
-        /// <summary>The smallest index the input may hold.</summary>
-        public long Minimum { get; }
-
-        /// <summary>The largest index the input may hold.</summary>
-        public long Maximum { get; }
-
-        /// <summary>The sentinel the loss ignores, also accepted; null where there is none.</summary>
-        public long? IgnoreIndex { get; }
-
-        /// <summary>Creates the exception for an out-of-range index fed to a run.</summary>
-        public IndexOutOfRangeInputException(
-            string input, long[] position, long value, long minimum, long maximum, long? ignoreIndex, string indexes)
-            : base(ErrorCodes.CR014,
-                $"{input} holds {value} at [{string.Join(", ", position)}], outside [{minimum}, {maximum}]"
-                + (ignoreIndex is long ignored ? $" and not the ignoreIndex {ignored}" : "")
-                + $": it indexes {indexes}. The run was refused before anything was computed.")
-        {
-            Input = input;
-            Position = position;
-            Value = value;
-            Minimum = minimum;
-            Maximum = maximum;
-            IgnoreIndex = ignoreIndex;
-        }
-    }
-
-    /// <summary>
     /// Exception thrown when model building or loading fails
     /// </summary>
     public class ModelException : ShorokooException

@@ -345,14 +345,9 @@ shape and type.
     behaviour ([#447](https://github.com/Shorokoo/Shorokoo/issues/447),
     [#450](https://github.com/Shorokoo/Shorokoo/issues/450)).
 20. An index must lie in `[-n, n-1]` for the `n` entries along `axis`; a negative one
-    counts from the end. Where the indices are an input of the graph — as fed, or
-    through `Identity`, `Reshape`, `Squeeze`, `Unsqueeze`, `Flatten` or a `Cast`
-    between integer types — every backend refuses a run fed one outside, before it
-    computes anything, with `IndexOutOfRangeInputException` (`CR014`), which names
-    the input, the element's position, its value and the range. The check reads
-    the indices the host holds, wherever `n` follows from the shapes the run is
-    fed. Indices in a device's memory, or computed in the graph, are not checked, and an index outside is then the backend's to handle:
-    ONNX Runtime's CPU kernel refuses it, its CUDA kernel can read a zero row.
+    counts from the end. An index outside is the backend's to handle: ONNX
+    Runtime's CPU kernel raises its own error, and its CUDA kernel does not check
+    and can read a zero row ([#501](https://github.com/Shorokoo/Shorokoo/issues/501)).
 
 ## Convolution & pooling
 
@@ -443,9 +438,10 @@ shape and type.
    (`y = x / sqrt(mean(x², suffix axes) + epsilon) * scale`, via
    `ReduceMean`/`Sqrt`/`Div`/`Mul`), so it runs on any execution provider.
 8. A target must lie in `[0, C-1]` for `C` classes, or equal `ignore_index`, which
-   may be any value. Where the targets are an input of the graph, a run fed one
-   outside is refused as Gather's indices are (note 20 under Shape & data
-   movement), on every backend and before anything is computed.
+   may be any value. A target outside is the backend's to handle: ONNX Runtime's
+   CPU kernel raises its own error for one of `C` or above and reads a negative
+   `t` as class `C + t`, and its CUDA kernel does not check and can count one of
+   `C` or above as a zero loss ([#501](https://github.com/Shorokoo/Shorokoo/issues/501)).
 
 ## MatMul & linear algebra
 

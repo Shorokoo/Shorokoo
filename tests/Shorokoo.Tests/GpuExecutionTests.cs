@@ -1527,31 +1527,6 @@ public class GpuExecutionTests
         return Weights(ckpt);
     }
 
-    /// <summary>
-    /// A token id outside its table and a class target outside the loss's classes are refused on a
-    /// card as on the host, before the run — where the CUDA kernels would read a zero row and count a
-    /// zero loss — in an evaluation and in a training step alike.
-    /// </summary>
-    [CudaFact]
-    public void CudaProvider_OutOfRangeTokensAndTargetsAreRefusedBeforeTheRun()
-    {
-        var model = NNZeroLogitsTokenClassifier.ComputationGraph.Specialize(
-            NNZeroLogitsTokenClassifier.ComputationGraph.FromOrderedInputs([TensorData([], 5L)]));
-        var rig = TrainingRig.FromScratch(model, NNCrossEntropyIgnoreMinus100Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
-            [TensorData([4L], new long[4])], new SGDOptimizerHyperparameters { LearningRate = 1f }, runtimeContext: new ComputeContext());
-        long Refused(long[] tokens, long[] targets) => Assert.Throws<IndexOutOfRangeInputException>(() => rig.TrainStep(
-            rig.CreateInitialCheckpoint(), rig.InputDef.FromOrderedData(TensorData([4L], tokens)),
-            rig.TargetDef.FromOrderedData(TensorData([4L], targets)))).Value;
-        TensorData Logits() => TensorData([4L, 5L], new float[20]);
-        var loss = NNCrossEntropyIgnoreMinus100Loss.ComputationGraph
-            .ToConcreteArchitecture([Logits(), TensorData([4L], new long[4])]).ToConcreteModel();
-
-        Assert.Equal(7L, Refused([0, 1, 2, 7], [1, 2, 3, 4]));
-        Assert.Equal(7L, Refused([0, 1, 2, 3], [1, 2, 3, 7]));
-        Assert.Equal(50286L, Assert.Throws<IndexOutOfRangeInputException>(
-            () => new ComputeContext().Execute(loss, Logits(), TensorData([4L], [0L, 1L, 2L, 50286L]))).Value);
-    }
-
     private static float[] Weights(TrainingCheckpoint checkpoint) =>
         TrainingRigHelpers.FlattenStruct(checkpoint.ToHost().TrainableParams);
 

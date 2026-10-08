@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using Shorokoo.Core.Factory.IR;
 
 namespace Shorokoo.Core.Backends;
@@ -17,18 +16,17 @@ namespace Shorokoo.Core.Backends;
 /// another reads a zero row and trains on.
 ///
 /// <para>It reads what the host holds and nothing else: an input in a device's memory is not
-/// copied back to be checked, and an index the graph computes is not checked. The extent of what
-/// an input indexes comes from the shapes the run is fed — straight from a fed table or an
-/// initializer, and otherwise evaluated over the part of the graph that computes it
-/// (<see cref="PlacementShapes"/>), once per set of input shapes. An extent nothing here can
-/// evaluate leaves its input unchecked.</para>
+/// copied back to be checked, and an index the graph computes is not checked. Each input is
+/// scanned once per run for its smallest and largest element, whatever it indexes. The extent of
+/// what it indexes is a fed table's or an initializer's dimension, or else one evaluated from the
+/// shapes the run is fed over the part of the graph that computes it (<see cref="PlacementShapes"/>),
+/// counting only what that infers and never a shape the graph states. An evaluated extent is kept
+/// and evaluated again only for a run whose elements it does not take. An extent that cannot be
+/// evaluated, the first time it is asked for, leaves its input unchecked from then on.</para>
 /// </summary>
 internal sealed class IndexInputCheck
 {
     private const int Int32 = 6, Int64 = 7;
-
-    // How many sets of input shapes the extents are kept evaluated for.
-    private const int EvaluatedShapes = 16;
 
     private static readonly HashSet<string> PassThrough = new(StringComparer.Ordinal)
     {
@@ -36,9 +34,9 @@ internal sealed class IndexInputCheck
     };
 
     /// <summary>The input <paramref name="Input"/> (by the run's name for it) indexes axis
-    /// <paramref name="Axis"/> of the value <paramref name="Indexed"/>: a table's rows, or a loss's
-    /// classes where <paramref name="ClassTarget"/>.</summary>
-    private sealed record Use(string Input, string Indexed, long Axis, bool ClassTarget, long? IgnoreIndex, string Op);
+    /// <paramref name="Axis"/> of the value <paramref name="Indexed"/>: a table's entries, or a
+    /// loss's classes where <paramref name="ClassTarget"/>.</summary>
+    private sealed record Use(string Input, string Indexed, long Axis, bool ClassTarget, long? IgnoreIndex);
 
     private readonly Use[] _uses;
 
@@ -48,12 +46,14 @@ internal sealed class IndexInputCheck
     // Each initializer's dims a use indexes.
     private readonly Dictionary<string, long[]> _initializerDims;
 
-    // The part of the graph that computes what a use indexes, where that is neither an input nor
-    // an initializer, with every large tensor in it reduced to its shape; the graph inputs it reads,
-    // and what it evaluated per set of their shapes.
+    // The part of the graph that computes what a use indexes, where that is neither an input nor an
+    // initializer, with every large tensor in it reduced to its shape; and the graph inputs it reads.
     private readonly GraphProto? _extents;
     private readonly (string GraphName, string Original, int ElementType)[] _extentInputs;
-    private readonly ConcurrentDictionary<string, Dictionary<string, PlacementShapes.Value>> _evaluated = new(StringComparer.Ordinal);
+
+    // Per use, the extent last evaluated for it: 0 where none was yet, Unevaluable where none can be.
+    private readonly long[] _evaluatedExtent;
+    private const long Unevaluable = -1;
 
     private IndexInputCheck(Use[] uses, Dictionary<string, string> originalByGraphInput,
         Dictionary<string, long[]> initializerDims, GraphProto? extents,
@@ -64,6 +64,7 @@ internal sealed class IndexInputCheck
         _initializerDims = initializerDims;
         _extents = extents;
         _extentInputs = extentInputs;
+        _evaluatedExtent = new long[uses.Length];
     }
 
     /// <summary>
@@ -98,15 +99,15 @@ internal sealed class IndexInputCheck
                 foreach (var (node, slot) in reads)
                 {
                     if (node.Domain is not ("" or "ai.onnx")) continue;
-                    if (slot == 0 && PassThrough.Contains(node.OpType)
+                    if (slot == 0 && node.Outputs.Count > 0 && PassThrough.Contains(node.OpType)
                         && (node.OpType != "Cast" || Attr(node, "to") is Int32 or Int64))
                         pending.Push(node.Outputs[0]);
                     else if (slot == 1 && node.OpType == "Gather")
                         uses.Add(new Use(originalInputNames[i], node.Inputs[0], Attr(node, "axis") ?? 0,
-                            ClassTarget: false, IgnoreIndex: null, node.OpType));
+                            ClassTarget: false, IgnoreIndex: null));
                     else if (slot == 1 && node.OpType is "SoftmaxCrossEntropyLoss" or "NegativeLogLikelihoodLoss")
                         uses.Add(new Use(originalInputNames[i], node.Inputs[0], 1,
-                            ClassTarget: true, Attr(node, "ignore_index"), node.OpType));
+                            ClassTarget: true, Attr(node, "ignore_index")));
                 }
             }
         }
@@ -138,28 +139,57 @@ internal sealed class IndexInputCheck
     {
         var fed = new Dictionary<string, NamedModelParam>(StringComparer.Ordinal);
         foreach (var input in inputs) fed.TryAdd(input.ParamName, input);
+        var scanned = new Dictionary<(string Input, long? IgnoreIndex), (long Min, long Max)?>();
         Dictionary<string, PlacementShapes.Value>? evaluated = null;
 
-        foreach (var use in _uses)
+        for (int u = 0; u < _uses.Length; u++)
         {
+            var use = _uses[u];
             if (!fed.TryGetValue(use.Input, out var param) || HostTensor(param) is not { } tensor) continue;
-            var shape = ShapeOf(use.Indexed, fed, ref evaluated);
-            if (shape is null) continue;
-            var axis = use.Axis < 0 ? use.Axis + shape.Length : use.Axis;
-            if (axis < 0 || axis >= shape.Length) continue;
+            var key = (use.Input, use.IgnoreIndex);
+            if (!scanned.TryGetValue(key, out var span)) scanned[key] = span = MinMax(tensor, use.IgnoreIndex);
+            if (span is not var (min, max)) continue;
 
-            var extent = shape[axis];
-            var (minimum, maximum) = use.ClassTarget ? (0L, extent - 1) : (-extent, extent - 1);
-            var (at, value) = FirstOutside(tensor, minimum, maximum, use.IgnoreIndex);
-            if (at < 0) continue;
+            long extent, axis;
+            if (DirectShape(use.Indexed, fed) is { } shape)
+            {
+                if (Axis(use, shape.Length) is not long direct) continue;
+                (extent, axis) = (shape[direct], direct);
+            }
+            else
+            {
+                var known = Volatile.Read(ref _evaluatedExtent[u]);
+                if (known < 0 || known > 0 && Within(use, known, min, max)) continue;
+                evaluated ??= Evaluated(fed);
+                if (evaluated?.TryGetValue(use.Indexed, out var value) != true
+                    || Axis(use, value!.Shape.Length) is not long computed)
+                {
+                    Volatile.Write(ref _evaluatedExtent[u], Unevaluable);
+                    continue;
+                }
+                (extent, axis) = (value.Shape[computed], computed);
+                Volatile.Write(ref _evaluatedExtent[u], extent);
+            }
+            if (Within(use, extent, min, max)) continue;
 
+            var (minimum, maximum) = Range(use, extent);
+            var (at, offending) = FirstOutside(tensor, minimum, maximum, use.IgnoreIndex);
             var indexes = use.ClassTarget
-                ? $"the {extent} classes of a {use.Op}"
-                : $"the {extent} entries along axis {axis} of a {use.Op}'s table";
+                ? $"the {extent} classes of the loss"
+                : $"the {extent} entries along axis {axis} of a Gather's table";
             throw new IndexOutOfRangeInputException(param.Label ?? $"input '{param.ParamName}'",
-                PositionOf(at, tensor.Shape.Dims), value, minimum, maximum, use.IgnoreIndex, indexes);
+                PositionOf(at, tensor.Shape.Dims), offending, minimum, maximum, use.IgnoreIndex, indexes);
         }
     }
+
+    private static (long Minimum, long Maximum) Range(Use use, long extent)
+        => use.ClassTarget ? (0L, extent - 1) : (-extent, extent - 1);
+
+    private static bool Within(Use use, long extent, long min, long max)
+        => Range(use, extent) is var (minimum, maximum) && min >= minimum && max <= maximum;
+
+    private static long? Axis(Use use, int rank)
+        => (use.Axis < 0 ? use.Axis + rank : use.Axis) is var axis && axis >= 0 && axis < rank ? axis : null;
 
     private static TensorData? HostTensor(NamedModelParam param)
         => param is TensorDataModelParam && param.ToTensorData() is { IsDisposed: false, IsHostResident: true } tensor
@@ -167,36 +197,60 @@ internal sealed class IndexInputCheck
             ? tensor
             : null;
 
-    private long[]? ShapeOf(string value, Dictionary<string, NamedModelParam> fed,
-        ref Dictionary<string, PlacementShapes.Value>? evaluated)
+    /// <summary>The shape of <paramref name="value"/> where it is a graph input the run is fed or an
+    /// initializer; null otherwise.</summary>
+    private long[]? DirectShape(string value, Dictionary<string, NamedModelParam> fed)
     {
-        if (_originalByGraphInput.TryGetValue(value, out var original))
-            return fed.TryGetValue(original, out var param) && param is TensorDataModelParam
-                ? param.ToTensorData().Shape.Dims
-                : null;
         if (_initializerDims.TryGetValue(value, out var dims)) return dims;
-        if (_extents is null) return null;
-        evaluated ??= Evaluated(fed);
-        return evaluated.TryGetValue(value, out var made) ? made.Shape : null;
+        return _originalByGraphInput.TryGetValue(value, out var original)
+               && fed.TryGetValue(original, out var param) && param is TensorDataModelParam
+            ? param.ToTensorData().Shape.Dims
+            : null;
     }
 
-    /// <summary>The values of the extents graph for the shapes <paramref name="fed"/> come in,
-    /// evaluated the first time a run comes with them.</summary>
-    private Dictionary<string, PlacementShapes.Value> Evaluated(Dictionary<string, NamedModelParam> fed)
+    /// <summary>The values of the extents graph for the shapes <paramref name="fed"/> come in, or
+    /// null where they cannot be evaluated.</summary>
+    private Dictionary<string, PlacementShapes.Value>? Evaluated(Dictionary<string, NamedModelParam> fed)
     {
+        if (_extents is null) return null;
         var given = new Dictionary<string, (long[] Shape, int ElementType)>(StringComparer.Ordinal);
         foreach (var (graphName, original, elementType) in _extentInputs)
             if (fed.TryGetValue(original, out var param) && param is TensorDataModelParam)
                 given[graphName] = (param.ToTensorData().Shape.Dims, elementType);
-        var key = string.Join(";", _extentInputs.Select(i => given.TryGetValue(i.GraphName, out var g) ? string.Join(",", g.Shape) : "?"));
-        if (_evaluated.TryGetValue(key, out var values)) return values;
-        // A graph fed ever-changing shapes keeps the latest few rather than every one it was fed.
-        if (_evaluated.Count >= EvaluatedShapes) _evaluated.Clear();
-        return _evaluated.GetOrAdd(key, _ => PlacementShapes.Evaluate(_extents!, given));
+        try
+        {
+            return PlacementShapes.Evaluate(_extents, given);
+        }
+        catch (Exception)
+        {
+            // An extent that cannot be evaluated leaves its input unchecked: the check never fails
+            // a run the backend would take.
+            return null;
+        }
     }
 
+    /// <summary>The smallest and largest element of <paramref name="tensor"/> that is not
+    /// <paramref name="ignoreIndex"/>, or null where there is none.</summary>
+    private static (long Min, long Max)? MinMax(TensorData tensor, long? ignoreIndex)
+        => tensor.Reading<(long Min, long Max)?>(() =>
+        {
+            long min = long.MaxValue, max = long.MinValue;
+            if (tensor.DType.IsSameElementTypeAs(DType.Int64))
+            {
+                foreach (var element in tensor.AccessMemory<long>())
+                    if (element != ignoreIndex) (min, max) = (Math.Min(min, element), Math.Max(max, element));
+            }
+            else
+            {
+                foreach (long element in tensor.AccessMemory<int>())
+                    if (element != ignoreIndex) (min, max) = (Math.Min(min, element), Math.Max(max, element));
+            }
+            GC.KeepAlive(tensor);
+            return min <= max ? (min, max) : null;
+        });
+
     /// <summary>The flat index and value of the first element of <paramref name="tensor"/> outside
-    /// <c>[minimum, maximum]</c> and not <paramref name="ignoreIndex"/>, or -1.</summary>
+    /// <c>[minimum, maximum]</c> and not <paramref name="ignoreIndex"/>.</summary>
     private static (long At, long Value) FirstOutside(TensorData tensor, long minimum, long maximum, long? ignoreIndex)
         => tensor.Reading(() =>
         {
@@ -229,8 +283,10 @@ internal sealed class IndexInputCheck
 
     /// <summary>
     /// The nodes of <paramref name="graph"/> that compute <paramref name="values"/>, in order, over
-    /// its inputs and the initializers they read, each tensor of more elements than a shape is made
-    /// of reduced to its shape so that nothing of a weight is kept; and the graph inputs they read.
+    /// its inputs and the initializers they read, and the graph inputs they read. Each tensor of more
+    /// elements than a shape is made of is reduced to its shape, so that nothing of a weight is kept;
+    /// a node holding a subgraph is left out, its outputs then unknown; and no shape the graph states
+    /// for a value is carried, so that only what is inferred counts.
     /// </summary>
     private static (GraphProto, (string, string, int)[]) ExtentsGraph(
         GraphProto graph, List<string> values, Dictionary<string, TensorProto> initializers,
@@ -246,7 +302,8 @@ internal sealed class IndexInputCheck
         var pending = new Stack<string>(values);
         while (pending.TryPop(out var value))
         {
-            if (!read.Add(value) || !producer.TryGetValue(value, out var node) || !needed.Add(node)) continue;
+            if (!read.Add(value) || !producer.TryGetValue(value, out var node)
+                || node.Attributes.Any(a => a.G is not null || a.Graphs is { Count: > 0 }) || !needed.Add(node)) continue;
             foreach (var input in node.Inputs)
                 if (input.Length > 0) pending.Push(input);
         }
@@ -256,12 +313,10 @@ internal sealed class IndexInputCheck
             if (needed.Contains(node)) extents.Nodes.Add(ShapeOnly(node));
         foreach (var name in read)
             if (initializers.TryGetValue(name, out var initializer)) extents.Initializers.Add(ShapeOnly(initializer));
-        extents.Inputs.AddRange(graph.Inputs);
-        extents.ValueInfoes.AddRange(graph.ValueInfoes);
-        extents.Outputs.AddRange(graph.Outputs);
+        extents.Inputs.AddRange(graph.Inputs.Where(i => read.Contains(i.Name)));
 
-        var inputs = graph.Inputs
-            .Where(i => read.Contains(i.Name) && originalByGraphInput.ContainsKey(i.Name))
+        var inputs = extents.Inputs
+            .Where(i => originalByGraphInput.ContainsKey(i.Name))
             .Select(i => (i.Name, originalByGraphInput[i.Name], i.Type?.TensorType?.ElemType ?? 0))
             .ToArray();
         return (extents, inputs);
@@ -274,7 +329,7 @@ internal sealed class IndexInputCheck
 
     private static NodeProto ShapeOnly(NodeProto node)
     {
-        if (node.OpType != "Constant" || !node.Attributes.Any(a => a.T is { } t && !ReferenceEquals(ShapeOnly(t), t)))
+        if (!node.Attributes.Any(a => a.T is { } t && !ReferenceEquals(ShapeOnly(t), t)))
             return node;
         var copy = new NodeProto { Name = node.Name, OpType = node.OpType, Domain = node.Domain };
         copy.Inputs.AddRange(node.Inputs);

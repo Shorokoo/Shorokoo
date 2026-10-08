@@ -785,6 +785,25 @@ public class ComputeContextLifetimeCoverageTests
         Assert.False(Proves(GraphOf("a b", "O", Op("Sub", "a b", "O", domain: "custom"))));
     }
 
+    private static Exception? IndexCheckOf(GraphProto graph, params long[] targets)
+        => Record.Exception(() => IndexInputCheck.Of(graph, ["x", "t"])!.Check(
+        [
+            new TensorDataModelParam("x", ModelParamType.InputParam, TensorData([4L, 5L], new float[20])),
+            new TensorDataModelParam("t", ModelParamType.InputParam, TensorData([4L], targets)),
+        ]));
+
+    [Fact]
+    public void TestTheIndexCheckRefusesOnlyOnAClassCountItEvaluatedAndNeverOnAStatedOne()
+    {
+        GraphProto Scores(string op, string stated = "s") => GraphOf("x:float[4,5] t:int64[4]", $"L {stated}",
+            Op(op, "x", "s"), Op("SoftmaxCrossEntropyLoss", "s t", "L"));
+
+        Assert.Null(IndexCheckOf(Scores("Einsum", "s:float[4,3]"), 0, 1, 2, 4));
+        Assert.Null(IndexCheckOf(Scores("Relu"), 0, 1, 2, 4));
+        Assert.Equal(4L, Assert.IsType<IndexOutOfRangeInputException>(IndexCheckOf(Scores("Relu"), 0, 1, 2, 7)).Maximum);
+        Assert.Null(IndexCheckOf(Scores("Relu", "s:float[4,3]"), 0, 1, 2, 4));
+    }
+
     private static PlacementProof PlacementsOver(GraphProto graph, string consumed, PlacementMemory? memory = null)
     {
         var inputs = graph.Inputs.Where(i => i.Type?.TensorType?.Shape is not null).ToDictionary(

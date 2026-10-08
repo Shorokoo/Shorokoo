@@ -93,8 +93,12 @@ equivalents are `OptimizerScalarZeros` / `OptimizerScalarOnes`
 **Writing your own.** An initializer states its parameter's shape either as its **first**
 `Inline` parameter (a shape vector) or, for rank 0, as its `Scalar<T>` return type. A
 shape baked into the body of a no-argument `Inline` is rejected by name when the model is
-lowered. The body is an ordinary graph body (tensor ops, loops, `IfElse`). The rules
-below apply to `[StateInitializer]` and `[TrainableParamInitializer]` alike.
+lowered, and a shaped initializer whose first argument is not an `int64` shape vector
+(`Init(wte)` handing it another parameter's value, say) is refused by name at the `Init`
+call; any other input comes after the shape. An optimizer-owned `[StateInitializer]` is
+exempt: the rig calls it once per trainable parameter, and the state takes whatever shape
+it returns ([Training](training.md)). The body is an ordinary graph body (tensor ops,
+loops, `IfElse`). The rules below apply to `[StateInitializer]` and `[TrainableParamInitializer]` alike.
 
 **It can call other initializers.** An `Init(...)` call inside an initializer body is
 evaluated as a value; only the top-level initializer defines a parameter. Either kind may

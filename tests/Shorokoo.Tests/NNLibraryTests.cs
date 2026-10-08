@@ -852,6 +852,7 @@ public class NNLibraryOptimizerTrainingCoverageTests
         Assert.Equal(0, StepScatterNDsWithoutReduction(NNGatheredTableProjectionModel.ComputationGraph, TensorData([4L], [3L, 3L, 3L, 3L])));
         Assert.Equal(0, StepScatterNDsWithoutReduction(NNInstanceNormalizationOpModel.ComputationGraph, TensorData([2L, 2L, 3L], new float[12])));
         Assert.Equal(0, StepScatterNDsWithoutReduction(NNBatchNormalizationOpModel.ComputationGraph, TensorData([2L, 2L, 3L], new float[12])));
+        Assert.Equal(0, StepScatterNDsWithoutReduction(NNGroupNormalizationOpModel.ComputationGraph, TensorData([2L, 2L, 3L], new float[12])));
     }
 
     [Fact]

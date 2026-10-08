@@ -1196,7 +1196,10 @@ public class CoreUtilsCoverageTests
         Assert.Equal(BitConverter.SingleToInt32Bits(7f), Marshal.ReadInt32(OrtTensorAddress.Read(value)!.Value, 8));
     }
 
-    private static List<OrtLogMessage> LoggedBuildingASession(ShorokooLogSeverity session, ShorokooLogSeverity captured)
+    internal static List<OrtLogMessage> LoggedBuildingASession(ShorokooLogSeverity session, ShorokooLogSeverity captured)
+        => LoggedBuildingASession(DefaultBackend.Instance, session, captured);
+
+    internal static List<OrtLogMessage> LoggedBuildingASession(IShorokooBackend backend, ShorokooLogSeverity session, ShorokooLogSeverity captured)
     {
         var x = InputTensor<float32>("x", rank: 1);
         var proto = FastOnnxModelBuilder.BuildInternalOnnxModel(new InternalComputationGraph([x], [x + x]), prepForOnnx: true);
@@ -1205,7 +1208,7 @@ public class CoreUtilsCoverageTests
         ProtoBuf.Serializer.Serialize(model, proto);
         var logged = new List<OrtLogMessage>();
         using (OrtLog.CaptureOnThisThread(logged.Add, captured))
-        using (DefaultBackend.Instance.CreateSession(model.ToArray(), ShorokooGraphOptimization.EnableAll, session, DeviceMemorySettings.Default)) { }
+        using (backend.CreateSession(model.ToArray(), ShorokooGraphOptimization.EnableAll, session, DeviceMemorySettings.Default)) { }
         return logged;
     }
 
@@ -1215,7 +1218,7 @@ public class CoreUtilsCoverageTests
         Assert.True(OrtEnvironment.LogsThroughOrtLog);
         Assert.Equal(ShorokooLogSeverity.Warning, OrtLog.Severity);
         Assert.Equal(OrtLog.WriteToStandardError, OrtLog.Sink);
-        OrtLog.Severity = OrtLog.Severity;
+        OrtEnvironment.ApplyLogSeverity();
         Assert.Equal(OrtLoggingLevel.ORT_LOGGING_LEVEL_WARNING, OrtEnv.Instance().EnvLogLevel);
         Assert.Throws<ArgumentOutOfRangeException>(() => OrtLog.Severity = (ShorokooLogSeverity)5);
 

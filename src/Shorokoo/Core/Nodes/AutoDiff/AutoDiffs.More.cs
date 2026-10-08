@@ -766,9 +766,9 @@ namespace Shorokoo.Core.Nodes.AutoDiff
             Tensor<T> xHatFlat = OnnxOp.Reshape(xHat, xShape, allowZero: false);
 
             // Build broadcast shape [1, C, 1, 1, ...] for scale/bias
-            Tensor<int64> onesShape = OnnxOp.Expand(Scalar(1L), xRank);
-            Tensor<int64> scatterIdx = OnnxOp.Reshape(Vector(1L), Vector(1L, 1L), allowZero: false);
-            Tensor<int64> broadcastShape = OnnxOp.ScatterND(onesShape, scatterIdx, cVec);
+            Tensor<int64> rank = xRank;
+            Tensor<int64> broadcastShape = OnnxOp.Concat(
+                [Vector(1L), cVec, OnnxOp.Expand(Scalar(1L), rank - Vector(2L))], axis: 0);
             Tensor<T> scaleBC = OnnxOp.Reshape(scale, broadcastShape, allowZero: false);
 
             // Build reduce axes for dscale/dbias: [0, 2, 3, ..., rank-1] (all except channel dim 1)

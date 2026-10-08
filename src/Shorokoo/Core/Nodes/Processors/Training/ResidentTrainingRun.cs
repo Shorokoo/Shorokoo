@@ -91,6 +91,10 @@ namespace Shorokoo
         /// moved on from it.</summary>
         private TrainingCheckpoint? _published;
 
+        /// <summary>Bytes of state the last step superseded without consuming, which
+        /// <see cref="Reclaim"/> counts once the run has let go of it.</summary>
+        private long _superseded;
+
         private bool _disposed;
 
         internal ResidentTrainingRun(TrainingRig rig, TrainingCheckpoint initialCheckpoint)
@@ -164,7 +168,7 @@ namespace Shorokoo
         /// consumed by the step, or one passed through <c>.Shared()</c> or <c>.TryConsume()</c>.</param>
         /// <param name="trainingTarget">Training target data, in the same forms.</param>
         public float Step(IData trainingInput, IData trainingTarget)
-            => Advance(Stepped(c => _rig.ResidentStep(c, null, trainingInput, trainingTarget, reclaimSuperseded: !_ownsCurrent))).Loss!.Value;
+            => Advance(Stepped(c => _rig.ResidentStep(c, null, trainingInput, trainingTarget))).Loss!.Value;
 
         /// <summary>
         /// Trains on one batch of a rig whose loss reads no target
@@ -186,7 +190,7 @@ namespace Shorokoo
         public float Step(IData hyperparameters, IData trainingInput, IData trainingTarget)
         {
             if (hyperparameters is null) throw new ArgumentNullException(nameof(hyperparameters));
-            return Advance(Stepped(c => _rig.ResidentStep(c, hyperparameters, trainingInput, trainingTarget, reclaimSuperseded: !_ownsCurrent)))
+            return Advance(Stepped(c => _rig.ResidentStep(c, hyperparameters, trainingInput, trainingTarget)))
                 .Loss!.Value;
         }
 
@@ -208,7 +212,7 @@ namespace Shorokoo
         /// loader itself.
         /// </summary>
         public float Step(DataBatch batch)
-            => Advance(Stepped(c => _rig.ResidentBatchStep(c, batch, reclaimSuperseded: !_ownsCurrent))).Loss!.Value;
+            => Advance(Stepped(c => _rig.ResidentBatchStep(c, batch))).Loss!.Value;
 
         /// <summary>
         /// Trains on one batch and hands you the updated state as an ordinary checkpoint — the step
@@ -221,7 +225,7 @@ namespace Shorokoo
         /// consumed by the step, or one passed through <c>.Shared()</c> or <c>.TryConsume()</c>.</param>
         /// <param name="trainingTarget">Training target data, in the same forms.</param>
         public TrainingCheckpoint StepToCheckpoint(IData trainingInput, IData trainingTarget)
-            => Publish(Stepped(c => _rig.ResidentStep(c, null, trainingInput, trainingTarget, reclaimSuperseded: !_ownsCurrent)));
+            => Publish(Stepped(c => _rig.ResidentStep(c, null, trainingInput, trainingTarget)));
 
         /// <summary>
         /// <see cref="StepToCheckpoint(IData, IData)"/> for a rig whose loss reads no target
@@ -241,7 +245,7 @@ namespace Shorokoo
             IData hyperparameters, IData trainingInput, IData trainingTarget)
         {
             if (hyperparameters is null) throw new ArgumentNullException(nameof(hyperparameters));
-            return Publish(Stepped(c => _rig.ResidentStep(c, hyperparameters, trainingInput, trainingTarget, reclaimSuperseded: !_ownsCurrent)));
+            return Publish(Stepped(c => _rig.ResidentStep(c, hyperparameters, trainingInput, trainingTarget)));
         }
 
         /// <summary>
@@ -260,7 +264,7 @@ namespace Shorokoo
         /// <see cref="DataBatch.Position"/> as the batch that was used.
         /// </summary>
         public TrainingCheckpoint StepToCheckpoint(DataBatch batch)
-            => Publish(Stepped(c => _rig.ResidentBatchStep(c, batch, reclaimSuperseded: !_ownsCurrent)));
+            => Publish(Stepped(c => _rig.ResidentBatchStep(c, batch)));
 
         /// <summary>
         /// The run's state as it stands, as a checkpoint — between steps, without running one and
@@ -328,11 +332,11 @@ namespace Shorokoo
         /// run's loss: the step is refused over it before it takes anything, with that state's own
         /// refusal, and so is every step after it.</para>
         ///
-        /// <para>Each step asks the rig to count the state it supersedes towards a collection only
-        /// where that state is not the run's own (<c>!_ownsCurrent</c>, read before the step): a
-        /// checkpoint the run handed out, or one it began from, which is garbage once the caller
-        /// drops it and whose memory — on a card, device memory — only a finalizer frees. State the
-        /// run owns the step consumes, and there is nothing to count.</para>
+        /// <para>A step notes the state it supersedes for <see cref="Reclaim"/> only where that
+        /// state is not the run's own (<c>!_ownsCurrent</c>, read before the step): a checkpoint the
+        /// run handed out, or one it began from, which is garbage once the caller drops it and whose
+        /// memory — on a card, device memory — only a finalizer frees. State the run owns the step
+        /// consumes, and there is nothing to count.</para>
         /// </summary>
         private TrainingCheckpoint Stepped(Func<TrainingCheckpoint, TrainingCheckpoint> step)
         {
@@ -340,7 +344,9 @@ namespace Shorokoo
             var whole = !IsSpent(current);
             try
             {
-                return step(current);
+                var next = step(current);
+                _superseded = _ownsCurrent ? 0 : TrainingRig.StateBytes(current);
+                return next;
             }
             catch
             {
@@ -401,6 +407,7 @@ namespace Shorokoo
             _current = next;
             _ownsCurrent = true;
             _published = null;
+            Reclaim(next);
             return next;
         }
 
@@ -414,7 +421,23 @@ namespace Shorokoo
             _ownsCurrent = false;
             _handedOut = true;
             _published = next;
+            Reclaim(next);
             return next;
+        }
+
+        /// <summary>
+        /// Counts the state the step just taken superseded without consuming towards the rig's
+        /// collection, once the run holds nothing of it: not as the state it trains from, not as the
+        /// checkpoint it handed out, and not in the step's own frame. A collection made while the run
+        /// still held it could not free it, and the steps after it supersede nothing to count until
+        /// the run hands out another checkpoint: a checkpoint the caller saved and dropped would keep
+        /// its copy of the state for the whole interval.
+        /// </summary>
+        private void Reclaim(TrainingCheckpoint produced)
+        {
+            long superseded = _superseded;
+            _superseded = 0;
+            if (superseded > 0) _rig.ReclaimSupersededState(superseded, produced);
         }
 
         /// <summary>

@@ -804,16 +804,16 @@ public class NNLibraryOptimizerTrainingCoverageTests
     }
 
     private static (Dictionary<string, int> TableSized, float[][] State, long InPlace) ResidentStepsOnHost(
-        bool fuses, ComputationGraph optimizer, Hyperparameter[] hyperparameters, float? runtimeValue)
+        bool fuses, ComputationGraph optimizer, Hyperparameter[] hyperparameters, float? runtimeValue, ComputationGraph? table = null, long rows = 64)
     {
         using var context = new ComputeContext(new HostBackend(fuses)) { Diagnostics = new Shorokoo.Core.Backends.DiagnosticSettings { TraceNodePlacement = true } };
-        var rig = TrainingRig.FromScratch(NNGatheredTableProjectionModel.ComputationGraph, L2Loss.ComputationGraph, optimizer,
+        var rig = TrainingRig.FromScratch(table ?? NNGatheredTableProjectionModel.ComputationGraph, L2Loss.ComputationGraph, optimizer,
             [new TensorDataModelParam("tokens", ModelParamType.InputParam, TensorData([3L], 1L, 5L, 9L))],
             hyperparameters, runtimeContext: context);
         using var run = rig.BeginResidentRun();
         for (long s = 0; s < 2; s++)
         {
-            var x = rig.InputDef.FromOrderedData(TensorData([3L], s, 5 + s, 63L));
+            var x = rig.InputDef.FromOrderedData(TensorData([3L], s, 5 + s, rows - 1));
             var y = rig.TargetDef.FromOrderedData(RangeTensor([3L, 48L], 0.01f, s));
             if (runtimeValue is { } value) run.Step(rig.MakeHyperparameters(value), x, y);
             else run.Step(x, y);
@@ -822,16 +822,17 @@ public class NNLibraryOptimizerTrainingCoverageTests
             .GetField("_compiledTrainSteps", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(rig)!;
         var nodes = steps.Values.Cast<CompiledGraph>().Single().ReadNodePlacement()!.Nodes;
         var checkpoint = run.TakeCheckpoint();
-        return (nodes.Where(n => n.OutputBytes % (64 * 4 * 4) == 0 && n.OutputBytes > 0 && n.OpType != "Gather")
+        return (nodes.Where(n => n.OutputBytes % (rows * 4 * 4) == 0 && n.OutputBytes > 0 && n.OpType != "Gather")
                 .GroupBy(n => n.OpType).ToDictionary(g => g.Key, g => g.Count()),
             [.. checkpoint.TrainableParams.Fields.Values.Concat(checkpoint.OptimizerState.Fields.Values).Select(Floats)],
             context.AliasedOutputs);
     }
 
-    private static void AssertFusedToTheBit(ComputationGraph optimizer, Hyperparameter[] hyperparameters, float? runtimeValue = null)
+    private static void AssertFusedToTheBit(ComputationGraph optimizer, Hyperparameter[] hyperparameters, float? runtimeValue = null,
+        ComputationGraph? table = null, long rows = 64)
     {
-        var fused = ResidentStepsOnHost(true, optimizer, hyperparameters, runtimeValue);
-        var written = ResidentStepsOnHost(false, optimizer, hyperparameters, runtimeValue);
+        var fused = ResidentStepsOnHost(true, optimizer, hyperparameters, runtimeValue, table, rows);
+        var written = ResidentStepsOnHost(false, optimizer, hyperparameters, runtimeValue, table, rows);
         Assert.Equal(new Dictionary<string, int> { ["AdamUpdate"] = 1 }, fused.TableSized);
         Assert.DoesNotContain("AdamUpdate", written.TableSized.Keys);
         Assert.Equal(written.State, fused.State);
@@ -844,6 +845,13 @@ public class NNLibraryOptimizerTrainingCoverageTests
     {
         AssertFusedToTheBit(AdamOptimizer.ComputationGraph, [0.001f, 0.9f, 0.999f, 1e-8f]);
         AssertFusedToTheBit(AdamWOptimizer.ComputationGraph, [0.001f, 0.9f, 0.999f, 1e-8f, 0.01f]);
+    }
+
+    [Fact]
+    public void TestAnAdamOrAdamWStepOnTheHostUpdatesATableSpreadOverThreadsToTheBit()
+    {
+        AssertFusedToTheBit(AdamOptimizer.ComputationGraph, [0.001f, 0.9f, 0.999f, 1e-8f], null, NNWideGatheredTableProjectionModel.ComputationGraph, 8256);
+        AssertFusedToTheBit(AdamWOptimizer.ComputationGraph, [0.001f, 0.9f, 0.999f, 1e-8f, 0.01f], null, NNWideGatheredTableProjectionModel.ComputationGraph, 8256);
     }
 
     [Fact]

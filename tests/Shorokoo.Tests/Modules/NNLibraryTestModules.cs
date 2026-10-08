@@ -2537,6 +2537,15 @@ public partial class NNGatheredTableProjectionModel
         => Normal.Init(Vector(64L, 4L)).Gather(tokens).MatMul(Normal.Init(Vector(4L, 48L)));
 }
 
+/// <summary><see cref="NNGatheredTableProjectionModel"/> over an <c>[8256, 4]</c> table: more
+/// elements than one task of the fused update takes, and a part task at its end.</summary>
+[Module]
+public partial class NNWideGatheredTableProjectionModel
+{
+    public static Tensor<float32> Inline(Tensor<int64> tokens)
+        => Normal.Init(Vector(8256L, 4L)).Gather(tokens).MatMul(Normal.Init(Vector(4L, 48L)));
+}
+
 /// <summary>ONNX's own <c>InstanceNormalization</c> of <c>[N, 2, 3]</c> input scaled by a trainable
 /// <c>[2, 1]</c> factor, under a trainable per-channel scale and bias.</summary>
 [Module]

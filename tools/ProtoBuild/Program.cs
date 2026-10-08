@@ -8,7 +8,7 @@ namespace ProtoBuild
         {
             Console.WriteLine("Dummy Project to build onnx.proto");
 
-            Onnx.AttributeProto var;
+            _ = typeof(Onnx.AttributeProto);
         }
     }
 }

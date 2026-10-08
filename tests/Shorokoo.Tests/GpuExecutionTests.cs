@@ -265,6 +265,22 @@ public class GpuExecutionTests
     }
 
     [CudaFact]
+    public void CudaProvider_ARunRefusedItsMemoryAfterTrainingAndLoadingModelsLeavesTheCardUsable()
+    {
+        for (int i = 0; i < 3; i++)
+        {
+            CudaProvider_AModelLoadedCompiledReadsItsWeightsOntoTheCardAndRunsAsTheLoadedGraphDoes();
+            CudaProvider_AModelOverSixteenMebibytesPlacesARunsValuesWhereThatPays();
+            CudaProvider_ACopyTheCudaRuntimeFailsIsAnErrorRatherThanADeclinedRange();
+            CudaProvider_ASessionsLimitCapsWhatItAllocatesAndNotAnInputReadWhereItIs();
+            CudaProvider_ASessionRunOverManyShapesKeepsNoMoreOnTheCardThanItsBusiestRunHadInUse();
+            CudaProvider_AShrinkingRunHandsBlocksBackAndEndsBelowThePeakItReached();
+            CudaProvider_TwoRunsFromOneSeedAreBitIdenticalUnderDeterministicCompute();
+            CudaProvider_ARunThatFitsItsBudgetOnlyWhenPlacedSucceedsOnItsFirstCall();
+        }
+    }
+
+    [CudaFact]
     public void CudaProvider_OutputsOnOneBlockOfASessionsMemoryEachFreeTheirOwnPagesAndWhatNoneStandsOnGoesWithTheRun()
     {
         const long MiB = 1024 * 1024;

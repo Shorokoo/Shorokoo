@@ -183,7 +183,7 @@ public abstract class OrtBackend : IShorokooBackend
             Directory.CreateDirectory(directory);
             using var stream = new MemoryStream();
             ProtoBuf.Serializer.Serialize(stream, model);
-            Discard(NewSession(stream.ToArray(), ShorokooGraphOptimization.TrainingStep, ShorokooLogSeverity.Fatal,
+            Discard(NewSession(AsRun(stream.ToArray(), ShorokooGraphOptimization.TrainingStep), ShorokooGraphOptimization.TrainingStep, ShorokooLogSeverity.Fatal,
                 DeviceMemorySettings.Default, DiagnosticSettings.Default, directory, 0, [], precision));
             ModelProto run;
             using (var written = File.OpenRead(Path.Combine(directory, OptimizedModelFile)))
@@ -407,6 +407,41 @@ public abstract class OrtBackend : IShorokooBackend
     /// <summary>Whether this backend's sessions run on a CUDA card.</summary>
     internal bool OnCard => _cudaDeviceId is not null;
 
+    /// <summary>
+    /// Whether a training step's session on the host runs each Adam or AdamW parameter update as
+    /// the one operator the native library adds to the CPU provider, rather than as the chain of
+    /// element-wise operators it is written as (<see cref="OrtFusedUpdates"/>); true unless set
+    /// otherwise, for a test that holds the one to the other. The result is the same to the bit.
+    /// </summary>
+    internal bool FusesOptimizerUpdates { get; init; } = true;
+
+    // Held while a session that registers the native library's operators is built, until one has
+    // been (see NewSessionOnce).
+    private static readonly object OperatorsGate = new();
+    private static volatile bool _operatorsAdded;
+
+    /// <summary>Whether this backend's sessions register the native library's operators: those of
+    /// the CPU provider alone, where the library is deployed.</summary>
+    private bool RegistersOperators => _cudaDeviceId is null && _stockProvider && NativeAllocator.Located is not null;
+
+    /// <summary>
+    /// <paramref name="model"/> as a session built at <paramref name="graphOptimization"/> runs it:
+    /// a training step's on the host with its Adam and AdamW updates fused
+    /// (<see cref="FusesOptimizerUpdates"/>), every other as it is, unparsed.
+    /// </summary>
+    private byte[] AsRun(byte[] model, ShorokooGraphOptimization graphOptimization)
+    {
+        if (!FusesOptimizerUpdates || !RegistersOperators || graphOptimization != ShorokooGraphOptimization.TrainingStep)
+            return model;
+        ModelProto parsed;
+        using (var stream = new MemoryStream(model, writable: false))
+            parsed = Shorokoo.Onnx.OnnxProtobuf.ReadModel(stream);
+        if (!OrtFusedUpdates.Fuse(parsed)) return model;
+        using var written = new MemoryStream();
+        ProtoBuf.Serializer.Serialize(written, parsed);
+        return written.ToArray();
+    }
+
     /// <summary>This backend's sessions take supplied initializers.</summary>
     public bool SuppliesInitializers => true;
 
@@ -429,6 +464,7 @@ public abstract class OrtBackend : IShorokooBackend
         ArgumentNullException.ThrowIfNull(diagnostics);
         // One copy for however many sessions are built from it: ORT takes the model as an array.
         var model = modelBytes.ToArray();
+        model = AsRun(model, graphOptimization);
         if (!SessionPlacing.Suppressed && WeightsToShare(model, outputAliases, suppliedInitializers) is { } weights
             && BuildSharingWeights(model, weights, graphOptimization, logSeverity, deviceMemory, diagnostics, intraOpThreads, suppliedInitializers, precision) is { } sharing)
             return sharing;
@@ -733,6 +769,9 @@ public abstract class OrtBackend : IShorokooBackend
         // process. Disposing in a finally keeps them rooted across the constructor.
         using var options = new SessionOptions();
         Configure(options, graphOptimization, logSeverity);
+        // Every session that may run one of the operators: a graph the runtime wrote out, which a
+        // session is also built from, holds them as it was given them.
+        if (RegistersOperators) options.RegisterCustomOpLibrary(NativeAllocator.Located!);
         if (intraOpThreads > 0) options.IntraOpNumThreads = intraOpThreads;
         // A session with no thread count of its own runs its operators on the process's pools, so
         // that two sessions run one after another -- a session and the one it places values
@@ -793,8 +832,22 @@ public abstract class OrtBackend : IShorokooBackend
                         options.AddInitializer(weight.Name, view);
                     }
             InferenceSession session;
-            using (CachingAllocator.Charge(host, card))
-                session = model is null ? new InferenceSession(modelFile!, options) : new InferenceSession(model, options);
+            // ONNX Runtime adds a registered domain to ONNX's process-wide table of domains the first
+            // time a session is built with it, checking it is not there first and then adding it,
+            // unguarded: two sessions built at once both find it missing, and the second fails ("the
+            // domain is already exist"). So sessions are built one at a time until one has added it.
+            var gate = RegistersOperators && !_operatorsAdded ? OperatorsGate : null;
+            if (gate is not null) Monitor.Enter(gate);
+            try
+            {
+                using (CachingAllocator.Charge(host, card))
+                    session = model is null ? new InferenceSession(modelFile!, options) : new InferenceSession(model, options);
+                if (gate is not null) _operatorsAdded = true;
+            }
+            finally
+            {
+                if (gate is not null) Monitor.Exit(gate);
+            }
             // The values themselves are the caller's to keep alive for the session's life; this
             // keeps them reachable across the constructor, which takes them as bare handles.
             GC.KeepAlive(suppliedInitializers);

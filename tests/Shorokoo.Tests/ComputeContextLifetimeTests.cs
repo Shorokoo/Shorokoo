@@ -804,6 +804,21 @@ public class ComputeContextLifetimeCoverageTests
         Assert.Null(IndexCheckOf(Scores("Relu", "s:float[4,3]"), 0, 1, 2, 4));
     }
 
+    [Fact]
+    public void TestAWrittenGraphProvesAFusedUpdateWritingItsParameterAndMomentsEachOverTheInputItReadsInThatPlace()
+    {
+        static GraphProto Updating(string inputs) => GraphOf("p m v g k", "P M V",
+            Op("AdamUpdate", inputs + " k k k k k k", "P M V", domain: "ai.shorokoo"));
+        bool ProvesInto(GraphProto graph, string output, string input) => OutputAliasProof.Prove(graph, [new OutputAlias(output, input)]).Count == 1;
+        Assert.True(ProvesInto(Updating("p m v g"), "P", "p"));
+        Assert.True(ProvesInto(Updating("p m v g"), "M", "m"));
+        Assert.True(ProvesInto(Updating("p m v g"), "V", "v"));
+        Assert.False(ProvesInto(Updating("p m v g"), "P", "m"));
+        Assert.False(ProvesInto(Updating("p m v p"), "P", "p"));
+        Assert.False(ProvesInto(Updating("p m v g"), "P", "g"));
+        Assert.False(ProvesInto(GraphOf("p m v g k", "P M V", Op("AdamUpdate", "p m v g k k k k k k", "P M V", domain: "custom")), "P", "p"));
+    }
+
     private static PlacementProof PlacementsOver(GraphProto graph, string consumed, PlacementMemory? memory = null)
     {
         var inputs = graph.Inputs.Where(i => i.Type?.TensorType?.Shape is not null).ToDictionary(

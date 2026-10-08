@@ -31,6 +31,13 @@ internal static unsafe class NativeAllocator
 
     private static readonly Lazy<IntPtr> _create = new(Bind, LazyThreadSafetyMode.ExecutionAndPublication);
 
+    private static readonly Lazy<string?> _located = new(Locate, LazyThreadSafetyMode.ExecutionAndPublication);
+
+    /// <summary><see cref="Locate"/>, asked once: the path a session registers the library's
+    /// operators from (<c>native/shorokoo_ort_ops.cpp</c>), or null where it is not deployed in
+    /// either place.</summary>
+    internal static string? Located => _located.Value;
+
     /// <summary>
     /// A native <c>OrtAllocator</c> over the managed allocator <paramref name="state"/> names,
     /// whose requests go to the entry points <paramref name="allocate"/>

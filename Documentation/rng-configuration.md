@@ -187,7 +187,7 @@ Two call sites of a module-typed `Function` need none of this: each has its own 
 
 A `[TrainableParamInitializer]` body may loop (`LoopAPI.Iterate`). Each trip folds its
 trip number onto the parameter's init key, so trips are independent samples (see
-[nn-library.md](initializers.md#initializers-shorokoomodulesinitializers)); nested loops
+[initializers.md](initializers.md#initializers-shorokoomodulesinitializers)); nested loops
 contribute one index each. These per-trip keys are reproducible but have no individual
 override addresses; see [Per-stream overrides](#per-stream-overrides).
 

@@ -19,7 +19,7 @@ Related: [onnx-and-weights.md](onnx-and-weights.md) · [training.md](training.md
 - Saves are **atomic** (staged beside the target, committed by rename), so a crash never
   corrupts an existing checkpoint. The target's parent directory must already exist.
   Every other save API is atomic too; see [onnx-and-weights.md](onnx-and-weights.md#facts)
-  and [training.md](training-checkpoints.md#save-and-resume-a-checkpoint-across-process-restarts).
+  and [training-checkpoints.md](training-checkpoints.md#save-and-resume-a-checkpoint-across-process-restarts).
 - A single-file training-checkpoint save returns a `SaveReport` (committed size, time
   spent writing, flushing and committing); a directory save returns `void`. See
   [What a save costs](training-checkpoints.md#what-a-save-costs).
@@ -547,7 +547,7 @@ Rules:
 - A data entry, stored or Zstd-compressed, may be of any size, and so may the checkpoint:
   an entry is written straight from the tensors' storage and read back a tensor at a time,
   and a tensor past what a managed array holds is read into host memory of a backend (see
-  [training.md](training-checkpoints.md#what-a-save-costs)). The single file writes Zip64 records
+  [training-checkpoints.md](training-checkpoints.md#what-a-save-costs)). The single file writes Zip64 records
   where a size or offset — an entry's, or the central directory's — is 4,294,967,295 bytes
   (4 GiB − 1) or more, or where the archive holds 65,535 entries or more, and nowhere
   else, so a smaller archive carries none; any Zip64-capable zip reader opens it. The directory form has no limit of its own.

@@ -119,7 +119,7 @@ and `QuickExecutionEngine` for a module graph. For example:
 Values go in the graph's input order, `[Hyper]` parameters first. An initializer's output
 never carries module machinery: an initializer may not create or reference a model, and
 building one that does is refused with `FW055` (see *Writing your own* in
-[nn-library.md](initializers.md#initializers-shorokoomodulesinitializers)).
+[initializers.md](initializers.md#initializers-shorokoomodulesinitializers)).
 
 Concretize the module's `ComputationGraph` against the input first, then execute:
 

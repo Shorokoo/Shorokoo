@@ -358,7 +358,7 @@ In short:
 Operations leave their source untouched unless stated. Two **end** it:
 `MoveToAttribute()` ([above](#the-two-conversions-and-which-one-spends-its-source))
 and feeding it to a run as it is, which consumes it; feed `.Shared()` to have the run
-only read it ([inference.md](tensors-in-a-run.md#feeding-a-run-consumed-shared-or-tried)).
+only read it ([tensors-in-a-run.md](tensors-in-a-run.md#feeding-a-run-consumed-shared-or-tried)).
 `TensorDataSequence.Create(...)` copies its tensors, and disposing the sequence
 releases only its copies.
 

@@ -72,7 +72,7 @@ arithmetic. The rest of this page describes `z`. Consequences:
 
 Nothing is re-drawn or rejected, so `TruncatedNormal`'s `[−2, 2]` is a clamp rather than
 rejection sampling
-([nn-library.md](initializers.md#initializers-shorokoomodulesinitializers)).
+([initializers.md](initializers.md#initializers-shorokoomodulesinitializers)).
 
 ## How finely the magnitude axis is resolved
 

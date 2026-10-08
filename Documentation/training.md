@@ -240,7 +240,7 @@ public sealed class ResidentTrainingRun : IDisposable
 ### What a training step consumes
 
 A training step feeds its inputs like any run
-([inference.md](tensors-in-a-run.md#feeding-a-run-consumed-shared-or-tried)): what it is given as it is,
+([tensors-in-a-run.md](tensors-in-a-run.md#feeding-a-run-consumed-shared-or-tried)): what it is given as it is,
 it **consumes** — dead once the step starts, memory returned as the step returns — and what it is
 given `.Shared()` it only reads.
 
@@ -252,7 +252,7 @@ var next = rig.TrainStep(best.Shared(), x2, y2);   // a checkpoint kept past the
 
 **What a step keeps of what it reads.** A tensor the run cannot address in place (any tensor built
 from a C# array, and a host tensor on a card) is read through a copy that the tensor keeps for
-reuse ([inference.md](tensors-in-a-run.md#feeding-a-run-consumed-shared-or-tried)). A training step
+reuse ([tensors-in-a-run.md](tensors-in-a-run.md#feeding-a-run-consumed-shared-or-tried)). A training step
 releases the copies of its **batch** as it returns, success or failure, so a `.Shared()` dataset is
 not held a second time (on a card, not uploaded whole); each step copies its batch afresh. Copies of
 the **checkpoint's state** are kept: a checkpoint fed `.Shared()` on a card keeps a copy on the card
@@ -436,7 +436,7 @@ optimizer's temporaries take no memory of their own either
 
 Results are bit-identical with or without it, and there is nothing to configure. On a card a
 resident run thus holds its state once rather than twice; under a device-memory budget the state
-is counted once — see [inference.md](gpu-backends.md#a-contexts-device-memory-budget). A step's peak
+is counted once — see [gpu-backends.md](gpu-backends.md#a-contexts-device-memory-budget). A step's peak
 falls by what of the new state a step writing it beside the old would hold at its busiest, which
 is not always all of it. The update's temporaries take memory of their own on ONNX Runtime either
 way, and under AdamW it frees one of them before it writes a weight's new value, so a step over

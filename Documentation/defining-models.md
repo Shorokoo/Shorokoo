@@ -64,7 +64,7 @@ so initializers compose. A `Tensor<T>` input may be **another trainable paramete
 arriving as its initial value. An initializer body may **not** create or reference a
 model (no `Foo.Model(...)`, `Foo.Call(...)`, `ModelSequence`, `GetTrainableParam`, or
 model-typed input): that fails with `FW055` when the graph is built. See *Writing your
-own* in [nn-library.md](initializers.md#initializers-shorokoomodulesinitializers).
+own* in [initializers.md](initializers.md#initializers-shorokoomodulesinitializers).
 
 ## Hyperparameter baking
 
@@ -408,7 +408,7 @@ covers initializers that take another parameter).
 - **`Inline`'s return type cannot vary.** A choice that changes the output *type*
   (e.g. a loss reduced to `Scalar<float32>` vs a per-element `Tensor<float32>`) cannot be
   a hyper. `TrainingRig.FromScratch` takes the loss as a **separate graph**, so pick the
-  reduction there ([nn-library.md](losses-and-optimizers.md#loss-configurable-knobs)).
+  reduction there ([losses-and-optimizers.md](losses-and-optimizers.md#loss-configurable-knobs)).
 - **There is no enum hyper.** Encode the knob as a `Scalar<int64>` compared in-graph
   (`(mode > Scalar(3L)).IfElse(a, b)`); the comparison may read `ctx.IterationIndex`, so
   the knob can differ per layer ([Per-layer variants](#per-layer-variants)). A choice

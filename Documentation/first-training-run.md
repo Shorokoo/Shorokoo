@@ -76,8 +76,10 @@ var rig = TrainingRig.FromScratch(
 `[N, C, d1, …]` against `[N, d1, …]`. The class axis is always axis 1. See the
 [losses table](losses-and-optimizers.md#losses-shorokoomoduleslosses).
 
-The full signature, the other optimizers and schedules are in
-[training.md](training.md#trainingrig-api).
+The full signature is in [training.md](training.md#trainingrig-api), the other optimizers in
+[losses-and-optimizers.md](losses-and-optimizers.md#optimizers-shorokoomodulesoptimizers), and
+the schedules in
+[training-hyperparameters.md](training-hyperparameters.md#schedule-factories-and-combinators).
 
 ## 3. Train
 

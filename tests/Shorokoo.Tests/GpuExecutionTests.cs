@@ -368,6 +368,16 @@ public class GpuExecutionTests
     }
 
     [CudaFact]
+    public void CudaProvider_ARandomDrawsBitwiseOperatorsRunOnTheHost()
+    {
+        using var traced = new ComputeContext { Diagnostics = new DiagnosticSettings { TraceNodePlacement = true } };
+        var (t, cond) = (TensorData([8L], new float[8]), TensorData(DType.Bool, [], true));
+        using var compiled = traced.Compile(DropoutSquaredInOneIfArmModel.ComputationGraph.ToConcreteArchitecture([t, cond]).ToConcreteModel());
+        compiled.Execute(t.Shared(), cond.Shared());
+        Assert.Contains("BitShift", compiled.ReadNodePlacement()!.NodesOn("CPUExecutionProvider").Select(n => n.OpType));
+    }
+
+    [CudaFact]
     public void CudaProvider_ARunWithANodeTheCardHasNoKernelForComputesWhatItComputesUnplaced()
     {
         var (shared, consumed, providers) = SharedAndConsumed(ComputeContextLifetimeCoverageTests.GraphOf("x:float[1024,1024]", "z:float[1024,1024]",

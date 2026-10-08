@@ -209,7 +209,7 @@ var activated = y.Relu();
 ## Reading concrete values out of a result
 
 Execution, run outputs and checkpoint parameters are `TensorData` (see
-[inference.md](inference.md)). Read values by naming the CLR storage type, wherever the tensor
+[tensors-in-a-run.md](tensors-in-a-run.md)). Read values by naming the CLR storage type, wherever the tensor
 is:
 
 ```csharp
@@ -341,7 +341,7 @@ var b = TensorFill((Vector<int64>)[Scalar(3L)], fill);   // fine: fill is untouc
 A `TensorData` **is** its memory: one object per allocation, or per range of the
 memory of an input a run consumed and wrote values into, never shared with
 another tensor. `Delete()` (the same as `Dispose()`) releases it. The full lifetime
-model is in [A tensor's lifetime](inference.md#a-tensors-lifetime-locks-and-deletion).
+model is in [A tensor's lifetime](tensors-in-a-run.md#a-tensors-lifetime-locks-and-deletion).
 In short:
 
 - **Deleting is optional.** A dropped tensor is reclaimed like any object. Delete
@@ -358,14 +358,14 @@ In short:
 Operations leave their source untouched unless stated. Two **end** it:
 `MoveToAttribute()` ([above](#the-two-conversions-and-which-one-spends-its-source))
 and feeding it to a run as it is, which consumes it; feed `.Shared()` to have the run
-only read it ([inference.md](inference.md#feeding-a-run-consumed-shared-or-tried)).
+only read it ([inference.md](tensors-in-a-run.md#feeding-a-run-consumed-shared-or-tried)).
 `TensorDataSequence.Create(...)` copies its tensors, and disposing the sequence
 releases only its copies.
 
 `To(context)`, when the context can read the tensor in place, and `ToHost()`, when it
 is already on the host, return the same tensor, so consuming or deleting the result
 (including via `using`) affects the original. `CopyTo` always returns an independent
-tensor; see [Moving data between contexts](inference.md#moving-data-between-contexts).
+tensor; see [Moving data between contexts](tensors-in-a-run.md#moving-data-between-contexts).
 
 ### `AccessMemory()`: in place on the host, through a copy on a card
 
@@ -411,7 +411,7 @@ outputs of a run on a CPU backend, are host-resident. `ToHost()` makes a tensor 
 its own in host memory — `checkpoint.ToHost()` does so for a whole training
 checkpoint. Nothing moves a run's output to the host but `ToHost()`, `To` or
 `CopyTo`, or a run on a host backend it is fed to — see
-[Where a run's inputs and outputs are](inference.md#where-a-runs-inputs-and-outputs-are).
+[Where a run's inputs and outputs are](tensors-in-a-run.md#where-a-runs-inputs-and-outputs-are).
 
 ## Anti-patterns
 

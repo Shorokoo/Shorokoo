@@ -19,10 +19,10 @@ Related: [onnx-and-weights.md](onnx-and-weights.md) · [training.md](training.md
 - Saves are **atomic** (staged beside the target, committed by rename), so a crash never
   corrupts an existing checkpoint. The target's parent directory must already exist.
   Every other save API is atomic too; see [onnx-and-weights.md](onnx-and-weights.md#facts)
-  and [training.md](training.md#save-and-resume-a-checkpoint-across-process-restarts).
+  and [training.md](training-checkpoints.md#save-and-resume-a-checkpoint-across-process-restarts).
 - A single-file training-checkpoint save returns a `SaveReport` (committed size, time
   spent writing, flushing and committing); a directory save returns `void`. See
-  [What a save costs](training.md#what-a-save-costs).
+  [What a save costs](training-checkpoints.md#what-a-save-costs).
 - A `.skpt` can carry [named weight sets](#named-weight-sets-default--ema) (e.g. `ema`
   alongside `default`), a [training checkpoint](#training-checkpoints) that
   `TrainingRig.Load` resumes from the file alone, and a
@@ -137,7 +137,7 @@ var next    = rig.TrainStep(resumed, inputBatch, targetBatch);   // trainstep co
 
 A checkpoint whose state is in device memory (one a resident run or `Fit` handed out on a GPU)
 is saved from there, each tensor written through one bounded host staging buffer, so the state is
-never whole in host memory — see [What a save costs](training.md#what-a-save-costs). Loading
+never whole in host memory — see [What a save costs](training-checkpoints.md#what-a-save-costs). Loading
 for a rig that trains on a device is the same in reverse: `LoadCheckpoint` and
 `LoadCheckpointFromSkpt` read the state from the file straight into the rig's device memory, a
 bounded piece at a time. An inference model loads onto a device with
@@ -187,7 +187,7 @@ What the file carries:
   tensors. The training loop owns them (`TrainStep` advances the step and carries
   epoch/batch through). Unknown epoch/batch, and the loss of an initial or bare
   checkpoint, are omitted and reload as `null`, never `0`.
-- **The [training history](training.md#the-training-history)**, when non-empty, as
+- **The [training history](training-data.md#the-training-history)**, when non-empty, as
   `data/history.safetensors` (registry key `history`), one tensor per column: `step` (`int64[n]`), `loss` (`float32[n]`), `epoch`
   and `batch_index` (`int64[n]`) with `epoch_present` / `batch_index_present`
   (`bool[n]`; `false` reads back `null`), and per hyperparameter
@@ -206,7 +206,7 @@ Round-trip is exact: state is bit-identical, counters are preserved, and a resum
 Runtime GPU backend under deterministic compute; see [Seeding the run](training.md#seeding-the-run)). Loading fails loudly, naming the
 tensor, on a mapped state tensor the rig does not declare, a declared one the file does
 not map, a tampered entry (sha256), or an element type or dimension mismatch with the
-rig's parameters (see [training.md](training.md)).
+rig's parameters (see [training-checkpoints.md](training-checkpoints.md)).
 
 ### Without a rig in hand
 
@@ -243,7 +243,7 @@ model's initializers are deferred, since the checkpoint overwrites their values;
 would.
 
 Format pairs: `Persistence.SaveTrainingCheckpoint` / `Persistence.LoadTrainingCheckpoint`
-(and `rig.LoadCheckpoint`) handle the **flat** [safetensors format](training.md);
+(and `rig.LoadCheckpoint`) handle the **flat** [safetensors format](training-checkpoints.md#save-and-resume-a-checkpoint-across-process-restarts);
 `SaveTrainingCheckpointToSkpt` / `ForTrainingCheckpoint`, `rig.LoadCheckpointFromSkpt`
 and `TrainingRig.Load` handle `.skpt`, which `Persistence.Load` and
 `Persistence.LoadEvaluationModel` also read. No entry point sniffs bytes: the wrong
@@ -547,7 +547,7 @@ Rules:
 - A data entry, stored or Zstd-compressed, may be of any size, and so may the checkpoint:
   an entry is written straight from the tensors' storage and read back a tensor at a time,
   and a tensor past what a managed array holds is read into host memory of a backend (see
-  [training.md](training.md#what-a-save-costs)). The single file writes Zip64 records
+  [training.md](training-checkpoints.md#what-a-save-costs)). The single file writes Zip64 records
   where a size or offset — an entry's, or the central directory's — is 4,294,967,295 bytes
   (4 GiB − 1) or more, or where the archive holds 65,535 entries or more, and nowhere
   else, so a smaller archive carries none; any Zip64-capable zip reader opens it. The directory form has no limit of its own.

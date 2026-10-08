@@ -52,7 +52,7 @@ For `[Module] class Foo` with `Inline(I x, [Hyper] H h) -> O`:
 | `Foo.Model(h).Call(x)` | Build the subgraph for input `x`. |
 | `Foo.Call(h, x)` | Shortcut for `Foo.Model(h).Call(x)`. Hyperparameters come first here; only the `Inline` source signature is inputs-first. |
 | `Foo.ComputationGraph` | The readonly `ComputationGraph` (kind `Module`; used for export and training). |
-| `FooHyperparameters` | Generated **only when every `[Hyper]` is tensor-shaped** (`Scalar<T>`, `Vector<T>` or `Tensor<T>`, any dtype): an init-only set implementing `IOptimizerHyperparameters`, with defaults from `[Hyper(default)]` at the declared dtype. Only a scalar can have a default; a non-scalar's property is `required`. See [training.md](training.md). |
+| `FooHyperparameters` | Generated **only when every `[Hyper]` is tensor-shaped** (`Scalar<T>`, `Vector<T>` or `Tensor<T>`, any dtype): an init-only set implementing `IOptimizerHyperparameters`, with defaults from `[Hyper(default)]` at the declared dtype. Only a scalar can have a default; a non-scalar's property is `required`. See [training-hyperparameters.md](training-hyperparameters.md). |
 
 For `[TrainableParamInitializer] class ConstInit` with `Inline(Vector<int64> shape)`:
 `ConstInit.Init(shape)` returns the initialized trainable `Tensor<T>`. A class named
@@ -64,7 +64,7 @@ so initializers compose. A `Tensor<T>` input may be **another trainable paramete
 arriving as its initial value. An initializer body may **not** create or reference a
 model (no `Foo.Model(...)`, `Foo.Call(...)`, `ModelSequence`, `GetTrainableParam`, or
 model-typed input): that fails with `FW055` when the graph is built. See *Writing your
-own* in [nn-library.md](nn-library.md#initializers-shorokoomodulesinitializers).
+own* in [nn-library.md](initializers.md#initializers-shorokoomodulesinitializers).
 
 ## Hyperparameter baking
 
@@ -82,7 +82,7 @@ own* in [nn-library.md](nn-library.md#initializers-shorokoomodulesinitializers).
   on the same hyper stay live. See
   [What concretization fixes](inference.md#what-concretization-fixes).
 - **Value-only** (scale factors, momentum, ε): read at every `Execute`, may vary per
-  call, and may be scheduled per step in an optimizer (see [training.md](training.md)).
+  call, and may be scheduled per step in an optimizer (see [training-hyperparameters.md](training-hyperparameters.md)).
 
 How a hyper is supplied depends on the route:
 
@@ -400,7 +400,7 @@ and the index works the same way: `[Hyper] Scalar<int64> lookupFrom` with
 
 `bank`'s initializer reading `wte`, a parameter outside the branch, does not keep `bank`
 alive in the ordinary layers: pruning follows where a parameter's value goes, not what
-its initializer reads ([Writing your own](nn-library.md#initializers-shorokoomodulesinitializers)
+its initializer reads ([Writing your own](initializers.md#initializers-shorokoomodulesinitializers)
 covers initializers that take another parameter).
 
 ### What must still be a C# argument
@@ -408,7 +408,7 @@ covers initializers that take another parameter).
 - **`Inline`'s return type cannot vary.** A choice that changes the output *type*
   (e.g. a loss reduced to `Scalar<float32>` vs a per-element `Tensor<float32>`) cannot be
   a hyper. `TrainingRig.FromScratch` takes the loss as a **separate graph**, so pick the
-  reduction there ([nn-library.md](nn-library.md#loss-configurable-knobs)).
+  reduction there ([nn-library.md](losses-and-optimizers.md#loss-configurable-knobs)).
 - **There is no enum hyper.** Encode the knob as a `Scalar<int64>` compared in-graph
   (`(mode > Scalar(3L)).IfElse(a, b)`); the comparison may read `ctx.IterationIndex`, so
   the knob can differ per layer ([Per-layer variants](#per-layer-variants)). A choice
@@ -701,7 +701,7 @@ new Module<Scalar<float32>, (Tensor<float32>, Tensor<float32>), Tensor<float32>>
   overloads.
 - **No `FooHyperparameters` classes.** Pass `Hyperparameter` / `Schedules.*` values
   positionally to `TrainingRig.FromScratch(...)` in the optimizer's `[Hyper]` order (see
-  [training.md](training.md)).
+  [training-hyperparameters.md](training-hyperparameters.md)).
 - **Naming.** The module name defaults to the declaring class; pass `name:` to override.
 - Lower level: `GraphBuilder.BuildComputationGraphFromDelegate(...)` (uncached) and the
   `Module<...>` / `CallbackModule<...>` constructors.

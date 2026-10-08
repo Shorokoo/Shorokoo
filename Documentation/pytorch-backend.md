@@ -18,7 +18,7 @@ it), and it needs a **Python environment**, which it can provision on first use.
   [JAX backend](jax-backend.md)) and `Shorokoo.PythonHost`. PyTorch itself lives in the Python
   environment.
 - A torch backend is **always named**: `new ComputeContext(new TorchCpuBackend())`. It is
-  never a candidate for [auto-discovery](inference.md#auto-discovery), and
+  never a candidate for [auto-discovery](backends-and-devices.md#auto-discovery), and
   `ComputeContext.Default` stays on ONNX Runtime.
 - The **Python environment** is, in order: the one you name in the backend's options; the one
   the `SHOROKOO_PYTHON_ENV` environment variable names; or one provisioned with
@@ -119,7 +119,7 @@ downloads the CUDA libraries for a card that is not there.
 `WinGpuBackend`, `LinuxGpuBackend` or a CUDA backend loaded through `IsolatedBackend`, whichever
 starts first: every CUDA backend runs on one pinned copy of cuDNN and cuBLAS, which is the release
 the CUDA environment's PyTorch carries — see
-[The NVIDIA libraries the CUDA backends run on](inference.md#the-nvidia-libraries-the-cuda-backends-run-on).
+[The NVIDIA libraries the CUDA backends run on](gpu-backends.md#the-nvidia-libraries-the-cuda-backends-run-on).
 When the CUDA environment is provisioned, or first used, its copies of those libraries become
 hard links to the shared cache's, filling the cache from them if it is empty, so nothing more is
 downloaded and PyTorch loads the very same files as the other backends. An environment you name
@@ -241,7 +241,7 @@ view (`Transpose`, `Expand`, `Slice`, a same-type `Cast`).
 
 **Placement.** A run that consumes inputs writes its values of a mebibyte or more into ranges of
 their memory where the graph proves it safe ([A run that writes into what it
-consumed](inference.md#a-run-that-writes-into-what-it-consumed)): each with torch's own operator
+consumed](tensors-in-a-run.md#a-run-that-writes-into-what-it-consumed)): each with torch's own operator
 writing into the range — an element-wise operator's or a matrix product's `out=` form (on
 floating-point values), `Softmax`, `LogSoftmax` and `Gelu` through theirs, `Gemm` as a product
 written into the range and scaled and summed there, `Clip` and the normalizations computed step by
@@ -285,7 +285,7 @@ so the per-session settings map only partly:
 `OperationCanceledException` carrying the token. One long kernel is not interrupted.
 
 **Precision on CUDA.** `float32` is computed in full `float32` precision unless the context allows
-TensorFloat-32 ([Precision](inference.md#precision-gpu-backends)). torch's two switches for it are
+TensorFloat-32 ([Precision](gpu-backends.md#precision-gpu-backends)). torch's two switches for it are
 the whole process's, so a run sets them from its session as it starts — about 0.3 µs — whatever
 they were before, and runs of sessions that set them differently do not overlap: runs in one
 precision run on the cards beside one another, and a run in the other waits until they are done —

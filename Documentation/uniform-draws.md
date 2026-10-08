@@ -28,7 +28,7 @@ var init   = UniformRange.Init([Scalar(4L), Scalar(8L)], Scalar(-1f), Scalar(1f)
   `low + (high − low)·u` gives; see [the next section](#the-range-is-addressed-not-scaled).
 - Bounds may be compile-time literals or graph scalars computed in-graph: the two
   `RandomUniform` overloads in [core-types.md](core-types.md#factory-helpers-using-static-shorokooglobals),
-  and every [initializer](nn-library.md#initializers-shorokoomodulesinitializers) that takes a
+  and every [initializer](initializers.md#initializers-shorokoomodulesinitializers) that takes a
   bound as an `Init` argument. Both forms use the same draw and carry the same guarantees.
   Graph-scalar bounds cannot be expressed as ONNX attributes, so they also need a
   concrete model built through [`ToConcreteModel`](rng-configuration.md), not a bare

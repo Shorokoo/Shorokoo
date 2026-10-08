@@ -46,7 +46,7 @@ var init   = NormalDist.Init([Scalar(4L), Scalar(8L)], Scalar(0f), Scalar(0.02f)
   the same draw and carry the same guarantees. Graph-scalar parameters cannot be expressed as
   ONNX attributes, so they also need a concrete model built through
   [`ToConcreteModel`](rng-configuration.md), not a bare architecture. The
-  [initializers](nn-library.md#initializers-shorokoomodulesinitializers) that take `mean` and
+  [initializers](initializers.md#initializers-shorokoomodulesinitializers) that take `mean` and
   `scale` as `Init` arguments do not go through that overload: they draw standard-normal and
   apply the shift and scale as ordinary graph arithmetic, so they need no concrete model.
 
@@ -72,7 +72,7 @@ arithmetic. The rest of this page describes `z`. Consequences:
 
 Nothing is re-drawn or rejected, so `TruncatedNormal`'s `[−2, 2]` is a clamp rather than
 rejection sampling
-([nn-library.md](nn-library.md#initializers-shorokoomodulesinitializers)).
+([nn-library.md](initializers.md#initializers-shorokoomodulesinitializers)).
 
 ## How finely the magnitude axis is resolved
 

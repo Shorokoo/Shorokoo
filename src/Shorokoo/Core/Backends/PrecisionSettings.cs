@@ -39,7 +39,7 @@ public sealed record PrecisionSettings
     /// precision.
     ///
     /// <para>It allows, and does not require: what each backend does with it is in the user guide
-    /// (<c>inference.md</c>, "Precision"). On the ONNX Runtime CUDA backend it is the provider's
+    /// (<c>gpu-backends.md</c>, "Precision"). On the ONNX Runtime CUDA backend it is the provider's
     /// <c>use_tf32</c>; on the PyTorch CUDA backend, torch's switches for cuBLAS and cuDNN, set for
     /// each run from its session; on the JAX CUDA backend, the precision XLA compiles each product
     /// and convolution in. It changes nothing on a CPU backend, which computes <c>float32</c> in

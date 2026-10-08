@@ -20,7 +20,7 @@ namespace Shorokoo.Modules.Losses;
 /// configurable knobs (class <c>weight</c>, <c>ignoreIndex</c>,
 /// <c>labelSmoothing</c>, <c>reduction</c>); passing a <c>weight</c> tensor adds a
 /// third graph input, so those overloads leave the default rig path — see the
-/// Losses section of <c>Documentation/nn-library.md</c> for the rig-via-baked-weight
+/// Losses section of <c>Documentation/losses-and-optimizers.md</c> for the rig-via-baked-weight
 /// recipe.
 /// </para>
 /// </summary>

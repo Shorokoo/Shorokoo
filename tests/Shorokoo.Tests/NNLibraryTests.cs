@@ -870,6 +870,20 @@ public class NNLibraryOptimizerTrainingCoverageTests
     {
         Assert.Equal(2, ResidentStepsOnHost(true, AdamOptimizer.ComputationGraph, [0.001f, 0.9f, 0.999f, 1e-8f], null).Fused);
         Assert.Equal(2, ResidentStepsOnHost(true, AdamWOptimizer.ComputationGraph, [0.001f, 0.9f, 0.999f, 1e-8f, 0.01f], null).Fused);
+        Assert.Equal(2, FusedUpdatesOfAStepUnderCrossEntropy(AdamOptimizer.ComputationGraph, [0.001f, 0.9f, 0.999f, 1e-8f]));
+        Assert.Equal(2, FusedUpdatesOfAStepUnderCrossEntropy(AdamWOptimizer.ComputationGraph, [0.001f, 0.9f, 0.999f, 1e-8f, 0.01f]));
+    }
+
+    private static int FusedUpdatesOfAStepUnderCrossEntropy(ComputationGraph optimizer, Hyperparameter[] hyperparameters)
+    {
+        using var context = new ComputeContext(new HostBackend(true)) { Diagnostics = new Shorokoo.Core.Backends.DiagnosticSettings { TraceNodePlacement = true } };
+        var rig = TrainingRig.FromScratch(NNGatheredTableProjectionModel.ComputationGraph, CrossEntropyLoss.ComputationGraph, optimizer,
+            [new TensorDataModelParam("tokens", ModelParamType.InputParam, TensorData([3L], 1L, 5L, 9L))], hyperparameters, runtimeContext: context);
+        using var run = rig.BeginResidentRun();
+        run.Step(rig.InputDef.FromOrderedData(TensorData([3L], 1L, 5L, 9L)), rig.TargetDef.FromOrderedData(TensorData([3L], 2L, 7L, 40L)));
+        var steps = (System.Collections.IDictionary)typeof(TrainingRig)
+            .GetField("_compiledTrainSteps", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(rig)!;
+        return steps.Values.Cast<CompiledGraph>().Single().ReadNodePlacement()!.Nodes.Count(n => n.OpType == "AdamUpdate");
     }
 
     [Fact]

@@ -86,8 +86,9 @@ compiled graphs run in turn, or a compiled graph whose runs consuming their inpu
 through a session of their own
 ([A run that writes into what it consumed](tensors-in-a-run.md#a-run-that-writes-into-what-it-consumed)). A session
 built with an intra-op thread count of its own (`CreateSession`'s `intraOpThreads`) keeps a pool of
-its own of that size; where something else made ONNX Runtime's environment first, every session
-keeps its own.
+its own of that size, and so does a session that traces its nodes
+(`DiagnosticSettings.TraceNodePlacement`), since ONNX Runtime profiles the pool a session runs on;
+where something else made ONNX Runtime's environment first, every session keeps its own.
 
 ### Auto-discovery
 

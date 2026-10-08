@@ -38,11 +38,24 @@ namespace Shorokoo.Core.AutoDiffCheckpointing;
 internal static class OrtExecutionOrder
 {
     /// <summary>The indices of <paramref name="nodes"/> in the order ORT executes them.</summary>
-    public static int[] Compute(IList<FastNode> nodes)
+    public static int[] Compute(IList<FastNode> nodes) => ComputeOver(nodes, Flat(nodes, n => n.Inputs), Flat(nodes, n => n.Outputs));
+
+    /// <summary>The indices of <paramref name="nodes"/> in the order ORT executes them, given each
+    /// node's <see cref="FastNode.Inputs"/> and <see cref="FastNode.Outputs"/> by position.</summary>
+    internal static int[] ComputeOver(IList<FastNode> nodes, IReadOnlyList<FastTensorKey?>[] inputsOf, IReadOnlyList<FastTensorKey?>[] outputsOf)
     {
         var result = new List<int>(nodes.Count);
-        EmitLevel(nodes, MatchScopes(nodes), 0, nodes.Count, rank: null, result);
+        EmitLevel(nodes, inputsOf, outputsOf, MatchScopes(nodes), 0, nodes.Count, rank: null, result);
         return result.ToArray();
+    }
+
+    /// <summary>What <paramref name="of"/> gives of each node, by position: FastNode flattens its
+    /// inputs and outputs on every read.</summary>
+    private static IReadOnlyList<FastTensorKey?>[] Flat(IList<FastNode> nodes, System.Func<FastNode, List<FastTensorKey?>> of)
+    {
+        var flat = new IReadOnlyList<FastTensorKey?>[nodes.Count];
+        for (int i = 0; i < nodes.Count; i++) flat[i] = of(nodes[i]);
+        return flat;
     }
 
     /// <summary>
@@ -66,7 +79,7 @@ internal static class OrtExecutionOrder
         for (int p = 0; p < preferred.Count; p++) rank[index[preferred[p]]] = p;
 
         var result = new List<int>(nodes.Count);
-        EmitLevel(nodes, MatchScopes(nodes), 0, nodes.Count, rank, result);
+        EmitLevel(nodes, Flat(nodes, n => n.Inputs), Flat(nodes, n => n.Outputs), MatchScopes(nodes), 0, nodes.Count, rank, result);
         // The output nodes ORT never sees keep closing the list.
         for (int i = 0; i < nodes.Count; i++)
             if (InternalOpCodes.IsGraphOutputOp(nodes[i].OpCode)) result.Add(i);
@@ -121,7 +134,8 @@ internal static class OrtExecutionOrder
     /// <paramref name="rank"/> null the traversal key is ORT's node index; otherwise it is the
     /// preferred rank, which yields the linear order <see cref="Realize"/> describes.
     /// </summary>
-    private static void EmitLevel(IList<FastNode> nodes, int[]? closeOf, int lo, int hi, int[]? rank, List<int> result)
+    private static void EmitLevel(IList<FastNode> nodes, IReadOnlyList<FastTensorKey?>[] inputsOf, IReadOnlyList<FastTensorKey?>[] outputsOf,
+        int[]? closeOf, int lo, int hi, int[]? rank, List<int> result)
     {
         var members = new List<(int Idx, int Close)>();
         for (int i = lo; i < hi; i++)
@@ -142,7 +156,7 @@ internal static class OrtExecutionOrder
         {
             var (idx, close) = members[m];
             for (int i = idx; i <= (close >= 0 ? close : idx); i++)
-                foreach (var output in nodes[i].Outputs)
+                foreach (var output in outputsOf[i])
                     if (output is not null) producer[output.Value] = m;
         }
 
@@ -157,7 +171,7 @@ internal static class OrtExecutionOrder
             deps[m] = new HashSet<int>();
             var (idx, close) = members[m];
             for (int i = idx; i <= (close >= 0 ? close : idx); i++)
-                foreach (var input in nodes[i].Inputs)
+                foreach (var input in inputsOf[i])
                     if (input is not null && producer.TryGetValue(input.Value, out var p) && p != m && !preResident[p])
                         deps[m].Add(p);
             foreach (var p in deps[m]) hasConsumer[p] = true;
@@ -168,16 +182,26 @@ internal static class OrtExecutionOrder
             var (idx, close) = members[m];
             result.Add(idx);
             if (close < 0) return;
-            EmitLevel(nodes, closeOf, idx + 1, close, rank, result);
+            EmitLevel(nodes, inputsOf, outputsOf, closeOf, idx + 1, close, rank, result);
             result.Add(close);
         }
 
-        foreach (var m in Enumerable.Range(0, count).Where(m => preResident[m]).OrderBy(Key))
+        // Ascending by key, and by member where keys tie, as a stable sort of members in order.
+        int[] ByKey(IEnumerable<int> chosen)
+        {
+            var keyed = chosen.Select(m => (Key(m), m)).ToArray();
+            System.Array.Sort(keyed);
+            var sorted = new int[keyed.Length];
+            for (int k = 0; k < keyed.Length; k++) sorted[k] = keyed[k].m;
+            return sorted;
+        }
+
+        foreach (var m in ByKey(Enumerable.Range(0, count).Where(m => preResident[m])))
             EmitMember(m);
 
         var visited = new bool[count];
         var stack = new List<(int Member, bool Leave)>();
-        foreach (var leaf in Enumerable.Range(0, count).Where(m => !preResident[m] && !hasConsumer[m]).OrderBy(Key))
+        foreach (var leaf in ByKey(Enumerable.Range(0, count).Where(m => !preResident[m] && !hasConsumer[m])))
             stack.Add((leaf, false));
 
         while (stack.Count > 0)
@@ -188,7 +212,7 @@ internal static class OrtExecutionOrder
             if (visited[m]) continue;
             visited[m] = true;
             stack.Add((m, true));
-            foreach (var p in deps[m].OrderBy(Key))
+            foreach (var p in ByKey(deps[m]))
                 if (!visited[p]) stack.Add((p, false));
         }
 

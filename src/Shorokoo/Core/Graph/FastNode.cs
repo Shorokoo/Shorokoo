@@ -90,19 +90,22 @@ namespace Shorokoo.Core.Graph
         /// Flattened view of all input tensor keys, in the same deterministic order that
         /// <see cref="Node.Inputs"/> uses (graph-attribute groups sorted by ordinal key).
         /// </summary>
-        public List<FastTensorKey?> Inputs =>
-            FullInputs.OrderBy(x => x.Key, System.StringComparer.Ordinal)
-                      .SelectMany(x => x.Value)
-                      .ToList();
+        public List<FastTensorKey?> Inputs => Flattened(FullInputs);
 
         /// <summary>
         /// Flattened view of all output tensor keys, in the same deterministic order that
         /// <see cref="Node.Outputs"/> uses.
         /// </summary>
-        public List<FastTensorKey?> Outputs =>
-            FullOutputs.OrderBy(x => x.Key, System.StringComparer.Ordinal)
-                       .SelectMany(x => x.Value)
-                       .ToList();
+        public List<FastTensorKey?> Outputs => Flattened(FullOutputs);
+
+        /// <summary>A copy of the groups' keys in one list, the groups sorted by ordinal name;
+        /// the one group most nodes have is copied as it is.</summary>
+        private static List<FastTensorKey?> Flattened(Dictionary<string, List<FastTensorKey?>> groups)
+        {
+            if (groups.Count == 1)
+                foreach (var only in groups.Values) return new List<FastTensorKey?>(only);
+            return groups.OrderBy(x => x.Key, System.StringComparer.Ordinal).SelectMany(x => x.Value).ToList();
+        }
 
         public override string ToString() => $"FastNode({OpCode})";
 

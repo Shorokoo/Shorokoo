@@ -52,6 +52,12 @@ internal class TensorShapeInfo
             : shape.Count; // Fallback for sub-byte types
     }
 
+    /// <summary>The element type and the dimensions, as one string: what an allocation plan
+    /// matches a free buffer to a value by. Made once, when first asked.</summary>
+    internal string TypeAndDims => _typeAndDims ??= DType + "[" + string.Join(",", Shape.Dims) + "]";
+
+    private string? _typeAndDims;
+
     public override string ToString()
         => $"{DType} {Shape}{(HasData ? " [values retained]" : "")}";
 }

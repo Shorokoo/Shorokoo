@@ -170,15 +170,24 @@ internal class GraphEvaluator
         EvaluationOrder order = EvaluationOrder.OrtOrder)
     {
         var nodes = graph.Nodes;
-        var ortWalk = OrtExecutionOrder.Compute(nodes);
+        // FastNode.Inputs and Outputs flatten their groups on every read; take each once.
+        var inputsOf = new List<FastTensorKey?>[nodes.Count];
+        var outputsOf = new List<FastTensorKey?>[nodes.Count];
+        for (int i = 0; i < nodes.Count; i++)
+        {
+            inputsOf[i] = nodes[i].Inputs;
+            outputsOf[i] = nodes[i].Outputs;
+        }
+
+        var ortWalk = OrtExecutionOrder.ComputeOver(nodes, inputsOf, outputsOf);
         // The output nodes run nothing and hold nothing: a graph output is never released anyway.
         var walk = order == EvaluationOrder.OrtOrder
             ? ortWalk
             : Enumerable.Range(0, graph.BodyEnd).ToArray();
 
         // Tensor key → last walk position that reads it.
-        var tensorLastUse = BuildTensorLastUse(nodes, walk);
-        var consumerOpCodes = BuildConsumerOpCodes(nodes);
+        var tensorLastUse = BuildTensorLastUse(nodes, inputsOf, walk);
+        var consumerOpCodes = BuildConsumerOpCodes(nodes, inputsOf);
         var graphOutputs = new HashSet<FastTensorKey>(graph.Outputs);
         // Never recycled into and never written in place: the fed inputs, and the initializers
         // ORT keeps (constants, parameter data). A state input is held for the whole run, as ORT
@@ -188,9 +197,9 @@ internal class GraphEvaluator
         // activations, and is the next fidelity gap to close after the two the benchmark names.
         var inputs = graph.Inputs;
         var graphInputs = new HashSet<FastTensorKey>(inputs);
-        foreach (var node in nodes)
-            if (node.IsModelInput() || node.IsModelParamData() || node.OpCode == Shorokoo.Core.Nodes.NodeDefinitions.OpCodes.CONSTANT)
-                foreach (var output in node.Outputs)
+        for (int i = 0; i < nodes.Count; i++)
+            if (nodes[i].IsModelInput() || nodes[i].IsModelParamData() || nodes[i].OpCode == Shorokoo.Core.Nodes.NodeDefinitions.OpCodes.CONSTANT)
+                foreach (var output in outputsOf[i])
                     if (output is not null) graphInputs.Add(output.Value);
 
         var plan = new AllocationPlan(graphOutputs, graphInputs, _modelOrtBufferReuse);
@@ -234,8 +243,8 @@ internal class GraphEvaluator
             if (node.IsModelInput())
                 continue;
 
-            var nodeInputs = node.Inputs;
-            var nodeOutputs = node.Outputs;
+            var nodeInputs = inputsOf[nodeIdx];
+            var nodeOutputs = outputsOf[nodeIdx];
             var readsMetadataOnly = IsMetadataOnly(node);
 
             // Step 1: Load input tensors into memory if not already loaded. A metadata-only
@@ -251,7 +260,7 @@ internal class GraphEvaluator
                 }
 
             // Step 2: Compute op performance
-            var perfInput = BuildOpPerfInput(node, pos, shapeInfo, tensorLastUse, consumerOpCodes);
+            var perfInput = BuildOpPerfInput(node, nodeInputs, nodeOutputs, pos, shapeInfo, tensorLastUse, consumerOpCodes);
             var perfResult = _perfRegistry.Estimate(perfInput);
             extraAtPos[pos] = perfResult.ExtraMemoryBytes;
             if (_layout == RunLayout.OnnxRuntimeHost && node.OpCode == Shorokoo.Core.Nodes.NodeDefinitions.OpCodes.WHERE
@@ -279,7 +288,7 @@ internal class GraphEvaluator
                 {
                     var writtenOver = false;
                     if (!readsMetadataOnly
-                        && TranslationReuse(node, outIdx, shapeInfo, plan, views, strides, tensorLastUse, graphOutputs, pos) is var (over, isView))
+                        && TranslationReuse(node, nodeInputs, nodeOutputs, outIdx, shapeInfo, plan, views, strides, tensorLastUse, graphOutputs, pos) is var (over, isView))
                     {
                         plan.Alias(over, output.Value, isView ? 0 : outputInfo.MemoryBytes);
                         if (isView) views.Add(output.Value);
@@ -387,17 +396,17 @@ internal class GraphEvaluator
     /// and memory of its own otherwise, as torch copies it.
     /// </summary>
     private static (FastTensorKey Over, bool IsView)? TranslationReuse(
-        FastNode node, int outIdx, ShapeInferenceResult shapeInfo, AllocationPlan plan, HashSet<FastTensorKey> views,
-        Dictionary<FastTensorKey, long[]> strides, Dictionary<FastTensorKey, int> tensorLastUse, HashSet<FastTensorKey> graphOutputs, int pos)
+        FastNode node, List<FastTensorKey?> inputs, List<FastTensorKey?> outputs, int outIdx, ShapeInferenceResult shapeInfo, AllocationPlan plan,
+        HashSet<FastTensorKey> views, Dictionary<FastTensorKey, long[]> strides, Dictionary<FastTensorKey, int> tensorLastUse,
+        HashSet<FastTensorKey> graphOutputs, int pos)
     {
-        var inputs = node.Inputs;
         var used = inputs.Count(i => i is not null);
         var op = node.OpCode;
         var first = inputs.Count > 0 ? inputs[0] : null;
         bool viewOfFirst = op switch
         {
             "Slice" or "Identity" or "Reshape" or "Squeeze" or "Unsqueeze" or "Flatten" or "Transpose" or "Expand" or "Split" => true,
-            "Cast" => first is { } cast && shapeInfo.GetTensorInfo(cast) is { } from && node.Outputs[outIdx] is { } cast_out
+            "Cast" => first is { } cast && shapeInfo.GetTensorInfo(cast) is { } from && outputs[outIdx] is { } cast_out
                       && shapeInfo.GetTensorInfo(cast_out) is { } to && from.DType == to.DType,
             "Max" or "Min" or "Sum" or "Mean" => used == 1,
             _ => false,
@@ -405,7 +414,7 @@ internal class GraphEvaluator
         if (viewOfFirst)
         {
             if (first is not { } source || !plan.Contains(source)) return null;
-            if (node.Outputs[outIdx] is { } view && shapeInfo.GetTensorInfo(source) is { } viewedInfo && shapeInfo.GetTensorInfo(view) is { } viewInfo
+            if (outputs[outIdx] is { } view && shapeInfo.GetTensorInfo(source) is { } viewedInfo && shapeInfo.GetTensorInfo(view) is { } viewInfo
                 && viewedInfo.Shape.Dims.All(d => d >= 0) && viewInfo.Shape.Dims.All(d => d >= 0))
             {
                 var viewedStrides = strides.TryGetValue(source, out var known) ? known : Shorokoo.Core.Backends.TorchStrides.Contiguous(viewedInfo.Shape.Dims);
@@ -416,7 +425,7 @@ internal class GraphEvaluator
             return (source, true);
         }
 
-        if (outIdx != 0 || node.Outputs.Count(o => o is not null) != 1 || node.Outputs[0] is not { } output) return null;
+        if (outIdx != 0 || outputs.Count(o => o is not null) != 1 || outputs[0] is not { } output) return null;
         IReadOnlyList<int> slots = op switch
         {
             _ when Shorokoo.Core.Backends.PlacementMemory.TorchElementWise.Contains(op)
@@ -516,8 +525,7 @@ internal class GraphEvaluator
 
         public bool IsGraphOutput(FastTensorKey key) => _buffers[_bufferOf[key]].IsGraphOutput;
 
-        public static string ShapeKey(TensorShapeInfo info)
-            => info.DType + "[" + string.Join(",", info.Shape.Dims) + "]";
+        public static string ShapeKey(TensorShapeInfo info) => info.TypeAndDims;
 
         public void Allocate(FastTensorKey key, TensorShapeInfo info, int pos)
         {
@@ -616,13 +624,13 @@ internal class GraphEvaluator
     /// <summary>
     /// Builds a map of tensor key → last walk position where that tensor is used as input.
     /// </summary>
-    private static Dictionary<FastTensorKey, int> BuildTensorLastUse(IList<FastNode> nodes, int[] walk)
+    private static Dictionary<FastTensorKey, int> BuildTensorLastUse(IList<FastNode> nodes, List<FastTensorKey?>[] inputsOf, int[] walk)
     {
         var lastUse = new Dictionary<FastTensorKey, int>();
         for (int pos = 0; pos < walk.Length; pos++)
         {
             if (IsMetadataOnly(nodes[walk[pos]])) continue;
-            foreach (var input in nodes[walk[pos]].Inputs)
+            foreach (var input in inputsOf[walk[pos]])
             {
                 if (input is not null)
                     lastUse[input.Value] = pos;
@@ -632,33 +640,51 @@ internal class GraphEvaluator
     }
 
     /// <summary>Tensor key → op codes of the nodes that read it (ORT fuses some producer/consumer pairs).</summary>
-    private static Dictionary<FastTensorKey, List<string>> BuildConsumerOpCodes(IList<FastNode> nodes)
+    private static Dictionary<FastTensorKey, List<string>> BuildConsumerOpCodes(IList<FastNode> nodes, List<FastTensorKey?>[] inputsOf)
     {
         var consumers = new Dictionary<FastTensorKey, List<string>>();
-        foreach (var node in nodes.Where(n => !Shorokoo.Core.Nodes.NodeDefinitions.InternalOpCodes.IsGraphOutputOp(n.OpCode)))
-            foreach (var input in node.Inputs)
+        for (int i = 0; i < nodes.Count; i++)
+        {
+            var node = nodes[i];
+            if (Shorokoo.Core.Nodes.NodeDefinitions.InternalOpCodes.IsGraphOutputOp(node.OpCode)) continue;
+            foreach (var input in inputsOf[i])
             {
-                if (input is null) continue;
+                // An empty key names no value: a missing optional slot reads nothing.
+                if (input is null || input.Value.IsEmpty) continue;
                 if (!consumers.TryGetValue(input.Value, out var list))
                     consumers[input.Value] = list = new List<string>();
                 list.Add(node.OpCode);
             }
+        }
         return consumers;
     }
+
+    /// <summary>The attributes a node's estimator reads — every one but Shorokoo's own — per
+    /// attribute bag, which is immutable.</summary>
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<Shorokoo.Core.Nodes.NodeDefinitions.OnnxCSharpAttributes, Dictionary<string, object?>> EstimatedAttributes = new();
+
+    private static Dictionary<string, object?> EstimatedAttributesOf(Shorokoo.Core.Nodes.NodeDefinitions.OnnxCSharpAttributes attributes)
+        => EstimatedAttributes.GetValue(attributes, bag =>
+        {
+            var attrs = new Dictionary<string, object?>();
+            foreach (var kvp in bag.GetAttributeVals())
+                if (!kvp.Key.StartsWith("shrk_"))
+                    attrs[kvp.Key] = kvp.Value;
+            return attrs;
+        });
 
     /// <summary>
     /// Builds the OpPerfInput for a given node at walk position <paramref name="pos"/>.
     /// </summary>
     private static OpPerfInput BuildOpPerfInput(
         FastNode node,
+        List<FastTensorKey?> nodeInputs,
+        List<FastTensorKey?> nodeOutputs,
         int pos,
         ShapeInferenceResult shapeInfo,
         Dictionary<FastTensorKey, int> tensorLastUse,
         Dictionary<FastTensorKey, List<string>> consumerOpCodes)
     {
-        var nodeInputs = node.Inputs;
-        var nodeOutputs = node.Outputs;
-
         var inputShapes = new TensorShapeInfo?[nodeInputs.Count];
         var inputMustRemainIntact = new bool[nodeInputs.Count];
 
@@ -684,19 +710,13 @@ internal class GraphEvaluator
                 outputShapes[i] = shapeInfo.GetTensorInfo(output.Value);
         }
 
-        // Extract attributes as dictionary
-        var attrVals = node.Attributes.GetAttributeVals();
-        var attrs = new Dictionary<string, object?>();
-        foreach (var kvp in attrVals)
-        {
-            if (!kvp.Key.StartsWith("shrk_"))
-                attrs[kvp.Key] = kvp.Value;
-        }
+        var attrs = EstimatedAttributesOf(node.Attributes);
 
+        // The one list of a node with one output read is handed on as it is; it is not written to.
         List<string>? consumers = null;
         foreach (var output in nodeOutputs)
             if (output is not null && consumerOpCodes.TryGetValue(output.Value, out var list))
-                (consumers ??= new List<string>()).AddRange(list);
+                consumers = consumers is null ? list : [.. consumers, .. list];
 
         return new OpPerfInput
         {

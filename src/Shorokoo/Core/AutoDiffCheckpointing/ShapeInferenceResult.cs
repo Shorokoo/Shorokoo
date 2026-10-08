@@ -8,8 +8,7 @@ namespace Shorokoo.Core.AutoDiffCheckpointing;
 
 /// <summary>
 /// Contains the complete shape inference results for a <see cref="InternalComputationGraph"/>.
-/// Provides per-tensor shape information and summary statistics about
-/// maximum tensor sizes encountered during inference.
+/// Provides per-tensor shape information.
 /// </summary>
 internal class ShapeInferenceResult
 {
@@ -21,21 +20,6 @@ internal class ShapeInferenceResult
     public ImmutableDictionary<FastTensorKey, TensorShapeInfo> TensorInfos => _tensorInfos;
 
     /// <summary>
-    /// The maximum number of elements in any single tensor in the graph.
-    /// </summary>
-    public long MaxElementCount { get; }
-
-    /// <summary>
-    /// The maximum rank (number of dimensions) of any tensor in the graph.
-    /// </summary>
-    public int MaxRank { get; }
-
-    /// <summary>
-    /// The maximum size of any single dimension across all tensors in the graph.
-    /// </summary>
-    public long MaxDimensionSize { get; }
-
-    /// <summary>
     /// The total number of tensors in the graph.
     /// </summary>
     public int TensorCount => _tensorInfos.Count;
@@ -43,30 +27,6 @@ internal class ShapeInferenceResult
     internal ShapeInferenceResult(ImmutableDictionary<FastTensorKey, TensorShapeInfo> tensorInfos)
     {
         _tensorInfos = tensorInfos;
-
-        long maxElements = 0;
-        int maxRank = 0;
-        long maxDim = 0;
-
-        foreach (var info in tensorInfos.Values)
-        {
-            if (info.ElementCount > maxElements)
-                maxElements = info.ElementCount;
-
-            var rank = info.Shape.Dims.Length;
-            if (rank > maxRank)
-                maxRank = rank;
-
-            foreach (var dim in info.Shape.Dims)
-            {
-                if (dim > maxDim)
-                    maxDim = dim;
-            }
-        }
-
-        MaxElementCount = maxElements;
-        MaxRank = maxRank;
-        MaxDimensionSize = maxDim;
     }
 
     /// <summary>

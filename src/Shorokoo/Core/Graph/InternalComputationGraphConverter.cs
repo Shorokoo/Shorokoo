@@ -218,7 +218,7 @@ namespace Shorokoo.Graph
         public static Dictionary<FastTensorKey, Variable> BuildTensorMapping(InternalComputationGraph fastGraph)
         {
             if (fastGraph is null) throw new ArgumentNullException(nameof(fastGraph));
-            return BuildNodesAndTensorMap(fastGraph).tensorsByKey;
+            return BuildNodesAndTensorMap(fastGraph, traceUnbuiltNodes: false).tensorsByKey;
         }
 
         /// <summary>
@@ -234,7 +234,7 @@ namespace Shorokoo.Graph
             BuildNodes(InternalComputationGraph fastGraph)
         {
             if (fastGraph is null) throw new ArgumentNullException(nameof(fastGraph));
-            var built = BuildNodesAndTensorMap(fastGraph);
+            var built = BuildNodesAndTensorMap(fastGraph, traceUnbuiltNodes: true);
             return (built.nodesInTopoOrder, built.inputs, built.outputs, built.tensorsByKey);
         }
 
@@ -295,11 +295,15 @@ namespace Shorokoo.Graph
             return fastGraph.Nodes.Select(n => n.TargetFunction).NotNulls().Distinct().ToImmutableArray();
         }
 
+        /// <param name="fastGraph">The graph to rebuild.</param>
+        /// <param name="traceUnbuiltNodes">Whether a rebuilt node whose <see cref="FastNode"/>
+        /// carries no stack trace captures one where it is rebuilt. A caller reading only the
+        /// tensors' metadata says no: the capture is the costliest part of a rebuild.</param>
         private static (ImmutableArray<Node> nodesInTopoOrder,
                         Dictionary<FastTensorKey, Variable> tensorsByKey,
                         ImmutableArray<Variable> inputs,
                         ImmutableArray<Variable> outputs)
-            BuildNodesAndTensorMap(InternalComputationGraph fastGraph)
+            BuildNodesAndTensorMap(InternalComputationGraph fastGraph, bool traceUnbuiltNodes)
         {
             // Map from the stored FastTensorKey to the freshly-created Variable we built while
             // rebuilding nodes in topological order.
@@ -389,7 +393,7 @@ namespace Shorokoo.Graph
                     attributes: attributes,
                     inputs: fullInputs,
                     outputs: fullOutputs,
-                    stackTrace: fastNode.StackTrace,
+                    stackTrace: traceUnbuiltNodes ? fastNode.StackTrace : fastNode.StackTrace ?? string.Empty,
                     defaultName: fastNode.FriendlyName,
                     identifierTemplateString: fastNode.IdentifierTemplate,
                     targetFunction: fastNode.TargetFunction,

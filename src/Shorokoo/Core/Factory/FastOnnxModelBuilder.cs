@@ -1610,9 +1610,9 @@ namespace Shorokoo.Core.Factory
             var splices = FastApplyKernelWorkarounds.Process(graph, workarounds, shapesAreConcrete, isFunctionBody);
             FastAddIdentityForOuterScopeValues.Process(graph);
             if (prepForOnnx) FastPrepForOnnx.Process(graph);
-            // The lookup before the call-stack strip: the Variable-level rebuild it takes gives a
-            // node without a stack trace a freshly captured one, which costs several times the rest
-            // of the rebuild, and a stack trace types nothing.
+            // The lookup's Variable-level rebuild captures no stack trace for a node without one
+            // (InternalComputationGraphConverter.BuildTensorMapping): a capture costs several times
+            // the rest of the rebuild, and a stack trace types nothing.
             var preRenameLookup = !needsLookup(graph) ? null
                 : splices.TensorInfo(graph) ?? FastTensorInfoProcessor.BuildTensorInfoLookup(graph);
             FastStripCallStacks.Process(graph);

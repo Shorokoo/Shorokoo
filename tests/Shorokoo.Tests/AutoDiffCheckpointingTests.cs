@@ -969,6 +969,85 @@ public class AutoDiffCheckpointingCoverageTests
     }
 
     [Fact]
+    public void TestTheBackendsModelIsAskedOnceAGraphAndNoMoreWhereItCannotTellTheHandedGraphCoverage()
+    {
+        var (graph, shapeInfo) = SdpaMeanPoolStepD64.Value;
+        (string Strategy, int Nodes, string Peaks, int Asked, int Distinct) Optimize(Func<int, long?> peakOfAddedNodes)
+        {
+            List<string> asked = [];
+            var result = new MemoryAwareGraphOptimizer(evaluator: new GraphEvaluator(state: SdpaStepStateInPlace),
+                backendPeak: g => { asked.Add(Content(g)); return peakOfAddedNodes(g.Nodes.Count - graph.Nodes.Count); })
+                .OptimizeWithShapeInfo(graph, shapeInfo);
+            return (result.StrategyName, result.OptimizedGraph.Nodes.Count, string.Join(",", (result.BackendPeakBytes ?? []).Select(p => p / Mb)),
+                asked.Count, asked.Distinct().Count());
+        }
+
+        Assert.Equal(("RematReorder", 436, "", 1, 1), Optimize(_ => null));
+        Assert.Equal(("Baseline", 435, "64,64,64,64", 6, 6), Optimize(_ => 64 * Mb));
+        Assert.Equal(("RematReorder", 438, "64,52,56,52", 11, 11), Optimize(added => Math.Max(Mb, 64 * Mb - added * 4 * Mb)));
+    }
+
+    private sealed class CountingRunModel(string build = "") : Shorokoo.OnnxRuntime.OrtBackend(), Shorokoo.Core.Backends.IShorokooBackend
+    {
+        internal int Asked;
+
+        long? Shorokoo.Core.Backends.IShorokooBackend.ModelledRunPeak(ModelProto model, IReadOnlyList<Shorokoo.Core.Backends.OutputAlias> outputAliases, Shorokoo.Core.Backends.PrecisionSettings precision)
+        {
+            Interlocked.Increment(ref Asked);
+            return ModelledRunPeakOf(model, outputAliases, precision);
+        }
+
+        string? Shorokoo.Core.Backends.IShorokooBackend.RunModelIdentity => build;
+    }
+
+    [Fact]
+    public void TestALoadedRigAsksTheBackendsModelOnlyWhatItsCheckpointAnswersAndChoosesAsItsBuildDidCoverage()
+    {
+        var backend = new CountingRunModel();
+        var otherBuild = new CountingRunModel("another build");
+        using var context = new ComputeContext(backend);
+        using var elsewhere = new ComputeContext(otherBuild);
+        (string Strategy, string Peaks, int Asked) Judged(Func<TrainingRig> build)
+        {
+            var before = backend.Asked + otherBuild.Asked;
+            var rig = build();
+            return (rig.OptimizationResult.StrategyName, string.Join(",", rig.OptimizationResult.BackendPeakBytes!), backend.Asked + otherBuild.Asked - before);
+        }
+        TrainingRig? built = null;
+        var fromScratch = Judged(() => built = TrainingRig.FromScratch(MemoryPassMlp.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            [Pattern([16L, 256L], 1f)], new SGDOptimizerHyperparameters { LearningRate = 0.01f }, runtimeContext: context));
+        var path = Path.Combine(Path.GetTempPath(), $"judged-{Guid.NewGuid():N}.skpt");
+        try
+        {
+            Persistence.SaveTrainingCheckpointToSkpt(built!.CreateInitialCheckpoint(), path);
+
+            Assert.True(fromScratch.Asked > 0);
+            Assert.Equal(fromScratch with { Asked = 0 }, Judged(() => TrainingRig.Load(path, runtimeContext: context).Rig));
+            Assert.Equal(fromScratch, Judged(() => TrainingRig.Load(path, runtimeContext: elsewhere).Rig));
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void TestARigTakesOnlyTheWellFormedAnswersItsCheckpointRecordsCoverage()
+    {
+        string[] keys = [new string('a', 64), new string('0', 64), new string('A', 64), new string('a', 63), new string('g', 64), new string('1', 64)];
+        var recorded = new Dictionary<string, long?> { [keys[0]] = 5, [keys[1]] = null, [keys[2]] = 5, [keys[3]] = 5, [keys[4]] = 5, [keys[5]] = -1 };
+
+        Assert.Equal([keys[1], keys[0]], TrainingRig.TakenRunModelAnswers(recorded).Keys.Order(StringComparer.Ordinal));
+    }
+
+    private static string Content(InternalComputationGraph graph)
+    {
+        var places = new Dictionary<object, int>();
+        int Place(object? key) => key is null ? -1 : places.TryGetValue(key, out var place) ? place : places[key] = places.Count;
+        return string.Join(";", graph.Nodes.Select(n => $"{Place(n.Key)}:{n.OpCode}({string.Join(",", n.Inputs.Select(k => Place(k)))})->{string.Join(",", n.Outputs.Select(k => Place(k)))}"));
+    }
+
+    [Fact]
     public void TestRematerializerStopsAtAnyBudgetMidSearchWithoutRaisingThePeakCoverage()
     {
         var (graph, shapeInfo) = SdpaMeanPoolStepD64.Value;
@@ -1068,6 +1147,16 @@ public class AutoDiffCheckpointingCoverageTests
         Assert.Equal(3 * Mb + 8, new GraphEvaluator().Evaluate(sameBytesOtherShape, otherInfo, EvaluationOrder.ProtoOrder).PeakMemoryBytes);
     }
 
+    // Shorokoo/Shorokoo#518: ONNX Runtime's model of a run cannot shape ScatterND.
+    [Fact(Skip = "Shorokoo/Shorokoo#518")]
+    public void TestOnnxRuntimesModelOfARunTellsTheStepOfAnEmbeddingCoverage()
+    {
+        var rig = TrainingRig.FromScratch(EmbeddingMeanPool.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            [TensorData([64L, 64L], new long[64 * 64])], new SGDOptimizerHyperparameters { LearningRate = 0.01f });
+
+        Assert.NotNull(rig.OptimizationResult.BackendPeakBytes);
+    }
+
     [Fact]
     public void TestMemoryPassBenchmarkMeasuresTheRigsOwnModelCoverage()
     {
@@ -1079,5 +1168,16 @@ public class AutoDiffCheckpointingCoverageTests
         Assert.Equal(inputShapes.Length, model.Graph.Inputs.Count);
         for (var i = 0; i < model.Graph.Inputs.Count; i++)
             Assert.Equal(inputShapes[i].Shape.Dims.Select(d => (long)d), model.Graph.Inputs[i].Type.TensorType.Shape.Dims.Select(d => d.DimValue));
+    }
+}
+
+[Module]
+public partial class EmbeddingMeanPool
+{
+    public static Tensor<float32> Inline(Tensor<int64> tokens)
+    {
+        var embedded = Shorokoo.Modules.Layers.Embedding.Model(Scalar(4096L), Scalar(256L), Scalar(-1L), Scalar(0f), Scalar(2f)).Call(tokens);
+        Vector<int64> sequence = [Scalar(1L)];
+        return embedded.Reduce(ReduceKind.Mean, sequence, keepDims: false);
     }
 }

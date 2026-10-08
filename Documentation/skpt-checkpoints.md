@@ -525,6 +525,15 @@ model.skpt
         "overrides": [                    // omitted when none
           { "collection": "Params", "path": [1, 3], "seed": 42 }
         ]
+      },
+
+      // What the backend's model of a run told the memory-aware pass: the peak, or null where
+      // it could not tell, by the SHA-256 of the question (the step asked about, the backend
+      // and the build of both). A rig loaded on the same build of the same backend takes them
+      // in place of asking. Omitted when the pass asked nothing.
+      "runModelAnswers": {
+        "9f2c…": 2689049,
+        "41ad…": null
       }
     }
   }

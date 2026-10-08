@@ -189,11 +189,115 @@ namespace Shorokoo
         internal static readonly AsyncLocal<double?> PassMemoryWeight = new();
 
         /// <summary>
+        /// The answers the backend's model of a run gave this rig's memory-aware pass, by question
+        /// (<see cref="RunModelQuestion"/>). A checkpoint of the rig records them, so that a rig loaded
+        /// from it on the same build of the same backend asks that model none of them again.
+        /// </summary>
+        internal IReadOnlyDictionary<string, long?> RunModelAnswers
+        {
+            get
+            {
+                lock (_runModelAnswers) return new Dictionary<string, long?>(_runModelAnswers, StringComparer.Ordinal);
+            }
+        }
+
+        private readonly Dictionary<string, long?> _runModelAnswers = new(StringComparer.Ordinal);
+
+        /// <summary>The answers the checkpoint this rig was loaded from records (<see cref="RunModelAnswers"/>),
+        /// which its pass takes in place of asking; none for a rig built from its sources.</summary>
+        private IReadOnlyDictionary<string, long?> _recordedRunModelAnswers = new Dictionary<string, long?>();
+
+        /// <summary>The answers of <paramref name="recorded"/> a rig's pass takes in place of asking: each
+        /// a peak of no fewer than zero bytes, or none, under a question's key — 64 lowercase hex
+        /// digits, as <see cref="RunModelQuestion"/> writes it.</summary>
+        internal static IReadOnlyDictionary<string, long?> TakenRunModelAnswers(IReadOnlyDictionary<string, long?>? recorded)
+        {
+            var taken = new Dictionary<string, long?>(StringComparer.Ordinal);
+            foreach (var (question, peak) in recorded ?? new Dictionary<string, long?>())
+                if (peak is not < 0 && question.Length == 64 && question.All(c => c is >= '0' and <= '9' or >= 'a' and <= 'f'))
+                    taken[question] = peak;
+            return taken;
+        }
+
+        /// <summary>
+        /// A question to a backend's model of a run, as the key its answer is recorded under: the
+        /// SHA-256 of the model asked about, the pairs written in place, the precision, and the
+        /// backend — its type, the layout and kernel workarounds it names, the build of what its
+        /// model answers from (<see cref="IShorokooBackend.RunModelIdentity"/>), and the builds of its
+        /// assembly and of Shorokoo's — so that an answer is taken only where the same build of the
+        /// same backend would be asked the same. The model's values and nodes are named for the order
+        /// they first appear in, as are the pairs': the lowering may number the outputs of an
+        /// <c>If</c>'s two branches in either order from one process to the next, and a model that
+        /// differs only in its names is the same question.
+        /// </summary>
+        private static string RunModelQuestion(Shorokoo.Core.Factory.IR.ModelProto model, IReadOnlyList<OutputAlias> aliases,
+            PrecisionSettings precision, IShorokooBackend backend)
+        {
+            var names = new Dictionary<string, string>(StringComparer.Ordinal);
+            string Named(string name) => name.Length == 0 ? name
+                : names.TryGetValue(name, out var named) ? named : names[name] = $"v{names.Count}";
+            void Rename(Shorokoo.Core.Factory.IR.GraphProto graph)
+            {
+                foreach (var input in graph.Inputs) input.Name = Named(input.Name);
+                foreach (var initializer in graph.Initializers) initializer.Name = Named(initializer.Name);
+                RenameNodes(graph.Nodes);
+                foreach (var output in graph.Outputs) output.Name = Named(output.Name);
+                foreach (var value in graph.ValueInfoes) value.Name = Named(value.Name);
+            }
+            void RenameNodes(List<Shorokoo.Core.Factory.IR.NodeProto> nodes)
+            {
+                foreach (var node in nodes)
+                {
+                    if (node.Name.Length > 0) node.Name = Named(node.Name);
+                    for (int i = 0; i < node.Inputs.Count; i++) node.Inputs[i] = Named(node.Inputs[i]);
+                    for (int o = 0; o < node.Outputs.Count; o++) node.Outputs[o] = Named(node.Outputs[o]);
+                    foreach (var attribute in node.Attributes)
+                    {
+                        if (attribute.G is { } branch) Rename(branch);
+                        foreach (var body in attribute.Graphs) Rename(body);
+                    }
+                }
+            }
+            var canonical = ProtoBuf.Serializer.DeepClone(model);
+            if (canonical.Graph is { } graph) Rename(graph);
+            foreach (var function in canonical.Functions)
+            {
+                for (int i = 0; i < function.Inputs.Count; i++) function.Inputs[i] = Named(function.Inputs[i]);
+                RenameNodes(function.Nodes);
+                for (int o = 0; o < function.Outputs.Count; o++) function.Outputs[o] = Named(function.Outputs[o]);
+            }
+
+            using var hash = System.Security.Cryptography.IncrementalHash.CreateHash(System.Security.Cryptography.HashAlgorithmName.SHA256);
+            using (var stream = new System.IO.MemoryStream())
+            {
+                ProtoBuf.Serializer.Serialize(stream, canonical);
+                hash.AppendData(stream.GetBuffer(), 0, (int)stream.Length);
+            }
+            var type = backend.GetType();
+            string[] asked =
+            [
+                .. aliases.Select(a => $"{Named(a.Output)}\u0001{Named(a.Input)}"),
+                precision.ToString(),
+                type.AssemblyQualifiedName ?? type.FullName ?? type.Name,
+                type.Assembly.ManifestModule.ModuleVersionId.ToString(),
+                typeof(TrainingRig).Assembly.ManifestModule.ModuleVersionId.ToString(),
+                backend.RunLayout.ToString(),
+                backend.KernelWorkaroundSet ?? string.Empty,
+                backend.RunModelIdentity ?? string.Empty,
+            ];
+            hash.AppendData(System.Text.Encoding.UTF8.GetBytes(string.Join("\n", asked)));
+            return Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
+        }
+
+        /// <summary>
         /// What the backend of the context this rig's steps run on holds at the peak of a run of a
         /// step graph, at the shapes of <paramref name="exemplars"/> — the model it would be handed,
         /// built as a compile builds it, with the state pairs that model proves written in place where
         /// the context writes in place — or null where the context is the unread default, or its
-        /// backend has no model of a run.
+        /// backend has no model of a run. Where that model builds something of its own to answer (it
+        /// is not <see cref="IShorokooBackend.ModelsARunQuickly"/>), an answer the checkpoint the rig
+        /// was loaded from records is taken in place of asking, and every answer is kept for the
+        /// rig's own checkpoints (<see cref="RunModelAnswers"/>); a quick model is simply asked.
         /// </summary>
         private Func<InternalComputationGraph, long?>? BackendPeakOf(IReadOnlyList<IRuntimeTensor> exemplars)
         {
@@ -209,6 +313,7 @@ namespace Shorokoo
             var workarounds = Shorokoo.Core.Lowering.KernelWorkarounds.KernelWorkaroundRegistry.For(backend.KernelWorkaroundSet);
             var writesInPlace = context.OutputAliasing || context.ValuePlacement == true;
             var candidates = StateAliasCandidates();
+            var recorded = !backend.ModelsARunQuickly;
             return graph =>
             {
                 var model = Shorokoo.Core.Factory.FastOnnxModelBuilder.BuildInternalOnnxModel(graph, prepForOnnx: true, inputDims: dims, workarounds: workarounds);
@@ -217,7 +322,13 @@ namespace Shorokoo
                     ? [.. candidates.Where(c => c.Output < step.Outputs.Count && c.Input < step.Inputs.Count)
                         .Select(c => new OutputAlias(step.Outputs[c.Output].Name, step.Inputs[c.Input].Name))]
                     : [];
-                return backend.ModelledRunPeak(model, OutputAliasProof.Prove(step, named), context.Precision);
+                var aliases = OutputAliasProof.Prove(step, named);
+                if (!recorded) return backend.ModelledRunPeak(model, aliases, context.Precision);
+                var question = RunModelQuestion(model, aliases, context.Precision, backend);
+                if (!_recordedRunModelAnswers.TryGetValue(question, out var peak))
+                    peak = backend.ModelledRunPeak(model, aliases, context.Precision);
+                lock (_runModelAnswers) _runModelAnswers[question] = peak;
+                return peak;
             };
         }
 
@@ -1213,7 +1324,8 @@ namespace Shorokoo
             TrainingBackend trainingBackend,
             BuildProgressReporter? progress,
             bool completesBuild = true,
-            bool deferInitialization = false)
+            bool deferInitialization = false,
+            IReadOnlyDictionary<string, long?>? runModelAnswers = null)
         {
             var c = constituents;
             ValidateConstituents(c);
@@ -1249,6 +1361,7 @@ namespace Shorokoo
                 RuntimeContext = runtimeContext,
                 TrainingBackend = trainingBackend,
             };
+            rig._recordedRunModelAnswers = TakenRunModelAnswers(runModelAnswers);
             // One thaw of the loss, read by both halves of the build: composition splices a clone of
             // it into the training graph and leaves it as it found it, and the initialization half
             // reads its target declaration back off it (see DeriveTargetExemplar).
@@ -4470,7 +4583,8 @@ namespace Shorokoo
             ComputeContext runtimeContext,
             TrainingBackend trainingBackend,
             BuildProgressReporter? progress = null,
-            bool deferInitialization = false)
+            bool deferInitialization = false,
+            IReadOnlyDictionary<string, long?>? runModelAnswers = null)
         {
             if (concreteArch is null) throw new ArgumentNullException(nameof(concreteArch));
             if (loss is null) throw new ArgumentNullException(nameof(loss));
@@ -4497,7 +4611,7 @@ namespace Shorokoo
             // terminal report accordingly.
             return DeriveFromConcreteArch(
                 constituents, archInternal, mergeContext, runtimeContext, trainingBackend, progress,
-                completesBuild: false, deferInitialization);
+                completesBuild: false, deferInitialization, runModelAnswers);
         }
 
         /// <summary>

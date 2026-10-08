@@ -819,6 +819,25 @@ public class ComputeContextLifetimeCoverageTests
         Assert.False(ProvesInto(GraphOf("p m v g k", "P M V", Op("AdamUpdate", "p m v g k k k k k k", "P M V", domain: "custom")), "P", "p"));
     }
 
+    private static bool FusesAdam(string g, params NodeProto[] gradient)
+        => Shorokoo.OnnxRuntime.OrtFusedUpdates.Fuse(new ModelProto { Graph = GraphOf(
+            $"p:float[2,3] m:float[2,3] v:float[2,3] {g} b1:float[1] c1:float[1] b2:float[1] c2:float[1] e:float[1] k:float[1]", "P M V",
+            [.. gradient, Op("Mul", "b1 m", "ma"), Op("Mul", "c1 g", "gc"), Op("Add", "ma gc", "M"),
+            Op("Mul", "b2 v", "vb"), Op("Mul", "c2 g", "cg"), Op("Mul", "cg g", "gg"), Op("Add", "vb gg", "V"),
+            Op("Sqrt", "V", "r"), Op("Add", "r e", "d"), Op("Div", "M d", "q"), Op("Mul", "q k", "u"), Op("Sub", "p u", "P")]) });
+
+    [Fact]
+    public void TestAnAdamChainIsFusedOnlyWhereItsGradientIsOfItsParametersShape()
+    {
+        Assert.True(FusesAdam("g:float[2,3]"));
+        Assert.True(FusesAdam("h:float[2,3]", Op("Relu", "h", "g")));
+        Assert.False(FusesAdam("h:float[1,3]", Op("Relu", "h", "g")));
+        Assert.False(FusesAdam("g:float[1,3]"));
+        Assert.False(FusesAdam("g:float[3]"));
+        Assert.False(FusesAdam("g:double[2,3]"));
+        Assert.False(FusesAdam("g"));
+    }
+
     private static PlacementProof PlacementsOver(GraphProto graph, string consumed, PlacementMemory? memory = null)
     {
         var inputs = graph.Inputs.Where(i => i.Type?.TensorType?.Shape is not null).ToDictionary(

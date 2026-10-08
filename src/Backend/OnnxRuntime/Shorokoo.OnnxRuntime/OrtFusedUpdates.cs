@@ -1,3 +1,4 @@
+using Shorokoo.Core.Backends;
 using Shorokoo.Core.Factory.IR;
 
 namespace Shorokoo.OnnxRuntime;
@@ -21,8 +22,9 @@ namespace Shorokoo.OnnxRuntime;
 /// the chain's order, the coefficients the chain computes from the hyperparameters fed to it as
 /// they are; so a step gives the same parameters and moments to the bit with it as without. A chain
 /// is rewritten only where every part of it is as below, the moments and the parameter are inputs
-/// of the step of one stated float32 shape, and every coefficient is a single value of no greater
-/// rank:</para>
+/// of the step of one stated float32 shape, the gradient is a float32 value of that shape too —
+/// as the graph states its type, or as its shape follows from the dimensions the graph states for
+/// its inputs — and every coefficient is a single value of no greater rank:</para>
 /// <code>
 ///   m' = beta1 * m + c1 * g
 ///   v' = beta2 * v + (c2 * g) * g
@@ -97,6 +99,13 @@ internal static class OrtFusedUpdates
         private readonly HashSet<string> _outputs = new(StringComparer.Ordinal);
         private readonly Dictionary<string, ValueInfoProto> _inputs = new(StringComparer.Ordinal);
 
+        // Every value whose type the graph states: its inputs, outputs and value infos.
+        private readonly Dictionary<string, ValueInfoProto> _stated = new(StringComparer.Ordinal);
+
+        // The shape and element type of each value that follows from the dimensions the graph states
+        // for its inputs; worked out the first time a value of no stated type is asked about.
+        private Dictionary<string, PlacementShapes.Value>? _inferred;
+
         // Per value known to hold a single element, its rank.
         private readonly Dictionary<string, int> _single = new(StringComparer.Ordinal);
 
@@ -104,6 +113,7 @@ internal static class OrtFusedUpdates
         {
             _graph = graph;
             foreach (var output in graph.Outputs) _outputs.Add(output.Name);
+            foreach (var info in graph.Inputs.Concat(graph.Outputs).Concat(graph.ValueInfoes)) _stated.TryAdd(info.Name, info);
             foreach (var input in graph.Inputs)
             {
                 _inputs[input.Name] = input;
@@ -221,12 +231,14 @@ internal static class OrtFusedUpdates
             }
 
             // The state is three distinct inputs of one stated float32 shape, the gradient none of
-            // them, and every coefficient a single value of no greater rank.
+            // them and a float32 value of that shape too, and every coefficient a single value of no
+            // greater rank.
             if (!_inputs.TryGetValue(p, out var pInfo) || !_inputs.TryGetValue(m, out var mInfo) || !_inputs.TryGetValue(v, out var vInfo))
                 return null;
             if (new HashSet<string>(StringComparer.Ordinal) { p, m, v, g }.Count != 4 || _single.ContainsKey(g)) return null;
             if (StatedDims(pInfo) is not { } dims || !IsFloat(pInfo) || !IsFloat(mInfo) || !IsFloat(vInfo)
-                || !SameDims(dims, StatedDims(mInfo)) || !SameDims(dims, StatedDims(vInfo)))
+                || !SameDims(dims, StatedDims(mInfo)) || !SameDims(dims, StatedDims(vInfo))
+                || !IsFloatOf(g, dims))
                 return null;
             string[] coefficients = decay is null ? [beta1!, c1!, beta2!, c2!, eps!, step] : [beta1!, c1!, beta2!, c2!, eps!, step, decay];
             if (coefficients.Any(c => !_single.TryGetValue(c, out var rank) || rank > dims.Count)) return null;
@@ -312,6 +324,22 @@ internal static class OrtFusedUpdates
             => info.Type?.TensorType?.Shape?.Dims;
 
         private static bool IsFloat(ValueInfoProto info) => info.Type?.TensorType?.ElemType == 1;
+
+        /// <summary>Whether <paramref name="value"/> is a float32 value of <paramref name="dims"/>: as
+        /// the graph states its type, or, where it states none, as its shape follows from the
+        /// dimensions the graph states for its inputs.</summary>
+        private bool IsFloatOf(string value, List<TensorShapeProto.Dimension> dims)
+        {
+            if (_stated.TryGetValue(value, out var info) && info.Type?.TensorType is not null)
+                return IsFloat(info) && SameDims(dims, StatedDims(info));
+            if (dims.Any(d => d.DimValue <= 0)) return false;
+            _inferred ??= PlacementShapes.Evaluate(_graph, _graph.Inputs
+                .Where(i => i.Type?.TensorType is { Shape: { } shape } && shape.Dims.All(d => d.DimValue > 0))
+                .ToDictionary(i => i.Name, i => (i.Type.TensorType.Shape.Dims.Select(d => d.DimValue).ToArray(), i.Type.TensorType.ElemType),
+                    StringComparer.Ordinal));
+            return _inferred.TryGetValue(value, out var inferred) && inferred.ElementType == 1
+                && inferred.Shape.AsSpan().SequenceEqual(dims.Select(d => d.DimValue).ToArray());
+        }
 
         private static bool SameDims(List<TensorShapeProto.Dimension> a, List<TensorShapeProto.Dimension>? b)
             => b is not null && a.Count == b.Count && a.Zip(b).All(d =>

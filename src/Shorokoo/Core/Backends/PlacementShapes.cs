@@ -210,7 +210,7 @@ internal static class PlacementShapes
         "MemcpyFromHost", "MemcpyToHost", "Softmax", "BiasSoftmax",
         "LogSoftmax", "Hardmax", "Not", "BitwiseNot", "Shrink", "LpNormalization", "CumSum", "Trilu",
         "InstanceNormalization", "LayerNormalization", "SimplifiedLayerNormalization",
-        "BatchNormalization", "Dropout",
+        "BatchNormalization", "Dropout", "ScatterElements", "ScatterND",
         "BiasDropout", "ReluGrad", "SigmoidGrad", "TanhGrad", "GeluGrad",
         "FastGeluGrad", "SoftmaxGrad", "SoftmaxGrad_13", "LogSoftmaxGrad", "LogSoftmaxGrad_13",
     };

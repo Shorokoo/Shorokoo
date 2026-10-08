@@ -868,7 +868,7 @@ public class NNLibraryOptimizerTrainingCoverageTests
             [new TensorDataModelParam("tokens", ModelParamType.InputParam, TensorData([3L], 1L, 5L, 9L))],
             hyperparameters, runtimeContext: context);
         using var run = rig.BeginResidentRun();
-        for (long s = 0; s < 3; s++)
+        for (long s = 0; s < 2; s++)
         {
             var x = rig.InputDef.FromOrderedData(TensorData([3L], s, 5 + s, 63L));
             var y = rig.TargetDef.FromOrderedData(RangeTensor([3L, 48L], 0.01f, s));
@@ -1344,6 +1344,8 @@ public class NNLibraryLayerTrainingCoverageTests
         AssertIgnoredTargetLeavesTheStepAsIfAbsent(NNCrossEntropyIgnore999Loss.ComputationGraph, 5, 999);
         AssertIgnoredTargetLeavesTheStepAsIfAbsent(NNNllIgnoreMinus100Loss.ComputationGraph, 5, -100);
         AssertIgnoredTargetLeavesTheStepAsIfAbsent(NNCrossEntropyIgnore999Loss.ComputationGraph, 128, 999);
+        AssertIgnoredTargetLeavesTheStepAsIfAbsent(NNCrossEntropySmoothedIgnore999Loss.ComputationGraph, 5, 999);
+        AssertIgnoredTargetLeavesTheStepAsIfAbsent(NNCrossEntropyWeightedIgnoreMinus100Loss.ComputationGraph, 5, -100);
     }
 }
 

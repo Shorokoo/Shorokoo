@@ -848,7 +848,7 @@ public class MemoryReuseScenarioTests
             long runStart;
             using (var options = new SessionOptions())
             {
-                OrtBackend.Configure(options, ShorokooGraphOptimization.TrainingStep, ShorokooLogSeverity.Fatal);
+                OrtBackend.Configure(options, ShorokooGraphOptimization.TrainingStep, ShorokooLogSeverity.Fatal, onCard);
                 options.AddSessionConfigEntry("session.use_env_allocators", "1");
                 options.OptimizedModelFilePath = Path.Combine(directory, "optimized.onnx");
                 options.ProfileOutputPathPrefix = Path.Combine(directory, "profile");
@@ -970,7 +970,7 @@ public class MemoryReuseScenarioTests
             long runStart;
             using (var options = new SessionOptions())
             {
-                OrtBackend.Configure(options, ShorokooGraphOptimization.TrainingStep, ShorokooLogSeverity.Fatal);
+                OrtBackend.Configure(options, ShorokooGraphOptimization.TrainingStep, ShorokooLogSeverity.Fatal, onCard);
                 options.AddSessionConfigEntry("session.use_env_allocators", "1");
                 options.OptimizedModelFilePath = Path.Combine(directory, "optimized.onnx");
                 options.ProfileOutputPathPrefix = Path.Combine(directory, "profile");

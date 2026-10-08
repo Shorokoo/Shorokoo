@@ -871,7 +871,7 @@ public class GpuExecutionTests
         var model = new MemoryStream();
         ProtoBuf.Serializer.Serialize(model, proto);
         using var options = new SessionOptions();
-        OrtBackend.Configure(options, ShorokooGraphOptimization.EnableAll, ShorokooLogSeverity.Fatal);
+        OrtBackend.Configure(options, ShorokooGraphOptimization.EnableAll, ShorokooLogSeverity.Fatal, onCard: true);
         CudaLibraries.Prepare();
         using var cuda = new OrtCUDAProviderOptions();
         cuda.UpdateOptions(new Dictionary<string, string>

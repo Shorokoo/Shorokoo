@@ -877,7 +877,7 @@ public abstract class OrtBackend : IShorokooBackend
         // (core/session/utils.cc, InitializeSession) -- a use-after-free that segfaults the
         // process. Disposing in a finally keeps them rooted across the constructor.
         using var options = new SessionOptions();
-        Configure(options, graphOptimization, LoggerSeverity(log.Log));
+        Configure(options, graphOptimization, LoggerSeverity(log.Log), onCard: _cudaDeviceId is not null);
         options.LogId = log.Id;
         // Every session that may run one of the operators: a graph the runtime wrote out, which a
         // session is also built from, holds them as it was given them.
@@ -1258,6 +1258,13 @@ public abstract class OrtBackend : IShorokooBackend
     /// everything else in ORT_ENABLE_ALL — constant folding, the MatMul/Gelu/LayerNorm fusions,
     /// layout transforms — stays on.</para>
     ///
+    /// <para>On a card (<paramref name="onCard"/>), at every level, ConstantSharing is disabled
+    /// too. It makes every equal small initializer one, and the CUDA execution provider then feeds
+    /// a node that reads one such value in device memory and another in host memory — a
+    /// <c>Slice</c> of <c>[1]</c> ending at <c>[1]</c>, from a start computed at run time — from a
+    /// single copy, which crashes the process when the node runs
+    /// (<see href="https://github.com/Shorokoo/Shorokoo/issues/535">Shorokoo/Shorokoo#535</see>).</para>
+    ///
     /// <para>Deliberately absent: <c>session.set_denormal_as_zero</c>. ORT applies that entry to
     /// the constructing thread once per process (first session wins) by setting FTZ/DAZ in its
     /// MXCSR, which then flushes every later float and double operation on that thread — the
@@ -1271,20 +1278,20 @@ public abstract class OrtBackend : IShorokooBackend
     public static void Configure(
         SessionOptions options,
         ShorokooGraphOptimization graphOptimization,
-        ShorokooLogSeverity logSeverity)
+        ShorokooLogSeverity logSeverity,
+        bool onCard = false)
     {
         options.LogSeverityLevel = (OrtLoggingLevel)(int)logSeverity;
         options.EnableMemoryPattern = false;
         // One node at a time, in the order of the graph the session writes out, on each stream:
         // what a run placing its values relies on (see OrtPlacements).
         options.ExecutionMode = ExecutionMode.ORT_SEQUENTIAL;
-        if (graphOptimization == ShorokooGraphOptimization.TrainingStep)
-        {
-            options.GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL;
-            options.AddSessionConfigEntry("optimization.disable_specified_optimizers", "CommonSubexpressionElimination");
-        }
-        else
-            options.GraphOptimizationLevel = (GraphOptimizationLevel)(int)graphOptimization;
+        var trainingStep = graphOptimization == ShorokooGraphOptimization.TrainingStep;
+        options.GraphOptimizationLevel = trainingStep ? GraphOptimizationLevel.ORT_ENABLE_ALL : (GraphOptimizationLevel)(int)graphOptimization;
+        List<string> disabled = [];
+        if (trainingStep) disabled.Add("CommonSubexpressionElimination");
+        if (onCard) disabled.Add("ConstantSharing");
+        if (disabled.Count > 0) options.AddSessionConfigEntry("optimization.disable_specified_optimizers", string.Join(",", disabled));
     }
 
     /// <summary>

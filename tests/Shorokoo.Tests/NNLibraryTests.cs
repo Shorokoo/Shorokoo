@@ -807,11 +807,11 @@ public class NNLibraryOptimizerTrainingCoverageTests
         public HostBackend(bool fuses) => FusesOptimizerUpdates = fuses;
     }
 
-    private static (Dictionary<string, int> TableSized, float[][] State, long InPlace) ResidentStepsOnHost(
+    private static (Dictionary<string, int> TableSized, float[][] State, long InPlace, int Fused) ResidentStepsOnHost(
         bool fuses, ComputationGraph optimizer, Hyperparameter[] hyperparameters, float? runtimeValue, ComputationGraph? table = null, long rows = 64)
         => ResidentSteps(new HostBackend(fuses), optimizer, hyperparameters, runtimeValue, table, rows);
 
-    private static (Dictionary<string, int> TableSized, float[][] State, long InPlace) ResidentSteps(
+    private static (Dictionary<string, int> TableSized, float[][] State, long InPlace, int Fused) ResidentSteps(
         Shorokoo.OnnxRuntime.OrtBackend backend, ComputationGraph optimizer, Hyperparameter[] hyperparameters, float? runtimeValue,
         ComputationGraph? table, long rows)
     {
@@ -832,7 +832,7 @@ public class NNLibraryOptimizerTrainingCoverageTests
         return (nodes.Where(n => n.OutputBytes % (rows * 4 * 4) == 0 && n.OutputBytes > 0 && n.OpType != "Gather")
                 .GroupBy(n => n.OpType).ToDictionary(g => g.Key, g => g.Count()),
             [.. checkpoint.TrainableParams.Fields.Values.Concat(checkpoint.OptimizerState.Fields.Values).Select(Floats)],
-            context.AliasedOutputs);
+            context.AliasedOutputs, nodes.Count(n => n.OpType == "AdamUpdate"));
     }
 
     private static void AssertFusedToTheBit(ComputationGraph optimizer, Hyperparameter[] hyperparameters, float? runtimeValue = null,
@@ -863,6 +863,13 @@ public class NNLibraryOptimizerTrainingCoverageTests
     {
         AssertFusedToTheBit(AdamOptimizer.ComputationGraph, [0.001f, 0.9f, 0.999f, 1e-8f], null, NNWideGatheredTableProjectionModel.ComputationGraph, 8256);
         AssertFusedToTheBit(AdamWOptimizer.ComputationGraph, [0.001f, 0.9f, 0.999f, 1e-8f, 0.01f], null, NNWideGatheredTableProjectionModel.ComputationGraph, 8256);
+    }
+
+    [Fact]
+    public void TestAnAdamOrAdamWStepOnTheHostFusesTheUpdateOfEveryParameterTheTableAndTheMatMulWeight()
+    {
+        Assert.Equal(2, ResidentStepsOnHost(true, AdamOptimizer.ComputationGraph, [0.001f, 0.9f, 0.999f, 1e-8f], null).Fused);
+        Assert.Equal(2, ResidentStepsOnHost(true, AdamWOptimizer.ComputationGraph, [0.001f, 0.9f, 0.999f, 1e-8f, 0.01f], null).Fused);
     }
 
     [Fact]

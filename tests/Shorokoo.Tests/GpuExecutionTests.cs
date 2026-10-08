@@ -1385,6 +1385,44 @@ public class GpuExecutionTests
         Assert.Equal([1L, 3L, 4L, 2L], OnTheCard(x, Crop(ResizeMode.Cubic), data).Shape.Dims);
     }
 
+    // Shorokoo/Shorokoo#539: the CUDA Resize kernel returns zeros for tf_crop_and_resize.
+    [CudaFact(Skip = "Shorokoo/Shorokoo#539")]
+    public void CudaProvider_ACropAndResizeCropsToItsRoiOnTheCard()
+    {
+        var x = InputTensor<float32>("x", rank: 4);
+        Variable Crop(Vector<float32> roi, Vector<float32> scales) => OnnxOp.Resize(x, roi: roi, scales: scales, sizes: null,
+            antialias: null, axes: null, coordinateTransformationMode: CoordinateTransformationMode.Tf_crop_and_resize,
+            cubicCoeffA: null, excludeOutside: null, extrapolationValue: -1f, keepAspectRatioPolicy: null, mode: ResizeMode.Linear, nearestMode: null);
+        Assert.Equal([2f, 3f, 4f, -1f, -1f], OnTheCard(x, Crop(Vector(0f, 0f, 0f, 0.5f, 1f, 1f, 1f, 1.5f), Vector(1f, 1f, 1f, 1f)),
+            TensorData([1L, 1L, 1L, 5L], [0f, 1f, 2f, 3f, 4f])).CopyMemory<float>());
+        Assert.Equal([2f, 4f, -1f], OnTheCard(x, Crop(Vector(0f, 0f, 0f, 0.5f, 1f, 1f, 1f, 1.5f), Vector(1f, 1f, 1f, 0.6f)),
+            TensorData([1L, 1L, 1L, 5L], [0f, 1f, 2f, 3f, 4f])).CopyMemory<float>());
+    }
+
+    // Shorokoo/Shorokoo#540: the CUDA Optional kernel refuses to copy a buffer onto itself.
+    [CudaFact(Skip = "Shorokoo/Shorokoo#540")]
+    public void CudaProvider_AnOptionalOfAComputedTensorRunsOnTheCard()
+    {
+        var x = InputTensor<float32>("x", rank: 1);
+        Assert.Equal([2f, 4f, 6f], OnTheCard(x, OnnxOp.OptionalGetElement(OnnxOp.Optional(OnnxOp.Add(x, x), DataStructure.Tensor, DType.Float32)),
+            TensorData([3L], [1f, 2f, 3f])).CopyMemory<float>());
+    }
+
+    // Shorokoo/Shorokoo#541: the CUDA provider takes these nodes and then fails them.
+    [CudaFact(Skip = "Shorokoo/Shorokoo#541")]
+    public void CudaProvider_AnOperatorTheCardHasNoKernelForItsTypeOrFormRunsOnTheCard()
+    {
+        var f = InputTensor<float32>("f", rank: 2);
+        var data = TensorData([2L, 4L], [0.625f, -1.3f, 2.2f, 40f, -0.1f, 3.75f, -50f, 0.875f]);
+        var blocks = Vector(0.5f, 1f, 0.25f, 2f).Reshape(Vector(2L, 2L));
+        Assert.Equal([1, -3, 2, 40, 0, 15, -25, 0], OnTheCard(f, OnnxOp.Cast(OnnxOp.QuantizeLinear(f, blocks,
+            Vector((sbyte)0, (sbyte)0, (sbyte)0, (sbyte)0).Reshape(Vector(2L, 2L)), axis: 1, blockSize: 2), null, DType.Int32), data).CopyMemory<int>());
+        Assert.Equal([0.5f, 0.5f, 4f, 1f, -0.25f, -0.25f, -2f, -2f], OnTheCard(f, OnnxOp.DequantizeLinear(Vector((sbyte)1, (sbyte)1, (sbyte)4, (sbyte)1, (sbyte)-1, (sbyte)-1, (sbyte)-1, (sbyte)-1).Reshape(Vector(2L, 4L)),
+            blocks, null, axis: 1, blockSize: 2), data).CopyMemory<float>());
+        Assert.Equal([0d, 5d, 0d, 0d], OnTheCard(f, OnnxOp.ScatterND(OnnxOp.Cast(OnnxOp.Mul(f, Scalar(0f)), null, DType.Float64), Vector(0L, 1L).Reshape(Vector(1L, 2L)), Vector(5d), null),
+            TensorData([2L, 2L], [1f, 2f, 3f, 4f])).CopyMemory<double>());
+    }
+
     private static TensorData OnTheCard<T>(Tensor<T> x, Variable output, TensorData data) where T : IVarType
     {
         using var context = new ComputeContext();

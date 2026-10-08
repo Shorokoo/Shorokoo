@@ -57,7 +57,7 @@ public class ModuleSourceGenerator : IIncrementalGenerator
         title: "Plain C# loop stacks layers",
         messageFormat: "This plain C# loop creates parameters or sub-models on every pass, so they are numbered in trace order and adding or removing one renames every later one. Write the loop as 'foreach (var ctx in LoopAPI.Iterate(count))', which names them by iteration, and gate layers that differ on ctx.IterationIndex.",
         category: "SourceGeneration",
-        DiagnosticSeverity.Info,
+        DiagnosticSeverity.Warning,
         isEnabledByDefault: true);
 
     /// <summary>

@@ -80,7 +80,7 @@ public class ModulesCodeGeneratorPlainLoopTests
                 : compilation.ReplaceSyntaxTree(helperTree!, edited);
             helperTree = edited;
             driver = driver.RunGenerators(compilation);
-            counts.Add(driver.GetRunResult().Diagnostics.Count(d => d.Id == "MSG007"));
+            counts.Add(driver.GetRunResult().Diagnostics.Count(d => d.Id == "MSG007" && d.Severity == DiagnosticSeverity.Warning));
         }
         return [.. counts];
     }

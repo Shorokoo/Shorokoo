@@ -35,7 +35,7 @@ public partial class PerfTableBankModel
     {
         var x = Shorokoo.Modules.Initializers.Normal.Init([Scalar(16384L), Scalar(64L)]).Gather(tokens);
         for (int table = 0; table < 3; table++)
-            x = x + Shorokoo.Modules.Initializers.Normal.Init([Scalar(16384L), Scalar(64L)]).Gather(tokens);
+            x = x + Shorokoo.Modules.Initializers.Normal.Init([Scalar(16384L), Scalar(64L)]).Named($"table{table}").Gather(tokens);
         return x.MatMul(Shorokoo.Modules.Initializers.Normal.Init([Scalar(64L), Scalar(16L)]));
     }
 }

@@ -574,7 +574,7 @@ namespace Shorokoo
             container.Dispose();
             return TrainingRig.ReconstructFromConstituents(
                 archGraph, lossGraph, optimizerGraph, hypers, names, rngConfig,
-                mergeContext, runtimeContext, trainingBackend, progress, deferInitialization);
+                mergeContext, runtimeContext, trainingBackend, progress, deferInitialization, rig.RunModelAnswers);
         }
 
         /// <summary>
@@ -1071,6 +1071,7 @@ namespace Shorokoo
                 SchedulerModel = schedulerKey,
                 Hyperparameters = hyperBindings,
                 Rng = SerializeRngConfig(rig.RngConfig),
+                RunModelAnswers = rig.RunModelAnswers is { Count: > 0 } answers ? new Dictionary<string, long?>(answers, StringComparer.Ordinal) : null,
             };
         }
 

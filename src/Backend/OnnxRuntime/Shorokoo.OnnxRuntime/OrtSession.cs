@@ -504,9 +504,12 @@ internal sealed class OrtSession : IShorokooSession
         using var inProgress = Log.Enter(runSettings.Log);
         using var abort = AbortWhenCancelled(runOptions, abortToken);
         using var charge = CachingAllocator.Charge(_hostAccount, _cardAccount);
+        var finished = false;
         try
         {
-            return run(runOptions);
+            var result = run(runOptions);
+            finished = true;
+            return result;
         }
         catch (OnnxRuntimeException cause) when (WasStopped(cause, abortToken))
         {
@@ -514,6 +517,9 @@ internal sealed class OrtSession : IShorokooSession
         }
         finally
         {
+            // A run that fails or is stopped returns without draining the card's stream, so the
+            // memory it let go of waits for the card before anything else may have it.
+            if (!finished) charge.Unfinished();
             GC.KeepAlive(feeds);
         }
     }

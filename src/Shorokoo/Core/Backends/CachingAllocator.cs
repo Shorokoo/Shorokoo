@@ -968,6 +968,23 @@ internal sealed unsafe class CachingAllocator
             + "so it hands back none of the memory that work may still read.");
     }
 
+    /// <summary>
+    /// Waits for the work the card has in hand as a call that did not run to its end ends
+    /// (<see cref="Scope.End"/>). A card that cannot be waited for is in an error no later work on it
+    /// survives, and the failure that ended the call is the one worth reporting, so that is not
+    /// thrown over it.
+    /// </summary>
+    private void AwaitUnfinishedCall()
+    {
+        try
+        {
+            AwaitCard();
+        }
+        catch (InvalidOperationException)
+        {
+        }
+    }
+
     /// <summary>Whether this allocator's lock is taken, by any thread.</summary>
     internal bool Locked => _gate.Taken;
 
@@ -1449,6 +1466,10 @@ internal sealed unsafe class CachingAllocator
     /// <summary>The disposable <see cref="Charge"/> answers.</summary>
     internal readonly struct ChargeScope(Scope scope) : IDisposable
     {
+        /// <summary>Says the call did not run to its end: it failed or was stopped, so the work it
+        /// queued on a card may still be running as it ends (<see cref="Scope.End"/>).</summary>
+        internal void Unfinished() => scope.Unfinished = true;
+
         public void Dispose()
         {
             t_scope = scope.Outer;
@@ -1462,6 +1483,9 @@ internal sealed unsafe class CachingAllocator
         internal Scope? Outer { get; } = outer;
 
         private HeldBlocks? _held;
+
+        /// <summary>Whether the call did not run to its end (<see cref="ChargeScope.Unfinished"/>).</summary>
+        internal bool Unfinished;
 
         // The bytes of the blocks it holds.
         private long _holding;
@@ -1524,9 +1548,16 @@ internal sealed unsafe class CachingAllocator
 
         /// <summary>The call is over, its stream done with what it held: kept, or back to the device
         /// where the account has closed meanwhile; and each account sheds what it holds beyond the
-        /// most one of its calls has used.</summary>
+        /// most one of its calls has used.
+        ///
+        /// <para>A run that completes has drained its stream as it returns, and a call that did not
+        /// run to its end has not: ONNX Runtime lets go of a failed or stopped run's memory without
+        /// waiting for the kernels it queued, which go on reading and writing it. So the card is
+        /// waited for first, or what the call held would be handed to other work, and shed from the
+        /// card, under kernels still running.</para></summary>
         internal void End()
         {
+            if (card is not null && Unfinished) card.Allocator.AwaitUnfinishedCall();
             if (card is not null) EndOn(card);
             if (host is not null) EndOn(host);
         }

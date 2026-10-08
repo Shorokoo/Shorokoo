@@ -62,6 +62,8 @@ namespace Shorokoo
                 return InvokeInitializerBody(targetFn, inputs, genericTypeArgs: null,
                     targetFn.Outputs[0].Type, targetFn.Outputs[0].Rank);
 
+            RefuseShapedParamWithoutShapeVector(targetFn, isTrainable, stateOwnership, inputs);
+
             return InternalOp.TrainableParamRef(inputs, iterationIndices, localModelId: null, targetFn.Outputs[0].Type, targetFn.Outputs[0].Rank, targetFn, isTrainable);
         }
 
@@ -110,15 +112,57 @@ namespace Shorokoo
             // (Shorokoo/Shorokoo#295).
             var genericTypeArgs = GenericTypeArgsOf(trainableParamInitializerImplementation);
 
+            if (GraphTrace.IsParamInitializerBodyTracing)
+                return (Variable)InvokeInitializerBody(targetFn, inputs, genericTypeArgs, dtype ?? targetFn.Outputs[0].Type, rank);
+
+            RefuseShapedParamWithoutShapeVector(targetFn, isTrainable, stateOwnership, inputs);
+
             // Create the trainable param ref with the appropriate dtype and generic type args
-            var result = GraphTrace.IsParamInitializerBodyTracing
-                ? InvokeInitializerBody(targetFn, inputs, genericTypeArgs, dtype ?? targetFn.Outputs[0].Type, rank)
-                : InternalOp.TrainableParamRef(inputs, iterationIndices, localModelId: null, dtype, rank, targetFn, isTrainable, genericTypeArgs);
+            var result = InternalOp.TrainableParamRef(inputs, iterationIndices, localModelId: null, dtype, rank, targetFn, isTrainable, genericTypeArgs);
 
             // The result is Variable but we know it's a tensor with the specified dtype.
             // Cast through Variable first (the interface), then to the concrete Tensor<T>.
             // This cast succeeds because TrainableParamRef creates a Variable with the correct dtype.
             return (Variable)result;
+        }
+
+        /// <summary>
+        /// Refuses a parameter whose initializer returns a shaped (non-<c>Scalar</c>) value but is
+        /// not handed an <c>int64</c> shape vector as its first argument. A shaped parameter's
+        /// shape is read off that first argument, so anything else in that slot — another
+        /// parameter's value, say — states no shape at all, and an initializer called with no
+        /// argument states it nowhere. The refusal is made here, at the <c>Init</c> call, so it
+        /// holds for every parameter the module declares, including one on a branch a
+        /// specialization later removes. Optimizer-owned state is exempt: it is computed per
+        /// trainable parameter by an ordinary call of its initializer, so its shape is whatever
+        /// that call returns.
+        /// </summary>
+        private static void RefuseShapedParamWithoutShapeVector(
+            Function targetFn, bool isTrainable, StateOwnership stateOwnership, Variable[] inputs)
+        {
+            if (!isTrainable && stateOwnership == StateOwnership.OptimizerOwned)
+                return;
+            if (targetFn.Outputs[0].Rank == 0)
+                return;
+            if (inputs.Length == 0)
+                throw new InvalidOperationException(
+                    $"Parameter initializer '{targetFn.DefaultName}' takes no initializer input and "
+                    + "does not return a rank-0 Scalar<T>, so the shape of the parameter it creates "
+                    + "is not stated anywhere the pipeline can read it. An initializer must either "
+                    + "take the parameter's shape as its first Inline parameter "
+                    + "(Inline(Vector<int64> shape, ...)) or declare the scalar shape by returning "
+                    + "Scalar<T>; a shape baked into the body of a no-input Inline is neither.");
+            if (inputs[0] is not { } first)
+                return;
+            if (first.Type == DType.Int64 && first.Rank is null or 1)
+                return;
+            throw new InvalidOperationException(
+                $"Parameter initializer '{targetFn.DefaultName}' returns a shaped tensor but its first "
+                + $"argument is a tensor of {first.Type}{(first.Rank is { } r ? $" with rank {r}" : "")}, not the "
+                + "parameter's shape. A shaped initializer takes the shape of the parameter it creates "
+                + "as its first Inline parameter (Inline(Vector<int64> shape, ...)); any other input, "
+                + "such as another parameter's value, comes after it. Pass the shape first, or return "
+                + "Scalar<T> for a rank-0 parameter.");
         }
 
         /// <summary>

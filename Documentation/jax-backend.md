@@ -21,7 +21,7 @@ what is JAX's own.
   only). Each brings `Shorokoo.Jax`, `Shorokoo.PythonTranslation` and `Shorokoo.PythonHost`; JAX
   itself lives in the Python environment.
 - A JAX backend is **always named**: `new ComputeContext(new JaxCpuBackend())`. It is never a
-  candidate for [auto-discovery](inference.md#auto-discovery).
+  candidate for [auto-discovery](backends-and-devices.md#auto-discovery).
 - The **Python environment** is resolved as for PyTorch: the backend's options, then
   `SHOROKOO_PYTHON_ENV`, then one provisioned with uv into your user cache
   ([details](pytorch-backend.md#the-python-environment)). The provisioned environments hold PyTorch
@@ -161,7 +161,7 @@ session binds no output aliases.
 | **Log severity** | Python warnings a run raises are shown at `Warning` and below, not above | same |
 
 Floating-point products and convolutions run in the operands' full precision unless the context
-allows TensorFloat-32 ([Precision](inference.md#precision-gpu-backends)): the precision is compiled
+allows TensorFloat-32 ([Precision](gpu-backends.md#precision-gpu-backends)): the precision is compiled
 into each program, from the session's context, so sessions of either kind run side by side. A
 determinant (`Det`) and its gradient are factorized in full precision either way.
 

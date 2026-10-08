@@ -18,4 +18,12 @@ the one it wants, rather than leaving it to discovery.
 
 ## Documentation
 
-Guides, API reference, and samples: https://github.com/Shorokoo/Shorokoo
+The guides for this version ship inside the package, in its `docs/` folder: start at
+`docs/README.md`, or at `docs/first-training-run.md` for a first program end to end. Restored
+to the default global packages folder, they are in `~/.nuget/packages/shorokoo/<version>/docs/`
+(`%UserProfile%\.nuget\packages\shorokoo\<version>\docs\` on Windows).
+
+The same guides online (in the package, this link names the commit the package was built from):
+https://github.com/Shorokoo/Shorokoo/tree/main/Documentation
+
+Samples: https://github.com/Shorokoo/Shorokoo/tree/main/samples

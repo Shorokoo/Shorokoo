@@ -1,6 +1,19 @@
 # Training models
 
-Related: [defining-models.md](defining-models.md) · [nn-library.md](nn-library.md) · [inference.md](inference.md) · [training-backends.md](training-backends.md)
+Compose a model, a loss and an optimizer into a `TrainingRig` and run its training steps. For a
+first program end to end, start at [first-training-run.md](first-training-run.md). Four pages go
+further:
+
+- [training-hyperparameters.md](training-hyperparameters.md) — each optimizer's hyperparameter set,
+  baked, scheduled or runtime hyperparameters, schedules, and custom optimizers.
+- [training-data.md](training-data.md) — data loaders, resuming at the next batch, and the training
+  history.
+- [training-checkpoints.md](training-checkpoints.md) — save and resume a run, what a save costs, and
+  bind trained weights into an inference model.
+- [training-memory.md](training-memory.md) — out-of-memory reports, what a process's memory holds,
+  and sizing a process memory limit.
+
+Related: [defining-models.md](defining-models.md) · [nn-library.md](nn-library.md) · [losses-and-optimizers.md](losses-and-optimizers.md) · [inference.md](inference.md) · [training-backends.md](training-backends.md)
 
 ## Facts
 
@@ -29,36 +42,21 @@ Related: [defining-models.md](defining-models.md) · [nn-library.md](nn-library.
 ## Built-in components
 
 Ready-made losses and optimizers ship in `Shorokoo.Modules` (namespaces
-`Shorokoo.Modules.Losses` / `Shorokoo.Modules.Optimizers`) — see [nn-library.md](nn-library.md)
-for the catalog (sixteen losses; layers and initializers too). Each optimizer whose
-hyperparameters are all tensor-shaped gets a source-generated, named, defaulted set
-(`<Optimizer>Hyperparameters`) implementing `IOptimizerHyperparameters`. The thirteen optimizers
-(the positional `params Hyperparameter[]` count for `FromScratch` equals each set's property count):
-
-| Optimizer | Hyperparameter set (named, init-only `Hyperparameter` properties; defaults from `[Hyper]`) |
-|---|---|
-| `SGDOptimizer` | `SGDOptimizerHyperparameters { LearningRate = 0.01 }` |
-| `SGDMomentumOptimizer` | `SGDMomentumOptimizerHyperparameters { LearningRate = 0.01, MomentumCoeff = 0.9 }` |
-| `AdamOptimizer` | `AdamOptimizerHyperparameters { LearningRate = 0.001, Beta1 = 0.9, Beta2 = 0.999, Epsilon = 1e-8 }` |
-| `AdamWOptimizer` | `AdamWOptimizerHyperparameters { LearningRate = 0.001, Beta1 = 0.9, Beta2 = 0.999, Epsilon = 1e-8, WeightDecay = 1e-4 }` |
-| `RMSpropOptimizer` | `RMSpropOptimizerHyperparameters { LearningRate = 0.01, Alpha = 0.99, Epsilon = 1e-8, Momentum = 0 }` |
-| `AdagradOptimizer` | `AdagradOptimizerHyperparameters { LearningRate = 0.01, Epsilon = 1e-10 }` |
-| `AdamaxOptimizer` | `AdamaxOptimizerHyperparameters { LearningRate = 0.002, Beta1 = 0.9, Beta2 = 0.999, Epsilon = 1e-8 }` |
-| `NAdamOptimizer` | `NAdamOptimizerHyperparameters { LearningRate = 0.002, Beta1 = 0.9, Beta2 = 0.999, Epsilon = 1e-8, MomentumDecay = 0.004 }` |
-| `RAdamOptimizer` | `RAdamOptimizerHyperparameters { LearningRate = 0.001, Beta1 = 0.9, Beta2 = 0.999, Epsilon = 1e-8 }` |
-| `AdadeltaOptimizer` | `AdadeltaOptimizerHyperparameters { LearningRate = 1.0, Rho = 0.9, Epsilon = 1e-6 }` |
-| `LionOptimizer` | `LionOptimizerHyperparameters { LearningRate = 1e-4, Beta1 = 0.9, Beta2 = 0.99, WeightDecay = 0 }` (4 positional) |
-| `AdafactorOptimizer` | `AdafactorOptimizerHyperparameters { LearningRate = 0.01, Beta2Decay = -0.8, Epsilon1 = 1e-30, Epsilon2 = 1e-3, ClipThreshold = 1.0, WeightDecay = 0 }` (6 positional; **non-factored** — full param-shaped 2nd moment) |
-| `LambOptimizer` | `LambOptimizerHyperparameters { LearningRate = 0.001, Beta1 = 0.9, Beta2 = 0.999, Epsilon = 1e-6, WeightDecay = 0.01 }` (5 positional; `Epsilon` is LAMB's `1e-6`, not Adam's `1e-8`) |
+`Shorokoo.Modules.Losses` / `Shorokoo.Modules.Optimizers`) — see
+[losses-and-optimizers.md](losses-and-optimizers.md) for the catalog (sixteen losses, thirteen
+optimizers). Each optimizer whose hyperparameters are all tensor-shaped gets a source-generated,
+named, defaulted set (`<Optimizer>Hyperparameters`) implementing `IOptimizerHyperparameters`; the
+thirteen sets, and how each hyperparameter is bound, are in
+[training-hyperparameters.md](training-hyperparameters.md).
 
 A loss module has signature `(predictions, targets) -> Scalar<float32>` with exactly two tensor
 inputs; targets are typically `Tensor<float32>`, but class-index losses (`CrossEntropyLoss`,
-`NLLLoss`) take `Tensor<int64>`. The library losses' knobs (`reduction`, `ignore_index`,
-`label_smoothing`, class `weight`/`pos_weight`, SmoothL1 `beta`) live on extra
+`NLLLoss`) take `Tensor<int64>`. The library losses' knobs (`reduction`, `ignoreIndex`,
+`labelSmoothing`, class `weight`/`posWeight`, SmoothL1 `beta`) live on extra
 `Reduced`/`PerElement` methods, not on the rig-bound `Inline`. To use them in a rig, write a
 2-input wrapper `[Module]` whose `Inline` calls `Reduced(...)` with the knobs baked; a class
-`weight`/`pos_weight` must be **baked as a graph constant** there. See
-[Losses → Configurable knobs](nn-library.md#loss-configurable-knobs).
+`weight`/`posWeight` must be **baked as a graph constant** there. See
+[Losses → Configurable knobs](losses-and-optimizers.md#loss-configurable-knobs).
 
 <a id="loss-ignoring-targets"></a>
 **A loss graph may ignore its `targets`.** Two inputs is a signature requirement only: the rig
@@ -66,7 +64,7 @@ checks whether the loss output reaches input 1 (through data edges and branch co
 derives the target slot from that. So a model that computes its **own** loss can be trained with a
 pass-through loss. Use this when the loss needs more than one predictions and one targets tensor —
 label ids, a padding mask, per-token weights, `Reduced`/`PerElement` knobs: pass those as ordinary
-**model** inputs (see [Which knobs reach the rig](nn-library.md#loss-configurable-knobs)) and make
+**model** inputs (see [Which knobs reach the rig](losses-and-optimizers.md#loss-configurable-knobs)) and make
 the model's single output the scalar loss:
 
 ```csharp
@@ -112,216 +110,7 @@ hyperparameters (which become the graph's leading inputs), and returns the updat
 Optimizer state never appears in the signature: it is created inside the body by an
 **optimizer-owned state initializer** (e.g. `OptimizerStateZeros.Init(currentParam.ShapeTensor())`)
 and updated with one `Globals.StateUpdate(state, newValue)` call per state — see
-[Custom optimizers](#custom-optimizers).
-
-### Hyperparameter kinds (`Hyperparameter`)
-
-Each hyperparameter property is a `Hyperparameter` bound to exactly one source; its `Kind` decides
-the wiring:
-
-| Assign | Kind | Wiring |
-|---|---|---|
-| a bare value (e.g. `1e-4f`, `5`, `true`), or `Hyperparameter.Baked(v)` | `Baked` | graph `Constant`; change ⇒ rebuild |
-| a `Schedule` (e.g. `Schedules.Cosine(3e-4f, total)`), or `Hyperparameter.Scheduled(schedule)` | `Scheduled` | computed **in-graph** from the counter input(s) each step |
-| `Hyperparameter.Scheduled(module)` | `Scheduled` (module) | a scheduler module (int64 counter(s) → the declared-dtype value) inlined into the graph |
-| `Hyperparameter.Runtime()` / `Hyperparameter.Runtime(shape)` | `Runtime` | runtime input; supply each step via `MakeHyperparameters` |
-
-`Schedules` holds the factories (`Constant`, `Linear`, `Cosine`, `CosineWithWarmup`, `StepDecay`,
-`Exponential`, `OneCycle`); a `Schedule` has combinators (`WithWarmup`, `Then`, `Scale`, `Clamp`,
-`Shift`, `PerEpoch`) — see [Schedule factories and combinators](#schedule-factories-and-combinators).
-`Schedule.At(long)` previews a value. Both types are in `Shorokoo.Core.Training`, which
-`using Shorokoo;` does **not** cover; add `using Shorokoo.Core.Training;` — see
-[`Shorokoo.Core.*` is not all internal](orientation.md#public-core-namespaces).
-
-**Scheduler modules.** A scheduler module's inputs are a named subset of the int64 scalar counters
-`{step, epoch, batchIndex}` and its single output is the value at the hyperparameter's declared
-dtype. Built-in schedules are step-only (`PerEpoch` derives the epoch from the step). Rig build
-rejects a scheduler graph with trainable params, module state / `StateUpdate`, RNG draws, or an
-unrecognized input. There is no API for a host lambda schedule.
-
-**Configurable milestones: `[Hyper]` + `Specialize`.** A module may declare milestones as `[Hyper]`
-inputs and bake them with [`Specialize`](inference.md#hardcoding-hypers-with-specialize), which
-removes them from the input list, before passing the graph to `Hyperparameter.Scheduled`:
-
-```csharp
-[Module]
-public partial class LinearDecay
-{
-    public static Scalar<float32> Inline(Scalar<int64> step, [Hyper(10)] Scalar<int32> totalSteps)
-        => Scalar(0.1f) * (Scalar(1f) - step.Cast<float32>() / totalSteps.Cast<float32>());
-}
-
-var sched = LinearDecay.ComputationGraph;                                     // inputs: totalSteps, step
-var decay = sched.Specialize(sched.FromOrderedInputs([TensorData([], 20)]));  // inputs: step
-
-var rig = TrainingRig.FromScratch(model, loss, SGDOptimizer.ComputationGraph, sample,
-    new SGDOptimizerHyperparameters { LearningRate = Hyperparameter.Scheduled(decay) });
-// learningRate = 0.1, 0.095, 0.09, … at steps 0, 1, 2, …
-```
-
-`FromOrderedInputs` pairs values with the leading input names, and `[Hyper]` inputs come first, so
-the value names `totalSteps`. The milestone is then fixed for the rig's life, like a `Baked` value.
-Specializing `step` too yields a constant schedule.
-
-Optimizer state is initialized at each hyperparameter's value at the initial counters (all 0).
-
-**Reading back the applied value.** Every checkpoint a step returns carries
-`.AppliedHyperparameters`: each hyperparameter's value in that step (scheduled: as computed
-in-graph; baked: the constant; runtime: as fed), keyed by the producing rig's
-`HyperparameterNames`, in that order. The step ran at counter `Step - 1`, so for a built-in
-schedule the value is `schedule.At(ckpt.Step - 1)`, up to the numeric note below:
-
-```csharp
-var ckpt = rig.TrainStep(ckpt, input, target);
-float lr = ckpt.AppliedHyperparameters!["learningRate"].ToSingle();
-```
-
-Each value is an immutable `AppliedHyperparameter` with `DType`, `Shape`, `ElementCount`,
-`ToDouble()` / `ToSingle()` (single-element), `ToArray<T>()` (`T` the dtype's storage type) and
-`ToTensorData()`. A resident run exposes its last step's map as `run.AppliedHyperparameters`. The
-values are copied to the host as the step runs (for a runtime value kept on a device, a download
-each step), so reading the map is free. It is `null` on an initial or loaded checkpoint, survives
-`otherRig.AdoptCheckpoint(ckpt)` unchanged, and is not saved on its own — the
-[training history](#the-training-history) holds every step's values and is saved.
-
-> **Numeric note.** On engines whose `Cos`/`Pow` differ from .NET `MathF` (e.g. ONNX Runtime), an
-> in-graph schedule using those ops may differ from `Schedule.At` by a few ulps. Arithmetic and
-> piecewise schedules are exact.
-
-### Schedule factories and combinators
-
-`s` is the 0-based global step and `f(s)` the value of the schedule a combinator is applied to.
-The rig evaluates these in `float32`.
-
-**Factories** (`Schedules.…`), each starting at step 0:
-
-| Factory | Value at step `s` | Outside its nominal range |
-|---|---|---|
-| `Constant(float value)` | `value` | unchanging |
-| `Linear(float baseValue, float finalValue, int totalSteps)` | `baseValue + (finalValue - baseValue) · p`, with `p = clamp(s / totalSteps, 0, 1)` | clamped: `baseValue` at and below step 0, `finalValue` from `totalSteps` on |
-| `Cosine(float baseValue, int totalSteps)` | `0.5 · baseValue · (1 + cos(π · p))`, same `p` | held at `0` from `totalSteps` on |
-| `CosineWithWarmup(float baseValue, int warmupSteps, int totalSteps)` | `Cosine(baseValue, max(1, totalSteps - warmupSteps)).WithWarmup(warmupSteps)` (a negative `warmupSteps` becomes `0`): a linear ramp from `0` to `baseValue` at `warmupSteps`, then cosine decay to `0` at `totalSteps` | held at `0` |
-| `StepDecay(float baseValue, int stepSize, float gamma)` | `baseValue · gamma^(s / stepSize)`, **integer** division | never clamps |
-| `Exponential(float baseValue, float gamma)` | `baseValue · gamma^s` | never clamps |
-| `OneCycle(float maxValue, int totalSteps, float pctStart = 0.3f, float divFactor = 25f, float finalDivFactor = 1e4f)` | with `initial = maxValue / divFactor`, `final = initial / finalDivFactor`, `up = max(1, round(totalSteps · clamp(pctStart, 0, 1)))`, `down = max(1, totalSteps - up)`: for `s < up`, `initial + (maxValue - initial) · 0.5 · (1 - cos(π · s / up))`; for `s ≥ up`, `final + (maxValue - final) · 0.5 · (1 + cos(π · clamp((s - up) / down, 0, 1)))` | held at `final` from `totalSteps` on |
-
-`totalSteps` (for `Linear`, `Cosine`, `CosineWithWarmup`, `OneCycle`) and `StepDecay`'s `stepSize`
-must be at least 1, or the factory throws.
-
-**Combinators** (chainable; each returns a new schedule):
-
-| Combinator | Value at step `s` |
-|---|---|
-| `Scale(float factor)` | `factor · f(s)` |
-| `Clamp(float min, float max)` | `clamp(f(s), min, max)`; throws if `min > max` |
-| `Shift(int steps)` | `f(s + steps)` — positive `steps` moves the schedule **earlier**, negative moves it later |
-| `PerEpoch(int stepsPerEpoch)` | `f(s / stepsPerEpoch)`, integer division; needs no epoch input; `stepsPerEpoch ≥ 1` |
-| `WithWarmup(int warmupSteps, float startFactor = 0f)` | with `peak = f(0)`: for `s < warmupSteps`, `peak · (startFactor + (1 - startFactor) · s / warmupSteps)`; then `f(s - warmupSteps)` (**re-based**). `warmupSteps == 0` returns the schedule unchanged |
-| `Then(int atStep, Schedule next)` | `f(s)` for `s < atStep`, then `next(s - atStep)` (**re-based**) |
-
-`startFactor` multiplies the inner schedule's step-0 value, not the optimizer's default;
-`Schedules.Constant(peak).WithWarmup(N)` ramps linearly from `0` to `peak` over steps `0 … N`.
-
-**Worked example: warm up, hold, decay.** `Then` re-bases, so the second schedule's length is in
-its own steps and the boundary in absolute steps:
-
-```csharp
-using Shorokoo.Core.Training;   // Schedule, Schedules
-
-// Ramp 0 → 1e-3 over steps 0..200, hold 1e-3 to step 3899,
-// then decay 1e-3 → 5e-5 over steps 3900..6000 and hold.
-Schedule lr = Schedules.Constant(1e-3f)
-    .WithWarmup(200)                                    // peak = Constant's step-0 value = 1e-3
-    .Then(3900, Schedules.Linear(1e-3f, 5e-5f, 2100));  // Linear's own step 0 is global step 3900
-```
-
-| step | `lr.At(step)` |
-|---|---|
-| `0` | `0` |
-| `100` | `5.0e-4` |
-| `199` | `9.95e-4` |
-| `200` … `3899` | `1e-3` |
-| `3900` | `1e-3` (`Linear` at its step 0) |
-| `4950` | `5.25e-4` |
-| `6000`, `7000` | `5e-5` |
-
-### Hyperparameter dtypes and shapes
-
-A hyperparameter's dtype and rank are what the optimizer **declares** in its `[Hyper(...)]`
-parameter (`Scalar<T>`, `Vector<T>` or `Tensor<T>`). Any supported dtype and shape works — an
-`int32` count, a `bit` flag, a `float64` coefficient, a per-element rate vector.
-
-```csharp
-[Module]
-public partial class MyOptimizer
-{
-    public static Tensor<float32> Inline(
-        Tensor<float32> currentParam,
-        Tensor<float32> grad,
-        [Hyper(0.01f)] Scalar<float32> learningRate,
-        [Hyper(2)]     Scalar<int32>   accumSteps,
-        [Hyper(true)]  Scalar<bit>     nesterov,
-        [Hyper(0.25)]  Scalar<float64> decay,
-        [Hyper]        Vector<float32> perGroupScale) => …;
-}
-```
-
-**Defaults are scalar-only.** `[Hyper(default)]` takes a host literal of the declared dtype. A
-non-scalar hyperparameter, or a dtype with no C# literal (e.g. `float16`), takes a bare `[Hyper]`;
-its generated property is `required`, bound with `Hyperparameter.Baked(Globals.TensorData(…))`.
-
-**Dtypes.** Host values (baked, or per-step via `MakeHyperparameters`) are fitted to the declared
-dtype. Float-to-float is always allowed (only overflow to infinity is rejected). Every other
-conversion must be value-preserving: `("accumSteps", 3L)` becomes `int32` 3; `2.5`,
-`long.MaxValue`, or crossing the bool boundary fails loud. Non-scalar values are not converted —
-build them at the declared dtype (`Globals.TensorData(dtype, shape, …)`). `rig.HyperparameterDTypes`
-lists the declared dtypes in `rig.HyperparameterNames` order.
-
-**Shapes.** The declaration fixes the rank; the binding gives the shape, reported by
-`rig.HyperparameterShapes`:
-
-| Kind | Where its shape comes from |
-|---|---|
-| `Baked` | the constant's own shape — `Hyperparameter.Baked(TensorData([4L], …))` |
-| `Scheduled` (module) | the scheduler module's output shape, inferred at rig build |
-| `Runtime` | declared by you: `Hyperparameter.Runtime(4L)`; `Runtime()` means a scalar |
-
-A runtime shape is fixed for the rig's life; a per-step value of another shape fails loud. A
-non-scalar hyperparameter must fit the parameters it updates, or the rig refuses it at build
-([Custom optimizers](#custom-optimizers)). A built-in `Schedule` drives only `float32` **scalar**
-hyperparameters; use a scheduler module for anything else.
-
-```csharp
-var rig = TrainingRig.FromScratch(model, loss, MyOptimizer.ComputationGraph, sample,
-    new MyOptimizerHyperparameters
-    {
-        LearningRate  = Schedules.Cosine(1e-3f, totalSteps),        // float32 scalar, built-in schedule
-        AccumSteps    = 4,                                          // int32, baked
-        Nesterov      = true,                                       // bool, baked
-        PerGroupScale = Hyperparameter.Runtime(3L),                 // float32 vector, host-supplied
-    });
-
-ckpt = rig.TrainStep(ckpt,
-    rig.MakeHyperparameters(("perGroupScale", TensorData([3L], 1f, 2f, 3f))),
-    inputs.Shared(), targets.Shared());
-```
-
-`MakeHyperparameters` copies any `TensorData` you give it, so a step never consumes yours. Its named
-overload takes `(string name, object value)` pairs; `DynamicHyperparameterNames` lists the runtime
-names.
-
-The positional `FromScratch` overloads take the values as an array, followed by the optional
-`rngConfig` / `mergeContext` / `runtimeContext`: `(sample, [0.05f], rng)`,
-`(sample, [0.05f], rng, merge, runtime)`, `(sample, [], rng)`. The params form
-`FromScratch(model, loss, opt, sample, 0.05f)` takes values only. Name a context passed without an
-`rngConfig` (`(sample, [0.05f], mergeContext: ctx)`). A literal `null` in the hyperparameter slot
-with an optional argument is ambiguous; pass the set or cast.
-
-`Hyperparameter.Baked(v)` exposes `BakedValue` (the `TensorData`) and `BakedDType`.
-`HyperAttribute.DefaultValue` is the attribute's literal (`object?`), and a graph input's
-`HyperDefaultValue` its invariant string (`string?`), so `int64` / `float64` / `bool` defaults
-round-trip exactly. A training `.skpt` records each baked binding's `dtype`, `shape` and base64
-`value`, and each runtime binding's `shape`.
+[Custom optimizers](training-hyperparameters.md#custom-optimizers).
 
 ## `TrainingRig` API
 
@@ -451,7 +240,7 @@ public sealed class ResidentTrainingRun : IDisposable
 ### What a training step consumes
 
 A training step feeds its inputs like any run
-([inference.md](inference.md#feeding-a-run-consumed-shared-or-tried)): what it is given as it is,
+([tensors-in-a-run.md](tensors-in-a-run.md#feeding-a-run-consumed-shared-or-tried)): what it is given as it is,
 it **consumes** — dead once the step starts, memory returned as the step returns — and what it is
 given `.Shared()` it only reads.
 
@@ -463,7 +252,7 @@ var next = rig.TrainStep(best.Shared(), x2, y2);   // a checkpoint kept past the
 
 **What a step keeps of what it reads.** A tensor the run cannot address in place (any tensor built
 from a C# array, and a host tensor on a card) is read through a copy that the tensor keeps for
-reuse ([inference.md](inference.md#feeding-a-run-consumed-shared-or-tried)). A training step
+reuse ([tensors-in-a-run.md](tensors-in-a-run.md#feeding-a-run-consumed-shared-or-tried)). A training step
 releases the copies of its **batch** as it returns, success or failure, so a `.Shared()` dataset is
 not held a second time (on a card, not uploaded whole); each step copies its batch afresh. Copies of
 the **checkpoint's state** are kept: a checkpoint fed `.Shared()` on a card keeps a copy on the card
@@ -578,7 +367,7 @@ leave nothing whole to return, while the state between two steps always is.
   with `StopReason == TrainingStopReason.Cancelled`. Nothing is thrown.
 - **`onStep`** is called after every step, in order, on the training thread, with a
   `TrainingStepReport`: `Step`, `Epoch`, `BatchIndex`, `Loss`, `Elapsed` and the full `Entry` (the
-  step's [history](#the-training-history) entry). All of it is already on the host, so watching
+  step's [history](training-data.md#the-training-history) entry). All of it is already on the host, so watching
   costs no transfer, and a run given no callback builds no report.
   - `report.RequestStop()` ends the run after this step (`StopReason.StopRequested`, or
     `Completed` when it was the last step anyway), e.g. for early stopping on a validation metric.
@@ -592,7 +381,7 @@ leave nothing whole to return, while the state between two steps always is.
 - **The result** is the state after the last step taken, whatever ended the run, with its data
   position. Passing it back resumes at the next batch exactly as a completed run's would, for the
   loader and the array forms alike; `numEpochs` counts from the resume epoch (see
-  [Feeding data](#feeding-data-the-data-loader)). To finish a stopped run at the end it was started
+  [Feeding data](training-data.md#feeding-data-the-data-loader)). To finish a stopped run at the end it was started
   with, call `rig.FitUntilEpoch(loader, untilEpoch, checkpoint)` instead: it trains until the loader
   reaches `untilEpoch`, counted from the start of training, so a restarted host makes the same call
   every time, and one whose checkpoint already got there trains nothing.
@@ -647,7 +436,7 @@ optimizer's temporaries take no memory of their own either
 
 Results are bit-identical with or without it, and there is nothing to configure. On a card a
 resident run thus holds its state once rather than twice; under a device-memory budget the state
-is counted once — see [inference.md](inference.md#a-contexts-device-memory-budget). A step's peak
+is counted once — see [gpu-backends.md](gpu-backends.md#a-contexts-device-memory-budget). A step's peak
 falls by what of the new state a step writing it beside the old would hold at its busiest, which
 is not always all of it. The update's temporaries take memory of their own on ONNX Runtime either
 way, and under AdamW it frees one of them before it writes a weight's new value, so a step over
@@ -701,7 +490,7 @@ gradient — see [training-backends.md](training-backends.md).
 
 Each context carries its backend, its `DeviceMemory` (a device-memory budget), its `Precision`
 (`float32` in full precision unless it allows TensorFloat-32 on a card — see
-[Precision](inference.md#precision-gpu-backends)) and `RunSettings` — see [Device memory](inference.md#device-memory-gpu-backends). So a rig can
+[Precision](gpu-backends.md#precision-gpu-backends)) and `RunSettings` — see [Device memory](gpu-backends.md#device-memory-gpu-backends). So a rig can
 build on one device and train on another:
 
 ```csharp
@@ -713,15 +502,15 @@ var rig = TrainingRig.FromScratch(
 ```
 
 Both devices must be reachable from one process, and merge-phase output reaches the runtime
-backend by a host copy per feed — see [One model, two devices](inference.md#one-model-two-devices).
+backend by a host copy per feed — see [One model, two devices](backends-and-devices.md#one-model-two-devices).
 Split only when the build does not fit on the card; leaving both `null` is normal.
 `rig.MergeContext.Backend` / `rig.RuntimeContext.Backend` name the devices;
 `DefaultBackend.RequireDevice(...)` refuses the wrong one — see
-[Which device am I on?](inference.md#which-device-am-i-on).
+[Which device am I on?](backends-and-devices.md#which-device-am-i-on).
 
 On GPU backends the runtime context's budget covers the state and batches it holds on the card plus
 what the running step's session allocates, which is held to what the state and batches leave it —
-see [A context's device-memory budget](inference.md#a-contexts-device-memory-budget). The rig keeps a
+see [A context's device-memory budget](gpu-backends.md#a-contexts-device-memory-budget). The rig keeps a
 compiled step for up to four input shapes; further shapes share one shape-generic step.
 
 A context's settings are fixed at construction: budget, precision, `ShrinkArenaAfterRun` (implied by a budget), and the `CancellationToken` that abandons the step running — see
@@ -743,8 +532,8 @@ Result types:
     them sees `0`). All counters are `int64`.
   - `.Rig` (the producing `TrainingRig?`, so `ToInferenceModel()` needs no graph).
   - `.Loss` (`float?`; `null` on an initial or bare checkpoint; saved as its own `Loss` component).
-  - `.AppliedHyperparameters` (see [Hyperparameter kinds](#hyperparameter-kinds-hyperparameter)).
-  - `.History` (see [The training history](#the-training-history)).
+  - `.AppliedHyperparameters` (see [Hyperparameter kinds](training-hyperparameters.md#hyperparameter-kinds-hyperparameter)).
+  - `.History` (see [The training history](training-data.md#the-training-history)).
   - `.ToHost()`: the checkpoint with its state in host memory, copying each tensor the host cannot
     read; the same checkpoint where every tensor already is host-readable. Every other slot carries
     through.
@@ -873,356 +662,6 @@ The setting changes nothing on the CPU backends, which are reproducible either w
 PyTorch and JAX backends do not apply it. Pass `new RngConfig { MasterSeed = … }` to re-roll all
 streams coherently, or `RngConfig.NonDeterministic()` for per-run variation.
 
-### When a training step runs out of memory
-
-An allocation failure in a step is rethrown as a `ComputeContextException` with code `CR009`
-reporting:
-
-- **Which pool**: `HOST memory` (a failed host allocation; a bare `bad allocation` is host even on
-  a GPU) or `DEVICE memory` (the accelerator's own). On ONNX Runtime the allocator every session
-  allocates through names the memory it failed to allocate, the card's or the host's. Where the
-  backend names no allocator on a session with device memory, the report says so.
-- **What the step held**: trainable parameters, model state, optimizer state and the batch, each
-  with tensor count and size, plus the five largest tensors.
-- **The card's figures** (where a CUDA runtime is installed; `DeviceMemory.Read()`): used, free and
-  total across processes, how much of it is this process's, and the most this session may allocate
-  where a budget limits it.
-- **This process's memory**: working set, commit charge and managed heap against the limit in force
-  (cgroup/container, Job Object, or machine RAM).
-
-On Windows/WDDM, device allocations count against system commit, so a process memory limit also
-caps device memory and fails with the same message as a full card. The report distinguishes three
-cases: the device is full; the device has room but the process is at its limit (raise the limit);
-or both have room and the session was held to less than it asked for — by a budget, or by an
-allocator keeping blocks it is not using.
-
-```
-[CR009] Compute context operation failed in TrainingRig.TrainStep: allocating memory for the training
-step at step 1 failed. The failing allocation was for DEVICE memory — the accelerator's own (backend
-'Shorokoo.WinGPU'). Training state held for this operation: 296 tensor(s), 1.83 GiB in total (...).
-Device: 12.59 GiB of 23.99 GiB in use across all processes, 11.9 GiB of it this process's, 11.4 GiB
-free. Host process: working set
-9.61 GiB, commit 27.4 GiB, managed heap 3.02 GiB; against a configured memory limit of 28 GiB (98%
-used). The device has room, yet this process is close to its own memory limit — and on Windows/WDDM a
-device allocation is backed by system commit, so a limit meant to bound HOST memory bounds DEVICE
-memory too ... This is the limit, not the model: re-run with it raised or removed. Underlying failure:
-[ErrorCode:RuntimeException] ... Failed to allocate 2359296 bytes on CUDA device 0: the card has no
-such block free (CUDA refused it) ...
-```
-
-The backend's text is kept verbatim at the end and the original exception as `InnerException`.
-Other failures keep their type and message. If the host runs out while the **garbage collector**
-needs memory, the runtime fails fast (`Fatal error. 0xE0004743`) with no exception to wrap; use the
-last CR009 report as the lead.
-
-### Reading a training process's memory
-
-A process's private bytes (its commit charge) are more than what it holds:
-
-- **The .NET heap keeps what it collected.** Building a rig, loading a checkpoint and saving one
-  each allocate the training state or a large share of it for a moment, and after a collection the
-  runtime keeps that memory committed for reuse rather than returning it. A forced
-  `GC.Collect()` leaves it committed; `GC.Collect(2, GCCollectionMode.Aggressive, blocking: true,
-  compacting: true)` returns it. So compare `GC.GetTotalMemory(false)` (what is live) with
-  `GC.GetGCMemoryInfo().TotalCommittedBytes` (what the heap holds) before reading the rest of the
-  commit as native. Under a container's or a Job Object's memory limit the runtime caps its heap
-  below the limit (at 75% of it by default) and collects harder as it nears the cap.
-- **On Windows, a card's memory is commit too.** Under WDDM every allocation on the card is backed
-  by system commit, so a GPU process's private bytes include what it holds on the card, the blocks
-  its allocator keeps for reuse among it (see above).
-
-What a rig itself holds is the model's state once over at most. A rig built from scratch keeps its
-initial values — parameters, model state and optimizer state — for `CreateInitialCheckpoint`, where
-the runs that computed them left them: on the card when its merge context runs on one, attached to
-that context. A rig from `TrainingRig.Load` keeps none, where every parameter declares a concrete
-shape (the case for a model built by Shorokoo): it computes them the first time something asks,
-since the checkpoint it loads replaces them. A resident run holds the state on its device; each
-checkpoint it hands out is that state where it is, which the run then only reads, so its next step
-writes beside it: a second copy of the state on the device for as long as you hold the checkpoint.
-
-## Feeding data: the data loader
-
-The array overloads of `Fit`/`Train` take pre-batched `TensorDataStruct[]`, each element one
-batch: element `i` is batch index `i` of every epoch. A **data loader** owns the batch stream: it
-batches your data, tracks its position, and lets `Fit` advance step / epoch / batch, so a saved checkpoint records where the run
-was and a resumed run continues from the next batch.
-
-```csharp
-// One value per field of the definition, in declaration order; the leading dimension is
-// the sample count.
-var inputs  = rig.InputDef.FromOrderedData(TensorData([1000L, 64L], features));
-var targets = rig.TargetDef.FromOrderedData(TensorData([1000L, 10L], labels));
-
-// Batch into 32s, reshuffling each epoch (deterministically from the seed).
-var loader = new InMemoryDataLoader(inputs, targets, batchSize: 32, shuffle: true, seed: 42);
-
-var outcome = rig.Fit(loader, numEpochs: 10);   // step / epoch / batch advance automatically
-```
-
-`FromOrderedData` takes field names from the definition — the target field is named after the loss
-module's **second `Inline` parameter**, so do not hard-code `"targets"`. It pairs values
-positionally and throws on a count mismatch; for many same-shaped fields,
-`new TensorDataStruct(def, fields)` also catches a swapped pair.
-
-- **`IDataLoader`**: `Position` (`DataLoaderPosition`, epoch + index of the *next* batch), `Next()`
-  (returns the current `DataBatch` — input, target, and its position — and advances, rolling into
-  the next epoch), `RestoreFrom(position)` (next `Next()` yields the batch *at* `position`) and
-  `RestoreAfter(position)` (next `Next()` yields the batch after it, rolling over epochs).
-  `InMemoryDataLoader.BatchesPerEpoch` is not on the interface.
-- **One step at a time.** `rig.TrainStep(checkpoint, loader)` draws one batch, trains on it (its
-  position drives any scheduler) and records the **batch used**; `Fit(loader)` loops over it.
-  Without a loader, `rig.TrainStep(checkpoint, input, target, epoch, batchNumber)` records the given
-  counters verbatim.
-- **`InMemoryDataLoader`** slices tensors you hold along the leading (sample) dimension into
-  fixed-size batches, optionally reshuffling every epoch.
-- **Batch feeding.** `DataBatch.Input` / `.Target` are `IData`: a `TensorDataStruct` (consumed) or
-  one via `.Shared()` / `.TryConsume()`. `InMemoryDataLoader` builds a fresh batch per `Next()`; a
-  custom loader that reuses its tensors passes them `.Shared()`
-  ([What a step keeps of what it reads](#what-a-training-step-consumes)).
-- **Shuffle is deterministic.** With `shuffle: true`, epoch `e`'s permutation is a pure function of
-  `(seed, e)` (Fisher–Yates over SplitMix64; no ambient `Random` or clock), so resuming at `(e, b)`
-  sees the same batches as the original run.
-- **Partial final batch.** `dropLast: true` (default) drops it, keeping every batch at the compiled
-  shape. `dropLast: false` keeps it (only if the graph tolerates a variable batch dimension); each
-  new shape costs one compile, then is cached. Up to four shapes get their own session; further
-  shapes share a shape-generic one, so compiles stay bounded.
-- **Resume.** A checkpoint's `.Epoch` / `.BatchIndex` name the batch **used** at its last step. In a
-  new process, rebuild the rig and a loader over the same data/seed and call
-  `rig.Fit(loader, numEpochs, initialCheckpoint: loaded)`: `Fit` calls `RestoreAfter`, so training
-  resumes at the next batch. A position-unknown checkpoint starts at `(0, 0)` via `RestoreFrom`.
-  `numEpochs` counts from the resume epoch (a mid-epoch checkpoint first finishes that epoch; one
-  saved at an epoch's last batch begins the next); `rig.FitUntilEpoch(loader, untilEpoch, loaded)`
-  trains to an epoch counted from the start instead. The array forms of `Fit` / `Train` stamp and
-  resume the same way, batch `i` of the array being batch index `i`. For an external data
-  pipeline, keep its position in the checkpoint's host user-data bag.
-
-### The training history
-
-Every checkpoint carries `.History`, a `TrainingHistory`: one `TrainingHistoryEntry` per successful
-step that led to it, oldest first. It is empty on a checkpoint no step produced. Each step
-(`TrainStep`, a resident run's `Step` or `StepToCheckpoint`, and so `Fit` and `Train`) appends one
-entry; a failed step appends nothing.
-
-```csharp
-public sealed record TrainingHistoryEntry
-{
-    public long Step { get; init; }          // the counter the step ran at: the produced checkpoint's Step - 1
-    public long? Epoch { get; init; }        // the counters it ran at; null where unknown
-    public long? BatchIndex { get; init; }
-    public float Loss { get; init; }
-    // Same map as the produced checkpoint's .AppliedHyperparameters. Immutable.
-    public IReadOnlyDictionary<string, AppliedHyperparameter> AppliedHyperparameters { get; init; }
-}
-
-public sealed class TrainingHistory : IReadOnlyList<TrainingHistoryEntry>
-{
-    public static TrainingHistory Empty { get; }
-    public static TrainingHistory Of(IEnumerable<TrainingHistoryEntry> entries);  // in that order
-    public TrainingHistory Since(long step);             // entries whose Step >= step
-    public TrainingHistory TakeLast(int count);          // the last count entries
-    // Columns parallel to the entries, built on first read:
-    public IReadOnlyList<long> Steps { get; }
-    public IReadOnlyList<float> Losses { get; }
-    public IReadOnlyList<long?> Epochs { get; }
-    public IReadOnlyList<long?> BatchIndices { get; }
-    public IReadOnlyList<string> HyperparameterNames { get; }       // every name any entry holds, by first appearance
-    public IReadOnlyList<AppliedHyperparameter?> AppliedValues(string name);  // null where an entry lacks it
-}
-```
-
-```csharp
-var result = rig.Fit(loader, numEpochs: 3);
-var history = result.FinalCheckpoint.History;
-foreach (var (step, loss, lr) in history.Steps.Zip(history.Losses, history.AppliedValues("learningRate")))
-    Console.WriteLine($"{step}\t{loss}\t{lr?.ToSingle()}");
-```
-
-Entries are `init`-only records, so you can build or merge histories with `TrainingHistory.Of` and
-`with`:
-
-```csharp
-var merged = TrainingHistory.Of(first.History.Concat(second.History.Select(e => e with { Step = e.Step + offset })));
-var ckpt = second.WithHistory(merged);
-```
-
-The history is immutable; appending costs `O(log n)` and shares earlier entries, so branches from
-one checkpoint do not affect each other. `Step` is not a key: training again from
-`ckpt.WithStep(10)` adds a second step-10 entry; entries are in run order.
-
-**Trimming and clearing.** All derivations (`WithCounters`, `WithStep`, `WithTrainableParams`, …,
-`Shared()`, `rig.AdoptCheckpoint`) keep the history. `ckpt.WithHistory(ckpt.History.TakeLast(1000))`
-or `.Since(5000)` keeps a slice; `WithoutHistory()` clears it. On a resident run use
-`run.ReplaceHistory(run.History.TakeLast(1000))` or `run.ClearHistory()`.
-
-**What it costs.** About 200–300 bytes per entry, more with scheduled, runtime or non-scalar
-hyperparameters — a few hundred MB for a million steps — and every save writes it all. Bound it on
-long runs.
-
-**Saving it.** History is the `CheckpointComponents.History` component, written whenever non-empty
-by `checkpoint.Save` and `.skpt` saves. To omit it from a flat save, pass components without it
-(`ckpt.Save(path, CheckpointComponents.InferenceState | CheckpointComponents.OptimizerState |
-CheckpointComponents.Counters | CheckpointComponents.Loss)`); from a `.skpt` save, save
-`ckpt.WithoutHistory()`. A file
-without one loads with an empty history; a resumed run continues it. Entries may hold
-hyperparameters only some have (e.g. after `otherRig.AdoptCheckpoint(ckpt)`), but if entries give
-one hyperparameter different dtypes or shapes the save throws `InvalidOperationException` naming it
-and how many trailing entries can be saved; save
-`ckpt.WithHistory(ckpt.History.TakeLast(…))`. On-disk layout:
-[Save and resume a checkpoint](#save-and-resume-a-checkpoint-across-process-restarts).
-
-## Save and resume a checkpoint (across process restarts)
-
-A `TrainingCheckpoint` holds trainable params, model state, optimizer state, and the run counters
-(step, epoch, batch index):
-
-```csharp
-// Save mid-training (e.g. every N steps, or at the end of an epoch):
-checkpoint.Save("run.safetensors");
-
-// Later — in a fresh process — rebuild the SAME rig, then load:
-var rig  = TrainingRig.FromScratch(MyModel.ComputationGraph, L2Loss.ComputationGraph,
-                                   AdamOptimizer.ComputationGraph, sampleInputs,
-                                   new AdamOptimizerHyperparameters { ... });
-var ckpt = rig.LoadCheckpoint("run.safetensors");   // params + optimizer moments + step restored
-var more = rig.Fit(inputs, targets, numEpochs: 5, ckpt);  // continues where it left off
-```
-
-- **Flat file layout.** One SafeTensors file with every param/state field. An `int64` marker holds
-  `[version, step]`; epoch and batch index are separate `int64` scalars written only when set, so
-  unknown counters reload as `null` and a concrete `0` as `0`.
-- **History layout.** A non-empty history is the `history/` section, one tensor per column:
-  `history/step` (`int64[n]`), `history/loss` (`float32[n]`), `history/epoch` and
-  `history/batch_index` (`int64[n]`) with presence columns `history/epoch_present` /
-  `history/batch_index_present` (`bool[n]`; `false` reloads as `null`), and per hyperparameter
-  `history/hyperparameter/<name>` (its dtype, shape `[n, …valueShape]`) with
-  `history/hyperparameter_present/<name>` (`bool[n]`). A missing or unknown column, or one of the
-  wrong dtype, rank or length, is refused on load. A `.skpt` stores the same columns in
-  `data/history.safetensors`.
-- **Saves are atomic.** `checkpoint.Save` (and `Persistence.SaveTrainingCheckpoint`) writes a
-  `.tmp-` sibling, flushes it, and renames it into place, so a crash mid-save leaves the old or the
-  new file, never a truncated one. The target **directory must exist** (it is not created); a
-  leftover `.tmp-` sibling is swept by the next successful save. A file held for a moment by
-  another process (an antivirus scanner, the search indexer) does not fail the save; see
-  [onnx-and-weights.md](onnx-and-weights.md#facts). `.skpt` saves are atomic too — see
-  [skpt-checkpoints.md](skpt-checkpoints.md#the-directory-form) for the directory form's one
-  exception.
-- **`.skpt` container.** `Persistence.SaveTrainingCheckpointToSkpt(checkpoint, "run.skpt")` (or the
-  `Persistence.ForTrainingCheckpoint(...)` builder) writes the native container, taking the model
-  from the checkpoint's `.Rig`. Resume with `rig.LoadCheckpointFromSkpt("run.skpt")`, or with no
-  graphs in hand, `var (rig, ckpt) = TrainingRig.Load("run.skpt")`, which rebuilds the rig from the
-  file. `Persistence.Load` and `Persistence.LoadEvaluationModel` read the model from the same file
-  without a rig. Layout: [skpt-checkpoints.md](skpt-checkpoints.md#training-checkpoints).
-- **One loader per format.** `rig.LoadCheckpoint` reads only flat safetensors;
-  `rig.LoadCheckpointFromSkpt` and `TrainingRig.Load` only `.skpt`. The wrong format fails with an
-  error naming the right entry point. `Persistence.Inspect` identifies an unknown file.
-- **Validation.** `LoadCheckpoint` / `LoadCheckpointFromSkpt` need a rig built from the **same**
-  model/loss/optimizer graphs. Field names, dtypes and **dimensions** are checked on load, and each
-  value is checked against the model's declared shape when bound, so a hand-built checkpoint of the
-  wrong shape is refused too. Provenance is not checked: right-shaped weights load into a different
-  model. Values match parameters by name, so names from a local or `.Named(...)` are stable
-  ([Parameter names](defining-models.md#parameter-names)); parameters left to class names are
-  numbered in creation order, and two same-shaped ones whose order was swapped load into each
-  other's places silently.
-- Because `.Step` is restored, **schedules resume from the right step**.
-- `rig.LoadCheckpoint(path)` delegates to `TrainingCheckpoint.Load(path, rig)` (and
-  `rig.LoadCheckpointFromSkpt(path)` to `TrainingCheckpoint.LoadFromSkpt(path, rig)`), which sets
-  `.Rig`. Without a rig, `Persistence.LoadTrainingCheckpoint(path)` reads a flat checkpoint (it is
-  self-describing) but validates nothing and sets no `.Rig`; pass it to `rig.AdoptCheckpoint(ckpt)`
-  to validate it.
-- **`CheckpointComponents`.** Save and load take optional flags — `InferenceState` (trainable params
-  + model state), `OptimizerState`, `Counters`, `Loss`, `History`, `TrainingRig` — combined with
-  `|`. `null` saves every available component and loads everything present (absent components come
-  from the rig's initial values; absent history is empty).
-  `checkpoint.Save(path, CheckpointComponents.InferenceState)` saves weights only. Requesting `Loss`
-  when it is `null`, or `History` when empty, writes nothing and does not throw. `TrainingRig` (the
-  rig's graphs, hyperparameter bindings and RNG config) is always written to a `.skpt` and read by
-  `TrainingRig.Load`; never name it yourself. Requesting it (including via
-  `CheckpointComponents.All`) throws on the flat `checkpoint.Save` and on `rig.LoadCheckpoint` /
-  `rig.LoadCheckpointFromSkpt`; omit it, or pass `null`.
-- `rig.AdoptCheckpoint(checkpoint)` returns the checkpoint bound to that rig, after validating the
-  field defs, enabling `ToInferenceModel()`.
-- `Persistence.Inspect(path)` shows a file's counters and per-section tensor listing without
-  loading it — see
-  [onnx-and-weights.md](onnx-and-weights.md#identify-and-summarize-a-file-persistenceinspect).
-
-### What a save costs
-
-Every single-file checkpoint save returns a `SaveReport`:
-
-```csharp
-var save = checkpoint.Save("run.safetensors");
-Console.WriteLine(save);
-// 200,000,077 bytes in 0.252s (757 MiB/s): write 0.051s, flush 0.194s, commit 0.007s
-```
-
-`Write` serializes into the staged file (for `.skpt`, also hashing, and compressing Zstd entries), `Flush` is the
-fsync, `Commit` the rename plus sweeping stale staged files. They sum to `Elapsed`; `BytesWritten`
-is the file size and `BytesPerSecond` the achieved rate. `Persistence.SaveTrainingCheckpoint`,
-`Persistence.SaveTrainingCheckpointToSkpt` and the `Persistence.ForTrainingCheckpoint(...)`
-builder's `Save` return it too; the directory form (`SaveAsDirectory`) returns `void`. Save time
-varies between identical saves (mostly in `Flush`), and multi-GB saves can take tens of seconds, so
-exclude it from throughput measurements:
-
-```csharp
-steady.Stop();                                   // saving is I/O, not training
-var save = checkpoint.Save(path);
-steady.Start();
-savedBytes += save.BytesWritten;
-```
-
-The flat safetensors save streams each tensor from its storage with no extra copy, and a load reads
-the file forward a tensor at a time, so a file of any size, holding tensors of any size, is read back
-whole. Into host memory, a tensor one managed array holds (`Array.MaxLength` bytes, just under
-2 GiB) is read into the framework's own host memory; a larger one is read through one bounded host
-buffer (8 MiB) into host memory of the backend `ComputeContext.Default` runs on, so it is never whole
-in a managed array, and a run on that context reads it where it is.
-
-The `.skpt` save also streams each entry straight from the tensors' storage, with no managed copy of
-the training state. An entry compressed with `WithZstdCompressedData` is compressed as it streams,
-afresh on each pass the writer makes over it, so it is never held whole either; its length is known
-only once it is compressed, so its tensors are read three times rather than two. An entry and an
-archive may be of any size: the single file writes Zip64 records where a size or offset is
-4,294,967,295 bytes (4 GiB − 1) or more, or where there are 65,535 entries or more. A load reads each data entry forward, a tensor at a
-time, exactly as the flat load does.
-
-A checkpoint in device memory is saved from there: the flat and `.skpt` saves (file and directory
-form) write each tensor through one bounded host staging buffer (8 MiB), piece by piece, so the
-state is never whole in host memory. On ONNX Runtime CUDA the CUDA runtime copies the pieces, and
-PyTorch and JAX copy them with their own operations; JAX brings a tensor no larger than the buffer
-home whole. The `.skpt` save reads each device tensor twice, once to hash it for the manifest
-and once to write it, and binds the model it writes from the weights' shapes and dtypes, copying
-only the smallest weights to the host. There is no direct device-to-disk path.
-
-Loading is the same in reverse. A checkpoint loaded for a rig that trains on a device
-(`rig.LoadCheckpoint`, `rig.LoadCheckpointFromSkpt`) reads its state from the file straight into
-the rig's device memory, through the same bounded buffer, and comes back device-resident, as a
-trained one does; the counters and the history are read on the host. A compressed `.skpt` entry is
-decoded as it streams.
-
-### Bind trained weights into an inference model
-
-```csharp
-var concrete = result.FinalCheckpoint.ToInferenceModel();   // no graph to re-supply
-var output   = ComputeContext.Default.Execute(concrete, myInput);
-```
-
-A saved training `.skpt` needs no rig: `Persistence.Load(path)` returns the runnable model and
-`Persistence.LoadEvaluationModel(path)` the model composed with its loss, for validation. Use
-`TrainingRig.Load(path)` only to keep training. A flat safetensors file has no architecture; a
-checkpoint from `Persistence.LoadTrainingCheckpoint` needs a rig to bind.
-
-```csharp
-var model = Persistence.Load("run.skpt");                  // ConcreteModel, weights bound
-var eval  = Persistence.LoadEvaluationModel("run.skpt");   // [model inputs…, targets] → loss
-```
-
-`ToInferenceModel()` binds the checkpoint's trainable params and model state into its `.Rig`'s
-retained concrete architecture (concretized once at build, at all inputs, so multi-input models
-work) — no re-concretization or sample inputs. It requires an attached rig; use
-`rig.AdoptCheckpoint(checkpoint)` for a bare checkpoint. It copies each value into the model, so
-the checkpoint stays usable, and binds a parameter of any size: one past 2 GiB is copied 8 MiB at
-a time into host memory of the backend `ComputeContext.Default` runs on, where the model holds it.
-
 ## Types used by the training API
 
 These are in namespace `Shorokoo` (covered by `using Shorokoo;`), except `Schedule` and `Schedules`, which are in `Shorokoo.Core.Training` and need `using Shorokoo.Core.Training;`:
@@ -1235,9 +674,9 @@ These are in namespace `Shorokoo` (covered by `using Shorokoo;`), except `Schedu
 | `ModelParamList` | A set of named params (e.g. loaded weights). | `new ModelParamList(IEnumerable<(string name, TensorData data)>)` |
 | `TensorDataStruct` | Named `TensorData` fields; the form `Train`/`TrainStep` take for inputs/targets. | `new TensorDataStruct(structDef, fields)` — `structDef` a `TensorStructDef` (namespace `Shorokoo.Core`), `fields` `KeyValuePair<string, IData>`, one per definition field of the declared kind (a mismatch throws), optionally via `.Shared()` / `.TryConsume()`. Read: `.Fields` (name → value, in definition order), `.Count`, `[int]`. |
 | `SharedInput` | A value to be **read** rather than consumed (`Mode` `Shared`), or consumed only if nothing else reads it (`TryConsume`). | `x.Shared()` / `x.TryConsume()` on a `TensorData`, `TensorDataStruct`, `TensorDataSequence` or `OptionalTensorData`. On a checkpoint these return a checkpoint with that `FeedMode`; on a `NamedModelParam`, a copy with its `FeedMode` set. |
-| `SaveReport` | A save's `BytesWritten`, `Write` / `Flush` / `Commit`, `Elapsed`, `BytesPerSecond`. | Returned by every single-file checkpoint save — see [What a save costs](#what-a-save-costs). |
-| `Schedule` (namespace `Shorokoo.Core.Training`) | A `step → value` schedule; assigning one makes a hyperparameter [`Scheduled`](#hyperparameter-kinds-hyperparameter). | A `Schedules.…` factory plus combinators (`WithWarmup`, `Then`, `Scale`, `Clamp`, `Shift`, `PerEpoch`). Preview with `.At(step)`. |
-| `Schedules` (static, namespace `Shorokoo.Core.Training`) | Factories: `Constant`, `Linear`, `Cosine`, `CosineWithWarmup`, `StepDecay`, `Exponential`, `OneCycle`. | `Schedules.Cosine(1e-3f, totalSteps)` — see [Schedule factories and combinators](#schedule-factories-and-combinators). |
+| `SaveReport` | A save's `BytesWritten`, `Write` / `Flush` / `Commit`, `Elapsed`, `BytesPerSecond`. | Returned by every single-file checkpoint save — see [What a save costs](training-checkpoints.md#what-a-save-costs). |
+| `Schedule` (namespace `Shorokoo.Core.Training`) | A `step → value` schedule; assigning one makes a hyperparameter [`Scheduled`](training-hyperparameters.md#hyperparameter-kinds-hyperparameter). | A `Schedules.…` factory plus combinators (`WithWarmup`, `Then`, `Scale`, `Clamp`, `Shift`, `PerEpoch`). Preview with `.At(step)`. |
+| `Schedules` (static, namespace `Shorokoo.Core.Training`) | Factories: `Constant`, `Linear`, `Cosine`, `CosineWithWarmup`, `StepDecay`, `Exponential`, `OneCycle`. | `Schedules.Cosine(1e-3f, totalSteps)` — see [Schedule factories and combinators](training-hyperparameters.md#schedule-factories-and-combinators). |
 
 ### Sample inputs
 
@@ -1287,101 +726,6 @@ declared rank is refused with `FW056`, naming the offenders and listing the mode
        var data = (TensorData)value;   // shape via data.Shape.Dims; values via data.CopyMemory<float>()
    }
    ```
-
-## Custom optimizers
-
-A custom optimizer is a `[Module]` whose `Inline` takes exactly `(currentParam, grad)`, then its
-`[Hyper]` hyperparameters, and returns the updated parameter. Each piece of state is created
-**inside the body** by an optimizer-owned `[StateInitializer]`'s `Init` — typically
-`OptimizerStateZeros.Init(currentParam.ShapeTensor())` from `Shorokoo.Modules.Optimizers` — and
-updated with exactly one `Globals.StateUpdate(state, newValue)`. For example, a momentum-less
-RMSprop (the full one is `RMSpropOptimizer` in [Shorokoo.Modules](nn-library.md)):
-
-```csharp
-[Module]
-public partial class SimpleRMSprop
-{
-    public static Tensor<float32> Inline(
-        Tensor<float32> currentParam,
-        Tensor<float32> grad,
-        [Hyper(0.001f)] Scalar<float32> learningRate,
-        [Hyper(0.99f)]  Scalar<float32> alpha,
-        [Hyper(1e-8f)]  Scalar<float32> epsilon)
-    {
-        var meanSquare = OptimizerStateZeros.Init(currentParam.ShapeTensor()); // one state field per param
-
-        var one = Scalar(1.0f);
-        var newMeanSquare = alpha * meanSquare + (one - alpha) * grad * grad;
-        Globals.StateUpdate(meanSquare, newMeanSquare);
-        return currentParam - learningRate * grad / (newMeanSquare.Sqrt() + epsilon);
-    }
-}
-```
-
-This generates `SimpleRMSpropHyperparameters { LearningRate = 0.001, Alpha = 0.99, Epsilon = 1e-8 }`
-with schedule support, and a `meanSquare` state field per trainable parameter, zero-initialized at
-its shape:
-
-```csharp
-var rig = TrainingRig.FromScratch(model, loss, SimpleRMSprop.ComputationGraph, sample,
-    new SimpleRMSpropHyperparameters { LearningRate = Schedules.Cosine(1e-3f, totalSteps) });
-```
-
-For another initial value, write an initializer (any `Inline`; the rig runs it with the inputs you
-wire in the body):
-
-```csharp
-[StateInitializer(Ownership = StateOwnership.OptimizerOwned)]
-public static partial class OptimizerStateOnes
-{
-    public static Tensor<float32> Inline(Vector<int64> shape) => Globals.TensorFill(shape, 1.0f);
-}
-```
-
-For one value per parameter (a step counter, a scalar EMA), use `OptimizerScalarZeros.Init()`
-(seeded 0), `OptimizerScalarOnes.Init()` (seeded 1, e.g. NAdam's running product `∏μ_i`), or your
-own rank-0 initializer; the scalar broadcasts and costs one float per parameter. Adam's and AdamW's
-timestep works this way.
-
-Constraints:
-
-- **State must come from an optimizer-owned initializer.** State declared as an `Inline` parameter
-  throws at rig build; `Globals.StateUpdate` throws `InvalidStateUpdateException` on a non-state
-  argument. Module-owned initializers (e.g. BatchNorm's) are rejected in optimizer graphs, and
-  optimizer-owned ones in model graphs.
-- **Each state is updated exactly once per step** — merge conditional updates into one value (e.g.
-  with `IfElse`).
-- **The updated parameter must keep the parameter's shape.** A hyperparameter or state of another
-  shape broadcasts; the rig refuses that at build, naming the parameter and both shapes. A
-  per-element hyperparameter needs parameters it fits.
-- **Hyperparameters must be tensor-shaped** (`Scalar<T>`, `Vector<T>`, `Tensor<T>`, any supported
-  dtype); a set is generated even with mixed dtypes and shapes. An `OptionalTensor`, sequence or
-  struct hyperparameter yields no generated set. Only scalars can have a `[Hyper(default)]`.
-- **Order + `[Hyper]` matter** — `Inline` takes `(currentParam, grad)` first and the hyperparameters after, and `[Hyper]` is what
-  makes the named set generate. Without it the optimizer works only through the positional
-  `params Hyperparameter[]` overload.
-- You can also implement `IOptimizerHyperparameters` by hand.
-
-## Notes / known limitations
-
-- `LionOptimizer` **swaps the beta roles** relative to Adam: momentum `m` decays by **β2**
-  (`m = β2·m + (1−β2)·g`); **β1** only blends the sign update. Its good `lr` is ~3–10× smaller than
-  AdamW's and its `wd` ~3–10× larger (default `wd 0`).
-- `AdafactorOptimizer` is **non-factored**: it keeps Adafactor's update rules (relative step
-  `min(lr, 1/√t)`, parameter scaling, RMS update clipping, increasing decay `1 − t^τ`) but its
-  second moment is full param-shaped — **Adam's memory**, not `R + C`. The per-parameter optimizer
-  graph is rank-agnostic, so it cannot factor (see [nn-library.md](nn-library.md)). `learningRate`
-  is the **cap** on the relative step.
-- Prefer the generated named set. The positional `params Hyperparameter[]` overload must match the
-  count exactly: SGD=1, SGDMomentum=2, Adam=4, RMSprop=4, AdamW=5, Adagrad=2, Adamax=4, NAdam=5,
-  RAdam=4, Adadelta=3, Lion=4, Adafactor=6, Lamb=5.
-- Optimizer state per trainable parameter (table in [nn-library.md](nn-library.md)):
-  momentum: velocity; Adam/AdamW: `m`/`v` + scalar `step`; RMSprop: `squareAvg`/`momentumBuffer`;
-  Adagrad: `accumulator`; Adamax: `m`/`u` + scalar `step`; NAdam: `m`/`v` + scalars `step`,
-  `muProduct`; RAdam: `m`/`v` + scalar `step`; Adadelta: `squareAvg`/`accDelta`; Lion: `m` only
-  (half of Adam); Lamb: `m`/`v` + scalar `step` (trust ratio not stored); Adafactor: full `v` +
-  scalar `step`. Param-shaped fields come from `OptimizerStateZeros`; scalar ones from
-  `OptimizerScalarZeros` (seeded 0) or `OptimizerScalarOnes` (seeded 1, NAdam's product).
 
 ## Anti-patterns
 

@@ -160,7 +160,7 @@ inner exception is a `PlatformNotSupportedException`.
 
 A `TensorData` never moves: `To` hands it to a context whose backend can read it
 where it is and copies otherwise, and `CopyTo` always copies; see
-[Moving data between contexts](inference.md#moving-data-between-contexts). Host
+[Moving data between contexts](tensors-in-a-run.md#moving-data-between-contexts). Host
 backends read the framework's host memory directly. Two CUDA contexts on one
 device share an allocation only when they share a native ONNX Runtime; two
 *isolated* backends over one card copy through the host. There is no
@@ -182,7 +182,7 @@ before it takes anything; wrap it with
 A run holds every tensor it is fed until it returns: one fed `.Shared()` (or via
 `.TryConsume()` while another run reads it) under a reader lock, so `Delete()` /
 `Dispose()` throw and `TryDelete()` declines; one fed as it is by consuming it;
-see [A tensor's lifetime](inference.md#a-tensors-lifetime-locks-and-deletion).
+see [A tensor's lifetime](tensors-in-a-run.md#a-tensors-lifetime-locks-and-deletion).
 Holds are taken inside the run, one feed at a time. A deletion from another thread
 during the call's setup (the `Execute` / `Run` call, input expansion and naming,
 and the holding of earlier feeds) makes the run throw `ObjectDisposedException`,
@@ -192,7 +192,7 @@ Nothing reads freed memory and no run returns a wrong answer, but the run is los
 A run refused before it starts takes nothing; one refused part-way (a feed died,
 or another run started reading a feed this one would consume) leaves what it had
 already taken consumed. The arrangement in
-[One model, two devices](inference.md#one-model-two-devices), staging the next
+[One model, two devices](backends-and-devices.md#one-model-two-devices), staging the next
 batch while the other device reads the last one, is where this is easy to hit.
 Give the concurrent run its own tensor (`CopyTo`) or wait for it to return.
 
@@ -201,7 +201,7 @@ Give the concurrent run its own tensor (`CopyTo`) or wait for it to return.
 A context's `DeviceMemorySettings.LimitBytes` counts the bytes of the tensors
 attached to it on the card, plus what the session of its executing run
 allocates; see
-[A context's device-memory budget](inference.md#a-contexts-device-memory-budget).
+[A context's device-memory budget](gpu-backends.md#a-contexts-device-memory-budget).
 That count is exact, but the card also holds:
 
 - **What the allocator keeps for reuse.** Every session on a card, whichever
@@ -244,10 +244,10 @@ backend keeps the overlap.
 
 ONNX Runtime never reuses a graph input's buffer for an intermediate, whatever the
 session or run options, so every fed input is resident for the whole run. A run
-that consumes an input — [fed as it is](inference.md#feeding-a-run-consumed-shared-or-tried)
+that consumes an input — [fed as it is](tensors-in-a-run.md#feeding-a-run-consumed-shared-or-tried)
 rather than `.Shared()` — writes its values into that input's memory where the
 graph proves it safe and it saves memory
-([A run that writes into what it consumed](inference.md#a-run-that-writes-into-what-it-consumed)).
+([A run that writes into what it consumed](tensors-in-a-run.md#a-run-that-writes-into-what-it-consumed)).
 What that still leaves:
 
 - **A shared input** is resident for the whole run and written into by nothing.
@@ -279,7 +279,7 @@ Outputs a run wrote into the memory of one input it consumed stand on that memor
 together. On ONNX Runtime, where the input was carved from Shorokoo's reserved
 memory, each frees its own pages as it ends; otherwise the memory is freed only
 when the last of them ends
-([Outputs on consumed memory](inference.md#a-run-that-writes-into-what-it-consumed)):
+([Outputs on consumed memory](tensors-in-a-run.md#a-run-that-writes-into-what-it-consumed)):
 
 - **On PyTorch** torch frees a tensor's storage whole, with the last tensor
   reading it, and has no call that frees part of one.
@@ -324,7 +324,7 @@ context element by element.
 
 Device-memory configuration is per context, session and run
 (`ComputeContext.DeviceMemory`, `RunSettings`; see
-[Device memory](inference.md#device-memory-gpu-backends)), so two models on one
+[Device memory](gpu-backends.md#device-memory-gpu-backends)), so two models on one
 host can have separate budgets.
 
 Reporting is process-wide. `DeviceMemory.Read()` and `Sample()` query the CUDA
@@ -335,7 +335,7 @@ are one record each for the process: two contexts training side by side in one
 process share them, and neither can be split between contexts.
 `CompiledGraph.ReadArenaStatistics()` reads one session's allocator and
 `ComputeContext.ReadDeviceMemoryUse()` what a context holds against its budget
-(see [What one session's allocator did](inference.md#what-one-sessions-allocator-did)).
+(see [What one session's allocator did](gpu-backends.md#what-one-sessions-allocator-did)).
 
 ### Backprop through dynamic loops
 

@@ -10,7 +10,7 @@ before you size a real job.
 Reference `Shorokoo`, `Shorokoo.Modules` and one backend package for your platform
 (`Shorokoo.LinuxCPU`, `Shorokoo.LinuxGPU`, `Shorokoo.WinCPU` or `Shorokoo.WinGPU`). With one
 backend referenced, `ComputeContext.Default` uses it with no setup. To choose one explicitly,
-see [inference.md](inference.md).
+see [Backend selection](backends-and-devices.md#backend-selection).
 
 ```csharp
 using Shorokoo;                     // TrainingRig, TrainingCheckpoint, Persistence, RngConfig
@@ -74,10 +74,12 @@ var rig = TrainingRig.FromScratch(
 
 `CrossEntropyLoss` takes logits `[N, C]` and `int64` class indices `[N]`, or with extra axes,
 `[N, C, d1, …]` against `[N, d1, …]`. The class axis is always axis 1. See the
-[losses table](nn-library.md#losses-shorokoomoduleslosses).
+[losses table](losses-and-optimizers.md#losses-shorokoomoduleslosses).
 
-The full signature, the other optimizers and schedules are in
-[training.md](training.md#trainingrig-api).
+The full signature is in [training.md](training.md#trainingrig-api), the other optimizers in
+[losses-and-optimizers.md](losses-and-optimizers.md#optimizers-shorokoomodulesoptimizers), and
+the schedules in
+[training-hyperparameters.md](training-hyperparameters.md#schedule-factories-and-combinators).
 
 ## 3. Train
 
@@ -140,7 +142,7 @@ using (var resumedRun = resumedRig.BeginResidentRun(resumed))
 A training `.skpt` also loads without a rig. `Persistence.LoadEvaluationModel` returns the
 model composed with its loss, `[model inputs…, targets] → loss`. `Persistence.Load` returns
 the trained model. Both run through `ComputeContext`. See
-[Bind trained weights into an inference model](training.md#bind-trained-weights-into-an-inference-model).
+[Bind trained weights into an inference model](training-checkpoints.md#bind-trained-weights-into-an-inference-model).
 
 ```csharp
 var eval = Persistence.LoadEvaluationModel("run.skpt");
@@ -165,7 +167,7 @@ using (var p = System.Diagnostics.Process.GetCurrentProcess())
 
 `DeviceMemory.Read()` reports the whole card, every process included, and `ProcessBytes` this
 process's own share of it. The other readings, and
-what each covers, are in [Device memory](inference.md#device-memory-gpu-backends).
+what each covers, are in [Device memory](gpu-backends.md#device-memory-gpu-backends).
 
 The batch helper used above:
 
@@ -193,17 +195,19 @@ None of these shows in a small first run. Each can end a long one.
   [skpt-checkpoints.md](skpt-checkpoints.md#current-limits). A model graph holds a weight of any
   size; see [Loading a saved model onto the device](inference.md#loading-a-saved-model-onto-the-device).
 - **Save cost.** What a save allocates and how long it takes grow with the checkpoint:
-  [What a save costs](training.md#what-a-save-costs).
-- **Out of memory.** A failed allocation arrives as `CR009` and says which pool ran out. On
-  Windows (WDDM), device memory is charged to the process's commit, so a host memory limit
-  also caps device memory:
-  [When a training step runs out of memory](training.md#when-a-training-step-runs-out-of-memory).
+  [What a save costs](training-checkpoints.md#what-a-save-costs).
+- **Out of memory.** A failed allocation arrives as `CR009` and says which pool ran out:
+  [When a training step runs out of memory](training-memory.md#when-a-training-step-runs-out-of-memory).
+- **Process memory limit.** On a WDDM-driven card (Windows), a limit on the process's memory bounds
+  what it holds on the card as well, so it must cover the process's peak commit charge, which
+  includes that device memory:
+  [Sizing a process memory limit](training-memory.md#sizing-a-process-memory-limit).
 - **Device-memory readings.** They are one record for the whole process and read device 0 only,
   and this process's share of the card can be unavailable in a container:
   [limitations.md](limitations.md#device-memory-readings-are-process-wide-and-device-0s).
 - **Speed on a card.** `float32` is computed in full precision on a GPU too, which on a
   convolutional network costs the step 2.3 to 2.6 times what TensorFloat-32 does. A context can
-  allow TensorFloat-32 for its runs: [Precision](inference.md#precision-gpu-backends).
+  allow TensorFloat-32 for its runs: [Precision](gpu-backends.md#precision-gpu-backends).
 - **Reproducibility.** A fixed seed reproduces a run bit for bit on the CPU backend, including
   across a save and resume. On a GPU it does so only on the ONNX Runtime backends, and only on a
   context that asks for deterministic compute: [Seeding the run](training.md#seeding-the-run).
@@ -212,4 +216,4 @@ None of these shows in a small first run. Each can end a long one.
 - **Namespaces.** The `using` lines each type needs are in [orientation.md](orientation.md).
 
 To initialize one parameter from another's value, see "Writing your own" under
-[Initializers](nn-library.md#initializers-shorokoomodulesinitializers).
+[Initializers](initializers.md#initializers-shorokoomodulesinitializers).

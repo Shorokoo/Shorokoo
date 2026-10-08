@@ -466,7 +466,7 @@ public class SideBySideBackendCoverageTests
 
         // A value the execution provider kept cannot cross: rebuilding it reads the source, and
         // there is no path from one runtime's device allocation to another's. This is the refusal
-        // inference.md promises users, and the message has to name the way home.
+        // backends-and-devices.md promises users, and the message has to name the way home.
         var refused = Assert.Throws<InvalidOperationException>(
             () => BackendTransfer.CopyTo(target, new UnreadableValue()));
         Assert.Contains("ToHost()", refused.Message);

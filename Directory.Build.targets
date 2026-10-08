@@ -13,13 +13,83 @@
   </PropertyGroup>
 
   <!-- Every package ships a readme. Packable projects keep a README.md next to
-       their csproj. -->
+       their csproj. It is packed as a ShorokooVersionedPackFile (below), so its
+       links open the documentation of the commit the package is built from. -->
   <PropertyGroup Condition="'$(IsPackable)' == 'true'">
     <PackageReadmeFile>README.md</PackageReadmeFile>
   </PropertyGroup>
   <ItemGroup Condition="'$(IsPackable)' == 'true'">
-    <None Include="$(MSBuildProjectDirectory)/README.md" Pack="true" PackagePath="/" Visible="false" />
+    <ShorokooVersionedPackFile Include="$(MSBuildProjectDirectory)/README.md" PackagePath="/" PackSubdir=""
+                               Condition="Exists('$(MSBuildProjectDirectory)/README.md')" />
   </ItemGroup>
+
+  <!-- Versioned links. A ShorokooVersionedPackFile is packed as a copy of itself in
+       which every https://github.com/Shorokoo/Shorokoo/blob/main/ or /tree/main/ link
+       names the commit being built instead of main, so a package's readme and guides
+       open the documentation of the version installed rather than the latest. The
+       commit is the one SourceLink stamps into the assemblies ($(SourceRevisionId)):
+       it exists for every build, tagged or not, whereas a release's tag is pushed only
+       once the release is published. A build with no git revision keeps main. Items
+       with RebaseParentLinks="true" also have their relative "](../" links, which
+       leave the packed folder, made absolute at the same commit: a link whose target,
+       resolved against the source file's folder, is a directory becomes a tree/ link,
+       any other a blob/ link.
+       Metadata: PackagePath (where NuGet puts the file), PackSubdir (the copy's
+       folder under obj/.../versioned-pack/, matching PackagePath). -->
+  <UsingTask TaskName="ShorokooVersionRepoLinks"
+             TaskFactory="RoslynCodeTaskFactory"
+             AssemblyFile="$(MSBuildToolsPath)/Microsoft.Build.Tasks.Core.dll">
+    <ParameterGroup>
+      <Files ParameterType="Microsoft.Build.Framework.ITaskItem[]" Required="true" />
+      <Ref ParameterType="System.String" Required="true" />
+    </ParameterGroup>
+    <Task>
+      <Using Namespace="System.IO" />
+      <Using Namespace="System.Text.RegularExpressions" />
+      <Code Type="Fragment" Language="cs"><![CDATA[
+const string Repo = "https://github.com/Shorokoo/Shorokoo/";
+foreach (var file in Files)
+{
+    var text = File.ReadAllText(file.ItemSpec);
+    text = Regex.Replace(text, Regex.Escape(Repo) + "(blob|tree)/main/", m => Repo + m.Groups[1].Value + "/" + Ref + "/");
+    if (string.Equals(file.GetMetadata("RebaseParentLinks"), "true", StringComparison.OrdinalIgnoreCase))
+    {
+        var parent = Path.GetDirectoryName(Path.GetDirectoryName(Path.GetFullPath(file.ItemSpec)));
+        text = Regex.Replace(text, @"\]\(\.\./([^)#?\s]*)", m =>
+        {
+            var target = m.Groups[1].Value;
+            var kind = Directory.Exists(Path.Combine(parent, target)) ? "tree/" : "blob/";
+            return "](" + Repo + kind + Ref + "/" + target;
+        });
+    }
+    var destination = file.GetMetadata("VersionedCopyTo");
+    Directory.CreateDirectory(Path.GetDirectoryName(destination));
+    if (!File.Exists(destination) || File.ReadAllText(destination) != text)
+        File.WriteAllText(destination, text);
+}
+]]></Code>
+    </Task>
+  </UsingTask>
+
+  <Target Name="ShorokooVersionPackFiles"
+          Condition="'$(IsPackable)' == 'true'"
+          BeforeTargets="_GetPackageFiles"
+          DependsOnTargets="InitializeSourceControlInformation">
+    <PropertyGroup>
+      <_ShorokooDocsRef>$(SourceRevisionId)</_ShorokooDocsRef>
+      <_ShorokooDocsRef Condition="'$(_ShorokooDocsRef)' == ''">main</_ShorokooDocsRef>
+      <_ShorokooVersionedDir>$([MSBuild]::NormalizeDirectory('$(MSBuildProjectDirectory)', '$(IntermediateOutputPath)', 'versioned-pack'))</_ShorokooVersionedDir>
+    </PropertyGroup>
+    <ItemGroup>
+      <_ShorokooVersionedPackFile Include="@(ShorokooVersionedPackFile)"
+                                  VersionedCopyTo="$(_ShorokooVersionedDir)%(ShorokooVersionedPackFile.PackSubdir)%(ShorokooVersionedPackFile.Filename)%(ShorokooVersionedPackFile.Extension)" />
+    </ItemGroup>
+    <ShorokooVersionRepoLinks Files="@(_ShorokooVersionedPackFile)" Ref="$(_ShorokooDocsRef)" />
+    <ItemGroup>
+      <None Include="@(_ShorokooVersionedPackFile->'%(VersionedCopyTo)')" Pack="true" Visible="false" />
+      <FileWrites Include="@(_ShorokooVersionedPackFile->'%(VersionedCopyTo)')" />
+    </ItemGroup>
+  </Target>
 
   <!-- Versioning: packable projects derive their version from the git tag via
        MinVer (tag prefix is set in Directory.Build.props), overriding the static

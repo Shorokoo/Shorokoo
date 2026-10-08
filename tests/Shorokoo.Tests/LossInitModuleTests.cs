@@ -149,4 +149,16 @@ public class Rank0ParamTrainingTests
             0.01f));
         Assert.Contains(nameof(InitShapelessZeros), ex.Message);
     }
+
+    [Fact]
+    public void TestAShapelessInitializerOnABranchSpecializedAwayIsStillRejectedByName()
+    {
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+        {
+            var g = GatedShapelessInitModel.ComputationGraph;
+            g = g.Specialize(g.FromOrderedInputs([TensorData([], false)]));
+            return g.ToConcreteArchitecture(g.FromOrderedInputs([TensorData([4L], new float[4])]));
+        });
+        Assert.Contains(nameof(InitShapelessZeros), ex.Message);
+    }
 }

@@ -44,4 +44,5 @@ public partial class Dense
 
 ## Documentation
 
-Guides, API reference, and samples: https://github.com/Shorokoo/Shorokoo
+- Guides and API reference: https://github.com/Shorokoo/Shorokoo/tree/main/Documentation
+- Samples: https://github.com/Shorokoo/Shorokoo/tree/main/samples

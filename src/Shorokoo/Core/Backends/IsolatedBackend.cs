@@ -459,6 +459,8 @@ public static class IsolatedBackend
 
         bool IShorokooBackend.ModelsARunQuickly => _inner.ModelsARunQuickly;
 
+        string? IShorokooBackend.RunModelIdentity => _inner.RunModelIdentity;
+
         public IShorokooTensorValue CreateTensor<T>(T[] data, long[] shape) where T : unmanaged
             => _inner.CreateTensor(data, shape);
 

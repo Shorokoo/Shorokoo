@@ -163,6 +163,11 @@ public abstract class OrtBackend : IShorokooBackend
     /// its graph written, or a value's shape cannot be told.
     /// </summary>
     long? IShorokooBackend.ModelledRunPeak(ModelProto model, IReadOnlyList<OutputAlias> outputAliases, PrecisionSettings precision)
+        => ModelledRunPeakOf(model, outputAliases, precision);
+
+    /// <summary>What <see cref="IShorokooBackend.ModelledRunPeak"/> answers, for a subclass that
+    /// re-implements it around this answer.</summary>
+    private protected long? ModelledRunPeakOf(ModelProto model, IReadOnlyList<OutputAlias> outputAliases, PrecisionSettings precision)
     {
         if (model.Graph is not { } handed) return null;
         var inputs = new Dictionary<string, (long[] Shape, int ElementType)>(StringComparer.Ordinal);
@@ -199,6 +204,18 @@ public abstract class OrtBackend : IShorokooBackend
 
     /// <summary>It has one: <see cref="OrtRunMemory"/>, over the graph a session writes out.</summary>
     bool IShorokooBackend.ModelsARun => true;
+
+    /// <summary>The build of this assembly, whose <see cref="OrtRunMemory"/> reads the graph a session
+    /// writes out, the native ONNX Runtime's version, and the build and location of the managed
+    /// library over it, which decide that graph.</summary>
+    string? IShorokooBackend.RunModelIdentity => RunModelBuild.Value;
+
+    private static readonly Lazy<string> RunModelBuild = new(() =>
+    {
+        var managed = typeof(InferenceSession).Assembly;
+        return $"{typeof(OrtBackend).Assembly.ManifestModule.ModuleVersionId}|{OrtEnvironment.Environment().GetVersionString()}|"
+            + $"{managed.ManifestModule.ModuleVersionId}|{managed.Location}";
+    });
 
     /// <summary>ONNX Runtime's allocation plan, with what its CPU kernels hold beside their outputs
     /// where this backend runs on the host.</summary>

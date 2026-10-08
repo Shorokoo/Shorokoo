@@ -117,6 +117,26 @@ public class SideBySideBackendCoverageTests
     }
 
     [Fact]
+    public void TestATracedRunLeavesTheUntracedRunsBesideItUndisturbed()
+    {
+        // No other test traces on Alt, so this is the first traced run its runtime sees.
+        using var plain = new ComputeContext(Alt.Value);
+        using var traced = new ComputeContext(Alt.Value) { Diagnostics = new DiagnosticSettings { TraceNodePlacement = true } };
+        var (graph, a, b, expected) = Model();
+        var profiled = traced.Compile(graph);
+        using var stop = new CancellationTokenSource();
+        var running = Enumerable.Range(0, 4).Select(_ => ArenaProbeModels.MatMul(plain)).Select(product => Task.Factory.StartNew(() =>
+        {
+            var operand = ArenaProbeModels.MatMulOperand(512);
+            do product.Execute(operand.Shared(), operand.Shared()); while (!stop.IsCancellationRequested);
+        }, TaskCreationOptions.LongRunning)).ToArray();
+        Thread.Sleep(200);
+        Assert.Equal(expected, SideBySideModel.Floats(profiled.Execute(a, b)[0]));
+        stop.Cancel();
+        Task.WaitAll(running);
+    }
+
+    [Fact]
     public void TestTheRenamingWrapperForwardsEveryMemberOfTheBackendInterface()
     {
         var wrapper = typeof(IsolatedBackend)

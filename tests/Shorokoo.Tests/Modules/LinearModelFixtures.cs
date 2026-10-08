@@ -2284,6 +2284,14 @@ public partial class ShapelessInitModel
         => input * InitShapelessZeros.Init();
 }
 
+/// <summary><see cref="InitShapelessZeros"/> on a branch a <c>[Hyper]</c> bit gates away.</summary>
+[Module]
+public partial class GatedShapelessInitModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> input, [Hyper] Scalar<bit> useIt)
+        => useIt.IfElse(input * InitShapelessZeros.Init(), input);
+}
+
 /// <summary>An initializer whose Inline hands its input straight back.</summary>
 [TrainableParamInitializer]
 public static partial class InitIdentityScalar

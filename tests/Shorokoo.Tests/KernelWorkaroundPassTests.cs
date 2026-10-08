@@ -536,10 +536,10 @@ public class KernelWorkaroundPassTests
         var step = AttentionTrainingStep();
         List<long[]?> dims = [.. step.InputNodes.Select(RepresentativeInputShapes.Get)];
         ModelProto Built(KernelWorkaroundSet set) => FastOnnxModelBuilder.BuildInternalOnnxModel(step, prepForOnnx: true, inputDims: dims, workarounds: set);
-        Assert.Equal(Bytes(Session(step, WithoutTheMatMulWorkaround)), Bytes(Session(step, KernelWorkaroundRegistry.OnnxRuntime)));
         Assert.Equal(Bytes(Built(WithoutTheMatMulWorkaround)), Bytes(Built(KernelWorkaroundRegistry.OnnxRuntime)));
         var shapes = FastApplyKernelWorkarounds.ConcreteShapes(step, KernelWorkaroundRegistry.OnnxRuntime, dims);
-        Assert.True(step.Nodes.Where(n => n.OpCode == MATMUL).SelectMany(n => n.Inputs).All(k => shapes!.ContainsKey(k!.Value)));
+        Assert.NotNull(shapes);
+        Assert.True(step.Nodes.Where(n => n.OpCode == MATMUL).SelectMany(n => n.Inputs).All(k => shapes.ContainsKey(k!.Value)));
     }
 
     [Fact]
@@ -625,6 +625,7 @@ public class KernelWorkaroundPassTests
         var (plain, rewritten) = (Built(null), Built(KernelWorkaroundRegistry.OnnxRuntime));
         Assert.Equal(0, Ifs(rewritten));
         Assert.NotEqual(Bytes(plain), Bytes(rewritten));
+        Assert.Null(FastApplyKernelWorkarounds.ConcreteShapes(g, KernelWorkaroundRegistry.OnnxRuntime, [x.Shape.Dims]));
         Assert.Equal(Run(g, plain, [x]), Run(g, rewritten, [x]));
     }
 

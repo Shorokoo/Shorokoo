@@ -41,8 +41,11 @@ namespace Shorokoo.Core.Nodes.AutoDiff
             var padding = broadcastedRank - originalRank;
 
             var paddedInputShape = originalShape.Pad(PadMode.Constant, pads: [padding, Scalar(0L)], val: Scalar(1L));
-            var indices = VectorRange(Scalar(0L), broadcastedRank, Scalar(1L));
-            var axesToReduce = ((Tensor<int64>)indices).Compress((paddedInputShape == 1) & (broadcastedShape != 1));
+            // One index past the last axis, never selected, so the Compress never reads an empty
+            // condition: ONNX Runtime's CUDA kernel fails on one, which rank-zero operands make.
+            var indices = VectorRange(Scalar(0L), broadcastedRank + Scalar(1L), Scalar(1L));
+            Vector<bit> selected = OnnxOp.Concat([(paddedInputShape == 1) & (broadcastedShape != 1), Vector(false)], axis: 0);
+            var axesToReduce = ((Tensor<int64>)indices).Compress(selected);
 
             // Use noopWithEmptyAxes=true so that when no axes need reducing (e.g., same-shape
             // operands), the tensor passes through unchanged instead of reducing all axes.

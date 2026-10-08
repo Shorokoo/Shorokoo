@@ -982,9 +982,9 @@ public class AutoDiffCheckpointingCoverageTests
                 asked.Count, asked.Distinct().Count());
         }
 
-        Assert.Equal(("RematReorder", 436, "", 1, 1), Optimize(_ => null));
-        Assert.Equal(("Baseline", 435, "64,64,64,64", 6, 6), Optimize(_ => 64 * Mb));
-        Assert.Equal(("RematReorder", 438, "64,52,56,52", 11, 11), Optimize(added => Math.Max(Mb, 64 * Mb - added * 4 * Mb)));
+        Assert.Equal(("RematReorder", 472, "", 1, 1), Optimize(_ => null));
+        Assert.Equal(("Baseline", 471, "64,64,64,64", 6, 6), Optimize(_ => 64 * Mb));
+        Assert.Equal(("RematReorder", 474, "64,52,56,52", 11, 11), Optimize(added => Math.Max(Mb, 64 * Mb - added * 4 * Mb)));
     }
 
     private sealed class CountingRunModel(string build = "") : Shorokoo.OnnxRuntime.OrtBackend(), Shorokoo.Core.Backends.IShorokooBackend

@@ -112,10 +112,10 @@ endfunction()
 if(shorokoo_cuda_ops STREQUAL "OFF")
   shorokoo_cuda_unavailable("SHOROKOO_CUDA_OPS is OFF.")
 else()
-  # The toolkit is looked for afresh where the folders naming it changed since the last
-  # configuration; what was found before would otherwise stay in the cache.
+  # The toolkit is looked for afresh unless the folders naming it are those the cache was filled
+  # from; what was found before would otherwise stay in the cache.
   set(root_key "${CUDAToolkit_ROOT}|$ENV{CUDAToolkit_ROOT}|$ENV{CUDA_PATH}")
-  if(DEFINED SHOROKOO_CUDA_ROOT_KEY AND NOT SHOROKOO_CUDA_ROOT_KEY STREQUAL root_key)
+  if(NOT DEFINED SHOROKOO_CUDA_ROOT_KEY OR NOT SHOROKOO_CUDA_ROOT_KEY STREQUAL root_key)
     get_cmake_property(cached CACHE_VARIABLES)
     foreach(variable IN LISTS cached)
       if(variable MATCHES "^(CUDAToolkit_|CUDA_)" AND NOT variable STREQUAL "CUDAToolkit_ROOT")

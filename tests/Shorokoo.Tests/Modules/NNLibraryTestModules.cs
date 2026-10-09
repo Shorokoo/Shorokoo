@@ -2563,6 +2563,17 @@ public partial class NNSoftCappedTableProjectionModel
         => (Normal.Init(Vector(64L, 4L)).Gather(tokens).MatMul(Normal.Init(Vector(4L, 48L))) * Scalar(1f / 15f)).Tanh() * Scalar(15f);
 }
 
+/// <summary><see cref="NNSoftCappedTableProjectionModel"/> over a <c>[batch, length]</c> grid of
+/// tokens, its logits reshaped to <c>[tokens, 48]</c> between the projection and the soft cap: a
+/// language model's head.</summary>
+[Module]
+public partial class NNSoftCappedSequenceHeadModel
+{
+    public static Tensor<float32> Inline(Tensor<int64> tokens)
+        => (Normal.Init(Vector(64L, 4L)).Gather(tokens).MatMul(Normal.Init(Vector(4L, 48L))).Reshape([Scalar(-1L), Scalar(48L)])
+            * Scalar(1f / 15f)).Tanh() * Scalar(15f);
+}
+
 /// <summary>A batch of rows projected by a <c>[3, 5]</c> weight, then through <c>Elu</c>, <c>Selu</c>
 /// and <c>Celu</c>, summed: the exponential activations, each differentiated once.</summary>
 [Module]

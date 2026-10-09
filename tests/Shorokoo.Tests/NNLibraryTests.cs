@@ -832,6 +832,29 @@ public class NNLibraryOptimizerTrainingCoverageTests
         Assert.Equal(1, CrossEntropySessionOps(NNSoftCappedTableProjectionModel.ComputationGraph, OpCodes.LOG_SOFTMAX));
     }
 
+    private static int OptimizedSequenceHeadScalesOfLogits()
+    {
+        var rig = TrainingRig.FromScratch(NNSoftCappedSequenceHeadModel.ComputationGraph, CrossEntropyLoss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            [new TensorDataModelParam("tokens", ModelParamType.InputParam, TensorData([2L, 3L], [3L, 9L, 3L, 0L, 41L, 7L]))], 0.1f);
+        var path = Path.Combine(Path.GetTempPath(), $"shrk_head_{Guid.NewGuid():N}.onnx");
+        try
+        {
+            using (var options = new Microsoft.ML.OnnxRuntime.SessionOptions { OptimizedModelFilePath = path })
+            using (new Microsoft.ML.OnnxRuntime.InferenceSession(Benchmarks.MemoryPassBenchmarkTests.RigModelBytes(rig.TrainingStepPureGraph, rig.OptimizationInputShapes), options)) { }
+            Shorokoo.Core.Factory.IR.ModelProto optimized;
+            using (var file = File.OpenRead(path)) optimized = ProtoBuf.Serializer.Deserialize<Shorokoo.Core.Factory.IR.ModelProto>(file);
+            var graph = optimized.Graph!;
+            var shapes = Shorokoo.Core.Backends.PlacementShapes.Evaluate(graph, graph.Inputs.ToDictionary(i => i.Name,
+                i => (i.Type.TensorType.Shape.Dims.Select(d => d.DimValue).ToArray(), i.Type.TensorType.ElemType), StringComparer.Ordinal));
+            return graph.Nodes.Count(n => n.OpType is "Mul" or "Div" && shapes.TryGetValue(n.Outputs[0], out var v) && v.Elements == 6 * 48);
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
+    public void TestASequenceHeadsScalesSitOnItsMatMulsWhereOnnxRuntimeFoldsThem()
+        => Assert.Equal(3, OptimizedSequenceHeadScalesOfLogits());
+
     [Fact]
     public void TestAnExponentialActivationsGradientReadsItsOutputRatherThanExponentiatingAgain()
     {

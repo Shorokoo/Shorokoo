@@ -67,6 +67,11 @@ public abstract class JaxBackend : IShorokooBackend
     /// <summary>The backend's device as the support package names it: <c>cpu</c> or <c>cuda:N</c>.</summary>
     public string DeviceName { get; }
 
+    /// <summary>It does: the step is one XLA computation, whose fusions run chains of elementwise
+    /// operators and the reductions they feed as single kernels, and share a reduction the forward
+    /// and backward passes both compute.</summary>
+    bool IShorokooBackend.FusesElementwiseOperators => true;
+
     internal bool OnCuda => _cudaDeviceId is not null;
 
     private long _donatedInputs;

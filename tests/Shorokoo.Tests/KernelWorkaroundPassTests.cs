@@ -259,6 +259,16 @@ public class KernelWorkaroundPassTests
     }
 
     [Fact]
+    public void TestACrossEntropyOverAnEmptyBatchRunsOnOnnxRuntime()
+    {
+        using var context = new ComputeContext();
+        var scores = TensorData([0L, 4L], new float[0]);
+        var labels = TensorData([0L], new long[0]);
+        Assert.Equal([0f], context.Execute(KernelWorkaroundCrossEntropySum.ComputationGraph.ToConcreteArchitecture([scores, labels]).ToConcreteModel(),
+            scores.Shared(), labels.Shared())[0].ToTensorData().CopyMemory<float>());
+    }
+
+    [Fact]
     public void TestTheCudaSetTakesWhatABodyDidNotComputeThroughMaxBeforeACallTheProviderRunsOnTheCpu()
     {
         var u = InputTensor<uint32>("u", rank: 1);
@@ -1226,4 +1236,11 @@ public partial class ChainedWorkaroundsReadByAShapeCheck
             Regrouped(kept, 3L),
         ], 0);
     }
+}
+
+[Module]
+public partial class KernelWorkaroundCrossEntropySum
+{
+    public static Tensor<float32> Inline(Tensor<float32> scores, Tensor<int64> labels)
+        => (Tensor<float32>)OnnxOp.SoftmaxCrossEntropyLoss(scores, labels, null, null, "sum").output;
 }

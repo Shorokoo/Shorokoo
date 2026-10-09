@@ -198,19 +198,45 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         //   log_prob = LogSoftmax(scores, axis=1)
         //   loss     = NegativeLogLikelihoodLoss(log_prob, labels, weight, ignore_index, reduction)
         //
-        // Gradient w.r.t. scores closed-form (standard CE backward):
-        //   dscores[i, c, ...] = (softmax(scores)[i, c, ...] - onehot(labels)[i, c, ...]) *
-        //                        weight[labels] * upstream * active_mask
-        //   With "mean" reduction the upstream divides by Σ effective weights; "sum"
-        //   broadcasts the scalar grad; "none" uses the per-element grad directly.
-        // Gradients into the log_prob output (outputGrads[1]) flow back through LogSoftmax.
+        // Gradient w.r.t. scores, closed form:
+        //   dscores[i, c, ...] = (exp(log_prob)[i, c, ...] - onehot(labels)[i, c, ...]) * s[i, ...]
+        //   s = weight[labels] * active_mask * upstream: "mean" divides the loss's gradient by
+        //   Σ effective weights, "sum" takes it as it is, "none" takes the per-element gradient.
+        //   Gradients into the log_prob output (outputGrads[1]) flow back through LogSoftmax:
+        //   g - exp(log_prob) * Σ_c g.
+        //
+        // The rule reads the forward's log_prob output (it is registered as using outputs, so
+        // the output follows the inputs): exp of it is the softmax, one elementwise pass where
+        // computing Softmax again would read the scores twice more. The one-hot is never built.
+        // The probabilities are scaled per sample and s is subtracted at each sample's target
+        // alone, by a ScatterND over the flattened tensor that adds into its data and so may
+        // write in place. Without a class weight or an ignore index, s is one value for every
+        // sample, a rank-0 factor of the product, which folds with the scalar factors of the
+        // chain it flows into (FastFoldScalarFactors).
+        //
+        // For a backend that fuses elementwise operators (SoftmaxCrossEntropyLossGradientInFusion)
+        // the trade goes the other way: the softmax recomputed from the scores shares its
+        // reductions with the forward pass and runs inside the fusion of the chain it feeds, with
+        // the one-hot a comparison in the same fusion, where reading the log-probabilities would
+        // have them written out and the scatter would have the probabilities written out too.
+        // There the scale is always the per-sample one, which stays in that fusion: a scalar at the
+        // end of the product would be fused into the matrix product it feeds instead.
 
         internal static Variable?[] SoftmaxCrossEntropyLossGradient(
             Variable?[] inputs, Variable?[] outputGrads, OnnxCSharpAttributes attributes)
+            => SoftmaxCrossEntropyLossGradientOf(inputs, outputGrads, attributes, inFusion: false);
+
+        internal static Variable?[] SoftmaxCrossEntropyLossGradientInFusion(
+            Variable?[] inputs, Variable?[] outputGrads, OnnxCSharpAttributes attributes)
+            => SoftmaxCrossEntropyLossGradientOf(inputs, outputGrads, attributes, inFusion: true);
+
+        private static Variable?[] SoftmaxCrossEntropyLossGradientOf(
+            Variable?[] inputs, Variable?[] outputGrads, OnnxCSharpAttributes attributes, bool inFusion)
         {
             var scores = inputs[0]!;
             var labels = inputs[1]!;
             var weight = inputs.Length > 2 ? inputs[2] : null;
+            var logProb = inputs.Length > 4 && !inFusion ? inputs[4] : null;
 
             var lossGrad = outputGrads.Length > 0 ? outputGrads[0] : null;
             var logProbGrad = outputGrads.Length > 1 ? outputGrads[1] : null;
@@ -219,72 +245,76 @@ namespace Shorokoo.Core.Nodes.AutoDiff
             var reduction = (attributes.GetAttributeObj(AttrReduction) as string) ?? "mean";
 
             var floatType = scores.Type;
+            var probabilities = inFusion ? OnnxOp.Softmax(scores, axis: 1) : OnnxOp.Exp(logProb ?? OnnxOp.LogSoftmax(scores, axis: 1));
+            Variable OneHotOf(Variable classIndex) => OnnxOp.OneHot(classIndex, OnnxOp.Gather(OnnxOp.Shape(scores), Scalar(1L), axis: 0),
+                OnnxOp.Cast(Vector(0.0f, 1.0f), saturate: null, to: floatType), axis: 1);
 
-            // softmax(scores, axis=1) — the channel axis is always 1 in ONNX SCEL.
-            var softmax = OnnxOp.Softmax(scores, axis: 1);
-
-            // weight vector and ignore mask (same shape as labels)
-            var cScalar = OnnxOp.Gather(OnnxOp.Shape(scores), Scalar(1L), axis: 0);
-            Variable wVec;
-            if (weight is null)
+            Variable? dScores = null;
+            if (lossGrad is not null)
             {
-                wVec = OnnxOp.Expand(OnnxOp.Cast(Scalar(1.0f), saturate: null, to: floatType), OnnxOp.Reshape(cScalar, Vector(1L), allowZero: false));
-            }
-            else
-            {
-                wVec = weight;
-            }
-            var (classIndex, activeMask) = IgnoreIndexMask(labels, ignoreIndex, floatType);
-            var weightPerSample = OnnxOp.Gather(wVec, classIndex, axis: 0);
-            if (activeMask is not null)
-                weightPerSample = OnnxOp.Mul(weightPerSample, activeMask);
-
-            // Upstream gradient (shape of labels) for the loss path
-            Variable upstream;
-            if (lossGrad is null)
-            {
-                // Loss output unused; zero-grad path for this term.
-                upstream = OnnxOp.Expand(OnnxOp.Cast(Scalar(0.0f), saturate: null, to: floatType), OnnxOp.Shape(labels));
-            }
-            else if (reduction == "none")
-            {
-                upstream = lossGrad;
-            }
-            else if (reduction == "sum")
-            {
-                upstream = OnnxOp.Expand(lossGrad, OnnxOp.Shape(labels));
-            }
-            else // mean
-            {
-                var totalWeight = OnnxOp.ReduceSum(weightPerSample, axes: null, keepdims: false, noopWithEmptyAxes: false);
-                var scaled = OnnxOp.Div(lossGrad, totalWeight);
-                upstream = OnnxOp.Expand(scaled, OnnxOp.Shape(labels));
+                var (classIndex, activeMask) = IgnoreIndexMask(labels, ignoreIndex, floatType);
+                if (!inFusion && weight is null && activeMask is null && reduction != "none")
+                {
+                    var count = OnnxOp.Cast(OnnxOp.Size(labels), saturate: null, to: floatType);
+                    var scale = reduction == "sum" ? lossGrad : OnnxOp.Div(lossGrad, count);
+                    var minusOne = OnnxOp.Expand(OnnxOp.Cast(Scalar(-1.0f), saturate: null, to: floatType), OnnxOp.Shape(labels));
+                    dScores = OnnxOp.Mul(ScatterAddAtTargets(probabilities, classIndex, minusOne), scale);
+                }
+                else
+                {
+                    // Gathered per label even without a class weight, from ones: XLA then keeps the
+                    // scale in the elementwise fusion, where one it can see is uniform it fuses into
+                    // the matrix product the gradient feeds.
+                    var classWeight = weight ?? OnnxOp.Expand(OnnxOp.Cast(Scalar(1.0f), saturate: null, to: floatType),
+                        OnnxOp.Reshape(OnnxOp.Gather(OnnxOp.Shape(scores), Scalar(1L), axis: 0), Vector(1L), allowZero: false));
+                    var weightPerSample = OnnxOp.Gather(classWeight, classIndex, axis: 0);
+                    if (activeMask is not null)
+                        weightPerSample = OnnxOp.Mul(weightPerSample, activeMask);
+                    Variable upstream = reduction switch
+                    {
+                        "none" => lossGrad,
+                        "sum" => OnnxOp.Expand(lossGrad, OnnxOp.Shape(labels)),
+                        _ => OnnxOp.Expand(OnnxOp.Div(lossGrad,
+                            OnnxOp.ReduceSum(weightPerSample, axes: null, keepdims: false, noopWithEmptyAxes: false)), OnnxOp.Shape(labels)),
+                    };
+                    var perSample = OnnxOp.Mul(weightPerSample, upstream);
+                    dScores = inFusion
+                        ? OnnxOp.Mul(OnnxOp.Sub(probabilities, OneHotOf(classIndex)), OnnxOp.Unsqueeze(perSample, Vector(1L)))
+                        : ScatterAddAtTargets(OnnxOp.Mul(probabilities, OnnxOp.Unsqueeze(perSample, Vector(1L))), classIndex, OnnxOp.Neg(perSample));
+                }
             }
 
-            // OneHot the labels along axis 1 in scores' shape.
-            var depthScalar = OnnxOp.Gather(OnnxOp.Shape(scores), Scalar(1L), axis: 0);
-            var values = OnnxOp.Cast(Vector(0.0f, 1.0f), saturate: null, to: floatType);
-            var onehot = OnnxOp.OneHot(classIndex, depthScalar, values, axis: 1);
-
-            // dscores from the loss term: (softmax - onehot) * weight[labels] * upstream
-            var scale1d = OnnxOp.Mul(weightPerSample, upstream);
-            var scaleBroadcast = OnnxOp.Unsqueeze(scale1d, Vector(1L));
-            var dScoresLoss = OnnxOp.Mul(OnnxOp.Sub(softmax, onehot), scaleBroadcast);
-
-            // dscores from the log_prob output (if used downstream): LogSoftmax gradient
-            // applied to logProbGrad. Closed form: grad - softmax * sum(grad, axis=1, keepdims).
-            Variable dScores = dScoresLoss;
             if (logProbGrad is not null)
             {
                 var sumLp = OnnxOp.ReduceSum(logProbGrad, axes: Vector(1L), keepdims: true, noopWithEmptyAxes: false);
-                var dFromLp = OnnxOp.Sub(logProbGrad, OnnxOp.Mul(softmax, sumLp));
-                dScores = OnnxOp.Add(dScores, dFromLp);
+                var dFromLp = OnnxOp.Sub(logProbGrad, OnnxOp.Mul(probabilities, sumLp));
+                dScores = dScores is null ? dFromLp : OnnxOp.Add(dScores, dFromLp);
             }
 
-            var result = new Variable?[inputs.Length];
+            var result = new Variable?[Math.Min(inputs.Length, 3)];
             result[0] = dScores;
             // labels grad = null; weight grad = null
             return result;
+        }
+
+        // values[i, classIndex[i, ...], ...] += added[i, ...] for every sample, over values
+        // [N, C, d1, ...] flattened: the element sample (i, d) targets sits at offset
+        // (j - d)·C + t·D + d, where j = i·D + d is the sample's own offset among the labels and D
+        // the extent of the trailing axes (an empty batch divides by one, not zero). The offsets
+        // are distinct, so the adds never collide.
+        private static Variable ScatterAddAtTargets(Variable values, Variable classIndex, Variable added)
+        {
+            var labelShape = OnnxOp.Shape(classIndex);
+            var samples = OnnxOp.Size(classIndex);
+            var trailing = OnnxOp.Div(samples, OnnxOp.Max(OnnxOp.Gather(labelShape, Scalar(0L), axis: 0), Scalar(1L)));
+            var classes = OnnxOp.Gather(OnnxOp.Shape(values), Scalar(1L), axis: 0);
+            var offset = OnnxOp.Range(Scalar(0L), samples, Scalar(1L));
+            var within = OnnxOp.Mod(offset, trailing, fmod: null);
+            var target = OnnxOp.Reshape(OnnxOp.Cast(classIndex, saturate: null, to: DType.Int64), Vector(-1L), allowZero: false);
+            var flatTarget = OnnxOp.Add(OnnxOp.Add(OnnxOp.Mul(OnnxOp.Sub(offset, within), classes), OnnxOp.Mul(target, trailing)), within);
+            var scattered = OnnxOp.ScatterND(OnnxOp.Reshape(values, Vector(-1L), allowZero: false),
+                OnnxOp.Unsqueeze(flatTarget, Vector(1L)), OnnxOp.Reshape(added, Vector(-1L), allowZero: false), ScatterNDReduction.Add);
+            return OnnxOp.Reshape(scattered, OnnxOp.Shape(values), allowZero: false);
         }
 
         // ===== STFT =====

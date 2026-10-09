@@ -12,8 +12,10 @@ namespace Shorokoo.Core.Lowering.KernelWorkarounds;
 internal static class KernelWorkaroundRegistry
 {
     /// <summary>
-    /// The rewrites around ONNX Runtime's kernels, in the order they apply: the reductions' axis
-    /// handling first, so the later reduction workarounds see normalised calls, with the negative
+    /// The rewrites around ONNX Runtime's kernels, in the order they apply: the cross-entropy ONNX
+    /// Runtime has no kernel for, as the log-softmax and negative log-likelihood it is made of,
+    /// ahead of all of them, so the rewrites after it see those calls; then the reductions' axis
+    /// handling, so the later reduction workarounds see normalised calls, with the negative
     /// axes made non-negative before a reduction of no axis is rewritten, since the axis that
     /// rewrite reduces is never negative; the crop-and-resize roi before the cubic resize layout,
     /// and both before the resize axes, since the calls they build keep the call's <c>axes</c>;
@@ -35,6 +37,7 @@ internal static class KernelWorkaroundRegistry
 
     private static ImmutableArray<KernelWorkaround> OnnxRuntimeWorkarounds =>
     [
+        new CrossEntropyAsLogSoftmaxWorkaround(),
         new ReduceNegativeAxesWorkaround(),
         new ReduceNoopEmptyAxesWorkaround(),
         new BoolEmptyReduceExtremeWorkaround(),

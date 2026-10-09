@@ -55,11 +55,20 @@ namespace Shorokoo.Core.Nodes.AutoDiff
             return finalGrad;
         }
 
+        /// <summary>
+        /// The gradient of a broadcasting binary operator's <paramref name="operand"/>, reduced back
+        /// to its shape — or <paramref name="grad"/> as it is where the <paramref name="other"/>
+        /// operand is a scalar: the output then has the operand's own shape, so there is nothing to
+        /// reduce, and a product scaled by a constant stays a chain of products.
+        /// </summary>
+        public static Tensor<T> ReverseBroadcastAgainst<T>(Tensor<T> grad, Tensor<T> operand, Tensor<T> other) where T : IVarType
+            => other.Rank == 0 ? grad : ReverseBroadcast(grad, operand.DShape);
+
         [AutoDiff(ADD)]
         public static Variable?[] Add<T>(Tensor<T> a, Tensor<T> b, Tensor<T> grad) where T : IVarType
         {
-            var aGrad = ReverseBroadcast(grad, a.DShape);
-            var bGrad = ReverseBroadcast(grad, b.DShape);
+            var aGrad = ReverseBroadcastAgainst(grad, a, b);
+            var bGrad = ReverseBroadcastAgainst(grad, b, a);
 
             return [aGrad, bGrad];
         }
@@ -67,8 +76,8 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         [AutoDiff(MUL)]
         public static Variable?[] Mul<T>(Tensor<T> a, Tensor<T> b, Tensor<T> grad) where T : IVarType
         {
-            var aGrad = ReverseBroadcast(grad * b, a.DShape);
-            var bGrad = ReverseBroadcast(grad * a, b.DShape);
+            var aGrad = ReverseBroadcastAgainst(grad * b, a, b);
+            var bGrad = ReverseBroadcastAgainst(grad * a, b, a);
 
             return [aGrad, bGrad];
         }
@@ -314,7 +323,24 @@ namespace Shorokoo.Core.Nodes.AutoDiff
                 .Select(m => m.GetCustomAttribute<AutoDiffAttribute>())
                 .Where(a => a is { UsesOutputs: true })
                 .Select(a => a!.OpName)
+                .Concat(VariadicGradientOpsUsingOutputs)
                 .ToHashSet();
+
+        /// <summary>
+        /// Replaces, in a table from <see cref="GetGradientOps"/>, each rule that reads what the
+        /// forward pass wrote with the one that recomputes it, for a backend that fuses the
+        /// recomputation into the elementwise chain it feeds: the cross-entropy's softmax.
+        /// </summary>
+        public static void RecomputeInFusion(
+            Dictionary<string, Func<Variable?[], Variable?[], OnnxCSharpAttributes, Variable?[]>> gradientOps)
+            => gradientOps[SOFTMAX_CROSS_ENTROPY_LOSS] = SoftmaxCrossEntropyLossGradientInFusion;
+
+        /// <summary>
+        /// The variadic rules (registered in <see cref="RegisterVariadicGradientOps"/>) that read
+        /// the forward outputs appended after the inputs, as an <c>[AutoDiff]</c> rule flagged
+        /// <c>UsesOutputs</c> does: SoftmaxCrossEntropyLoss reads its log-probabilities.
+        /// </summary>
+        private static readonly string[] VariadicGradientOpsUsingOutputs = [SOFTMAX_CROSS_ENTROPY_LOSS];
 
         // ===== Concat (variadic) =====
 

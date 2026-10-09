@@ -1,4 +1,5 @@
 using Shorokoo.Core.AutoDiffCheckpointing;
+using Shorokoo.Core.Factory;
 using Shorokoo.Core.Graph;
 using Shorokoo.Core.Nodes.Processors.Helpers;
 using Shorokoo.Runtime;
@@ -781,6 +782,150 @@ public class NNLibraryOptimizerTrainingCoverageTests
         Assert.Equal(14, StepOpsSized(64 * 4, table, [3L], AdamWOptimizer.ComputationGraph,
             new AdamWOptimizerHyperparameters { WeightDecay = Hyperparameter.Runtime() }.InOptimizerOrder()));
         Assert.Equal(4, StepOpsSized(64, NNGatheredBiasModel.ComputationGraph, [3L], SGDOptimizer.ComputationGraph, 0.1f));
+    }
+
+    private static TrainingRig CrossEntropyRig(ComputationGraph model)
+        => TrainingRig.FromScratch(model, CrossEntropyLoss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            [new TensorDataModelParam("tokens", ModelParamType.InputParam, TensorData([6L], [3L, 9L, 3L, 0L, 41L, 7L]))], 0.1f);
+
+    private static int CrossEntropyStepOps(ComputationGraph model, string opCode)
+        => CrossEntropyRig(model).TrainingStepPureGraph.ToInternal().Nodes.Count(n => n.OpCode == opCode);
+
+    private static int CrossEntropyStepOpsSized(ComputationGraph model)
+    {
+        var rig = CrossEntropyRig(model);
+        var step = rig.TrainingStepPureGraph.ToInternal();
+        var shapes = new ShapeInferenceInterpreter().Infer(step, rig.OptimizationInputs);
+        return step.Nodes.Take(step.BodyEnd).Skip(step.InputCount)
+            .Count(n => n.OpCode != OpCodes.RESHAPE && n.Outputs.Any(o => o is FastTensorKey k && shapes.GetTensorInfo(k)?.ElementCount == 6 * 48));
+    }
+
+    private static int CrossEntropySessionOps(ComputationGraph model, string opType)
+    {
+        var rig = CrossEntropyRig(model);
+        return FastOnnxModelBuilder.BuildInternalOnnxModel(rig.TrainingStepPureGraph.ToInternal(), prepForOnnx: true,
+            workarounds: Shorokoo.Core.Lowering.KernelWorkarounds.KernelWorkaroundRegistry.OnnxRuntimeCuda).Graph!.Nodes.Count(n => n.OpType == opType);
+    }
+
+    [Fact]
+    public void TestACrossEntropyGradientReadsTheForwardLogProbabilitiesAndSubtractsOnlyAtTheTargets()
+    {
+        Assert.Equal(0, CrossEntropyStepOps(NNGatheredTableProjectionModel.ComputationGraph, OpCodes.SOFTMAX));
+        Assert.Equal(0, CrossEntropyStepOps(NNGatheredTableProjectionModel.ComputationGraph, OpCodes.ONE_HOT));
+        Assert.Equal(0, CrossEntropyStepOps(NNSoftCappedTableProjectionModel.ComputationGraph, OpCodes.SOFTMAX));
+        Assert.Equal(0, CrossEntropyStepOps(NNSoftCappedTableProjectionModel.ComputationGraph, OpCodes.ONE_HOT));
+    }
+
+    [Fact]
+    public void TestACrossEntropyStepMakesTheFewestLogitSizedPasses()
+    {
+        Assert.Equal(5, CrossEntropyStepOpsSized(NNGatheredTableProjectionModel.ComputationGraph));
+        Assert.Equal(11, CrossEntropyStepOpsSized(NNSoftCappedTableProjectionModel.ComputationGraph));
+    }
+
+    [Fact]
+    public void TestOnnxRuntimeIsHandedCrossEntropyAsALogSoftmaxOverTheClassAxis()
+    {
+        Assert.Equal(0, CrossEntropySessionOps(NNGatheredTableProjectionModel.ComputationGraph, OpCodes.SOFTMAX_CROSS_ENTROPY_LOSS));
+        Assert.Equal(1, CrossEntropySessionOps(NNGatheredTableProjectionModel.ComputationGraph, OpCodes.LOG_SOFTMAX));
+        Assert.Equal(0, CrossEntropySessionOps(NNSoftCappedTableProjectionModel.ComputationGraph, OpCodes.SOFTMAX_CROSS_ENTROPY_LOSS));
+        Assert.Equal(1, CrossEntropySessionOps(NNSoftCappedTableProjectionModel.ComputationGraph, OpCodes.LOG_SOFTMAX));
+    }
+
+    private static int OptimizedSequenceHeadScalesOfLogits()
+    {
+        var rig = TrainingRig.FromScratch(NNSoftCappedSequenceHeadModel.ComputationGraph, CrossEntropyLoss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            [new TensorDataModelParam("tokens", ModelParamType.InputParam, TensorData([2L, 3L], [3L, 9L, 3L, 0L, 41L, 7L]))], 0.1f);
+        var path = Path.Combine(Path.GetTempPath(), $"shrk_head_{Guid.NewGuid():N}.onnx");
+        try
+        {
+            using (var options = new Microsoft.ML.OnnxRuntime.SessionOptions { OptimizedModelFilePath = path })
+            using (new Microsoft.ML.OnnxRuntime.InferenceSession(Benchmarks.MemoryPassBenchmarkTests.RigModelBytes(rig.TrainingStepPureGraph, rig.OptimizationInputShapes), options)) { }
+            Shorokoo.Core.Factory.IR.ModelProto optimized;
+            using (var file = File.OpenRead(path)) optimized = ProtoBuf.Serializer.Deserialize<Shorokoo.Core.Factory.IR.ModelProto>(file);
+            var graph = optimized.Graph!;
+            var shapes = Shorokoo.Core.Backends.PlacementShapes.Evaluate(graph, graph.Inputs.ToDictionary(i => i.Name,
+                i => (i.Type.TensorType.Shape.Dims.Select(d => d.DimValue).ToArray(), i.Type.TensorType.ElemType), StringComparer.Ordinal));
+            return graph.Nodes.Count(n => n.OpType is "Mul" or "Div" && shapes.TryGetValue(n.Outputs[0], out var v) && v.Elements == 6 * 48);
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
+    public void TestASequenceHeadsScalesSitOnItsMatMulsWhereOnnxRuntimeFoldsThem()
+        => Assert.Equal(3, OptimizedSequenceHeadScalesOfLogits());
+
+    private static int FullSizeMuls(ComputationGraph model)
+    {
+        var rig = TrainingRig.FromScratch(model, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, [TensorData([32L, 48L], new float[32 * 48])], 0.1f);
+        var step = rig.TrainingStepPureGraph.ToInternal();
+        var shapes = new ShapeInferenceInterpreter().Infer(step, rig.OptimizationInputs);
+        return step.Nodes.Count(n => n.OpCode == OpCodes.MUL && shapes.GetTensorInfo(new FastTensorKey(n.Key, 0))?.ElementCount == 32 * 48);
+    }
+
+    [Fact]
+    public void TestScalesAppliedToASmallTensorStayOnItWhenTheyFold()
+    {
+        Assert.Equal(4, FullSizeMuls(NNScaledBeforeBroadcastModel.ComputationGraph));
+        Assert.Equal(4, FullSizeMuls(NNScalesMultipliedBeforeBroadcastModel.ComputationGraph));
+    }
+
+    [Fact]
+    public void TestAScaleBetweenTwoProjectionsSettlesBesideOne()
+    {
+        var rig = TrainingRig.FromScratch(NNScaledBetweenProjectionsModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            [TensorData([2L, 2L, 4L], [.. Enumerable.Range(0, 16).Select(i => i * 0.25f - 2f)])], 0.1f);
+        var step = rig.TrainingStepPureGraph.ToInternal();
+        var producer = step.Nodes.SelectMany(n => n.Outputs.OfType<FastTensorKey>().Select(o => (o, n))).ToDictionary(p => p.o, p => p.n);
+        bool IsHalf(FastTensorKey? k) => k is FastTensorKey key && producer[key].OpCode == OpCodes.CONSTANT
+            && producer[key].Attributes.GetAttributeVal(OnnxOpAttributeNames.AttrValue) is { } v && v.Shape.Dims.Length == 0 && v.Elements<float>()[0] == 0.5f;
+        Assert.Equal([OpCodes.MATMUL, OpCodes.MATMUL], step.Nodes.Where(n => n.OpCode == OpCodes.MUL && n.Inputs.Any(IsHalf))
+            .Select(n => producer[(FastTensorKey)n.Inputs.First(i => !IsHalf(i))!].OpCode));
+    }
+
+    private static int SequenceHeadStepOpsOn(Shorokoo.Core.Backends.IShorokooBackend backend, string opCode, bool logitSized = false)
+    {
+        using var context = new ComputeContext(backend);
+        var rig = TrainingRig.FromScratch(NNSoftCappedSequenceHeadModel.ComputationGraph, CrossEntropyLoss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            [new TensorDataModelParam("tokens", ModelParamType.InputParam, TensorData([2L, 3L], [3L, 9L, 3L, 0L, 41L, 7L]))],
+            new SGDOptimizerHyperparameters { LearningRate = 0.1f }, runtimeContext: context);
+        var step = rig.TrainingStepPureGraph.ToInternal();
+        var shapes = new ShapeInferenceInterpreter().Infer(step, rig.OptimizationInputs);
+        return step.Nodes.Count(n => n.OpCode == opCode && (!logitSized || shapes.GetTensorInfo(new FastTensorKey(n.Key, 0))?.ElementCount == 6 * 48));
+    }
+
+    [Fact]
+    public void TestABackendThatFusesElementwiseOperatorsRecomputesTheSoftmaxInsideTheFusion()
+    {
+        Assert.Equal(1, SequenceHeadStepOpsOn(new Shorokoo.Jax.Cpu.JaxCpuBackend(), OpCodes.SOFTMAX));
+        Assert.Equal(0, SequenceHeadStepOpsOn(new Shorokoo.Jax.Cpu.JaxCpuBackend(), OpCodes.SCATTER_ND, logitSized: true));
+    }
+
+    [Fact]
+    public void TestABackendThatFusesElementwiseOperatorsScalesTheCrossEntropyGradientPerSampleInsideTheFusion()
+    {
+        using var context = new ComputeContext(new Shorokoo.Jax.Cpu.JaxCpuBackend());
+        var rig = TrainingRig.FromScratch(NNGatheredTableProjectionModel.ComputationGraph, CrossEntropyLoss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            [new TensorDataModelParam("tokens", ModelParamType.InputParam, TensorData([6L], [3L, 9L, 3L, 0L, 41L, 7L]))],
+            new SGDOptimizerHyperparameters { LearningRate = 0.1f }, runtimeContext: context);
+        var step = rig.TrainingStepPureGraph.ToInternal();
+        var shapes = new ShapeInferenceInterpreter().Infer(step, rig.OptimizationInputs);
+        var scalars = Shorokoo.Core.Nodes.Processors.Fast.FastScalarValues.Find(step);
+        Assert.Equal(0, step.Nodes.Count(n => n.OpCode == OpCodes.MUL && n.Inputs.Any(i => i is FastTensorKey k && scalars.Contains(k))
+            && shapes.GetTensorInfo(new FastTensorKey(n.Key, 0))?.ElementCount == 6 * 48));
+        Assert.Equal(1, step.Nodes.Count(n => n.OpCode == OpCodes.GATHER && n.Inputs[1] == step.Inputs[^1]));
+    }
+
+    [Fact]
+    public void TestABackendThatDoesNotFoldAScaleIntoAProductScalesTheLogitsGradientOnce()
+        => Assert.Equal(5, SequenceHeadStepOpsOn(new Shorokoo.PyTorch.Cpu.TorchCpuBackend(), OpCodes.MUL, logitSized: true));
+
+    [Fact]
+    public void TestAnExponentialActivationsGradientReadsItsOutputRatherThanExponentiatingAgain()
+    {
+        var rig = TrainingRig.FromScratch(NNExponentialActivationsModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            [TensorData([4L, 3L], [0.5f, -1f, 2f, 0.25f, 1.5f, -3f, -2f, 0f, -0.75f, 1f, 2.5f, -1.5f])], 0.1f);
+        Assert.Equal(0, rig.TrainingStepPureGraph.ToInternal().Nodes.Count(n => n.OpCode == OpCodes.EXP));
     }
 
     private static int StepScatterNDsWithoutReduction(ComputationGraph model, TensorData sample)

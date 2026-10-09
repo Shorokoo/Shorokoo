@@ -2554,6 +2554,76 @@ public partial class NNGatheredTableProjectionModel
         => Normal.Init(Vector(64L, 4L)).Gather(tokens).MatMul(Normal.Init(Vector(4L, 48L)));
 }
 
+/// <summary><see cref="NNGatheredTableProjectionModel"/>'s logits soft-capped at 15 as
+/// <c>tanh(logits / 15) · 15</c>: the head of a language model that bounds its logits.</summary>
+[Module]
+public partial class NNSoftCappedTableProjectionModel
+{
+    public static Tensor<float32> Inline(Tensor<int64> tokens)
+        => (Normal.Init(Vector(64L, 4L)).Gather(tokens).MatMul(Normal.Init(Vector(4L, 48L))) * Scalar(1f / 15f)).Tanh() * Scalar(15f);
+}
+
+/// <summary><see cref="NNSoftCappedTableProjectionModel"/> over a <c>[batch, length]</c> grid of
+/// tokens, its logits reshaped to <c>[tokens, 48]</c> between the projection and the soft cap: a
+/// language model's head.</summary>
+[Module]
+public partial class NNSoftCappedSequenceHeadModel
+{
+    public static Tensor<float32> Inline(Tensor<int64> tokens)
+        => (Normal.Init(Vector(64L, 4L)).Gather(tokens).MatMul(Normal.Init(Vector(4L, 48L))).Reshape([Scalar(-1L), Scalar(48L)])
+            * Scalar(1f / 15f)).Tanh() * Scalar(15f);
+}
+
+/// <summary>A fixed <c>[48]</c> gain scaled twice by the batch's element count before it broadcasts
+/// over the batch's <c>[32, 48]</c> rows, then a bias: scales applied to a small tensor ahead of the
+/// product that makes it large.</summary>
+[Module]
+public partial class NNScaledBeforeBroadcastModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+    {
+        var n = (Tensor<float32>)OnnxOp.Cast(OnnxOp.Size(x), null, DType.Float32);
+        var gain = (Tensor<float32>)OnnxOp.Expand(Vector(0.5f), Vector(48L));
+        return x * (gain * n * n) + Normal.Init(Vector(48L));
+    }
+}
+
+/// <summary><see cref="NNScaledBeforeBroadcastModel"/> with the two scales multiplied together
+/// before they meet the gain.</summary>
+[Module]
+public partial class NNScalesMultipliedBeforeBroadcastModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+    {
+        var n = (Tensor<float32>)OnnxOp.Cast(OnnxOp.Size(x), null, DType.Float32);
+        var gain = (Tensor<float32>)OnnxOp.Expand(Vector(0.5f), Vector(48L));
+        return x * (n * n * gain) + Normal.Init(Vector(48L));
+    }
+}
+
+/// <summary>A projection reshaped, scaled by a constant and projected again by a fixed matrix: a
+/// scale between two matrix products, beside both, whose product nothing but the second reads.</summary>
+[Module]
+public partial class NNScaledBetweenProjectionsModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+        => (x.MatMul(Normal.Init(Vector(4L, 6L))).Reshape([Scalar(-1L), Scalar(6L)]) * Scalar(0.5f))
+            .MatMul((Tensor<float32>)OnnxOp.Reshape(Vector(1f, -1f, 2f, 0.5f, 3f, -2f, 1.5f, 0f, -1f, 2.5f, 1f, -0.5f, 0.25f, 2f, -3f, 1f, 0.75f, -1.25f),
+                Vector(6L, 3L), allowZero: false));
+}
+
+/// <summary>A batch of rows projected by a <c>[3, 5]</c> weight, then through <c>Elu</c>, <c>Selu</c>
+/// and <c>Celu</c>, summed: the exponential activations, each differentiated once.</summary>
+[Module]
+public partial class NNExponentialActivationsModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+    {
+        var h = x.MatMul(Normal.Init(Vector(3L, 5L)));
+        return (Tensor<float32>)OnnxOp.Elu(h, 0.5f) + (Tensor<float32>)OnnxOp.Selu(h) + (Tensor<float32>)OnnxOp.Celu(h, 2f);
+    }
+}
+
 /// <summary><see cref="NNGatheredTableProjectionModel"/> over an <c>[8256, 4]</c> table: more
 /// elements than one task of the fused update takes, and a part task at its end.</summary>
 [Module]

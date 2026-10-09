@@ -204,6 +204,11 @@ public abstract class OrtBackend : IShorokooBackend
     /// <summary>It has one: <see cref="OrtRunMemory"/>, over the graph a session writes out.</summary>
     bool IShorokooBackend.ModelsARun => true;
 
+    /// <summary>It does: ONNX Runtime's graph optimizer makes a <c>Mul</c> or <c>Div</c> by a scalar
+    /// constant that reads or feeds a <c>MatMul</c> the <c>alpha</c> of the <c>FusedMatMul</c> it
+    /// rewrites the pair into, on the host and on a card alike.</summary>
+    bool IShorokooBackend.FoldsScalesIntoMatMul => true;
+
     /// <summary>The build of this assembly, whose <see cref="OrtRunMemory"/> reads the graph a session
     /// writes out, the native ONNX Runtime's version, and the build and location of the managed
     /// library over it, which decide that graph; the instruction sets of the processor and, on a

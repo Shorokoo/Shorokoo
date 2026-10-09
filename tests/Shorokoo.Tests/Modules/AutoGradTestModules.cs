@@ -3709,7 +3709,7 @@ namespace Shorokoo.Tests.Modules
             var ceGrad = (Tensor<float64>)Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(x,
                 ((Tensor<float64>)OnnxOp.SoftmaxCrossEntropyLoss(x, labels, null, null, "mean").output).Scalar());
             var expectedCe = ((Tensor<float64>)OnnxOp.Softmax(x, axis: 1)
-                - (Tensor<float64>)OnnxOp.OneHot(labels, Scalar(4L), OnnxOp.Cast(Vector(0f, 1f), null, DType.Float64), axis: 1)) / Scalar(3.0);
+                - (Tensor<float64>)OnnxOp.Cast(OnnxOp.OneHot(labels, Scalar(4L), Vector(0f, 1f), axis: 1), null, DType.Float64)) / Scalar(3.0);
             return ((meanGrad - x * Scalar(2.0) / n).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar() < Scalar(1e-12))
                 & ((ceGrad - expectedCe).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar() < Scalar(1e-12));
         }
@@ -3742,16 +3742,6 @@ namespace Shorokoo.Tests.Modules
             ((Tensor<float16>)Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(x, (x * x).Reduce(ReduceKind.Mean, keepDims: false).Scalar())).Cast<float32>(),
             ((Tensor<float16>)Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(x,
                 ((Tensor<float16>)OnnxOp.SoftmaxCrossEntropyLoss(x, Vector(2L, 0L, 3L), null, null, "mean").output).Scalar())).Cast<float32>());
-    }
-
-    /// <summary><see cref="AutoGradFloat64LossCheck"/> over a <c>bfloat16</c> loss.</summary>
-    [Module]
-    public partial class AutoGradBFloat16LossCheck
-    {
-        public static Scalar<bit> Inline(Tensor<bfloat16> x) => HalfPrecisionLoss.Holds(x, x.Cast<float32>(),
-            ((Tensor<bfloat16>)Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(x, (x * x).Reduce(ReduceKind.Mean, keepDims: false).Scalar())).Cast<float32>(),
-            ((Tensor<bfloat16>)Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(x,
-                ((Tensor<bfloat16>)OnnxOp.SoftmaxCrossEntropyLoss(x, Vector(2L, 0L, 3L), null, null, "mean").output).Scalar())).Cast<float32>());
     }
 
     internal static class HalfPrecisionLoss

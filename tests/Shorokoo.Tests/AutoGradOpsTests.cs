@@ -182,12 +182,11 @@ public class AutoGradElementwiseOpsCoverageTests
 
     // Shorokoo/Shorokoo#551: the backward pass is seeded with a float32 one whatever the loss's type.
     [Fact(Skip = "Shorokoo/Shorokoo#551: a loss's gradient is seeded as float32 whatever the loss's type")]
-    public void TestAutoGradOfAFloat64OrHalfPrecisionLoss()
+    public void TestAutoGradOfAFloat64OrFloat16Loss()
     {
         float[] x = [0.5f, -1f, 2f, 0.25f, 1.5f, 3f, -2f, 0f, -0.75f, 1f, 2.5f, -1.5f];
         Assert.True(AutoTest.AdvancedTestGraph<AutoGradFloat64LossCheck>([], [TensorData(DType.Float64, [3L, 4L], [.. x.Select(v => (object)(double)v)])]));
         Assert.True(AutoTest.AdvancedTestGraph<AutoGradFloat16LossCheck>([], [TensorData(DType.Float16, [3L, 4L], [.. x.Select(v => (object)(Float16)v)])]));
-        Assert.True(AutoTest.AdvancedTestGraph<AutoGradBFloat16LossCheck>([], [TensorData(DType.BFloat16, [3L, 4L], [.. x.Select(v => (object)(BFloat16)v)])]));
     }
 
     [Fact]

@@ -1333,6 +1333,16 @@ public class CoreUtilsCoverageTests
             (W, "graph.cc:124 onnxruntime::MergeShapeInfo", "Error merging shape info for output. 'N53_T0' source:{2,3,1} target:{2,3,0}. Falling back to lenient merge.", V),
             (W, "graph.cc:1430 onnxruntime::Graph::Graph", "Initializer N3_T0 appears in graph inputs and will not be treated as constant value/weight.", V),
             (ShorokooLogSeverity.Error, "sequential_executor.cc:671 onnxruntime::ExecuteKernel", "Non-zero status code returned while running Gather node.", V),
+            (W, "inference_session.cc:3040 Initialize", "Serializing optimized model with Graph Optimization level greater than ORT_ENABLE_EXTENDED and the NchwcTransformer enabled.", V),
+            (W, "session_state.cc:1397 VerifyEachNodeIsAssignedToAnEp", "Some nodes were not assigned to the preferred execution providers which may or may not have an negative impact on performance.", V),
+            (W, "transformer_memcpy.cc:111 ApplyImpl", "87 Memcpy nodes are added to the graph main_graph for CUDAExecutionProvider.", V),
+            (W, "constant_folding.cc:608 ApplyImpl", "Failure during constant folding of ScatterElements node 'N5': indices element out of data bounds", V),
+            (W, "graph.cc:124 MergeShapeInfo", "Error merging shape info for output. 'N53_T0' source:{2,3,1} target:{2,3,0}. Falling back to lenient merge.", V),
+            (W, "graph.cc:1430 Graph", "Initializer N3_T0 appears in graph inputs and will not be treated as constant value/weight.", V),
+            (ShorokooLogSeverity.Error, "sequential_executor.cc:671 ExecuteKernel", "Non-zero status code returned while running Gather node.", V),
+            (W, "graph.cc:124 ShapeInfo", "Error merging shape info for output.", W),
+            (W, "graph.cc:124 Other::MergeShapeInfo", "Error merging shape info for output.", W),
+            (W, "inference_session.cc:3040 Graph", "Initializer N3_T0 appears in graph inputs and will not be treated as constant value/weight.", W),
             (W, "graph.cc:5607 onnxruntime::Graph::CleanUnusedInitializersAndNodeArgs", "Removing initializer 'w'. It is not used by any node and should be removed from the model.", W),
             (W, "graph.cc:124 onnxruntime::MergeShapeInfo", "Some other message.", W),
             (W, "graph.cc:124 onnxruntime::SomeOtherFunction", "Error merging shape info for output.", W),
@@ -1603,6 +1613,19 @@ public class CoreUtilsCoverageTests
         Assert.True(ReleasingWhatACardKeepsAnswersTheBytesItsMemoryShrankBy());
         Assert.Equal((0L, 4 * G, 4 * G), MemoryTheSystemWouldNotTakeBackStaysCountedAsCommitted());
         Assert.Equal((false, false, true), ABlockACallLetGoOfGoesBackWithinItOnlyToARequestOnTheStreamItWasTakenOn());
+        Assert.Equal((1, 0), (WaitsForTheCardAsACallEnds(unfinished: true), WaitsForTheCardAsACallEnds(unfinished: false)));
+    }
+
+    private static int WaitsForTheCardAsACallEnds(bool unfinished)
+    {
+        var card = new FakeCard();
+        var account = card.Allocator.Open("probe");
+        using (var charge = CachingAllocator.Charge(null, account))
+        {
+            card.Allocator.Free(card.Allocator.Allocate(FakeCard.GranuleBytes, out _, stream: 1));
+            if (unfinished) charge.Unfinished();
+        }
+        return card.Waits;
     }
 
     private static (bool, bool, bool) ABlockACallLetGoOfGoesBackWithinItOnlyToARequestOnTheStreamItWasTakenOn()

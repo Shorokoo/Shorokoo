@@ -928,13 +928,8 @@ internal sealed class OrtPlacements : IDisposable
         /// cannot be made, as a folder nothing else could take over a sweep is.</summary>
         internal void KeepRuns(string directory)
         {
-            (SweepOnThisThread ?? ProcessSweep).Start();
             Runs = directory;
-            try
-            {
-                _runsClaim = new FileStream(Path.Combine(directory, KeptLockFile), FileMode.CreateNew, FileAccess.ReadWrite, FileShare.Read);
-            }
-            catch (Exception unclaimed) when (unclaimed is IOException or UnauthorizedAccessException) { }
+            _runsClaim = ClaimFolder(directory);
         }
 
         ~KeptFiles() => Delete();
@@ -975,12 +970,37 @@ internal sealed class OrtPlacements : IDisposable
         internal bool Started => _task.IsValueCreated;
     }
 
+    /// <summary>
+    /// Claims <paramref name="directory"/>, a folder of this process's in the temporary folder, for
+    /// as long as the answer is held open: a file of its own in it (<see cref="KeptLockFile"/>), which
+    /// keeps <see cref="SweepStale"/> from taking the folder however long it goes unwritten. Starts
+    /// the sweep of what ended processes left, as the first folder this process keeps there does.
+    /// Null where the claim cannot be made: the folder is then kept unclaimed, as one nothing else
+    /// could take over a sweep is.
+    /// </summary>
+    internal static FileStream? ClaimFolder(string directory)
+    {
+        (SweepOnThisThread ?? ProcessSweep).Start();
+        try
+        {
+            return new FileStream(Path.Combine(directory, KeptLockFile), FileMode.CreateNew, FileAccess.ReadWrite, FileShare.Read);
+        }
+        catch (Exception unclaimed) when (unclaimed is IOException or UnauthorizedAccessException)
+        {
+            return null;
+        }
+    }
+
     private const string ModelFilePrefix = "shorokoo-model-";
 
     /// <summary>The prefixes of the folders the sessions and their placements make in the temporary
-    /// folder: the graph that runs, kept; and those made and deleted as a session or a variant is
-    /// built.</summary>
-    private static readonly string[] FolderPrefixes = ["shorokoo-runs-", "shorokoo-optimized-", "shorokoo-placed-"];
+    /// folder: the graph that runs, kept; those made and deleted as a session or a variant is
+    /// built; and the profile a traced session writes, kept for the session's life.</summary>
+    private static readonly string[] FolderPrefixes = ["shorokoo-runs-", "shorokoo-optimized-", "shorokoo-placed-", NodePlacementPrefix];
+
+    /// <summary>The prefix of the folder a session traced for its node placement writes its profile
+    /// into (<see cref="ClaimFolder"/> claims it for the session's life).</summary>
+    internal const string NodePlacementPrefix = "shorokoo-node-placement-";
 
     /// <summary>How long a file or folder has gone unwritten before a sweep may take it for one an
     /// ended process left: none is in the making that long.</summary>

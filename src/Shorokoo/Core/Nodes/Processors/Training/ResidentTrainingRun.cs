@@ -339,14 +339,15 @@ namespace Shorokoo
         {
             var current = Current;
             var whole = !IsSpent(current);
+            var owned = _ownsCurrent;
             try
             {
                 var next = step(current);
-                return (next, _ownsCurrent ? 0 : TrainingRig.StateBytes(current));
+                return (next, owned ? 0 : TrainingRig.StateBytes(current));
             }
             catch
             {
-                if (whole && IsSpent(current)) _lost = Lost(beganFrom: !_ownsCurrent);
+                if (whole && IsSpent(current)) _lost = Lost(beganFrom: !owned);
                 throw;
             }
             finally

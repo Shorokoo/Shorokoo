@@ -800,6 +800,20 @@ public class ComputeContextLifetimeCoverageTests
         Assert.False(ProvesInto(GraphOf("p m v g k", "P M V", Op("AdamUpdate", "p m v g k k k k k k", "P M V", domain: "custom")), "P", "p"));
     }
 
+    [Fact]
+    public void TestAFusedUpdatesParameterAndMomentsArePlacedEachOverTheInputItReadsInThatPlace()
+    {
+        static GraphProto Updating(string inputs, string domain = "ai.shorokoo") => GraphOf("p:float[128] m:float[128] v:float[128] g:float[128] k:float[1]", "P M V",
+            Op("AdamUpdate", inputs + " k k k k k k", "P M V", domain: domain));
+        Assert.True(Places(Updating("p m v g"), "p m v", At("P", "p", 0), At("M", "m", 0), At("V", "v", 0)));
+        Assert.True(Places(Updating("p m v g"), "p", At("P", "p", 0)));
+        Assert.False(Places(Updating("p m v g"), "m", At("P", "m", 0)));
+        Assert.False(Places(Updating("p m v g"), "g", At("P", "g", 0)));
+        Assert.False(Places(Updating("p m v p"), "p", At("P", "p", 0)));
+        Assert.False(Places(Updating("p m v g", "custom"), "p", At("P", "p", 0)));
+        Assert.Equal(3, PlacementsOver(Updating("p m v g"), "p m v").Plan(smallest: 256, idleOutputBytes: 0).Count);
+    }
+
     private static bool FusesAdam(string g, params NodeProto[] gradient)
         => Shorokoo.OnnxRuntime.OrtFusedUpdates.Fuse(new ModelProto { Graph = GraphOf(
             $"p:float[2,3] m:float[2,3] v:float[2,3] {g} b1:float[1] c1:float[1] b2:float[1] c2:float[1] e:float[1] k:float[1]", "P M V",

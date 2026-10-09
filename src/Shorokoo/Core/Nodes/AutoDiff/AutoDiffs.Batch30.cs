@@ -149,19 +149,15 @@ namespace Shorokoo.Core.Nodes.AutoDiff
             }
             else // "mean"
             {
-                var totalWeight = OnnxOp.ReduceSum(weightPerSample, axes: null, keepdims: false, noopWithEmptyAxes: false);
-                var scaled = OnnxOp.Div(grad, totalWeight);
-                upstream = OnnxOp.Expand(scaled, OnnxOp.Shape(target));
+                upstream = OnnxOp.Expand(MeanScale(grad, weightPerSample, floatType), OnnxOp.Shape(target));
             }
 
             // Per-sample scalar gradient contribution: -weight[target] * upstream
             var negOne = OnnxOp.Cast(Scalar(-1.0f), saturate: null, to: floatType);
             var perSample = OnnxOp.Mul(negOne, OnnxOp.Mul(weightPerSample, upstream));
 
-            // OneHot the target along the channel axis (axis=1 in input). values = [0, 1] in input dtype.
-            var depthScalar = OnnxOp.Gather(OnnxOp.Shape(input), Scalar(1L), axis: 0);
-            var values = OnnxOp.Cast(Vector(0.0f, 1.0f), saturate: null, to: floatType);
-            var onehot = OnnxOp.OneHot(classIndex, depthScalar, values, axis: 1);
+            // OneHot the target along the channel axis (axis=1 in input).
+            var onehot = OneHotOf(classIndex, input, floatType);
 
             // Broadcast perSample to [N, 1, d1, ...] and multiply by onehot to get dinput shape [N, C, d1, ...].
             var perSampleExp = OnnxOp.Unsqueeze(perSample, Vector(1L));
@@ -172,6 +168,28 @@ namespace Shorokoo.Core.Nodes.AutoDiff
             // target gradient = null (integer indices, non-diff)
             // weight gradient = null (treated as constant)
             return result;
+        }
+
+        // lossGrad / Σ weightPerSample, the factor a "mean" reduction scales each sample's gradient
+        // by; zero where every sample is ignored and the weights sum to zero, as PyTorch has it,
+        // rather than the NaN of 0 · (1 / 0). A half-precision sum is taken in float32, as float16
+        // counts only to 65504.
+        private static Variable MeanScale(Variable lossGrad, Variable weightPerSample, DType floatType)
+        {
+            var wide = floatType == DType.Float16 || floatType == DType.BFloat16 ? DType.Float32 : floatType;
+            Variable Widened(Variable v) => wide == floatType ? v : OnnxOp.Cast(v, saturate: null, to: wide);
+            var total = OnnxOp.ReduceSum(Widened(weightPerSample), axes: null, keepdims: false, noopWithEmptyAxes: false);
+            var zero = OnnxOp.Cast(Scalar(0.0f), saturate: null, to: wide);
+            var scale = OnnxOp.Where(OnnxOp.Equal(total, zero), zero, OnnxOp.Div(Widened(lossGrad), total));
+            return wide == floatType ? scale : OnnxOp.Cast(scale, saturate: null, to: floatType);
+        }
+
+        // onehot(classIndex) along axis 1 of scores [N, C, d1, ...], in floatType. ONNX Runtime's
+        // OneHot has float32 values and no float64 ones, so another type is cast from float32.
+        private static Variable OneHotOf(Variable classIndex, Variable scores, DType floatType)
+        {
+            var onehot = OnnxOp.OneHot(classIndex, OnnxOp.Gather(OnnxOp.Shape(scores), Scalar(1L), axis: 0), Vector(0.0f, 1.0f), axis: 1);
+            return floatType == DType.Float32 ? onehot : OnnxOp.Cast(onehot, saturate: null, to: floatType);
         }
 
         // The class index a loss gradient gathers and one-hots for each sample, plus the
@@ -246,14 +264,15 @@ namespace Shorokoo.Core.Nodes.AutoDiff
 
             var floatType = scores.Type;
             var probabilities = inFusion ? OnnxOp.Softmax(scores, axis: 1) : OnnxOp.Exp(logProb ?? OnnxOp.LogSoftmax(scores, axis: 1));
-            Variable OneHotOf(Variable classIndex) => OnnxOp.OneHot(classIndex, OnnxOp.Gather(OnnxOp.Shape(scores), Scalar(1L), axis: 0),
-                OnnxOp.Cast(Vector(0.0f, 1.0f), saturate: null, to: floatType), axis: 1);
+            // ScatterND's add has no float16 kernel in ONNX Runtime on the host and no float64 one
+            // on CUDA: scores of any type but float32 take the one-hot form.
+            var scatters = !inFusion && floatType == DType.Float32;
 
             Variable? dScores = null;
             if (lossGrad is not null)
             {
                 var (classIndex, activeMask) = IgnoreIndexMask(labels, ignoreIndex, floatType);
-                if (!inFusion && weight is null && activeMask is null && reduction != "none")
+                if (scatters && weight is null && activeMask is null && reduction != "none")
                 {
                     var count = OnnxOp.Cast(OnnxOp.Size(labels), saturate: null, to: floatType);
                     var scale = reduction == "sum" ? lossGrad : OnnxOp.Div(lossGrad, count);
@@ -274,13 +293,12 @@ namespace Shorokoo.Core.Nodes.AutoDiff
                     {
                         "none" => lossGrad,
                         "sum" => OnnxOp.Expand(lossGrad, OnnxOp.Shape(labels)),
-                        _ => OnnxOp.Expand(OnnxOp.Div(lossGrad,
-                            OnnxOp.ReduceSum(weightPerSample, axes: null, keepdims: false, noopWithEmptyAxes: false)), OnnxOp.Shape(labels)),
+                        _ => OnnxOp.Expand(MeanScale(lossGrad, weightPerSample, floatType), OnnxOp.Shape(labels)),
                     };
                     var perSample = OnnxOp.Mul(weightPerSample, upstream);
-                    dScores = inFusion
-                        ? OnnxOp.Mul(OnnxOp.Sub(probabilities, OneHotOf(classIndex)), OnnxOp.Unsqueeze(perSample, Vector(1L)))
-                        : ScatterAddAtTargets(OnnxOp.Mul(probabilities, OnnxOp.Unsqueeze(perSample, Vector(1L))), classIndex, OnnxOp.Neg(perSample));
+                    dScores = scatters
+                        ? ScatterAddAtTargets(OnnxOp.Mul(probabilities, OnnxOp.Unsqueeze(perSample, Vector(1L))), classIndex, OnnxOp.Neg(perSample))
+                        : OnnxOp.Mul(OnnxOp.Sub(probabilities, OneHotOf(classIndex, scores, floatType)), OnnxOp.Unsqueeze(perSample, Vector(1L)));
                 }
             }
 
@@ -301,7 +319,9 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         // [N, C, d1, ...] flattened: the element sample (i, d) targets sits at offset
         // (j - d)·C + t·D + d, where j = i·D + d is the sample's own offset among the labels and D
         // the extent of the trailing axes (an empty batch divides by one, not zero). The offsets
-        // are distinct, so the adds never collide.
+        // are distinct, so the adds never collide. A class index is read as OneHot reads it: one
+        // in [-C, 0) counts from the end, and one outside [-C, C) is no class, where the sample
+        // adds nothing (at its own first class, so that no other sample's element moves).
         private static Variable ScatterAddAtTargets(Variable values, Variable classIndex, Variable added)
         {
             var labelShape = OnnxOp.Shape(classIndex);
@@ -310,10 +330,15 @@ namespace Shorokoo.Core.Nodes.AutoDiff
             var classes = OnnxOp.Gather(OnnxOp.Shape(values), Scalar(1L), axis: 0);
             var offset = OnnxOp.Range(Scalar(0L), samples, Scalar(1L));
             var within = OnnxOp.Mod(offset, trailing, fmod: null);
-            var target = OnnxOp.Reshape(OnnxOp.Cast(classIndex, saturate: null, to: DType.Int64), Vector(-1L), allowZero: false);
+            var label = OnnxOp.Reshape(OnnxOp.Cast(classIndex, saturate: null, to: DType.Int64), Vector(-1L), allowZero: false);
+            var wrapped = OnnxOp.Where(OnnxOp.Less(label, Scalar(0L)), OnnxOp.Add(label, classes), label);
+            var isClass = OnnxOp.And(OnnxOp.GreaterOrEqual(wrapped, Scalar(0L)), OnnxOp.Less(wrapped, classes));
+            var target = OnnxOp.Where(isClass, wrapped, Scalar(0L));
+            var flatAdded = OnnxOp.Reshape(added, Vector(-1L), allowZero: false);
+            var zero = OnnxOp.Cast(Scalar(0.0f), saturate: null, to: flatAdded.Type);
             var flatTarget = OnnxOp.Add(OnnxOp.Add(OnnxOp.Mul(OnnxOp.Sub(offset, within), classes), OnnxOp.Mul(target, trailing)), within);
             var scattered = OnnxOp.ScatterND(OnnxOp.Reshape(values, Vector(-1L), allowZero: false),
-                OnnxOp.Unsqueeze(flatTarget, Vector(1L)), OnnxOp.Reshape(added, Vector(-1L), allowZero: false), ScatterNDReduction.Add);
+                OnnxOp.Unsqueeze(flatTarget, Vector(1L)), OnnxOp.Where(isClass, flatAdded, zero), ScatterNDReduction.Add);
             return OnnxOp.Reshape(scattered, OnnxOp.Shape(values), allowZero: false);
         }
 

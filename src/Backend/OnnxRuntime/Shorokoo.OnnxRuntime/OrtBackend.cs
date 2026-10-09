@@ -898,7 +898,7 @@ public abstract class OrtBackend : IShorokooBackend
         // options into it: a setter there throwing after the folder was made would otherwise leave
         // it with no name for the catch to delete it by. The folder the graph is written into is
         // the caller's, made and deleted there.
-        var profileDirectory = diagnostics.TraceNodePlacement ? TempDirectory("shorokoo-node-placement-") : null;
+        var profileDirectory = diagnostics.TraceNodePlacement ? TempDirectory(OrtPlacements.NodePlacementPrefix) : null;
         // A model whose initializers lie in files beside it is read with them from the caller's
         // folder, which also takes a supplied initializer's placeholder; otherwise a placeholder
         // gets a folder of its own, made here and deleted below.

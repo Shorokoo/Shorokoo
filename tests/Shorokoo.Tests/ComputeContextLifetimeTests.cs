@@ -1599,6 +1599,8 @@ public class ComputeContextLifetimeCoverageTests
         var (staleFile, heldFile, freshFile) = (files[0], files[1], files[2]);
         string[] staleFolders = [folders[0], folders[2]], heldFolders = [folders[1], folders[3]];
         var old = DateTime.UtcNow.AddDays(-2);
+        using var traced = (OrtSession)DefaultBackend.Instance.CreateSession(ModelOf(GraphOf("a:float[4] b:float[4]", "O:float[4]", Op("Sub", "a b", "O"))),
+            ShorokooGraphOptimization.EnableAll, LogSettings.None, new DeviceMemorySettings(), new DiagnosticSettings { TraceNodePlacement = true });
         try
         {
             foreach (var file in files) File.WriteAllBytes(file, [1]);
@@ -1613,14 +1615,14 @@ public class ComputeContextLifetimeCoverageTests
             {
                 File.SetLastWriteTimeUtc(staleFile, old);
                 File.SetLastWriteTimeUtc(heldFile, old);
-                foreach (var folder in folders) Directory.SetLastWriteTimeUtc(folder, old);
+                foreach (var folder in folders.Append(traced.ProfileDirectory!)) Directory.SetLastWriteTimeUtc(folder, old);
                 OrtPlacements.SweepStale();
             }
             Assert.False(File.Exists(staleFile));
             Assert.All(staleFolders, folder => Assert.False(Directory.Exists(folder)));
             Assert.True(File.Exists(heldFile));
             Assert.True(File.Exists(freshFile));
-            Assert.All(heldFolders, folder => Assert.True(Directory.Exists(folder)));
+            Assert.All(heldFolders.Append(traced.ProfileDirectory!), folder => Assert.True(Directory.Exists(folder)));
         }
         finally
         {

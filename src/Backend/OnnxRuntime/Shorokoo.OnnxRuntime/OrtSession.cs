@@ -58,8 +58,16 @@ internal sealed class OrtSession : IShorokooSession
     private OrtMemoryInfo? _ownedPinnedMemoryInfo;
 
     // The folder ORT writes this session's profile into, or null when it was not built to record
-    // one -- which is the default. Deleted with the session.
+    // one -- which is the default. Deleted with the session, and claimed until then, so that the
+    // sweep of what ended processes left (OrtPlacements.SweepStale) takes it only once no live
+    // session holds it: a folder the session could not delete -- its profile file still open as a
+    // finalizer runs, or a process that ended without finalizing it -- is reclaimed that way.
     private readonly string? _profileDirectory;
+    private FileStream? _profileClaim;
+
+    /// <summary>The folder ONNX Runtime writes this session's profile into, or null when it was not
+    /// built to record one.</summary>
+    internal string? ProfileDirectory => _profileDirectory;
 
     /// <summary>The views of supplied initializers this session was built over (see
     /// <c>OrtBackend.Supply</c>), which ONNX Runtime requires to outlive it: released after it.</summary>
@@ -146,6 +154,8 @@ internal sealed class OrtSession : IShorokooSession
         // the device an info names, and allocates it there from the session's allocator for it.
         _cardMemory = cudaDeviceId is { } device ? CudaMemoryInfo(device) : null;
         _pinnedAllocator = new Lazy<OrtAllocator?>(CreatePinnedAllocator);
+        // Last, so that a constructor that throws leaves the folder unclaimed for the caller to delete.
+        if (profileDirectory is not null) _profileClaim = OrtPlacements.ClaimFolder(profileDirectory);
     }
 
     /// <summary>
@@ -991,6 +1001,8 @@ internal sealed class OrtSession : IShorokooSession
     private void DeleteProfileDirectory()
     {
         if (_profileDirectory is null) return;
+        try { _profileClaim?.Dispose(); } catch (Exception) { }
+        _profileClaim = null;
         try { Directory.Delete(_profileDirectory, recursive: true); }
         // A temp folder that will not delete is not worth failing a disposal over; the platform
         // reclaims it, and there is nothing a caller could do here.

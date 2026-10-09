@@ -142,14 +142,14 @@ refused, as everywhere. JAX has **no string tensors and no sequences**: `CreateS
 `CreateSequence` throw `NotSupportedException`, and a model with a string input or output, a string
 constant or a sequence or optional operator is refused.
 
-Every output a run hands back is memory of its own. A JAX array is never written in place, so a
-session binds no output aliases.
+Nothing writes into a JAX array in place but XLA itself, over an input a run **donates** to it (see
+[Runs](#runs)); every other output is memory of its own.
 
 ## Runs
 
 | | CPU | CUDA |
 |---|---|---|
-| **Output aliasing** | none: nothing is written in place | none |
+| **Output aliasing** | XLA buffer donation (below); every output is still handed back as a host array of its own | XLA buffer donation (below): an output XLA writes over a donated input is in that input's memory on the card |
 | **Where inputs and outputs are** | host memory | the card: every input is placed there before the run, and every output stays there |
 | **Cancellation** (`RunSettings.CancellationToken`) | a run cancelled before it starts is refused; a run is one XLA program and is not stopped part way | same |
 | **`DeviceMemory.LimitBytes`** | ignored | ignored: JAX's allocator is the process's and takes no per-run limit |
@@ -160,6 +160,19 @@ session binds no output aliases.
 | **`DeterministicCompute`** | not applied | not applied: XLA's kernels run as they otherwise would |
 | **`Precision.AllowTensorFloat32`** | no effect: `float32` in full precision | off by default: every product and convolution is compiled at `Precision.HIGHEST`; on, at `Precision.HIGH`: XLA computes products in TensorFloat-32, and each convolution in TensorFloat-32 or in full precision, whichever kernel its autotuner finds faster when it compiles the program |
 | **Log severity** | Python warnings a run raises are shown at `Warning` and below, not above | same |
+| **When a run returns** | once the program has run | once the program is dispatched: the card may still be computing, and JAX reads an output only once it is computed, so the host's next work overlaps the card's |
+
+**Donation.** A session donates to XLA the inputs of the output aliases it is built with — for a
+training rig's step, every state field (weight, optimizer moment, step counter) with the output that
+replaces it — as `jax.jit(..., donate_argnums=...)` does, and XLA writes an output over a donated
+input wherever its own analysis lets it. A run donates such an input as it is only where it
+consumed it and fed it as no other input; an input it only reads — a `.Shared()` tensor, a checkpoint
+a resident run handed out or began from `.Shared()` — is copied in the run's memory first and the
+copy donated, so it is never written over or deleted. XLA orders the program so that nothing reads a
+donated input after it is written over, and computes an output it cannot write over its input into
+memory of its own, so results are the same with or without donation. On a card a resident run thus
+holds its state once rather than twice; on the CPU every input and output crosses into and out of
+JAX by copy anyway, so donation only spares JAX's own buffers.
 
 Floating-point products and convolutions run in the operands' full precision unless the context
 allows TensorFloat-32 ([Precision](gpu-backends.md#precision-gpu-backends)): the precision is compiled

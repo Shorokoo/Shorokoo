@@ -873,6 +873,28 @@ public class NNLibraryOptimizerTrainingCoverageTests
         Assert.NotEmpty(rig.TrainingStepPureGraph.ToInternal().Nodes);
     }
 
+    private static int SequenceHeadStepOpsOn(Shorokoo.Core.Backends.IShorokooBackend backend, string opCode, bool logitSized = false)
+    {
+        using var context = new ComputeContext(backend);
+        var rig = TrainingRig.FromScratch(NNSoftCappedSequenceHeadModel.ComputationGraph, CrossEntropyLoss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            [new TensorDataModelParam("tokens", ModelParamType.InputParam, TensorData([2L, 3L], [3L, 9L, 3L, 0L, 41L, 7L]))],
+            new SGDOptimizerHyperparameters { LearningRate = 0.1f }, runtimeContext: context);
+        var step = rig.TrainingStepPureGraph.ToInternal();
+        var shapes = new ShapeInferenceInterpreter().Infer(step, rig.OptimizationInputs);
+        return step.Nodes.Count(n => n.OpCode == opCode && (!logitSized || shapes.GetTensorInfo(new FastTensorKey(n.Key, 0))?.ElementCount == 6 * 48));
+    }
+
+    [Fact]
+    public void TestABackendThatFusesElementwiseOperatorsRecomputesTheSoftmaxInsideTheFusion()
+    {
+        Assert.Equal(1, SequenceHeadStepOpsOn(new Shorokoo.Jax.Cpu.JaxCpuBackend(), OpCodes.SOFTMAX));
+        Assert.Equal(0, SequenceHeadStepOpsOn(new Shorokoo.Jax.Cpu.JaxCpuBackend(), OpCodes.SCATTER_ND, logitSized: true));
+    }
+
+    [Fact]
+    public void TestABackendThatDoesNotFoldAScaleIntoAProductScalesTheLogitsGradientOnce()
+        => Assert.Equal(5, SequenceHeadStepOpsOn(new Shorokoo.PyTorch.Cpu.TorchCpuBackend(), OpCodes.MUL, logitSized: true));
+
     [Fact]
     public void TestAnExponentialActivationsGradientReadsItsOutputRatherThanExponentiatingAgain()
     {

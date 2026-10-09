@@ -247,7 +247,7 @@ shape and type.
 | Expand | ✅ | ✅ | ✅ |
 | EyeLike | ✅ | ✅ | N/A (structural) |
 | Flatten | ✅ | ✅ | ✅ |
-| Gather | ✅ | ✅ | ✅ [4] |
+| Gather | ✅ [20] | ✅ | ✅ [4] |
 | GatherElements | ✅ | ✅ | ✅ |
 | GatherND | ✅ | ✅ | 🟡 [5] |
 | Identity | ✅ | ✅ | ✅ |
@@ -344,6 +344,10 @@ shape and type.
     the call (`Tensor storage size overflowed`): accepted as ONNX Runtime's
     behaviour ([#447](https://github.com/Shorokoo/Shorokoo/issues/447),
     [#450](https://github.com/Shorokoo/Shorokoo/issues/450)).
+20. An index must lie in `[-n, n-1]` for the `n` entries along `axis`; a negative one
+    counts from the end. An index outside is the backend's to handle: ONNX
+    Runtime's CPU kernel raises its own error, and its CUDA kernel does not check
+    and can read a zero row ([#501](https://github.com/Shorokoo/Shorokoo/issues/501)).
 
 ## Convolution & pooling
 
@@ -414,9 +418,9 @@ shape and type.
 | LayerNormalization | ✅ | 🟡 [5] | ✅ [6] |
 | LpNormalization | ✅ | 🟡 [5] | ✅ |
 | MeanVarianceNormalization | ✅ | 🟡 [5] | ✅ |
-| NegativeLogLikelihoodLoss | ✅ | 🟡 [5] | ✅ |
+| NegativeLogLikelihoodLoss | ✅ [8] | 🟡 [5] | ✅ |
 | RMSNormalization | ✅ [7] | ✅ | ✅ |
-| SoftmaxCrossEntropyLoss | ✅ | 🟡 [5] | ✅ |
+| SoftmaxCrossEntropyLoss | ✅ [8] | 🟡 [5] | ✅ |
 
 1. With `training_mode=1` the node is decomposed into primitives on export, with
    the same results.
@@ -433,6 +437,11 @@ shape and type.
 7. Lowers inline to opset-21 primitives
    (`y = x / sqrt(mean(x², suffix axes) + epsilon) * scale`, via
    `ReduceMean`/`Sqrt`/`Div`/`Mul`), so it runs on any execution provider.
+8. A target must lie in `[0, C-1]` for `C` classes, or equal `ignore_index`, which
+   may be any value. A target outside is the backend's to handle: ONNX Runtime's
+   CPU kernel raises its own error for one of `C` or above and reads a negative
+   `t` as class `C + t`, and its CUDA kernel does not check and can count one of
+   `C` or above as a zero loss ([#501](https://github.com/Shorokoo/Shorokoo/issues/501)).
 
 ## MatMul & linear algebra
 
@@ -464,10 +473,12 @@ shape and type.
    give it the left operand's batch dimension where that is 1 and the right
    one's is not. Its backend corrects this when the session is built with every
    input's dimensions stated, as a training step is for the shapes it is fed,
-   outside a loop body: the product goes through an `If` on either operand or
-   the product being empty, giving zeros of the product's shape where one is,
-   which ONNX Runtime folds away wherever the shapes follow from those
-   dimensions. Where an operand's shape is computed from the data (a
+   outside a loop body. Two operands whose shapes Shorokoo works out from those
+   dimensions and that are not empty are multiplied as written; any other
+   product goes through an `If` on either operand or the product being empty,
+   giving zeros of the product's shape where one is, which ONNX Runtime folds
+   away wherever the shapes follow from those dimensions. Where an operand's
+   shape is computed from the data (a
    `NonZero`, a `TopK` with a computed `k`, a `Reshape` or `Expand` to a
    computed shape) that `If` runs on every run, at the cost of a few shape
    operations. A `Constant` operand with a dimension of 0 gives those zeros

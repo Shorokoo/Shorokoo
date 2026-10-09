@@ -24,29 +24,90 @@ permissions:
   contents: write       # push the tag + create the GitHub Release
   packages: write       # mirror the packages to GitHub Packages
 
+env:
+  # The CUDA release whose nvcc and static runtime build the CUDA operators library: one of the
+  # major version ONNX Runtime's GPU packages are built against (13), the release they are built with.
+  SHOROKOO_CUDA_RELEASE: "13.0.3"
+
 jobs:
-  # Shorokoo.OnnxRuntime carries a native library of its own, the allocator it hands ONNX Runtime
-  # (src/Backend/OnnxRuntime/Shorokoo.OnnxRuntime/native), for every platform the backends target.
-  # A build makes only its own platform's, so the Windows one is built here and handed to the
-  # publish job, which builds the Linux one as part of its own build and packs both.
-  native-allocator-windows:
-    runs-on: windows-latest
+  # Shorokoo.OnnxRuntime carries a native library of its own, the allocator and operators it hands
+  # ONNX Runtime (src/Backend/OnnxRuntime/Shorokoo.OnnxRuntime/native), for every platform the
+  # backends target, and the GPU backend packages carry the CUDA build of those operators for their
+  # platform. A build makes only its own platform's natives, so the Windows ones are built here and
+  # the Linux CUDA one in native-linux-cuda, and both are handed to the publish job, which builds
+  # the Linux allocator as part of its own build and packs them all.
+  native-windows:
+    # Visual Studio 2022's MSVC, which every CUDA 13 release's nvcc supports as its host compiler.
+    runs-on: windows-2025
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build the native allocator (win-x64)
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      # nvcc, the CUDA headers and the static CUDA runtime alone, from NVIDIA's redistributable
+      # archives, each checked against the SHA-256 the release's manifest gives it.
+      - name: Fetch the CUDA compiler
+        run: python .github/scripts/fetch_cuda_compiler.py "$env:SHOROKOO_CUDA_RELEASE" "$env:RUNNER_TEMP/cuda"
+
+      # The libraries are compiled against ONNX Runtime's C API header, which the project's restore
+      # brings in the Microsoft.ML.OnnxRuntime package. A command that fails stops the step there,
+      # rather than leaving the next to fail on what it did not do. SHOROKOO_CUDA_OPS=ON: a CUDA
+      # operators library that cannot be built fails the release here, saying why.
+      - name: Build the native libraries (win-x64)
         run: |
-          cmake -S src/Backend/OnnxRuntime/Shorokoo.OnnxRuntime/native -B build/allocator -DSHOROKOO_OUTPUT_DIR="${{ github.workspace }}/artifacts/native/win-x64"
-          cmake --build build/allocator --config Release
+          $PSNativeCommandUseErrorActionPreference = $true
+          $project = "src/Backend/OnnxRuntime/Shorokoo.OnnxRuntime/Shorokoo.OnnxRuntime.csproj"
+          dotnet restore $project
+          $env:DOTNET_NOLOGO = "1"
+          $include = (dotnet msbuild $project -getProperty:PkgMicrosoft_ML_OnnxRuntime | Select-Object -Last 1).Trim() + "/build/native/include"
+          cmake -S src/Backend/OnnxRuntime/Shorokoo.OnnxRuntime/native -B build/native -DSHOROKOO_OUTPUT_DIR="${{ github.workspace }}/artifacts/native/win-x64" -DSHOROKOO_ORT_INCLUDE_DIR="$include" -DSHOROKOO_CUDA_OPS=ON -DCUDAToolkit_ROOT="$env:RUNNER_TEMP/cuda"
+          cmake --build build/native --config Release
 
       - uses: actions/upload-artifact@v4
         with:
-          name: native-allocator-win-x64
-          path: artifacts/native/win-x64/shorokoo_ort_allocator.dll
+          name: native-win-x64
+          path: |
+            artifacts/native/win-x64/shorokoo_ort_allocator.dll
+            artifacts/native/win-x64/shorokoo_ort_cuda_ops.dll
+          if-no-files-found: error
+
+  # The Linux CUDA operators library, built on the oldest C library ONNX Runtime's Linux packages
+  # run on (manylinux_2_28: glibc 2.28): the static CUDA runtime linked into it calls the C library,
+  # and a library linked on a newer system asks for symbol versions only that system has.
+  native-linux-cuda:
+    runs-on: ubuntu-latest
+    container: quay.io/pypa/manylinux_2_28_x86_64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch the CUDA compiler
+        run: /opt/python/cp312-cp312/bin/python .github/scripts/fetch_cuda_compiler.py "$SHOROKOO_CUDA_RELEASE" "$RUNNER_TEMP/cuda"
+
+      # ONNX Runtime's C API header, from the Microsoft.ML.OnnxRuntime package of the version
+      # Shorokoo.OnnxRuntime references.
+      - name: Fetch ONNX Runtime's C API header
+        run: |
+          set -euo pipefail
+          version=$(grep -oP '<PackageReference Include="Microsoft.ML.OnnxRuntime" Version="\K[^"]+' src/Backend/OnnxRuntime/Shorokoo.OnnxRuntime/Shorokoo.OnnxRuntime.csproj)
+          curl -fsSL -o "$RUNNER_TEMP/ort.nupkg" "https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime/$version/microsoft.ml.onnxruntime.$version.nupkg"
+          /opt/python/cp312-cp312/bin/python -c "import sys, zipfile; z = zipfile.ZipFile(sys.argv[1]); z.extractall(sys.argv[2], [n for n in z.namelist() if n.startswith('build/native/include/')])" "$RUNNER_TEMP/ort.nupkg" "$RUNNER_TEMP/ort"
+
+      - name: Build the CUDA operators library (linux-x64)
+        run: |
+          set -euo pipefail
+          cmake -S src/Backend/OnnxRuntime/Shorokoo.OnnxRuntime/native -B build/native -DSHOROKOO_OUTPUT_DIR="$GITHUB_WORKSPACE/artifacts/native/linux-x64" -DSHOROKOO_ORT_INCLUDE_DIR="$RUNNER_TEMP/ort/build/native/include" -DSHOROKOO_CUDA_OPS=ON -DCUDAToolkit_ROOT="$RUNNER_TEMP/cuda"
+          cmake --build build/native --config Release --target shorokoo_ort_cuda_ops
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-linux-x64-cuda
+          path: artifacts/native/linux-x64/libshorokoo_ort_cuda_ops.so
           if-no-files-found: error
 
   publish:
-    needs: native-allocator-windows
+    needs: [native-windows, native-linux-cuda]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -76,27 +137,35 @@ jobs:
           --filter "Purpose=Coverage"
           -c Release --logger "console;verbosity=minimal"
 
-      # The runner's C and C++ runtimes are newer than the oldest Linux ONNX Runtime runs on, and a
-      # library built here could ask for a symbol version only they have. Nothing the native
-      # allocator needs may be newer than what ONNX Runtime's own library needs.
-      - name: Check the native allocator asks no more of Linux than ONNX Runtime does
-        run: |
-          lib=src/Backend/OnnxRuntime/Shorokoo.OnnxRuntime/obj/native/linux-x64/libshorokoo_ort_allocator.so
-          ort=$(ls ~/.nuget/packages/microsoft.ml.onnxruntime/*/runtimes/linux-x64/native/libonnxruntime.so | head -1)
-          newest() { objdump -T "$1" | grep -oE "\($2_[0-9.]+\)" | tr -d '()' | sort -V | tail -1; }
-          for family in GLIBC GLIBCXX CXXABI GCC; do
-            mine=$(newest "$lib" "$family"); theirs=$(newest "$ort" "$family")
-            [ -z "$mine" ] && continue
-            if [ -z "$theirs" ] || [ "$(printf '%s\n%s\n' "$mine" "$theirs" | sort -V | tail -1)" != "$theirs" ]; then
-              echo "::error::$lib needs $mine, and ONNX Runtime needs no newer than ${theirs:-none of $family}"
-              exit 1
-            fi
-          done
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-win-x64
+          path: artifacts/native/win-x64
 
       - uses: actions/download-artifact@v4
         with:
-          name: native-allocator-win-x64
-          path: artifacts/native/win-x64
+          name: native-linux-x64-cuda
+          path: artifacts/native/linux-x64
+
+      # The runner's C and C++ runtimes are newer than the oldest Linux ONNX Runtime runs on, and a
+      # library built here could ask for a symbol version only they have. Nothing the native
+      # allocator or the CUDA operators library needs may be newer than what ONNX Runtime's own
+      # library needs.
+      - name: Check the Linux native libraries ask no more of Linux than ONNX Runtime does
+        run: |
+          ort=$(ls ~/.nuget/packages/microsoft.ml.onnxruntime/*/runtimes/linux-x64/native/libonnxruntime.so | head -1)
+          newest() { objdump -T "$1" | grep -oE "\($2_[0-9.]+\)" | tr -d '()' | sort -V | tail -1; }
+          for lib in src/Backend/OnnxRuntime/Shorokoo.OnnxRuntime/obj/native/linux-x64/libshorokoo_ort_allocator.so \
+                     artifacts/native/linux-x64/libshorokoo_ort_cuda_ops.so; do
+            for family in GLIBC GLIBCXX CXXABI GCC; do
+              mine=$(newest "$lib" "$family"); theirs=$(newest "$ort" "$family")
+              [ -z "$mine" ] && continue
+              if [ -z "$theirs" ] || [ "$(printf '%s\n%s\n' "$mine" "$theirs" | sort -V | tail -1)" != "$theirs" ]; then
+                echo "::error::$lib needs $mine, and ONNX Runtime needs no newer than ${theirs:-none of $family}"
+                exit 1
+              fi
+            done
+          done
 
       # Each Purpose=Benchmark check measures the machine — wall clock, process-wide
       # memory growth, or both — so each gets a process of its own. Anything sharing

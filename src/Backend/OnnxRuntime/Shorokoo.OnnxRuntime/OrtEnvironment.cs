@@ -1,6 +1,7 @@
 using System.Reflection;
 using System.Runtime.InteropServices;
 using Microsoft.ML.OnnxRuntime;
+using Shorokoo.Core.Backends;
 
 namespace Shorokoo.OnnxRuntime;
 
@@ -92,6 +93,8 @@ internal static class OrtEnvironment
 
     private static readonly object _environmentGate = new();
     private static bool? _sharedThreadPools;
+    private static bool _logsThroughRoutes;
+    private static int _watchingFloor;
 
     /// <summary>
     /// Whether the process's ONNX Runtime environment has thread pools of its own, which a session
@@ -117,10 +120,56 @@ internal static class OrtEnvironment
         lock (_environmentGate) _sharedThreadPools = false;
     }
 
-    /// <summary>The process's ONNX Runtime environment, made with thread pools of its own where
-    /// nothing has made it yet (<see cref="SharedThreadPools"/>).</summary>
+    /// <summary>Whether the process's ONNX Runtime environment hands its messages to
+    /// <see cref="RuntimeLogRoutes"/>: true where it was made here, false where something else made
+    /// it first.</summary>
+    internal static bool LogsThroughRoutes
+    {
+        get
+        {
+            Environment();
+            return LogsThroughRoutesNow();
+        }
+    }
+
+    private static bool LogsThroughRoutesNow()
+    {
+        lock (_environmentGate) return _logsThroughRoutes;
+    }
+
+    /// <summary>Sets the level the environment's own logger logs from to
+    /// <paramref name="floor"/>, where the environment was made here. Sessions and runs log through
+    /// loggers of their own, at the level each was given; this one carries what ONNX Runtime logs for
+    /// the process rather than for a session, which is delivered to the build or run in progress on
+    /// the thread that logged it.</summary>
+    private static void ApplyFloor(ShorokooLogSeverity floor)
+    {
+        lock (_environmentGate)
+            if (_logsThroughRoutes)
+                OrtEnv.Instance().EnvLogLevel = (OrtLoggingLevel)floor;
+    }
+
+    // The environment's logging function, held for the life of the process: ONNX Runtime keeps the
+    // pointer to it and calls it from any thread for as long as the environment lives. Every copy of
+    // this assembly, the ones IsolatedBackend loads included, hands its runtime's messages to the one
+    // table of routes the core keeps, which delivers each to the session or run whose logger it went
+    // through, at the severity OrtLogTriage gives it.
+    private static readonly DOrtLoggingFunction LogFunction = Log;
+
+    private static void Log(IntPtr param, OrtLoggingLevel severity, string category, string logId, string codeLocation, string message)
+        => RuntimeLogRoutes.Deliver(
+            logId, OrtLogTriage.Of((ShorokooLogSeverity)severity, codeLocation, message), Source, category, codeLocation, message);
+
+    /// <summary>What a message ONNX Runtime logs names as its source.</summary>
+    internal const string Source = "ONNX Runtime";
+
+    /// <summary>The process's ONNX Runtime environment, made with thread pools of its own and
+    /// logging through <see cref="RuntimeLogRoutes"/> where nothing has made it yet
+    /// (<see cref="SharedThreadPools"/>). The routes' floor is read, and watched, outside the lock,
+    /// as a change of floor takes the routes' lock and then this one.</summary>
     internal static OrtEnv Environment()
     {
+        var floor = RuntimeLogRoutes.Floor;
         lock (_environmentGate)
         {
             if (_sharedThreadPools is null)
@@ -133,14 +182,18 @@ internal static class OrtEnvironment
                     var options = new EnvironmentCreationOptions
                     {
                         logId = "CSharpOnnxRuntime",
-                        logLevel = OrtLoggingLevel.ORT_LOGGING_LEVEL_WARNING,
+                        logLevel = (OrtLoggingLevel)floor,
+                        loggingFunction = LogFunction,
                         threadOptions = threads,
                     };
                     OrtEnv.CreateInstanceWithOptions(ref options);
                     _sharedThreadPools = true;
+                    _logsThroughRoutes = true;
                 }
             }
         }
+        if (Interlocked.Exchange(ref _watchingFloor, 1) == 0 && LogsThroughRoutesNow())
+            RuntimeLogRoutes.WatchFloor(ApplyFloor);
         return OrtEnv.Instance();
     }
 

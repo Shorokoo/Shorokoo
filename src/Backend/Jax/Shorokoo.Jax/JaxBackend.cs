@@ -67,7 +67,30 @@ public abstract class JaxBackend : IShorokooBackend
     /// <summary>The backend's device as the support package names it: <c>cpu</c> or <c>cuda:N</c>.</summary>
     public string DeviceName { get; }
 
+    /// <summary>It does: the step is one XLA computation, whose fusions run chains of elementwise
+    /// operators and the reductions they feed as single kernels, and share a reduction the forward
+    /// and backward passes both compute.</summary>
+    bool IShorokooBackend.FusesElementwiseOperators => true;
+
     internal bool OnCuda => _cudaDeviceId is not null;
+
+    private long _donatedInputs;
+    private long _copiedInputs;
+
+    /// <summary>How many inputs the runs of this backend's sessions have donated to XLA as they were
+    /// handed -- values the runs consumed, which XLA may write an output over -- since the backend was
+    /// made.</summary>
+    internal long DonatedInputs => Interlocked.Read(ref _donatedInputs);
+
+    /// <summary>How many inputs the runs of this backend's sessions have donated through a copy, being
+    /// only lent them, since the backend was made.</summary>
+    internal long CopiedInputs => Interlocked.Read(ref _copiedInputs);
+
+    internal void CountDonations(long donated, long copied)
+    {
+        if (donated != 0) Interlocked.Add(ref _donatedInputs, donated);
+        if (copied != 0) Interlocked.Add(ref _copiedInputs, copied);
+    }
 
     /// <summary>The CUDA device this backend runs on, or -1 on the CPU.</summary>
     internal int CudaDeviceId => _cudaDeviceId ?? -1;
@@ -134,8 +157,8 @@ public abstract class JaxBackend : IShorokooBackend
     /// run is refused now, naming what it cannot run.</summary>
     /// <param name="modelBytes">The serialized ONNX model.</param>
     /// <param name="graphOptimization">Unused: XLA optimizes the program it compiles.</param>
-    /// <param name="logSeverity">The least severity at which a warning the session's runs raise in
-    /// Python is shown.</param>
+    /// <param name="log">Where the Python warnings raised while the model is compiled go; a run's
+    /// warnings go to its own <see cref="RunSettings.Log"/>.</param>
     /// <param name="deviceMemory">Unused: JAX's device allocator is the whole process's and takes no
     /// per-run limit.</param>
     /// <exception cref="JaxUnsupportedModelException">The model uses something this backend cannot
@@ -143,33 +166,33 @@ public abstract class JaxBackend : IShorokooBackend
     public IShorokooSession CreateSession(
         ReadOnlyMemory<byte> modelBytes,
         ShorokooGraphOptimization graphOptimization,
-        ShorokooLogSeverity logSeverity,
+        LogSettings log,
         DeviceMemorySettings deviceMemory)
-        => JaxSession.Create(this, modelBytes, logSeverity, DiagnosticSettings.Default, PrecisionSettings.Default);
+        => JaxSession.Create(this, modelBytes, log, DiagnosticSettings.Default, PrecisionSettings.Default, []);
 
     /// <summary>The same session, recording which device ran each node where
     /// <paramref name="diagnostics"/> asks: every node runs on this backend's device.</summary>
     public IShorokooSession CreateSession(
         ReadOnlyMemory<byte> modelBytes,
         ShorokooGraphOptimization graphOptimization,
-        ShorokooLogSeverity logSeverity,
+        LogSettings log,
         DeviceMemorySettings deviceMemory,
         DiagnosticSettings diagnostics)
-        => JaxSession.Create(this, modelBytes, logSeverity, diagnostics, PrecisionSettings.Default);
+        => JaxSession.Create(this, modelBytes, log, diagnostics, PrecisionSettings.Default, []);
 
-    /// <summary>The same session: a JAX array is never written in place, so the session binds none
-    /// of <paramref name="outputAliases"/> (<see cref="IShorokooSession.BindableAliases"/> is
-    /// empty) and every output is memory of its own.</summary>
+    /// <summary>The same session, donating to XLA the inputs of the pairs of
+    /// <paramref name="outputAliases"/> it can write in place, so that a run may write an output
+    /// over an input it consumed: see <see cref="JaxSession"/>.</summary>
     public IShorokooSession CreateSession(
         ReadOnlyMemory<byte> modelBytes,
         ShorokooGraphOptimization graphOptimization,
-        ShorokooLogSeverity logSeverity,
+        LogSettings log,
         DeviceMemorySettings deviceMemory,
         DiagnosticSettings diagnostics,
         IReadOnlyList<OutputAlias> outputAliases)
     {
         ArgumentNullException.ThrowIfNull(outputAliases);
-        return JaxSession.Create(this, modelBytes, logSeverity, diagnostics, PrecisionSettings.Default);
+        return JaxSession.Create(this, modelBytes, log, diagnostics, PrecisionSettings.Default, outputAliases);
     }
 
     /// <summary>
@@ -188,7 +211,7 @@ public abstract class JaxBackend : IShorokooBackend
     public IShorokooSession CreateSession(
         ReadOnlyMemory<byte> modelBytes,
         ShorokooGraphOptimization graphOptimization,
-        ShorokooLogSeverity logSeverity,
+        LogSettings log,
         DeviceMemorySettings deviceMemory,
         DiagnosticSettings diagnostics,
         IReadOnlyList<OutputAlias> outputAliases,
@@ -202,7 +225,7 @@ public abstract class JaxBackend : IShorokooBackend
         if (suppliedInitializers.Count > 0)
             throw new NotSupportedException(
                 $"{Description} cannot take a model's initializers as values it already holds.");
-        return JaxSession.Create(this, modelBytes, logSeverity, diagnostics, precision);
+        return JaxSession.Create(this, modelBytes, log, diagnostics, precision, outputAliases);
     }
 
     public IShorokooTensorValue CreateTensor<T>(T[] data, long[] shape) where T : unmanaged

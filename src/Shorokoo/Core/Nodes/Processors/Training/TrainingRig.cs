@@ -189,11 +189,154 @@ namespace Shorokoo
         internal static readonly AsyncLocal<double?> PassMemoryWeight = new();
 
         /// <summary>
+        /// The answers the backend's model of a run gave this rig's memory-aware pass, by question
+        /// (<see cref="RunModelQuestion"/>). A checkpoint of the rig records them, so that a rig loaded
+        /// from it on the same build of the same backend asks that model none of them again.
+        /// </summary>
+        internal IReadOnlyDictionary<string, long?> RunModelAnswers
+        {
+            get
+            {
+                lock (_runModelAnswers) return new Dictionary<string, long?>(_runModelAnswers, StringComparer.Ordinal);
+            }
+        }
+
+        private readonly Dictionary<string, long?> _runModelAnswers = new(StringComparer.Ordinal);
+
+        /// <summary>The answers the checkpoint this rig was loaded from records (<see cref="RunModelAnswers"/>),
+        /// which its pass takes in place of asking; none for a rig built from its sources.</summary>
+        private IReadOnlyDictionary<string, long?> _recordedRunModelAnswers = new Dictionary<string, long?>();
+
+        /// <summary>Whether <paramref name="key"/> is a key a recorded answer can stand under: 64
+        /// lowercase hex digits, as <see cref="RunModelQuestion"/> writes it.</summary>
+        internal static bool IsRunModelQuestion(string key)
+            => key.Length == 64 && key.All(c => c is >= '0' and <= '9' or >= 'a' and <= 'f');
+
+        /// <summary>
+        /// A question to a backend's model of a run, as the key its answer is recorded under: the
+        /// SHA-256 of the model asked about, the pairs written in place, the precision, and the
+        /// backend — its type, the layout and kernel workarounds it names, the build of what its
+        /// model answers from (<see cref="IShorokooBackend.RunModelIdentity"/>), and the builds of its
+        /// assembly and of Shorokoo's — so that an answer is taken only where the same build of the
+        /// same backend would be asked the same. The model's values and nodes are named for the order
+        /// they first appear in, as are the pairs': the lowering may number the outputs of an
+        /// <c>If</c>'s two branches in either order from one process to the next, and a model that
+        /// differs only in its names is the same question.
+        /// </summary>
+        internal static string RunModelQuestion(Shorokoo.Core.Factory.IR.ModelProto model, IReadOnlyList<OutputAlias> aliases,
+            PrecisionSettings precision, IShorokooBackend backend)
+        {
+            var names = new Dictionary<string, string>(StringComparer.Ordinal);
+            string Named(string name) => name.Length == 0 ? name
+                : names.TryGetValue(name, out var named) ? named : names[name] = $"v{names.Count}";
+            void Rename(Shorokoo.Core.Factory.IR.GraphProto graph)
+            {
+                foreach (var input in graph.Inputs) input.Name = Named(input.Name);
+                foreach (var initializer in graph.Initializers) initializer.Name = Named(initializer.Name);
+                RenameNodes(graph.Nodes);
+                foreach (var output in graph.Outputs) output.Name = Named(output.Name);
+                foreach (var value in graph.ValueInfoes) value.Name = Named(value.Name);
+            }
+            void RenameNodes(List<Shorokoo.Core.Factory.IR.NodeProto> nodes)
+            {
+                foreach (var node in nodes)
+                {
+                    if (node.Name.Length > 0) node.Name = Named(node.Name);
+                    for (int i = 0; i < node.Inputs.Count; i++) node.Inputs[i] = Named(node.Inputs[i]);
+                    for (int o = 0; o < node.Outputs.Count; o++) node.Outputs[o] = Named(node.Outputs[o]);
+                    foreach (var attribute in node.Attributes)
+                    {
+                        if (attribute.G is { } branch) Rename(branch);
+                        foreach (var body in attribute.Graphs) Rename(body);
+                    }
+                }
+            }
+            var canonical = ProtoBuf.Serializer.DeepClone(model);
+            if (canonical.Graph is { } graph) Rename(graph);
+            foreach (var function in canonical.Functions)
+            {
+                for (int i = 0; i < function.Inputs.Count; i++) function.Inputs[i] = Named(function.Inputs[i]);
+                RenameNodes(function.Nodes);
+                for (int o = 0; o < function.Outputs.Count; o++) function.Outputs[o] = Named(function.Outputs[o]);
+            }
+
+            using var hash = System.Security.Cryptography.IncrementalHash.CreateHash(System.Security.Cryptography.HashAlgorithmName.SHA256);
+            using (var stream = new System.IO.MemoryStream())
+            {
+                ProtoBuf.Serializer.Serialize(stream, canonical);
+                hash.AppendData(stream.GetBuffer(), 0, (int)stream.Length);
+            }
+            var type = backend.GetType();
+            string[] asked =
+            [
+                .. aliases.Select(a => $"{Named(a.Output)}\u0001{Named(a.Input)}"),
+                precision.ToString(),
+                type.AssemblyQualifiedName ?? type.FullName ?? type.Name,
+                type.Assembly.ManifestModule.ModuleVersionId.ToString(),
+                typeof(TrainingRig).Assembly.ManifestModule.ModuleVersionId.ToString(),
+                backend.RunLayout.ToString(),
+                backend.KernelWorkaroundSet ?? string.Empty,
+                backend.RunModelIdentity ?? string.Empty,
+            ];
+            hash.AppendData(System.Text.Encoding.UTF8.GetBytes(string.Join("\n", asked)));
+            return Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
+        }
+
+        /// <summary>
+        /// <paramref name="graph"/> as a session built for the shapes of <paramref name="exemplars"/>
+        /// runs it -- its shape arithmetic baked, reversibly
+        /// (<see cref="Shorokoo.Core.Nodes.Processors.Fast.FastBakeShapeArithmetic.Reversibly"/>) -- with
+        /// its shapes and what turns a rewrite of it back into a step for every shape; null where an
+        /// exemplar states no shape, or nothing is baked.
+        /// </summary>
+        private static (InternalComputationGraph Graph, ShapeInferenceResult ShapeInfo,
+            Shorokoo.Core.Nodes.Processors.Fast.FastBakeShapeArithmetic.Reversal Reversal)? BakedForThePass(
+            InternalComputationGraph graph, IRuntimeTensor[] exemplars, ShapeInferenceInterpreter shapeInferencer)
+        {
+            var dims = new long[]?[exemplars.Length];
+            for (int i = 0; i < dims.Length; i++)
+            {
+                if (exemplars[i] is not RuntimeTensor { Shape: { } shape }) return null;
+                dims[i] = [.. shape.Dims.Select(d => (long)d)];
+            }
+            if (Shorokoo.Core.Nodes.Processors.Fast.ConcreteValues.At(graph, dims) is not { } values) return null;
+            var view = graph.Clone();
+            if (Shorokoo.Core.Nodes.Processors.Fast.FastBakeShapeArithmetic.Reversibly(view, values) is not { } reversal) return null;
+            return (view, shapeInferencer.Infer(view, exemplars), reversal);
+        }
+
+        /// <summary>
+        /// <paramref name="onView"/>, the pass's result on <paramref name="view"/>, with the graph it
+        /// chose carried back to the step it was baked from, <paramref name="step"/> -- the step itself,
+        /// with <paramref name="stepShapes"/>, where the pass chose the view as handed -- with its shapes; null where the
+        /// rewrite cannot be carried back.
+        /// </summary>
+        private static GraphOptimizationResult? CarriedBack(GraphOptimizationResult onView, InternalComputationGraph view,
+            InternalComputationGraph step, ShapeInferenceResult stepShapes, Shorokoo.Core.Nodes.Processors.Fast.FastBakeShapeArithmetic.Reversal reversal,
+            IRuntimeTensor[] exemplars, ShapeInferenceInterpreter shapeInferencer)
+        {
+            var chosen = ReferenceEquals(onView.OptimizedGraph, view) ? step : reversal.Restore(onView.OptimizedGraph);
+            if (chosen is null) return null;
+            return new GraphOptimizationResult
+            {
+                StrategyName = onView.StrategyName,
+                BackendPeakBytes = onView.BackendPeakBytes,
+                OptimizedGraph = chosen,
+                ShapeInfo = ReferenceEquals(chosen, step) ? stepShapes : shapeInferencer.Infer(chosen, exemplars),
+                Evaluation = onView.Evaluation,
+                AllStrategies = [.. onView.AllStrategies.Select(s => ReferenceEquals(s.Graph, onView.OptimizedGraph) ? (s.Name, s.Evaluation, chosen) : s)],
+            };
+        }
+
+        /// <summary>
         /// What the backend of the context this rig's steps run on holds at the peak of a run of a
         /// step graph, at the shapes of <paramref name="exemplars"/> — the model it would be handed,
         /// built as a compile builds it, with the state pairs that model proves written in place where
         /// the context writes in place — or null where the context is the unread default, or its
-        /// backend has no model of a run.
+        /// backend has no model of a run. Where that model builds something of its own to answer (it
+        /// is not <see cref="IShorokooBackend.ModelsARunQuickly"/>), an answer the checkpoint the rig
+        /// was loaded from records is taken in place of asking, and every answer is kept for the
+        /// rig's own checkpoints (<see cref="RunModelAnswers"/>); a quick model is simply asked.
         /// </summary>
         private Func<InternalComputationGraph, long?>? BackendPeakOf(IReadOnlyList<IRuntimeTensor> exemplars)
         {
@@ -209,6 +352,7 @@ namespace Shorokoo
             var workarounds = Shorokoo.Core.Lowering.KernelWorkarounds.KernelWorkaroundRegistry.For(backend.KernelWorkaroundSet);
             var writesInPlace = context.OutputAliasing || context.ValuePlacement == true;
             var candidates = StateAliasCandidates();
+            var recorded = !backend.ModelsARunQuickly;
             return graph =>
             {
                 var model = Shorokoo.Core.Factory.FastOnnxModelBuilder.BuildInternalOnnxModel(graph, prepForOnnx: true, inputDims: dims, workarounds: workarounds);
@@ -217,7 +361,13 @@ namespace Shorokoo
                     ? [.. candidates.Where(c => c.Output < step.Outputs.Count && c.Input < step.Inputs.Count)
                         .Select(c => new OutputAlias(step.Outputs[c.Output].Name, step.Inputs[c.Input].Name))]
                     : [];
-                return backend.ModelledRunPeak(model, OutputAliasProof.Prove(step, named), context.Precision);
+                var aliases = OutputAliasProof.Prove(step, named);
+                if (!recorded) return backend.ModelledRunPeak(model, aliases, context.Precision);
+                var question = RunModelQuestion(model, aliases, context.Precision, backend);
+                if (!_recordedRunModelAnswers.TryGetValue(question, out var peak))
+                    peak = backend.ModelledRunPeak(model, aliases, context.Precision);
+                lock (_runModelAnswers) _runModelAnswers[question] = peak;
+                return peak;
             };
         }
 
@@ -427,9 +577,10 @@ namespace Shorokoo
 
         /// <summary>
         /// Compute time + peak memory the <see cref="GraphEvaluator"/> projected for the
-        /// unoptimized <see cref="PreOptimizationGraph"/>, under the same shape inference
-        /// the optimizer used. Compare with <see cref="OptimizationResult"/>'s evaluation
-        /// to quantify the optimizer's improvement.
+        /// unoptimized <see cref="PreOptimizationGraph"/> as the optimizer was handed it -- its shape
+        /// arithmetic baked at <see cref="OptimizationInputShapes"/>, where the optimizer rewrote it
+        /// so -- under the same shape inference the optimizer used. Compare with
+        /// <see cref="OptimizationResult"/>'s evaluation to quantify the optimizer's improvement.
         /// </summary>
         internal GraphEvaluationResult PreOptimizationEval { get; private set; } = null!;
 
@@ -1213,7 +1364,8 @@ namespace Shorokoo
             TrainingBackend trainingBackend,
             BuildProgressReporter? progress,
             bool completesBuild = true,
-            bool deferInitialization = false)
+            bool deferInitialization = false,
+            IReadOnlyDictionary<string, long?>? runModelAnswers = null)
         {
             var c = constituents;
             ValidateConstituents(c);
@@ -1249,6 +1401,7 @@ namespace Shorokoo
                 RuntimeContext = runtimeContext,
                 TrainingBackend = trainingBackend,
             };
+            rig._recordedRunModelAnswers = new Dictionary<string, long?>(runModelAnswers ?? new Dictionary<string, long?>(), StringComparer.Ordinal);
             // One thaw of the loss, read by both halves of the build: composition splices a clone of
             // it into the training graph and leaves it as it found it, and the initialization half
             // reads its target declaration back off it (see DeriveTargetExemplar).
@@ -2353,7 +2506,8 @@ namespace Shorokoo
             // in place on fastTraining and returns the same graph for the public-facing
             // TrainingStepPureGraph property.
             _trainingStepWorkGraph = LowerGraph(
-                fastTraining, MergeContext, progress, lowerAutoGrad: TrainingBackend.LowersAutoGrad);
+                fastTraining, MergeContext, progress, lowerAutoGrad: TrainingBackend.LowersAutoGrad,
+                runtimeBackend: _runtimeContext?.ResolvedBackend);
 
             UpdatedParamFieldCount = TrainableParamStructDef.Fields.Length;
             UpdatedStateFieldCount = ModelStateDef.Fields.Length;
@@ -2648,9 +2802,13 @@ namespace Shorokoo
         /// <param name="lowerAutoGrad">False for a step whose gradient is left to the execution
         /// backend (<see cref="TrainingBackend.Native"/>): the pipeline stops before the autograd
         /// expansion, and the step keeps its one <c>AUTO_GRAD</c> node for the backend to run.</param>
+        /// <param name="runtimeBackend">The backend of the rig's runtime context, which runs the step:
+        /// whether it fuses elementwise operators and whether it folds a scale into a matrix product
+        /// decide the shape of a gradient where two are equal in value. Without one, the shapes are
+        /// those that suit ONNX Runtime.</param>
         private static InternalComputationGraph LowerGraph(
             InternalComputationGraph fast, ComputeContext mergeContext, BuildProgressReporter? progress = null,
-            bool lowerAutoGrad = true)
+            bool lowerAutoGrad = true, IShorokooBackend? runtimeBackend = null)
         {
             void Stage(string stage) => progress?.Report(BuildPhase.TrainingStep, stage);
 
@@ -2703,10 +2861,18 @@ namespace Shorokoo
 
             // Lower AUTO_GRAD nodes natively on the Fast graph — no CG round-trip needed.
             Stage("ExpandAutoGrad");
-            Shorokoo.Core.Nodes.Processors.AutoGrad.FastProcessAutoGradProcessor.Process(fast);
+            Shorokoo.Core.Nodes.Processors.AutoGrad.FastProcessAutoGradProcessor.Process(fast,
+                recomputeInFusion: runtimeBackend?.FusesElementwiseOperators ?? false);
 
             Stage("SimplifyAfterAutoGrad");
             Shorokoo.Core.Nodes.Processors.Fast.FastSimplify.Process(fast);
+            // A gradient scaled by several scalars along a chain of products -- a mean's 1/N, a
+            // soft cap's c and 1/c -- is scaled by their product once.
+            Shorokoo.Core.Nodes.Processors.Fast.FastFoldScalarFactors.Process(fast);
+            // A scale by a scalar next to a matrix product is folded into the product by a backend
+            // that folds scales so; one with a reshape between them is a pass of its own.
+            if (runtimeBackend?.FoldsScalesIntoMatMul ?? true)
+                Shorokoo.Core.Nodes.Processors.Fast.FastScaleBesideMatMul.Process(fast);
             // A decay factor a baked zero weight decay folded to one scales a whole parameter by
             // it every step; the product is the parameter itself.
             Shorokoo.Core.Nodes.Processors.Fast.FastDropMultiplyByOne.Process(fast);
@@ -3110,7 +3276,7 @@ namespace Shorokoo
         /// because the caller may still be holding it. Nothing here disposes anything the caller
         /// can still see — it schedules a collection, and only unreachable state is affected.</para>
         /// </summary>
-        private void ReclaimSupersededState(long stepBytes, TrainingCheckpoint produced)
+        internal void ReclaimSupersededState(long stepBytes, TrainingCheckpoint produced)
         {
             if (System.Threading.Interlocked.Add(ref _supersededStateBytes, stepBytes)
                 < System.Threading.Interlocked.Read(ref _reclaimBudgetBytes)) return;
@@ -3152,6 +3318,11 @@ namespace Shorokoo
                              : System.Threading.Interlocked.Read(ref _baseReclaimBudgetBytes));
             }
         }
+
+        /// <summary>Backend bytes <paramref name="checkpoint"/>'s state still holds; see
+        /// <see cref="SupersededBytes"/>.</summary>
+        internal static long StateBytes(TrainingCheckpoint checkpoint)
+            => SupersededBytes(checkpoint.TrainableParams, checkpoint.ModelState, checkpoint.OptimizerState);
 
         /// <summary>Backend bytes the tensor fields of <paramref name="structs"/> that are still
         /// alive hold. A field whose size is not derivable — a dtype with no fixed byte stride, a
@@ -3238,10 +3409,10 @@ namespace Shorokoo
         /// The loss is read where the step left it — a read copies it to the host — since every step
         /// reports it, and its tensor is released once read.
         /// <paramref name="call"/> is how a message about the run names it, <c>TrainStep</c> where
-        /// none is given. <paramref name="reclaimSuperseded"/> says whether the state this step
-        /// supersedes is a checkpoint the caller holds, garbage only once the caller drops it
-        /// (<see cref="ReclaimSupersededState"/>): every step's but a resident run's, which owns its
-        /// state itself.
+        /// none is given. <paramref name="reclaimSuperseded"/> says whether to count the state this
+        /// step supersedes without consuming it towards a collection
+        /// (<see cref="ReclaimSupersededState"/>): every step's but a resident run's, which counts
+        /// it itself once it has let go of that state.
         /// </summary>
         private TrainingCheckpoint RunStep(
             TrainingCheckpoint checkpoint,
@@ -3462,15 +3633,7 @@ namespace Shorokoo
             };
 
             // Only state this step superseded and left alive: what it consumed is released already.
-            // State a resident run keeps to itself belongs to the run, which consumes it with the
-            // next step or releases it itself, so counting it here would buy a forced blocking gen-2
-            // collection per step -- on a model whose state crosses the budget every step, that is a
-            // full-heap collection with nothing to collect, in the loop whose whole point is that
-            // per-step overhead dominates.
-            if (reclaimSuperseded)
-                ReclaimSupersededState(
-                    SupersededBytes(checkpoint.TrainableParams, checkpoint.ModelState, checkpoint.OptimizerState),
-                    newCheckpoint);
+            if (reclaimSuperseded) ReclaimSupersededState(StateBytes(checkpoint), newCheckpoint);
 
             return newCheckpoint;
         }
@@ -3628,24 +3791,24 @@ namespace Shorokoo
         /// <summary>
         /// One step of a <see cref="ResidentTrainingRun"/> on caller-supplied data. Applies the same
         /// no-runtime-hyperparameter guard the schedule-driven <c>TrainStep</c> does when
-        /// <paramref name="hyperparams"/> is absent, so a rig that needs values still says so.
+        /// <paramref name="hyperparams"/> is absent, so a rig that needs values still says so. The
+        /// state it supersedes is the run's to count, once the run has let go of it.
         /// </summary>
         internal TrainingCheckpoint ResidentStep(
             TrainingCheckpoint checkpoint,
             IData? hyperparams,
             IData trainingInput,
-            IData trainingOutput,
-            bool reclaimSuperseded)
+            IData trainingOutput)
         {
             if (hyperparams is null) RequireNoRuntimeHyperparameters();
-            return RunStep(checkpoint, hyperparams, trainingInput, trainingOutput, ResidentStepCall, reclaimSuperseded);
+            return RunStep(checkpoint, hyperparams, trainingInput, trainingOutput, ResidentStepCall, reclaimSuperseded: false);
         }
 
         /// <summary>One step of a <see cref="ResidentTrainingRun"/> on an already-drawn batch; see
         /// <see cref="BatchStep"/>.</summary>
         internal TrainingCheckpoint ResidentBatchStep(
-            TrainingCheckpoint checkpoint, DataBatch batch, bool reclaimSuperseded)
-            => BatchStep(checkpoint, batch, ResidentStepCall, reclaimSuperseded);
+            TrainingCheckpoint checkpoint, DataBatch batch)
+            => BatchStep(checkpoint, batch, ResidentStepCall, reclaimSuperseded: false);
 
         /// <summary>
         /// One step on an already-drawn batch, and the one place the loader-step-and-counter
@@ -4473,7 +4636,8 @@ namespace Shorokoo
             ComputeContext runtimeContext,
             TrainingBackend trainingBackend,
             BuildProgressReporter? progress = null,
-            bool deferInitialization = false)
+            bool deferInitialization = false,
+            IReadOnlyDictionary<string, long?>? runModelAnswers = null)
         {
             if (concreteArch is null) throw new ArgumentNullException(nameof(concreteArch));
             if (loss is null) throw new ArgumentNullException(nameof(loss));
@@ -4500,7 +4664,7 @@ namespace Shorokoo
             // terminal report accordingly.
             return DeriveFromConcreteArch(
                 constituents, archInternal, mergeContext, runtimeContext, trainingBackend, progress,
-                completesBuild: false, deferInitialization);
+                completesBuild: false, deferInitialization, runModelAnswers);
         }
 
         /// <summary>
@@ -4991,16 +5155,29 @@ namespace Shorokoo
             var evaluator = new Shorokoo.Core.AutoDiffCheckpointing.GraphEvaluator(state: new StepState(
                 StateAliasCandidates(), (_runtimeContext?.OutputAliasing ?? true) || _runtimeContext?.ValuePlacement == true),
                 layout: _runtimeContext?.ResolvedBackend.RunLayout ?? RunLayout.OnnxRuntime);
-            var baselineEval = evaluator.Evaluate(graph, shapeInfo);
+            // The pass rewrites the step a session built for the exemplars' shapes runs, whose shape
+            // arithmetic is baked into constants (FastBakeShapeArithmetic) -- most of a lowered
+            // step's nodes, and none of them run there -- and carries its rewrite back to the step,
+            // which serves every shape. Where the rewrite cannot be carried back, the pass rewrites
+            // the step as it stands.
+            var baked = TrainingBackend.LowersAutoGrad ? BakedForThePass(graph, allInputs, shapeInferencer) : null;
+            var baselineEval = baked is { } view ? evaluator.Evaluate(view.Graph, view.ShapeInfo) : evaluator.Evaluate(graph, shapeInfo);
             GraphOptimizationResult optResult;
             if (TrainingBackend.LowersAutoGrad)
             {
                 Stage("OptimizeTrainingStepGraph");
-                var optimizer = new MemoryAwareGraphOptimizer(
+                MemoryAwareGraphOptimizer Optimizer() => new(
                     memoryFactor: PassMemoryWeight.Value ?? MemoryAwareGraphOptimizer.DefaultMemoryWeight,
                     evaluator: evaluator, shapeInference: shapeInferencer, backendPeak: BackendPeakOf(allInputs),
                     weighPlateaus: _runtimeContext?.ResolvedBackend.ModelsARunQuickly ?? false);
-                optResult = optimizer.OptimizeWithShapeInfo(graph, shapeInfo);
+                GraphOptimizationResult? carried = null;
+                if (baked is { } passView)
+                {
+                    var onView = Optimizer().OptimizeWithShapeInfo(passView.Graph, passView.ShapeInfo);
+                    carried = CarriedBack(onView, passView.Graph, graph, shapeInfo, passView.Reversal, allInputs, shapeInferencer);
+                }
+                if (carried is null && baked is not null) baselineEval = evaluator.Evaluate(graph, shapeInfo);
+                optResult = carried ?? Optimizer().OptimizeWithShapeInfo(graph, shapeInfo);
             }
             else
             {

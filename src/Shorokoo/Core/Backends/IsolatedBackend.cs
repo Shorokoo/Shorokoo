@@ -382,57 +382,57 @@ public static class IsolatedBackend
         public IShorokooSession CreateSession(
             ReadOnlyMemory<byte> modelBytes,
             ShorokooGraphOptimization graphOptimization,
-            ShorokooLogSeverity logSeverity,
+            LogSettings log,
             DeviceMemorySettings deviceMemory)
-            => _inner.CreateSession(modelBytes, graphOptimization, logSeverity, deviceMemory);
+            => _inner.CreateSession(modelBytes, graphOptimization, log, deviceMemory);
 
         public IShorokooSession CreateSession(
             ReadOnlyMemory<byte> modelBytes,
             ShorokooGraphOptimization graphOptimization,
-            ShorokooLogSeverity logSeverity,
+            LogSettings log,
             DeviceMemorySettings deviceMemory,
             DiagnosticSettings diagnostics)
-            => _inner.CreateSession(modelBytes, graphOptimization, logSeverity, deviceMemory, diagnostics);
+            => _inner.CreateSession(modelBytes, graphOptimization, log, deviceMemory, diagnostics);
 
         public IShorokooSession CreateSession(
             ReadOnlyMemory<byte> modelBytes,
             ShorokooGraphOptimization graphOptimization,
-            ShorokooLogSeverity logSeverity,
+            LogSettings log,
             DeviceMemorySettings deviceMemory,
             DiagnosticSettings diagnostics,
             IReadOnlyList<OutputAlias> outputAliases)
             => _inner.CreateSession(
-                modelBytes, graphOptimization, logSeverity, deviceMemory, diagnostics, outputAliases);
+                modelBytes, graphOptimization, log, deviceMemory, diagnostics, outputAliases);
 
         public IShorokooSession CreateSession(
             ReadOnlyMemory<byte> modelBytes,
             ShorokooGraphOptimization graphOptimization,
-            ShorokooLogSeverity logSeverity,
+            LogSettings log,
             DeviceMemorySettings deviceMemory,
             DiagnosticSettings diagnostics,
             IReadOnlyList<OutputAlias> outputAliases,
             int intraOpThreads)
             => _inner.CreateSession(
-                modelBytes, graphOptimization, logSeverity, deviceMemory, diagnostics, outputAliases,
+                modelBytes, graphOptimization, log, deviceMemory, diagnostics, outputAliases,
                 intraOpThreads);
 
         public IShorokooSession CreateSession(
             ReadOnlyMemory<byte> modelBytes,
             ShorokooGraphOptimization graphOptimization,
-            ShorokooLogSeverity logSeverity,
+            LogSettings log,
             DeviceMemorySettings deviceMemory,
             DiagnosticSettings diagnostics,
             IReadOnlyList<OutputAlias> outputAliases,
             int intraOpThreads,
             IReadOnlyList<SuppliedInitializer> suppliedInitializers)
             => _inner.CreateSession(
-                modelBytes, graphOptimization, logSeverity, deviceMemory, diagnostics, outputAliases,
+                modelBytes, graphOptimization, log, deviceMemory, diagnostics, outputAliases,
                 intraOpThreads, suppliedInitializers);
 
         public IShorokooSession CreateSession(
             ReadOnlyMemory<byte> modelBytes,
             ShorokooGraphOptimization graphOptimization,
-            ShorokooLogSeverity logSeverity,
+            LogSettings log,
             DeviceMemorySettings deviceMemory,
             DiagnosticSettings diagnostics,
             IReadOnlyList<OutputAlias> outputAliases,
@@ -440,7 +440,7 @@ public static class IsolatedBackend
             IReadOnlyList<SuppliedInitializer> suppliedInitializers,
             PrecisionSettings precision)
             => _inner.CreateSession(
-                modelBytes, graphOptimization, logSeverity, deviceMemory, diagnostics, outputAliases,
+                modelBytes, graphOptimization, log, deviceMemory, diagnostics, outputAliases,
                 intraOpThreads, suppliedInitializers, precision);
 
         public bool SuppliesInitializers => _inner.SuppliesInitializers;
@@ -458,6 +458,12 @@ public static class IsolatedBackend
         bool IShorokooBackend.ModelsARun => _inner.ModelsARun;
 
         bool IShorokooBackend.ModelsARunQuickly => _inner.ModelsARunQuickly;
+
+        bool IShorokooBackend.FusesElementwiseOperators => _inner.FusesElementwiseOperators;
+
+        bool IShorokooBackend.FoldsScalesIntoMatMul => _inner.FoldsScalesIntoMatMul;
+
+        string? IShorokooBackend.RunModelIdentity => _inner.RunModelIdentity;
 
         public IShorokooTensorValue CreateTensor<T>(T[] data, long[] shape) where T : unmanaged
             => _inner.CreateTensor(data, shape);

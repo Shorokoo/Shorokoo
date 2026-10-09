@@ -22,6 +22,24 @@ public partial class WideLinearModel
     public static Tensor<float32> Inline(Tensor<float32> x) => Linear.Model(Scalar(4096L), Scalar(true)).Call(x);
 }
 
+/// <summary>The gradient of the sum of a <c>[V, 4]</c> table's rows read at <c>ids</c>: each row
+/// counts the ids that read it.</summary>
+[Module]
+public partial class GatheredTableGradientModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> table, Tensor<int64> ids)
+        => Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(table, table.Gather(ids).Reduce(ReduceKind.Sum, keepDims: false).Scalar());
+}
+
+/// <summary>The gradient of the product of two scalars: a broadcasting op's gradient over operands
+/// of rank zero.</summary>
+[Module]
+public partial class ScalarProductGradientModel
+{
+    public static Scalar<float32> Inline(Scalar<float32> a, Scalar<float32> b)
+        => Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(a, a * b);
+}
+
 /// <summary>One pre-LayerNorm transformer encoder layer, 64 wide with four heads: its gradients
 /// reduce over every row of the batch, which is where the card's kernels add up in whatever order
 /// its threads finish.</summary>
@@ -38,8 +56,10 @@ public partial class SquareStackModel
 {
     public static Tensor<float32> Inline(Tensor<float32> x)
     {
+#pragma warning disable MSG007 // separate trace-order parameters are the shape under test
         for (int i = 0; i < 64; i++)
             x = x.MatMul(Shorokoo.Modules.Initializers.XavierUniform.Init([Scalar(64L), Scalar(64L)]));
+#pragma warning restore MSG007
         return x;
     }
 }
@@ -245,6 +265,22 @@ public class GpuExecutionTests
     }
 
     [CudaFact]
+    public void CudaProvider_ARunRefusedItsMemoryAfterTrainingAndLoadingModelsLeavesTheCardUsable()
+    {
+        for (int i = 0; i < 3; i++)
+        {
+            CudaProvider_AModelLoadedCompiledReadsItsWeightsOntoTheCardAndRunsAsTheLoadedGraphDoes();
+            CudaProvider_AModelOverSixteenMebibytesPlacesARunsValuesWhereThatPays();
+            CudaProvider_ACopyTheCudaRuntimeFailsIsAnErrorRatherThanADeclinedRange();
+            CudaProvider_ASessionsLimitCapsWhatItAllocatesAndNotAnInputReadWhereItIs();
+            CudaProvider_ASessionRunOverManyShapesKeepsNoMoreOnTheCardThanItsBusiestRunHadInUse();
+            CudaProvider_AShrinkingRunHandsBlocksBackAndEndsBelowThePeakItReached();
+            CudaProvider_TwoRunsFromOneSeedAreBitIdenticalUnderDeterministicCompute();
+            CudaProvider_ARunThatFitsItsBudgetOnlyWhenPlacedSucceedsOnItsFirstCall();
+        }
+    }
+
+    [CudaFact]
     public void CudaProvider_OutputsOnOneBlockOfASessionsMemoryEachFreeTheirOwnPagesAndWhatNoneStandsOnGoesWithTheRun()
     {
         const long MiB = 1024 * 1024;
@@ -310,7 +346,7 @@ public class GpuExecutionTests
         byte[] x = [.. MemoryMarshal.AsBytes(Enumerable.Range(0, N * N).Select(i => (i % 13) * 0.25f - 1.5f).ToArray().AsSpan())];
         (byte[], ILookup<string, string>?) Run(bool consume)
         {
-            using var session = backend.CreateSession(model, ShorokooGraphOptimization.EnableAll, ShorokooLogSeverity.Fatal, new DeviceMemorySettings(),
+            using var session = backend.CreateSession(model, ShorokooGraphOptimization.EnableAll, LogSettings.None, new DeviceMemorySettings(),
                 new DiagnosticSettings { TraceNodePlacement = !consume });
             var fed = inputs.ToDictionary(name => name, _ => backend.CreateTensorInBackendMemory(ShorokooTensorElementType.Float, x, [N, N]));
             var feeds = fed.ToDictionary(f => f.Key, f => f.Value);
@@ -323,6 +359,65 @@ public class GpuExecutionTests
 
         var (shared, providers) = Run(consume: false);
         return (shared, Run(consume: true).Item1, providers!);
+    }
+
+    [CudaFact]
+    public void CudaProvider_AnAppliedScheduledHyperparameterIsTheScheduledValueOnEveryStep()
+    {
+        var (sample, input, target) = TrainingRigHelpers.ScalarMultiplyBatches();
+        using var context = new ComputeContext();
+        var rig = TrainingRig.FromScratch(ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, MixedDTypeHyperOptimizer.ComputationGraph,
+            sample, new MixedDTypeHyperOptimizerHyperparameters { LearningRate = Schedules.Constant(0.1f) }, runtimeContext: context);
+        var ckpt = rig.CreateInitialCheckpoint();
+        var applied = new float[300];
+        for (int i = 0; i < applied.Length; i++)
+        {
+            ckpt = rig.TrainStep(ckpt, input.Shared(), target.Shared());
+            applied[i] = ckpt.AppliedHyperparameters!["learningRate"].ToSingle();
+        }
+        Assert.Equal(Enumerable.Repeat(0.1f, applied.Length), applied);
+    }
+
+    [CudaFact]
+    public void CudaProvider_AGatheredTablesGradientSumsRepeatedIdsOnTheCardWithoutAWarning()
+    {
+        long[] ids = [5, 9, 5, 5, 0, 9, 5, 63];
+        System.Collections.Concurrent.ConcurrentQueue<RuntimeLogMessage> logged = [];
+        var warnings = new RunSettings { Log = new LogSettings { Sink = logged.Enqueue } };
+        using var context = new ComputeContext { RunSettings = warnings };
+        var rig = TrainingRig.FromScratch(NNGatheredTableModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            [TensorData([ids.Length], ids)], new SGDOptimizerHyperparameters { LearningRate = 1f }, runtimeContext: context);
+        var initial = rig.CreateInitialCheckpoint();
+        var before = Weights(initial);
+        var after = Weights(rig.TrainStep(initial, rig.InputDef.FromOrderedData(TensorData([ids.Length], ids)).Shared(),
+            rig.TargetDef.FromOrderedData(TensorData([ids.Length, 4L], new float[ids.Length * 4])).Shared()));
+
+        using var traced = new ComputeContext { Diagnostics = new DiagnosticSettings { TraceNodePlacement = true }, RunSettings = warnings };
+        var table = TensorData([64L, 4L], new float[256]);
+        var read = TensorData([ids.Length], ids);
+        using var compiled = traced.Compile(GatheredTableGradientModel.ComputationGraph.ToConcreteArchitecture([table, read]).ToConcreteModel());
+        var gradient = compiled.Execute(table, read)[0].ToTensorData().CopyMemory<float>();
+        var placement = compiled.ReadNodePlacement()!;
+
+        Assert.Empty(logged);
+        for (int i = 0; i < before.Length; i++)
+        {
+            int reads = ids.Count(id => id == i / 4);
+            Assert.Equal(before[i] * (1f - reads / (2f * ids.Length)), after[i], 1e-5f);
+            Assert.Equal(reads, gradient[i]);
+        }
+        Assert.All(placement.Nodes.Where(n => n.OpType is "ScatterElements" or "ScatterND"), n => Assert.Equal("CUDAExecutionProvider", n.Provider));
+        Assert.Contains(placement.Nodes, n => n.OpType == "ScatterElements");
+    }
+
+    [CudaFact]
+    public void CudaProvider_ARandomDrawsBitwiseOperatorsRunOnTheHost()
+    {
+        using var traced = new ComputeContext { Diagnostics = new DiagnosticSettings { TraceNodePlacement = true } };
+        var (t, cond) = (TensorData([8L], new float[8]), TensorData(DType.Bool, [], true));
+        using var compiled = traced.Compile(DropoutSquaredInOneIfArmModel.ComputationGraph.ToConcreteArchitecture([t, cond]).ToConcreteModel());
+        compiled.Execute(t.Shared(), cond.Shared());
+        Assert.Contains("BitShift", compiled.ReadNodePlacement()!.NodesOn("CPUExecutionProvider").Select(n => n.OpType));
     }
 
     [CudaFact]
@@ -475,7 +570,7 @@ public class GpuExecutionTests
         var model = new MemoryStream();
         ProtoBuf.Serializer.Serialize(model, proto);
         using var session = backend.CreateSession(
-            model.ToArray(), ShorokooGraphOptimization.EnableAll, ShorokooLogSeverity.Fatal,
+            model.ToArray(), ShorokooGraphOptimization.EnableAll, LogSettings.None,
             new DeviceMemorySettings { LimitBytes = 32 * MiB });
         var bytes = new byte[64 * MiB];
         IReadOnlyList<IShorokooTensorValue> Run(IShorokooTensorValue input) => session.Run(
@@ -810,7 +905,7 @@ public class GpuExecutionTests
         var model = new MemoryStream();
         ProtoBuf.Serializer.Serialize(model, proto);
         using var options = new SessionOptions();
-        OrtBackend.Configure(options, ShorokooGraphOptimization.EnableAll, ShorokooLogSeverity.Fatal);
+        OrtBackend.Configure(options, ShorokooGraphOptimization.EnableAll, ShorokooLogSeverity.Fatal, onCard: true);
         CudaLibraries.Prepare();
         using var cuda = new OrtCUDAProviderOptions();
         cuda.UpdateOptions(new Dictionary<string, string>
@@ -900,7 +995,7 @@ public class GpuExecutionTests
     // A resident AdamW run of WideLinearModel, shrinking as under a budget: the plain step holds the
     // new state beside the consumed one, two of its three parameter-sized values at once on the card
     // (the third is written after a temporary goes).
-    [CudaFact]
+    [CudaFact(needsProcessFigure: true)]
     public void CudaProvider_WritingAStepsStateOverWhatItConsumedTakesMostOfTheStateOffTheCardsPeak()
     {
         DeviceMemory.ResetPeak();
@@ -919,7 +1014,7 @@ public class GpuExecutionTests
         }
     }
 
-    [CudaFact]
+    [CudaFact(needsProcessFigure: true)]
     public void CudaProvider_PlacingAStepsStateOverWhatItConsumedTakesTheStateOffTheCardsPeakAsAliasingDoes()
     {
         DeviceMemory.ResetPeak();
@@ -1030,7 +1125,7 @@ public class GpuExecutionTests
     /// use its weights and each output's own bytes once a run that hands its memory back is over,
     /// nothing beyond what is in use, and its weights alone once the outputs are let go of.
     /// </summary>
-    [CudaFact]
+    [CudaFact(needsProcessFigure: true)]
     public void CudaProvider_AKeptOutputHoldsOnlyItsOwnBytesOnTheCardAndNothingOfItsSessionsArena()
     {
         const long MiB = 1024 * 1024;
@@ -1075,7 +1170,7 @@ public class GpuExecutionTests
     /// allocator holds exactly its bytes more while it is kept and nothing more once it is let go,
     /// and the card holds less than the output twice over for the run's every block.
     /// </summary>
-    [CudaFact]
+    [CudaFact(needsProcessFigure: true)]
     public void CudaProvider_AnOutputWhoseShapeTheRunLearnsIsOnTheCardOnceAsTheBlockItsSessionWroteItInto()
     {
         using var ctx = new ComputeContext();
@@ -1098,7 +1193,7 @@ public class GpuExecutionTests
     /// has, and hands them back to the card as a run that hands back its memory ends, or as the
     /// program asks.
     /// </summary>
-    [CudaFact]
+    [CudaFact(needsProcessFigure: true)]
     public void CudaProvider_TheCardsAllocatorHandsBackWhatNoTensorUsesAsARunThatHandsBackItsMemoryEndsOrTheProgramAsks()
     {
         const long MiB = 1024 * 1024;
@@ -1234,6 +1329,25 @@ public class GpuExecutionTests
         public OrtArenaCardBackend() : base(cudaDeviceId: 0) => SessionsUseOrtArena = true;
     }
 
+    [CudaFact]
+    public void CudaProvider_AnAdamOrAdamWStepUpdatesEveryParameterInOneFusedPassToTheBit()
+    {
+        Assert.NotNull(Shorokoo.OnnxRuntime.NativeAllocator.LocatedCudaOperators);
+        Assert.Equal(2, NNLibraryOptimizerTrainingCoverageTests.ResidentSteps(new FusingCardBackend(true), AdamOptimizer.ComputationGraph, [0.001f, 0.9f, 0.999f, 1e-8f], null).Fused);
+        NNLibraryOptimizerTrainingCoverageTests.AssertFusedToTheBit(fuses => new FusingCardBackend(fuses), AdamOptimizer.ComputationGraph, [0.001f, 0.9f, 0.999f, 1e-8f]);
+        NNLibraryOptimizerTrainingCoverageTests.AssertFusedToTheBit(fuses => new FusingCardBackend(fuses), AdamWOptimizer.ComputationGraph, [0.001f, 0.9f, 0.999f, 1e-8f, 0.01f]);
+        NNLibraryOptimizerTrainingCoverageTests.AssertFusedToTheBit(fuses => new FusingCardBackend(fuses), AdamWOptimizer.ComputationGraph, [0.01f, 0.8f, 0.9f, 1e-6f, 0f]);
+        NNLibraryOptimizerTrainingCoverageTests.AssertFusedToTheBit(fuses => new FusingCardBackend(fuses), AdamWOptimizer.ComputationGraph,
+            new AdamWOptimizerHyperparameters { WeightDecay = Hyperparameter.Runtime() }.InOptimizerOrder(), 0.1f);
+        NNLibraryOptimizerTrainingCoverageTests.AssertFusedToTheBit(fuses => new FusingCardBackend(fuses), AdamWOptimizer.ComputationGraph,
+            [0.001f, 0.9f, 0.999f, 1e-8f, 0.01f], null, NNWideGatheredTableProjectionModel.ComputationGraph, 8256);
+    }
+
+    private sealed class FusingCardBackend : OrtBackend
+    {
+        public FusingCardBackend(bool fuses) : base(cudaDeviceId: 0) => FusesOptimizerUpdates = fuses;
+    }
+
     /// <summary>What this process holds on the card once every tensor nothing reaches any more is
     /// released: a released tensor's finalizer can leave another to the next collection.</summary>
     private static long HeldOnTheCard()
@@ -1246,9 +1360,150 @@ public class GpuExecutionTests
         return DeviceMemory.Read()!.Value.ProcessBytes!.Value;
     }
 
+    [CudaFact]
+    public void CudaProvider_TheGradientOfAProductOfScalarsRunsOnTheCard()
+    {
+        using var compiled = new ComputeContext().Compile(
+            ScalarProductGradientModel.ComputationGraph.ToConcreteArchitecture([TensorData([], 2f), TensorData([], 3f)]).ToConcreteModel());
+        Assert.Equal([3f], compiled.Execute(TensorData([], 2f), TensorData([], 3f))[0].ToTensorData().CopyMemory<float>());
+    }
+
+    private static string[] HostWorkOfAStep(ComputationGraph model, long[] rows, long[] targetRows)
+    {
+        using var context = new ComputeContext { Diagnostics = new DiagnosticSettings { TraceNodePlacement = true } };
+        var x = NNLibraryFixtures.RangeTensor(rows, 0.01f);
+        var rig = TrainingRig.FromScratch(model, L2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph, [x.CopyTo(ComputeContext.Host)],
+            new AdamWOptimizerHyperparameters { LearningRate = 0.01f }, runtimeContext: context);
+        rig.TrainStep(rig.CreateInitialCheckpoint(), rig.InputDef.FromOrderedData(x), rig.TargetDef.FromOrderedData(NNLibraryFixtures.RangeTensor(targetRows, 0.02f)));
+        return [.. NNLibraryFixtures.OnlyCompiledTrainStep(rig).ReadNodePlacement()!.Nodes
+            .Where(n => n.Provider != "CUDAExecutionProvider" || n.OpType.StartsWith("Memcpy", StringComparison.Ordinal))
+            .Select(n => n.OpType)];
+    }
+
+    [CudaFact]
+    public void CudaProvider_ASliceOfAConstantFromAStartReadAtRunTimeRunsOnTheCard()
+    {
+        var x = InputTensor<float32>("x", rank: 1);
+        Assert.Equal([1L], OnTheCard(x, OnnxOp.Slice(Vector(1L), OnnxOp.Sub(OnnxOp.Shape(x), Vector(3L)), Vector(1L)), TensorData([3L], [1f, 2f, 3f])).CopyMemory<long>());
+        Assert.Equal([7L], OnTheCard(x, OnnxOp.Slice(Vector(7L), OnnxOp.Sub(OnnxOp.Shape(x), Vector(3L)), Vector(7L)), TensorData([3L], [1f, 2f, 3f])).CopyMemory<long>());
+    }
+
+    // Shorokoo/Shorokoo#536: the CUDA reduction kernels refuse keepdims 0 over an axis of extent 0.
+    [CudaFact(Skip = "Shorokoo/Shorokoo#536")]
+    public void CudaProvider_AReductionOverAnEmptyAxisGivesItsIdentityOnTheCard()
+    {
+        var i = InputTensor<int32>("i", rank: 2);
+        var f = InputTensor<float32>("f", rank: 2);
+        var v = InputTensor<float32>("v", rank: 1);
+        Assert.Equal(Enumerable.Repeat(int.MinValue, 40), OnTheCard(i, i.Reduce(ReduceKind.Max, Vector(0L)), TensorData(DType.Int32, [0L, 40L], Array.Empty<object>())).CopyMemory<int>());
+        Assert.Equal([float.NegativeInfinity, float.NegativeInfinity, float.NegativeInfinity], OnTheCard(f, f.Reduce(ReduceKind.Max, Vector(0L)), TensorData(DType.Float32, [0L, 3L], Array.Empty<object>())).CopyMemory<float>());
+        Assert.Equal([0f], OnTheCard(v, v.Reduce(ReduceKind.Sum), TensorData(DType.Float32, [0L], Array.Empty<object>())).CopyMemory<float>());
+        Assert.Equal([1f, 1f], OnTheCard(f, f.Reduce(ReduceKind.Prod, Vector(1L)), TensorData(DType.Float32, [2L, 0L], Array.Empty<object>())).CopyMemory<float>());
+    }
+
+    // Shorokoo/Shorokoo#537: the CUDA reduction kernels pass the input through when no axis is reduced.
+    [CudaFact(Skip = "Shorokoo/Shorokoo#537")]
+    public void CudaProvider_ANoopReductionComputesEachElementsOwnGroupOnTheCard()
+    {
+        var x = InputTensor<float32>("x", rank: 1);
+        var data = TensorData([4L], [-2f, -1f, 1f, 3f]);
+        Variable Noop(ReduceKind kind) => NN.Reduce(kind, x, null, keepDims: true, noOp: true);
+        Assert.Equal([2f, 1f, 1f, 3f], OnTheCard(x, Noop(ReduceKind.L1), data).CopyMemory<float>());
+        Assert.Equal([2f, 1f, 1f, 3f], OnTheCard(x, Noop(ReduceKind.L2), data).CopyMemory<float>());
+        Assert.Equal([4f, 1f, 1f, 9f], OnTheCard(x, Noop(ReduceKind.SumSquare), data).CopyMemory<float>());
+        Assert.Equal([0f, MathF.Log(3f)], OnTheCard(x, Noop(ReduceKind.LogSum), TensorData([2L], [1f, 3f])).CopyMemory<float>());
+    }
+
+    // Shorokoo/Shorokoo#538: building the session crashes the process.
+    [CudaFact(Skip = "Shorokoo/Shorokoo#538")]
+    public void CudaProvider_ACropAndResizeWithAnAspectRatioPolicyBuildsItsSessionOnTheCard()
+    {
+        var x = InputTensor<float32>("x", rank: 4);
+        Variable Crop(ResizeMode mode) => OnnxOp.Resize(x, roi: Vector(-0.2f, 0.05f, 1.1f, 0.95f), scales: null, sizes: Vector(3L, 4L),
+            antialias: null, axes: [1L, 2L], coordinateTransformationMode: CoordinateTransformationMode.Tf_crop_and_resize,
+            cubicCoeffA: null, excludeOutside: null, extrapolationValue: -1f,
+            keepAspectRatioPolicy: KeepAspectRatioPolicy.not_larger, mode: mode, nearestMode: null);
+        var data = TensorData([1L, 4L, 6L, 2L], [.. Enumerable.Range(0, 48).Select(i => (float)(i % 7))]);
+        Assert.Equal([1L, 3L, 4L, 2L], OnTheCard(x, Crop(ResizeMode.Linear), data).Shape.Dims);
+        Assert.Equal([1L, 3L, 4L, 2L], OnTheCard(x, Crop(ResizeMode.Cubic), data).Shape.Dims);
+    }
+
+    // Shorokoo/Shorokoo#539: the CUDA Resize kernel returns zeros for tf_crop_and_resize.
+    [CudaFact(Skip = "Shorokoo/Shorokoo#539")]
+    public void CudaProvider_ACropAndResizeCropsToItsRoiOnTheCard()
+    {
+        var x = InputTensor<float32>("x", rank: 4);
+        Variable Crop(Vector<float32> roi, Vector<float32> scales) => OnnxOp.Resize(x, roi: roi, scales: scales, sizes: null,
+            antialias: null, axes: null, coordinateTransformationMode: CoordinateTransformationMode.Tf_crop_and_resize,
+            cubicCoeffA: null, excludeOutside: null, extrapolationValue: -1f, keepAspectRatioPolicy: null, mode: ResizeMode.Linear, nearestMode: null);
+        Assert.Equal([2f, 3f, 4f, -1f, -1f], OnTheCard(x, Crop(Vector(0f, 0f, 0f, 0.5f, 1f, 1f, 1f, 1.5f), Vector(1f, 1f, 1f, 1f)),
+            TensorData([1L, 1L, 1L, 5L], [0f, 1f, 2f, 3f, 4f])).CopyMemory<float>());
+        Assert.Equal([2f, 4f, -1f], OnTheCard(x, Crop(Vector(0f, 0f, 0f, 0.5f, 1f, 1f, 1f, 1.5f), Vector(1f, 1f, 1f, 0.6f)),
+            TensorData([1L, 1L, 1L, 5L], [0f, 1f, 2f, 3f, 4f])).CopyMemory<float>());
+    }
+
+    // Shorokoo/Shorokoo#540: the CUDA Optional kernel refuses to copy a buffer onto itself.
+    [CudaFact(Skip = "Shorokoo/Shorokoo#540")]
+    public void CudaProvider_AnOptionalOfAComputedTensorRunsOnTheCard()
+    {
+        var x = InputTensor<float32>("x", rank: 1);
+        Assert.Equal([2f, 4f, 6f], OnTheCard(x, OnnxOp.OptionalGetElement(OnnxOp.Optional(OnnxOp.Add(x, x), DataStructure.Tensor, DType.Float32)),
+            TensorData([3L], [1f, 2f, 3f])).CopyMemory<float>());
+    }
+
+    // Shorokoo/Shorokoo#541: the CUDA provider takes these nodes and then fails them.
+    [CudaFact(Skip = "Shorokoo/Shorokoo#541")]
+    public void CudaProvider_AnOperatorTheCardHasNoKernelForItsTypeOrFormRunsOnTheCard()
+    {
+        var f = InputTensor<float32>("f", rank: 2);
+        var data = TensorData([2L, 4L], [0.625f, -1.3f, 2.2f, 40f, -0.1f, 3.75f, -50f, 0.875f]);
+        var blocks = Vector(0.5f, 1f, 0.25f, 2f).Reshape(Vector(2L, 2L));
+        Assert.Equal([1, -3, 2, 40, 0, 15, -25, 0], OnTheCard(f, OnnxOp.Cast(OnnxOp.QuantizeLinear(f, blocks,
+            Vector((sbyte)0, (sbyte)0, (sbyte)0, (sbyte)0).Reshape(Vector(2L, 2L)), axis: 1, blockSize: 2), null, DType.Int32), data).CopyMemory<int>());
+        Assert.Equal([0.5f, 0.5f, 4f, 1f, -0.25f, -0.25f, -2f, -2f], OnTheCard(f, OnnxOp.DequantizeLinear(Vector((sbyte)1, (sbyte)1, (sbyte)4, (sbyte)1, (sbyte)-1, (sbyte)-1, (sbyte)-1, (sbyte)-1).Reshape(Vector(2L, 4L)),
+            blocks, null, axis: 1, blockSize: 2), data).CopyMemory<float>());
+        Assert.Equal([0d, 5d, 0d, 0d], OnTheCard(f, OnnxOp.ScatterND(OnnxOp.Cast(OnnxOp.Mul(f, Scalar(0f)), null, DType.Float64), Vector(0L, 1L).Reshape(Vector(1L, 2L)), Vector(5d), null),
+            TensorData([2L, 2L], [1f, 2f, 3f, 4f])).CopyMemory<double>());
+    }
+
+    private static TensorData OnTheCard<T>(Tensor<T> x, Variable output, TensorData data) where T : IVarType
+    {
+        using var context = new ComputeContext();
+        return context.Execute(new InternalComputationGraph([x], [output]), data.Shared())[0].ToTensorData();
+    }
+
+    [CudaFact]
+    public void CudaProvider_ATrainingStepRunsEveryNodeOnTheCardWithNoCopyToTheHost()
+    {
+        Assert.Empty(HostWorkOfAStep(Modules.PlainTinyMlpStack.ComputationGraph, [2L, 8L], [2L, 16L]));
+        Assert.Empty(HostWorkOfAStep(AttentionLayerModel.ComputationGraph, [2L, 8L, 64L], [2L, 8L, 64L]));
+        Assert.Empty(HostWorkOfAStep(NNResidualBiasedProjectionModel.ComputationGraph, [1L, 2L, 3L, 4L], [1L, 2L, 3L, 4L]));
+    }
+
+    [CudaFact]
+    public void CudaProvider_APadOfConstantPadsAlongConstantAxesPadsOnlyThoseAxesOnTheCard()
+    {
+        using var context = new ComputeContext { Diagnostics = new DiagnosticSettings { TraceNodePlacement = true } };
+        float[] Padded(long[] dims, long[] pads, long[] axes, bool concrete)
+        {
+            var x = InputTensor<float32>("x", rank: dims.Length);
+            var g = new InternalComputationGraph([x], [OnnxOp.Pad(x, Vector(pads), Scalar(9f), Vector(axes))]);
+            using var compiled = context.Compile(g, [concrete ? dims : null], trainingStep: false);
+            var padded = compiled.Execute(TensorData(dims, [1f, 2f, 3f, 4f]).Shared())[0].ToTensorData().CopyMemory<float>();
+            Assert.Equal(["CUDAExecutionProvider"], compiled.ReadNodePlacement()!.Nodes.Where(n => n.OpType == "Pad").Select(n => n.Provider));
+            return padded;
+        }
+        foreach (bool concrete in (bool[])[false, true])
+        {
+            Assert.Equal([9f, 1f, 2f, 9f, 9f, 9f, 3f, 4f, 9f, 9f], Padded([2L, 2L], [1L, 2L], [-1L], concrete));
+            Assert.Equal([9f, 9f, 1f, 2f, 3f, 4f], Padded([1L, 2L, 2L], [1L, 0L], [1L], concrete));
+            Assert.Equal([9f, 1f, 2f, 9f, 3f, 4f, 9f, 9f, 9f, 9f, 9f, 9f], Padded([1L, 2L, 2L], [0L, 1L, 1L, 0L], [0L, 2L], concrete));
+        }
+    }
+
     /// <summary>
     /// A graph the provider cannot run whole: one output is computed on the card and one on the
-    /// host, which is what <see cref="SessionOutputPlacement.Mixed"/ > is for, and the crossing
+    /// host, which is what <see cref="SessionOutputPlacement.Mixed"/> is for, and the crossing
     /// is charged to the pinned host arena rather than to the device one. A graph with no node the
     /// provider can run is <see cref="SessionOutputPlacement.Host"/>, its device memory holding
     /// nothing but the output it copies onto the card, and one it runs whole is
@@ -1399,7 +1654,7 @@ public class GpuExecutionTests
     /// The card's figure for this process alone, which #406 asked for: a gigabyte held on the card
     /// is in it, and it is a part of what the card reports across every process.
     /// </summary>
-    [CudaFact]
+    [CudaFact(needsProcessFigure: true)]
     public void CudaProvider_TheProcessFigureHoldsWhatThisProcessPutOnTheCard()
     {
         using var ctx = new ComputeContext();

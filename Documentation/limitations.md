@@ -411,8 +411,13 @@ scores it better, and the strategies are chosen among by it, so that by that mod
 the step it hands over holds no more there than the one it was handed. PyTorch's
 model is quick to ask, so the rematerializer also weighs by it the three candidates
 its own figures score best where they leave it nothing better to take; ONNX
-Runtime's builds a session each time it is asked, and is asked only about each
-strategy's steps. ONNX Runtime's model reads the
+Runtime's builds a session of the step each time it is asked, at about the cost of
+compiling it, so it is asked only about each strategy's steps, once about each
+distinct one, and nothing more where it cannot tell the step as handed. A training
+checkpoint records its answers: a rig loaded from one on the same builds of
+Shorokoo and its backend, at the same precision and, for ONNX Runtime, on the same
+kind of processor or card (its instruction sets, and a card's compute capability),
+asks only what they do not answer. ONNX Runtime's model reads the
 graph ONNX Runtime optimizes and runs, in the order it runs it, with the buffers
 its allocation plan keeps for later values of the same shape and the scratch its
 kernels take: convolutions' and recurrent layers' working buffers on the host, and
@@ -424,14 +429,17 @@ transposed attention heads is transposed too — and a recurrent layer's stacked
 outputs. Both run a loop's body once per iteration where its trip count follows
 from the shapes fed, and hold what a sequence holds for as long as the sequence
 lives. Where a model cannot tell a value's shape, the pass's own figures decide.
-It is conservative and has no
+It works on the step as a session built for the shapes the
+rig was built at runs it — the step's shape arithmetic, most of a lowered step's
+nodes, baked into constants there — and carries what it chose back to the step the
+rig runs at every shape. It is conservative and has no
 opt-out; use the attribute to force a trade it would not take. It picks the
 tensors it recomputes, but not whole-module segments: checkpointing each layer of
-a two-layer transformer encoder holds a further 5–6% less than the pass alone on
-ONNX Runtime, for a tenth more step time or more, and up to 4% less on PyTorch. The
+a two-layer transformer encoder holds up to a further 5% less than the pass alone on
+ONNX Runtime, for a tenth more step time or more, and up to 6% less on PyTorch. The
 pass cuts a step's peak memory by anywhere from nothing to about a third on ONNX
-Runtime, for at most a few percent more computation; on PyTorch it can trade more
-— a two-layer encoder's step holds over 40% less, for about a fifth more
+Runtime, for up to about a tenth more computation; on PyTorch it can trade more
+— a two-layer encoder's step holds about half as much, for about a fifth more
 computation. A step containing a scope — a recurrent op's backward pass is a loop
 — is searched only where the backend's model answers for it, which it does for a
 loop whose trip count follows from the shapes fed, and for no branch (`If`); a

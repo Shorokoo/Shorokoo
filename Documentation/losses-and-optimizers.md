@@ -71,11 +71,11 @@ Knobs are **build-time C# arguments** on two extra methods:
 - **`ignoreIndex`** (CE, NLL): a target equal to it adds nothing to the loss or the gradient, and
   `Mean` divides by the targets that are not ignored, as PyTorch does: by their count, or with
   `weight` by the sum of their classes' weights. The sentinel is any `int64`, a negative one such
-  as PyTorch's `-100` included. On the CPU backend, a training step whose batch holds an ignored
-  target fails when the sentinel lies outside `[-C, C-1]` for `C` classes — `-100` below 100
-  classes, say — because the gradient indexes the class weights with it
-  ([#499](https://github.com/Shorokoo/Shorokoo/issues/499)); evaluating the loss does not. Until
-  that is fixed, pick a sentinel inside `[-C, C-1]` for a model you train.
+  as PyTorch's `-100` included, in evaluation and training alike.
+- **Target range** (CE, NLL): every other target must lie in `[0, C-1]` for `C` classes. A
+  target outside it is the backend's to handle: ONNX Runtime's CPU kernel raises its own error for
+  one of `C` or above and reads a negative `t` as class `C + t`, and its CUDA kernel does not check
+  and can count one of `C` or above as a zero loss ([#501](https://github.com/Shorokoo/Shorokoo/issues/501)).
 - **SmoothL1 ↔ Huber**: `SmoothL1(e; β) = HuberLoss(δ = β) / β`. Huber's `delta` is a
   live, schedulable `[Hyper]`; SmoothL1's `beta` is baked.
 - **PoissonNLL**: the Keras `Poisson` form is
@@ -88,8 +88,7 @@ Knobs are **build-time C# arguments** on two extra methods:
 The rig gives the loss graph exactly **two tensor inputs** and expects a
 **`Scalar<float32>`**.
 
-- **Rig-safe**: `reduction = Mean`/`Sum`, `ignoreIndex` (with a sentinel inside `[-C, C-1]`;
-  see [`ignoreIndex`](#loss-configurable-knobs) above), `labelSmoothing` — through a
+- **Rig-safe**: `reduction = Mean`/`Sum`, `ignoreIndex`, `labelSmoothing` — through a
   **wrapper module**, since the generated `ComputationGraph` uses the bare `Inline`:
 
   ```csharp
@@ -175,8 +174,17 @@ hyperparameter set (`<Name>Hyperparameters`, e.g. `AdamOptimizerHyperparameters`
   ≈ `lr`. At `wd = 0`, AdamW equals Adam. Both compute the step as
   `m/(√v + ε·√(1−β2^t)) · lr·√(1−β2^t)/(1−β1^t)`, with the corrections folded into scalars so the
   update makes as few full passes over the parameter as it can; for a large parameter (an embedding
-  table, say) the number of passes, not the arithmetic, sets the optimizer's share of a step. Every
-  element is updated every step, rows the batch did not read included.
+  table, say) the number of passes, not the arithmetic, sets the optimizer's share of a step. On
+  the ONNX Runtime backends, a training step runs the Adam or AdamW update of each `float32`
+  parameter whose shape its model states as one fused pass, which reads the parameter, its gradient
+  and both moments once and writes the parameter and the moments once, with the same result to the
+  bit as the operators it is written as: on the CPU backends, with ONNX Runtime's stock CPU
+  provider, through Shorokoo's native library (the `Shorokoo.OnnxRuntime` package carries it), and
+  on the CUDA backends, on the card, through its CUDA build (the `Shorokoo.WinGPU` and
+  `Shorokoo.LinuxGPU` packages carry it). Anywhere else — on the PyTorch and JAX backends, for
+  another dtype or a parameter of unstated shape, or on a CUDA backend built from source where no
+  CUDA toolkit was at hand to build that library (see the repository's README) — it runs as those
+  operators, twelve passes over the parameter (thirteen with a weight decay). Every element is updated every step, rows the batch did not read included.
 - **RMSprop** with `momentum = 0` is plain RMSprop (both state tensors still exist).
 - **Adamax** puts `ε` inside the max and bias-corrects only `m`.
 - **NAdam** has no weight decay.

@@ -848,7 +848,7 @@ public class MemoryReuseScenarioTests
             long runStart;
             using (var options = new SessionOptions())
             {
-                OrtBackend.Configure(options, ShorokooGraphOptimization.TrainingStep, ShorokooLogSeverity.Fatal);
+                OrtBackend.Configure(options, ShorokooGraphOptimization.TrainingStep, ShorokooLogSeverity.Fatal, onCard);
                 options.AddSessionConfigEntry("session.use_env_allocators", "1");
                 options.OptimizedModelFilePath = Path.Combine(directory, "optimized.onnx");
                 options.ProfileOutputPathPrefix = Path.Combine(directory, "profile");
@@ -970,7 +970,7 @@ public class MemoryReuseScenarioTests
             long runStart;
             using (var options = new SessionOptions())
             {
-                OrtBackend.Configure(options, ShorokooGraphOptimization.TrainingStep, ShorokooLogSeverity.Fatal);
+                OrtBackend.Configure(options, ShorokooGraphOptimization.TrainingStep, ShorokooLogSeverity.Fatal, onCard);
                 options.AddSessionConfigEntry("session.use_env_allocators", "1");
                 options.OptimizedModelFilePath = Path.Combine(directory, "optimized.onnx");
                 options.ProfileOutputPathPrefix = Path.Combine(directory, "profile");
@@ -2398,7 +2398,7 @@ public class MemoryReuseScenarioTests
     private static ConfigRecord RunShipped(Config config, byte[] model)
     {
         OrtBackend backend = config.Card ? new CardBackend() : new HostBackend();
-        using var session = backend.CreateSession(model, ShorokooGraphOptimization.EnableAll, ShorokooLogSeverity.Error, DeviceMemorySettings.Default);
+        using var session = backend.CreateSession(model, ShorokooGraphOptimization.EnableAll, LogSettings.None, DeviceMemorySettings.Default);
         var aBytes = MemoryMarshal.AsBytes(Pattern(b: false).AsSpan()).ToArray();
         var bBytes = MemoryMarshal.AsBytes(Pattern(b: true).AsSpan()).ToArray();
         List<RunRecord> runs = [];

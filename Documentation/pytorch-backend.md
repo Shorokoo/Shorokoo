@@ -227,11 +227,11 @@ What a run does with the settings every backend is handed, on each device:
 | **Cancellation** (`RunSettings.CancellationToken`) | stops before the next node | stops before the next node |
 | **`DeviceMemory.LimitBytes`** | ignored, as on every CPU backend | caps each run's allocations (see below) |
 | **`RunSettings.ShrinkArenaAfterRun`** | ignored | `torch.cuda.empty_cache()` after the run |
+| **`RunSettings.Log`** | each Python warning the run raises, as a `Warning` from `PyTorch` (see [Log messages](backends-and-devices.md#log-messages)) | same |
 | **Arena statistics** / `RunStats` | none | torch's caching allocator on the device |
 | **`TraceNodePlacement`** | every node on `cpu` | every node on `cuda:N` |
 | **`DeterministicCompute`** | not applied | not applied: torch's kernels run as they otherwise would |
 | **`Precision.AllowTensorFloat32`** | no effect: `float32` in full precision | off by default: each run sets `torch.backends.cuda.matmul.allow_tf32` and `torch.backends.cudnn.allow_tf32` off as it starts; on, it sets both on, and products, cuDNN convolutions and recurrent layers run in TensorFloat-32 |
-| **Log severity** | Python warnings a run raises are shown at `Warning` and below, not above | same |
 
 **Output aliasing.** An output paired with a consumed input (as the training rig pairs each
 updated parameter with the parameter) is written into the input's memory when it comes from

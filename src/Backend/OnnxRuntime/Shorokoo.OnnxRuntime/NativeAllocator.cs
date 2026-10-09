@@ -31,37 +31,72 @@ internal static unsafe class NativeAllocator
 
     private static readonly Lazy<IntPtr> _create = new(Bind, LazyThreadSafetyMode.ExecutionAndPublication);
 
+    private static readonly Lazy<string?> _located = new(Locate, LazyThreadSafetyMode.ExecutionAndPublication);
+
+    /// <summary><see cref="Locate"/>, asked once: the path a session registers the library's
+    /// operators from (<c>native/shorokoo_ort_ops.cpp</c>), or null where it is not deployed in
+    /// either place.</summary>
+    internal static string? Located => _located.Value;
+
     /// <summary>
     /// A native <c>OrtAllocator</c> over the managed allocator <paramref name="state"/> names,
     /// whose requests go to the entry points <paramref name="allocate"/>
     /// (<c>(state, size, reason, capacity)</c>, answering a block or null with the reason written
-    /// down) and <paramref name="free"/> (<c>(state, block)</c>), describing itself with the native
-    /// memory info <paramref name="info"/>. It lives for the life of the process.
+    /// down), <paramref name="allocateOnStream"/> (<c>(state, size, stream, reason, capacity)</c>,
+    /// the same for a request ONNX Runtime makes on one of its streams) and <paramref name="free"/>
+    /// (<c>(state, block)</c>), describing itself with the native memory info <paramref name="info"/>.
+    /// It lives for the life of the process.
     /// </summary>
     /// <exception cref="DllNotFoundException">The library is not deployed.</exception>
-    internal static IntPtr Create(IntPtr state, IntPtr allocate, IntPtr free, IntPtr info)
+    internal static IntPtr Create(IntPtr state, IntPtr allocate, IntPtr allocateOnStream, IntPtr free, IntPtr info)
     {
-        var create = (delegate* unmanaged<IntPtr, IntPtr, IntPtr, IntPtr, IntPtr>)_create.Value;
-        var made = create(state, allocate, free, info);
+        var create = (delegate* unmanaged<IntPtr, IntPtr, IntPtr, IntPtr, IntPtr, IntPtr>)_create.Value;
+        var made = create(state, allocate, allocateOnStream, free, info);
         return made != IntPtr.Zero ? made
             : throw new OutOfMemoryException("There was no memory for Shorokoo's native allocator itself.");
     }
 
+    /// <summary>The CUDA build of the library's operators (<c>native/shorokoo_adam_update.cu</c>),
+    /// which a CUDA session registers in place of the CPU one. It ships in the GPU backend
+    /// packages, Shorokoo.WinGPU and Shorokoo.LinuxGPU, beside ONNX Runtime's CUDA provider.</summary>
+    internal const string CudaOperatorsLibraryName = "shorokoo_ort_cuda_ops";
+
+    /// <summary>The CUDA operators library's file on this operating system.</summary>
+    internal static string CudaOperatorsFileName
+        => OperatingSystem.IsWindows() ? CudaOperatorsLibraryName + ".dll" : "lib" + CudaOperatorsLibraryName + ".so";
+
+    private static readonly Lazy<string?> _locatedCudaOperators = new(
+        () => LocateFile(CudaOperatorsFileName) is { } path && NativeLibrary.TryLoad(path, out _) ? path : null,
+        LazyThreadSafetyMode.ExecutionAndPublication);
+
+    /// <summary>The path a CUDA session registers the operators from, found where the library is,
+    /// or null where that build is not deployed or this system cannot load it (one built against a
+    /// newer C library than the system's, say): a build from source makes it only where it finds a
+    /// CUDA toolkit to make it with, and a CUDA session without it runs each update as the chain of
+    /// operators it is written as.</summary>
+    internal static string? LocatedCudaOperators => _locatedCudaOperators.Value;
+
     /// <summary>The path the library is deployed at, beside this assembly or under
-    /// <c>runtimes/&lt;rid&gt;/native/</c> there, or null where it is in neither.</summary>
-    internal static string? Locate()
+    /// <c>runtimes/&lt;rid&gt;/native/</c> there, or in a folder the host probes for natives, or
+    /// null where it is in none of them.</summary>
+    internal static string? Locate() => LocateFile(FileName);
+
+    private static string? LocateFile(string fileName)
     {
         var location = typeof(NativeAllocator).Assembly.Location;
-        string[] directories = !string.IsNullOrEmpty(location) && Path.GetDirectoryName(location) is { Length: > 0 } dir
-            ? [dir, AppContext.BaseDirectory]
-            : [AppContext.BaseDirectory];
+        List<string> directories = [];
+        if (!string.IsNullOrEmpty(location) && Path.GetDirectoryName(location) is { Length: > 0 } dir) directories.Add(dir);
+        directories.Add(AppContext.BaseDirectory);
+        // The folders the host itself probes for natives, a deps.json's included.
+        if (AppContext.GetData("NATIVE_DLL_SEARCH_DIRECTORIES") is string probed)
+            directories.AddRange(probed.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
         var rid = (OperatingSystem.IsWindows() ? "win-" : "linux-")
             + RuntimeInformation.ProcessArchitecture.ToString().ToLowerInvariant();
         foreach (var directory in directories)
         {
-            var flat = Path.Combine(directory, FileName);
+            var flat = Path.Combine(directory, fileName);
             if (File.Exists(flat)) return flat;
-            var underRuntimes = Path.Combine(directory, "runtimes", rid, "native", FileName);
+            var underRuntimes = Path.Combine(directory, "runtimes", rid, "native", fileName);
             if (File.Exists(underRuntimes)) return underRuntimes;
         }
         return null;

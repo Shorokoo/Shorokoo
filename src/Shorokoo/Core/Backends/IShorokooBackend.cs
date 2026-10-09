@@ -126,10 +126,15 @@ public interface IShorokooBackend
     // deviceMemory configures the arena this one session allocates in. It is a parameter, not
     // process state, because that is what ORT's own shape is: each session gets its own arena,
     // built from the values read here and kept for the session's life.
+    //
+    // log is where what the runtime emits while it builds the session goes, and what the session's
+    // runs emit when their RunSettings carry the same settings; a run whose RunSettings.Log differs
+    // sends what it emits there instead. A backend whose runtime emits nothing it can route still
+    // takes it, and delivers nothing.
     IShorokooSession CreateSession(
         ReadOnlyMemory<byte> modelBytes,
         ShorokooGraphOptimization graphOptimization,
-        ShorokooLogSeverity logSeverity,
+        LogSettings log,
         DeviceMemorySettings deviceMemory);
 
     // The same session, told what the caller wants recorded about it -- today, whether it keeps a
@@ -143,10 +148,10 @@ public interface IShorokooBackend
     IShorokooSession CreateSession(
         ReadOnlyMemory<byte> modelBytes,
         ShorokooGraphOptimization graphOptimization,
-        ShorokooLogSeverity logSeverity,
+        LogSettings log,
         DeviceMemorySettings deviceMemory,
         DiagnosticSettings diagnostics)
-        => CreateSession(modelBytes, graphOptimization, logSeverity, deviceMemory);
+        => CreateSession(modelBytes, graphOptimization, log, deviceMemory);
 
     // The same session, told which of its outputs it may write into the memory of which of its
     // inputs (output aliasing, see OutputAlias): pairs the model's lowering proved -- nothing reads
@@ -164,11 +169,11 @@ public interface IShorokooBackend
     IShorokooSession CreateSession(
         ReadOnlyMemory<byte> modelBytes,
         ShorokooGraphOptimization graphOptimization,
-        ShorokooLogSeverity logSeverity,
+        LogSettings log,
         DeviceMemorySettings deviceMemory,
         DiagnosticSettings diagnostics,
         IReadOnlyList<OutputAlias> outputAliases)
-        => CreateSession(modelBytes, graphOptimization, logSeverity, deviceMemory, diagnostics);
+        => CreateSession(modelBytes, graphOptimization, log, deviceMemory, diagnostics);
 
     // The same session, told how many threads one run of it may spread an operator over:
     // intraOpThreads of 1 runs each operator on the calling thread alone, for a caller that runs
@@ -180,12 +185,12 @@ public interface IShorokooBackend
     IShorokooSession CreateSession(
         ReadOnlyMemory<byte> modelBytes,
         ShorokooGraphOptimization graphOptimization,
-        ShorokooLogSeverity logSeverity,
+        LogSettings log,
         DeviceMemorySettings deviceMemory,
         DiagnosticSettings diagnostics,
         IReadOnlyList<OutputAlias> outputAliases,
         int intraOpThreads)
-        => CreateSession(modelBytes, graphOptimization, logSeverity, deviceMemory, diagnostics, outputAliases);
+        => CreateSession(modelBytes, graphOptimization, log, deviceMemory, diagnostics, outputAliases);
 
     // The same session, with some of the model's initializers supplied as values already in this
     // backend's memory -- weights loaded straight onto the card, which the model's bytes then need
@@ -198,7 +203,7 @@ public interface IShorokooBackend
     IShorokooSession CreateSession(
         ReadOnlyMemory<byte> modelBytes,
         ShorokooGraphOptimization graphOptimization,
-        ShorokooLogSeverity logSeverity,
+        LogSettings log,
         DeviceMemorySettings deviceMemory,
         DiagnosticSettings diagnostics,
         IReadOnlyList<OutputAlias> outputAliases,
@@ -209,7 +214,7 @@ public interface IShorokooBackend
         if (suppliedInitializers.Count > 0)
             throw new NotSupportedException(
                 $"{Description} cannot take a model's initializers as values it already holds.");
-        return CreateSession(modelBytes, graphOptimization, logSeverity, deviceMemory, diagnostics, outputAliases, intraOpThreads);
+        return CreateSession(modelBytes, graphOptimization, log, deviceMemory, diagnostics, outputAliases, intraOpThreads);
     }
 
     // The same session, told the floating-point precision it computes in: whether a CUDA card may
@@ -224,7 +229,7 @@ public interface IShorokooBackend
     IShorokooSession CreateSession(
         ReadOnlyMemory<byte> modelBytes,
         ShorokooGraphOptimization graphOptimization,
-        ShorokooLogSeverity logSeverity,
+        LogSettings log,
         DeviceMemorySettings deviceMemory,
         DiagnosticSettings diagnostics,
         IReadOnlyList<OutputAlias> outputAliases,
@@ -234,7 +239,7 @@ public interface IShorokooBackend
     {
         ArgumentNullException.ThrowIfNull(precision);
         return CreateSession(
-            modelBytes, graphOptimization, logSeverity, deviceMemory, diagnostics, outputAliases, intraOpThreads,
+            modelBytes, graphOptimization, log, deviceMemory, diagnostics, outputAliases, intraOpThreads,
             suppliedInitializers);
     }
 
@@ -295,6 +300,14 @@ public interface IShorokooBackend
     // A decorator forwards this, as it forwards every member with a default body.
     internal bool ModelsARunQuickly => false;
 
+    // The build of what ModelledRunPeak answers from -- for ONNX Runtime, the native runtime and the
+    // managed library over it -- or null where nothing beyond this backend's type and assembly
+    // decides its answers. The training rig keys the answers it records by it, so that an answer
+    // recorded on one build is never taken on another.
+    //
+    // A decorator forwards this, as it forwards every member with a default body.
+    internal string? RunModelIdentity => null;
+
     // How this backend lays a run's values out in memory, as the training rig's memory-aware pass
     // charges them while it searches (see ModelledRunPeak for how it then judges). ONNX Runtime's
     // allocation plan is the default; ONNX Runtime on the host adds what its CPU kernels hold beside
@@ -303,6 +316,25 @@ public interface IShorokooBackend
     //
     // A decorator forwards this, as it forwards every member with a default body.
     internal Shorokoo.Core.AutoDiffCheckpointing.RunLayout RunLayout => Shorokoo.Core.AutoDiffCheckpointing.RunLayout.OnnxRuntime;
+
+    // Whether this backend compiles a graph into kernels that fuse chains of elementwise operators
+    // and the reductions they feed -- XLA, behind the JAX backends -- rather than running each node
+    // as a kernel of its own. There a value recomputed in the fusion that reads it costs no pass of
+    // its own, while one the backward pass reads from the forward pass has to be written out; so the
+    // training rig's autodiff recomputes where a gradient rule has the choice (a cross-entropy's
+    // softmax, say), and reuses what the forward pass wrote everywhere else.
+    //
+    // A decorator forwards this, as it forwards every member with a default body.
+    internal bool FusesElementwiseOperators => false;
+
+    // Whether this backend folds a product by a scalar constant into the matrix product that reads
+    // or feeds it -- ONNX Runtime makes the scale the alpha of the MatMul it fuses -- so that a scale
+    // beside a MatMul costs nothing. The training rig then moves a scale across the reshapes between
+    // it and the MatMuls it flows into -- a static one across each of several, which elsewhere would
+    // make one pass per reshape of what was one.
+    //
+    // A decorator forwards this, as it forwards every member with a default body.
+    internal bool FoldsScalesIntoMatMul => false;
 
     IShorokooTensorValue CreateTensor<T>(T[] data, long[] shape) where T : unmanaged;
 

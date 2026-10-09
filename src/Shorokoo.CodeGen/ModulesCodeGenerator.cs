@@ -52,6 +52,14 @@ public class ModuleSourceGenerator : IIncrementalGenerator
         DiagnosticSeverity.Warning,
         isEnabledByDefault: true);
 
+    private static readonly DiagnosticDescriptor PlainLoopStacksLayers = new(
+        id: "MSG007",
+        title: "Plain C# loop stacks layers",
+        messageFormat: "This plain C# loop creates parameters or sub-models on every pass, so they are numbered in trace order and adding or removing one renames every later one. Write the loop as 'foreach (var ctx in LoopAPI.Iterate(count))', which names them by iteration, and gate layers that differ on ctx.IterationIndex.",
+        category: "SourceGeneration",
+        DiagnosticSeverity.Warning,
+        isEnabledByDefault: true);
+
     /// <summary>
     /// Finds every <c>x = y;</c> that sits inside a <c>LoopAPI.Iterate(...)</c> body and is declared
     /// a carry there by <c>LoopAPI.Init(x)</c>, whose right-hand side is a bare name bound outside
@@ -176,6 +184,8 @@ public class ModuleSourceGenerator : IIncrementalGenerator
 
         context.RegisterSourceOutput(moduleClasses, static (spc, classes) =>
         {
+            // A helper called from several modules is reported once.
+            var reportedLoops = new HashSet<(string?, TextSpan)>();
             foreach (var classInfo in classes)
             {
                 if (classInfo is null) continue;
@@ -227,7 +237,10 @@ public class ModuleSourceGenerator : IIncrementalGenerator
                         }
                     }
 
-                    
+                    foreach (var loop in classInfo.PlainLoopsStackingLayers)
+                        if (reportedLoops.Add((loop.SourceTree?.FilePath, loop.SourceSpan)))
+                            spc.ReportDiagnostic(Diagnostic.Create(PlainLoopStacksLayers, loop));
+
                     // Report warnings for ignored methods (bad format / explicitly ignored)
                     foreach (var fm in classInfo.FullModules)
                     {
@@ -477,6 +490,155 @@ public class ModuleSourceGenerator : IIncrementalGenerator
         return false;
     }
 
+    private const int MaxHelperDepth = 4;
+
+    /// <summary>
+    /// Finds the plain C# loops (<c>for</c>, <c>while</c>, <c>do</c>, and a <c>foreach</c> not over
+    /// <c>LoopAPI.Iterate</c>) that stack layers: whose body, directly or through a source method it
+    /// calls, creates a parameter (<c>T.Init(...)</c> on a <c>[TrainableParamInitializer]</c> or
+    /// <c>[StateInitializer]</c> class) or a sub-model (<c>T.Model(...)</c> / <c>T.Call(...)</c> on a
+    /// <c>[Module]</c> class) whose name is not set with <c>.Named(...)</c>. Every pass of such a
+    /// loop numbers those items in trace order, which <c>LoopAPI.Iterate</c> names by iteration.
+    ///
+    /// <para>The loops are looked for in <paramref name="roots"/> and in the source methods they
+    /// call, local functions included, up to <see cref="MaxHelperDepth"/> calls deep. A qualifying
+    /// loop is reported alone, not the loops nested in it. A lambda is not looked into: whether it
+    /// runs once per pass is not visible from the syntax. A model reused across passes
+    /// (<c>m.Call(x)</c> on a local) creates nothing and is not counted. A name counts only on an
+    /// <c>Init(...)</c> or <c>Model(...)</c> result, or on the local it is stored in; a
+    /// <c>Call(...)</c> result is neither, so naming it names no sub-model.</para>
+    /// </summary>
+    internal static List<Location> FindPlainLoopsStackingLayers(IEnumerable<IMethodSymbol> roots, Compilation compilation)
+    {
+        var found = new List<Location>();
+        var models = new Dictionary<SyntaxTree, SemanticModel>();
+        var visited = new HashSet<IMethodSymbol>(SymbolEqualityComparer.Default);
+        var creates = new Dictionary<IMethodSymbol, bool>(SymbolEqualityComparer.Default);
+
+        SemanticModel ModelOf(SyntaxTree tree)
+        {
+            if (!models.TryGetValue(tree, out var model))
+                models[tree] = model = compilation.GetSemanticModel(tree);
+            return model;
+        }
+
+        foreach (var root in roots)
+            Visit(root, 0);
+        return found;
+
+        void Visit(IMethodSymbol method, int depth)
+        {
+            if (!visited.Add(method)) return;
+            foreach (var body in BodiesOf(method))
+                VisitNode(body, depth);
+        }
+
+        void VisitNode(SyntaxNode node, int depth)
+        {
+            if (node is AnonymousFunctionExpressionSyntax or LocalFunctionStatementSyntax) return;
+            if (PlainLoopBody(node) is { } loopBody && Creates(loopBody, depth))
+            {
+                found.Add(LoopKeyword(node).GetLocation());
+                return;
+            }
+            if (node is InvocationExpressionSyntax inv && depth < MaxHelperDepth && SourceHelper(inv) is { } helper)
+                Visit(helper, depth + 1);
+            foreach (var child in node.ChildNodes())
+                VisitNode(child, depth);
+        }
+
+        bool Creates(SyntaxNode scope, int depth)
+        {
+            foreach (var inv in DescendantsOutsideFunctions(scope).OfType<InvocationExpressionSyntax>())
+            {
+                if (CreatesUnnamedItem(inv, scope)) return true;
+                if (depth < MaxHelperDepth && SourceHelper(inv) is { } helper && HelperCreates(helper, depth + 1))
+                    return true;
+            }
+            return false;
+        }
+
+        bool HelperCreates(IMethodSymbol helper, int depth)
+        {
+            if (creates.TryGetValue(helper, out var known)) return known;
+            creates[helper] = false;   // a recursive helper adds nothing while it is being looked at
+            return creates[helper] = BodiesOf(helper).Any(b => Creates(b, depth));
+        }
+
+        bool CreatesUnnamedItem(InvocationExpressionSyntax inv, SyntaxNode scope)
+        {
+            if (inv.Expression is not MemberAccessExpressionSyntax { Name.Identifier.Text: var name } ma) return false;
+            if (name is not ("Init" or "Model" or "Call")) return false;
+            if (name != "Call" && IsNamed(inv, scope)) return false;
+            if (ModelOf(inv.SyntaxTree).GetSymbolInfo(ma.Expression).Symbol is not INamedTypeSymbol type) return false;
+            var attributes = type.GetAttributes().Select(a => a.AttributeClass?.Name).ToList();
+            return name == "Init"
+                ? attributes.Contains("TrainableParamInitializerAttribute") || attributes.Contains("StateInitializerAttribute")
+                : attributes.Contains("ModuleAttribute");
+        }
+
+        IMethodSymbol? SourceHelper(InvocationExpressionSyntax inv)
+            => ModelOf(inv.SyntaxTree).GetSymbolInfo(inv).Symbol is IMethodSymbol { DeclaringSyntaxReferences.Length: > 0 } m
+                ? m.OriginalDefinition
+                : null;
+
+        IEnumerable<SyntaxNode> BodiesOf(IMethodSymbol method)
+            => method.DeclaringSyntaxReferences
+                .Select(r => r.GetSyntax() switch
+                {
+                    BaseMethodDeclarationSyntax d => (SyntaxNode?)d.Body ?? d.ExpressionBody,
+                    LocalFunctionStatementSyntax f => (SyntaxNode?)f.Body ?? f.ExpressionBody,
+                    _ => null,
+                })
+                .Where(b => b is not null && compilation.ContainsSyntaxTree(b.SyntaxTree))!;
+    }
+
+    /// <summary>Whether the parameter or sub-model <paramref name="inv"/> creates is given a name
+    /// with <c>.Named(...)</c>: on the call itself, or on the local it is stored in, anywhere in
+    /// <paramref name="scope"/>.</summary>
+    private static bool IsNamed(InvocationExpressionSyntax inv, SyntaxNode scope)
+    {
+        if (inv.Parent is MemberAccessExpressionSyntax { Name.Identifier.Text: "Named", Parent: InvocationExpressionSyntax })
+            return true;
+        var local = inv.Parent switch
+        {
+            EqualsValueClauseSyntax { Parent: VariableDeclaratorSyntax v } => v.Identifier.Text,
+            AssignmentExpressionSyntax { Left: IdentifierNameSyntax id } a when a.Right == inv => id.Identifier.Text,
+            _ => null,
+        };
+        return local is not null && scope.DescendantNodes().OfType<InvocationExpressionSyntax>().Any(named =>
+            named.Expression is MemberAccessExpressionSyntax
+            {
+                Name.Identifier.Text: "Named",
+                Expression: IdentifierNameSyntax receiver,
+            } && receiver.Identifier.Text == local);
+    }
+
+    private static IEnumerable<SyntaxNode> DescendantsOutsideFunctions(SyntaxNode scope)
+        => scope.DescendantNodes(n => n is not (AnonymousFunctionExpressionSyntax or LocalFunctionStatementSyntax));
+
+    /// <summary>The body of a plain C# loop, or null when <paramref name="node"/> is not one.</summary>
+    private static SyntaxNode? PlainLoopBody(SyntaxNode node)
+        => node switch
+        {
+            ForStatementSyntax f => f.Statement,
+            WhileStatementSyntax w => w.Statement,
+            DoStatementSyntax d => d.Statement,
+            ForEachStatementSyntax fe when !IsLoopApiIterate(fe) => fe.Statement,
+            ForEachVariableStatementSyntax fv => fv.Statement,
+            _ => null,
+        };
+
+    private static SyntaxToken LoopKeyword(SyntaxNode loop)
+        => loop switch
+        {
+            ForStatementSyntax f => f.ForKeyword,
+            WhileStatementSyntax w => w.WhileKeyword,
+            DoStatementSyntax d => d.DoKeyword,
+            CommonForEachStatementSyntax fe => fe.ForEachKeyword,
+            _ => loop.GetFirstToken(),
+        };
+
     private static bool IsIterateInvocation(InvocationExpressionSyntax inv)
         => inv.Expression is MemberAccessExpressionSyntax ma && ma.Name.Identifier.Text == "Iterate";
 
@@ -591,6 +753,8 @@ public class ModuleSourceGenerator : IIncrementalGenerator
                 .Select(static x => x!)
                 .ToList();
 
+            var moduleMethods = classSymbol.GetMembers().OfType<IMethodSymbol>()
+                .Where(m => moduleInfos.Any(fm => fm.FnName == m.Name && fm.Kind != ModuleKind.Ignore));
             return new ModuleClassInfo(
                 classSymbol.Name,
                 classSymbol.ContainingNamespace.ToDisplayString(),
@@ -598,7 +762,8 @@ public class ModuleSourceGenerator : IIncrementalGenerator
                 classDeclaration.GetLocation(),
                 isStaticClass: true,
                 typeParameterList,
-                typeConstraintClauses);
+                typeConstraintClauses,
+                plainLoopsStackingLayers: FindPlainLoopsStackingLayers(moduleMethods, semanticModel.Compilation));
         }
         else
         {
@@ -634,7 +799,8 @@ public class ModuleSourceGenerator : IIncrementalGenerator
                 typeParameterList,
                 typeConstraintClauses,
                 inlineMethod,  // Pass the inline method
-                checkpoint: checkpoint);
+                checkpoint: checkpoint,
+                plainLoopsStackingLayers: FindPlainLoopsStackingLayers([inlineMethod], semanticModel.Compilation));
         }
     }
 
@@ -1484,9 +1650,11 @@ public class ModuleClassInfo
     public bool IsStateInitializer { get; }  // True for [StateInitializer], false for [TrainableParamInitializer]
     public string StateOwnershipName { get; }  // StateOwnership member name from [StateInitializer(Ownership = ...)]
     public bool Checkpoint { get; }  // [Module(Checkpoint = true)]: calls are activation-checkpoint segments
+    public List<Location> PlainLoopsStackingLayers { get; }  // MSG007 sites, in this module or the helpers it calls
 
-    public ModuleClassInfo(string className, string fullyQualifiedNamespace, List<FullModuleInfo> fullModules, Location? location, bool isStaticClass = false, string typeParameterList = "", string typeConstraintClauses = "", IMethodSymbol? inlineMethod = null, bool isNewStyleInitializer = false, bool isStateInitializer = false, string stateOwnershipName = "ModuleOwned", bool checkpoint = false)
+    public ModuleClassInfo(string className, string fullyQualifiedNamespace, List<FullModuleInfo> fullModules, Location? location, bool isStaticClass = false, string typeParameterList = "", string typeConstraintClauses = "", IMethodSymbol? inlineMethod = null, bool isNewStyleInitializer = false, bool isStateInitializer = false, string stateOwnershipName = "ModuleOwned", bool checkpoint = false, List<Location>? plainLoopsStackingLayers = null)
     {
+        PlainLoopsStackingLayers = plainLoopsStackingLayers ?? [];
         Checkpoint = checkpoint;
         ClassName = className;
         Namespace = string.IsNullOrEmpty(fullyQualifiedNamespace) || fullyQualifiedNamespace == "<global namespace>"

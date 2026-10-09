@@ -23,8 +23,10 @@ using static OpCodes;
 /// A <c>Constant</c> operand with a dimension of 0 makes the product zeros of its shape, and the
 /// call becomes those zeros (<see cref="ZerosOfTheProduct"/>); two <c>Constant</c> operands that
 /// are not empty keep the call as it stands. When the model states every input's dimensions and
-/// the call is not in a loop body (<see cref="WorkaroundSite.ShapesAreConcrete"/>), the call's
-/// result goes through an <c>If</c> on either operand or the product having a dimension of 0,
+/// the call is not in a loop body (<see cref="WorkaroundSite.ShapesAreConcrete"/>), two operands
+/// whose dimensions follow from those and are none of them 0 (<see cref="WorkaroundSite.ShapeOf"/>)
+/// keep the call as it stands too, the product then having no dimension of 0 either; any other
+/// call's result goes through an <c>If</c> on either operand or the product having a dimension of 0,
 /// which gives zeros of the product's shape where one has and the result where none has. ONNX
 /// Runtime folds that <c>If</c> away when it builds the session wherever the shapes follow from
 /// those dimensions. Where an operand's shape is computed from the data — the output of a
@@ -47,10 +49,15 @@ internal sealed class MatMulEmptyOperandWorkaround : KernelWorkaround
 {
     public override IReadOnlySet<string> OpCodes { get; } = new HashSet<string>([MATMUL], StringComparer.Ordinal);
 
+    public override bool ReadsShapes => true;
+
     public override bool Applies(WorkaroundSite site)
         => (site.RankOf(0), site.RankOf(1)) is not ((1 or 2, 2) or (1, 1))
            && (HasAnEmptyConstant(site)
-               || site.ShapesAreConcrete && (site.ConstantShapeOf(0) is null || site.ConstantShapeOf(1) is null));
+               || site.ShapesAreConcrete && (site.ConstantShapeOf(0) is null || site.ConstantShapeOf(1) is null)
+                  && !(IsNotEmpty(site.ShapeOf(0)) && IsNotEmpty(site.ShapeOf(1))));
+
+    private static bool IsNotEmpty(Shape? shape) => shape is { } s && !s.Dims.Contains(0);
 
     private static bool HasAnEmptyConstant(WorkaroundSite site)
         => site.ConstantShapeOf(0) is { } a && a.Dims.Contains(0) || site.ConstantShapeOf(1) is { } b && b.Dims.Contains(0);

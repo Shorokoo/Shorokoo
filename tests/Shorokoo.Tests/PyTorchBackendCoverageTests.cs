@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Python.Runtime;
@@ -121,7 +122,7 @@ public class PyTorchBackendCoverageTests
         foreach (var type in EveryTorchType)
         {
             var bytes = Enumerable.Range(0, 3 * ElementSize(type)).Select(i => (byte)(type == ShorokooTensorElementType.Bool ? i % 2 : i * 7 % 64)).ToArray();
-            using var session = Torch.CreateSession(Onnx("Identity", (int)type), default, default, DeviceMemorySettings.Default);
+            using var session = Torch.CreateSession(Onnx("Identity", (int)type), default, LogSettings.Default, DeviceMemorySettings.Default);
             using var host = Torch.CreateTensorFromRawBytes(type, bytes, [3]);
             using var device = Torch.CreateTensorInBackendMemory(type, bytes, [3]);
             var outputs = session.Run(new Dictionary<string, IShorokooTensorValue> { ["x0"] = host }, ["y"], RunSettings.Default);
@@ -164,7 +165,7 @@ public class PyTorchBackendCoverageTests
     {
         string[] words = ["plain", "", "naïve ✓", "quote ' and \\ and \n"];
         using var strings = Torch.CreateStringTensor(words, [2, 2]);
-        using var session = Torch.CreateSession(Onnx("Identity", (int)ShorokooTensorElementType.String), default, default, DeviceMemorySettings.Default);
+        using var session = Torch.CreateSession(Onnx("Identity", (int)ShorokooTensorElementType.String), default, LogSettings.Default, DeviceMemorySettings.Default);
         var outputs = session.Run(new Dictionary<string, IShorokooTensorValue> { ["x0"] = strings }, ["y"], RunSettings.Default);
 
         Assert.Equal(ShorokooTensorElementType.String, strings.ElementType);
@@ -301,7 +302,7 @@ public class PyTorchBackendCoverageTests
         graph.Inputs[0].Type = FloatTensor;
         graph.Outputs[0].Type = FloatTensor;
         graph.Initializers.Add(new TensorProto { Name = "axes", data_type = (int)TensorProto.DataType.Int64, Dims = [0] });
-        using var session = backend.CreateSession(Serialize(graph), default, default, DeviceMemorySettings.Default);
+        using var session = backend.CreateSession(Serialize(graph), default, LogSettings.Default, DeviceMemorySettings.Default);
         using var x = backend.CreateTensor([-0f, 1f, -2f], [3]);
         using var y = session.Run(new Dictionary<string, IShorokooTensorValue> { ["x"] = x }, ["y"], RunSettings.Default)[0];
         return string.Join(" ", MemoryMarshal.Cast<byte, float>(backend.CopyTensorToHost(y)).ToArray()
@@ -346,7 +347,7 @@ public class PyTorchBackendCoverageTests
         string[] bounds = [lo is null ? "" : "lo", hi is null ? "" : "hi"];
         var graph = Graph(["x", .. bounds.Where(b => b.Length > 0)], ["y"], Node("Clip", ["x", .. bounds], ["y"]));
         foreach (var value in graph.Inputs.Concat(graph.Outputs)) value.Type = FloatTensor;
-        using var session = backend.CreateSession(Serialize(graph), default, default, DeviceMemorySettings.Default);
+        using var session = backend.CreateSession(Serialize(graph), default, LogSettings.Default, DeviceMemorySettings.Default);
         IShorokooTensorValue Tensor(float[] values, long[] shape)
             => backend.CreateTensorInBackendMemory(ShorokooTensorElementType.Float, [.. MemoryMarshal.AsBytes<float>(values)], shape);
         var feeds = new Dictionary<string, IShorokooTensorValue> { ["x"] = Tensor([.. Enumerable.Repeat(x, 67)], [67]) };
@@ -503,7 +504,7 @@ public class PyTorchBackendCoverageTests
             Node("Constant", [], ["pads"], attributes: Tensor("value", 7, [2], [1, 1])),
             Node("Constant", [], ["fill"], attributes: fill),
             Node("Pad", ["x0", "pads", "fill"], ["y"]));
-        using var session = backend.CreateSession(Serialize(graph), default, default, DeviceMemorySettings.Default);
+        using var session = backend.CreateSession(Serialize(graph), default, LogSettings.Default, DeviceMemorySettings.Default);
         using var x = backend.CreateTensorFromRawBytes(type, new byte[value.Length], [1]);
         using var y = session.Run(Feeds(x), ["y"], RunSettings.Default)[0];
         return backend.CopyTensorToHost(y).SequenceEqual([.. value, .. new byte[value.Length], .. value]);
@@ -530,7 +531,7 @@ public class PyTorchBackendCoverageTests
         var branch = Node("If", ["c"], ["y"]);
         branch.Attributes.Add(new AttributeProto { Name = "then_branch", Type = AttributeProto.AttributeType.Graph, G = thenBranch });
         branch.Attributes.Add(new AttributeProto { Name = "else_branch", Type = AttributeProto.AttributeType.Graph, G = elseBranch });
-        using var session = Torch.CreateSession(Serialize(Graph(["c", "x"], ["y"], branch), twice), default, default, DeviceMemorySettings.Default);
+        using var session = Torch.CreateSession(Serialize(Graph(["c", "x"], ["y"], branch), twice), default, LogSettings.Default, DeviceMemorySettings.Default);
 
         Assert.Equal([2f, 4f], RunFloats(session, true, [1f, 2f]));
         Assert.Equal([-1f, -2f], RunFloats(session, false, [1f, 2f]));
@@ -587,16 +588,16 @@ public class PyTorchBackendCoverageTests
         call.Attributes.Add(new AttributeProto { Name = "shrk_dtype", Type = AttributeProto.AttributeType.Ints, Ints = [1] });
         var bogus = Node("Twice", ["x"], ["y"], domain: "Functions");
         bogus.Attributes.Add(new AttributeProto { Name = "scale", Type = AttributeProto.AttributeType.Int, I = 2 });
-        using var session = Torch.CreateSession(Serialize(Graph(["c", "x"], ["y"], call), twice), default, default, DeviceMemorySettings.Default);
+        using var session = Torch.CreateSession(Serialize(Graph(["c", "x"], ["y"], call), twice), default, LogSettings.Default, DeviceMemorySettings.Default);
 
         Assert.Equal([2f, 4f], RunFloats(session, true, [1f, 2f]));
-        Assert.Throws<TorchUnsupportedModelException>(() => Torch.CreateSession(Serialize(Graph(["c", "x"], ["y"], bogus), twice), default, default, DeviceMemorySettings.Default));
+        Assert.Throws<TorchUnsupportedModelException>(() => Torch.CreateSession(Serialize(Graph(["c", "x"], ["y"], bogus), twice), default, LogSettings.Default, DeviceMemorySettings.Default));
     }
 
     [Fact]
     public void TestAnOutputIsMemoryOfItsOwnEvenWhereTheGraphReturnsItsInput()
     {
-        using var session = Torch.CreateSession(Onnx("Identity", (int)ShorokooTensorElementType.Float), default, default, DeviceMemorySettings.Default);
+        using var session = Torch.CreateSession(Onnx("Identity", (int)ShorokooTensorElementType.Float), default, LogSettings.Default, DeviceMemorySettings.Default);
         using var input = Torch.CreateTensor([1f, 2f], [2]);
         var output = session.Run(new Dictionary<string, IShorokooTensorValue> { ["x0"] = input }, ["y"], RunSettings.Default)[0];
         output.GetTensorMutableDataAsSpan<float>()[0] = 5f;
@@ -610,7 +611,7 @@ public class PyTorchBackendCoverageTests
     public void TestARunOnACardSetsTorchsTensorFloat32SwitchesFromItsSessionAndARunOnTheCpuSetsNeither()
     {
         var allowing = SideBySideModel.AllowingTensorFloat32;
-        using var session = Torch.CreateSession(Onnx("Neg", (int)ShorokooTensorElementType.Float), default, default, DeviceMemorySettings.Default);
+        using var session = Torch.CreateSession(Onnx("Neg", (int)ShorokooTensorElementType.Float), default, LogSettings.Default, DeviceMemorySettings.Default);
         using var x = Torch.CreateTensor([1f], [1]);
         const string Switches = "(torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32)";
         const string Set = "__import__('shorokoo_torch.runtime', fromlist=['runtime']).float32_precision";
@@ -701,7 +702,7 @@ public class PyTorchBackendCoverageTests
     [Fact]
     public void TestEveryConsumedFeedIsReleasedExactlyOnceHoweverTheRunEnds()
     {
-        using var session = Torch.CreateSession(Onnx("Neg", (int)ShorokooTensorElementType.Float), default, default, DeviceMemorySettings.Default);
+        using var session = Torch.CreateSession(Onnx("Neg", (int)ShorokooTensorElementType.Float), default, LogSettings.Default, DeviceMemorySettings.Default);
         using var cancelled = new CancellationTokenSource();
         cancelled.Cancel();
 
@@ -715,9 +716,9 @@ public class PyTorchBackendCoverageTests
     [Fact]
     public void TestAModelTheBackendCannotRunIsRefusedAtSessionCreationNamingTheOperator()
     {
-        var unknown = Assert.Throws<TorchUnsupportedModelException>(() => Torch.CreateSession(Onnx("NoSuchOperator", 1), default, default, DeviceMemorySettings.Default));
-        var foreign = Assert.Throws<TorchUnsupportedModelException>(() => Torch.CreateSession(Onnx("Relu", 1, domain: "com.example"), default, default, DeviceMemorySettings.Default));
-        var attribute = Assert.Throws<TorchUnsupportedModelException>(() => Torch.CreateSession(Onnx("Relu", 1, attribute: new AttributeProto { Name = "bogus", Type = AttributeProto.AttributeType.Int, I = 1 }), default, default, DeviceMemorySettings.Default));
+        var unknown = Assert.Throws<TorchUnsupportedModelException>(() => Torch.CreateSession(Onnx("NoSuchOperator", 1), default, LogSettings.Default, DeviceMemorySettings.Default));
+        var foreign = Assert.Throws<TorchUnsupportedModelException>(() => Torch.CreateSession(Onnx("Relu", 1, domain: "com.example"), default, LogSettings.Default, DeviceMemorySettings.Default));
+        var attribute = Assert.Throws<TorchUnsupportedModelException>(() => Torch.CreateSession(Onnx("Relu", 1, attribute: new AttributeProto { Name = "bogus", Type = AttributeProto.AttributeType.Int, I = 1 }), default, LogSettings.Default, DeviceMemorySettings.Default));
 
         Assert.Equal(("NoSuchOperator", TorchUnsupportedReason.UnknownOperator), (unknown.Operator, unknown.Reason));
         Assert.Equal(("com.example", TorchUnsupportedReason.UnknownOperator), (foreign.Domain, foreign.Reason));
@@ -739,7 +740,7 @@ public class PyTorchBackendCoverageTests
             Node("ReduceSum", ["tp"], ["loss"]),
             AutoGrad(["loss", "w", "b", "p", "u"], ["gw", "gb", "gp", "gu"]),
             Node("Sub", ["w", "gw"], ["w2"]));
-        using var session = Torch.CreateSession(TrainingStep(step), ShorokooGraphOptimization.TrainingStep, default, DeviceMemorySettings.Default);
+        using var session = Torch.CreateSession(TrainingStep(step), ShorokooGraphOptimization.TrainingStep, LogSettings.Default, DeviceMemorySettings.Default);
         var outputs = RunFloats(session, new() { ["w"] = w, ["b"] = b, ["x"] = x, ["c"] = c, ["u"] = [4f] }, ["w2", "gb", "gp", "gu", "loss"]);
 
         var t = w.Select((wi, i) => MathF.Tanh(wi * x[i] + b[i])).ToArray();
@@ -762,9 +763,9 @@ public class PyTorchBackendCoverageTests
         var activations = Graph(["w"], ["g"],
             Node("Softplus", ["w"], ["a"]), Node("Elu", ["w"], ["e"]), Node("Selu", ["w"], ["s"]), Node("Celu", ["w"], ["c"]),
             Node("Sum", ["a", "e", "s", "c"], ["y"]), Node("ReduceSum", ["y"], ["loss"]), AutoGrad(["loss", "w"], ["g"]));
-        using var constantSession = Torch.CreateSession(TrainingStep(constant), default, default, DeviceMemorySettings.Default);
-        using var activationSession = Torch.CreateSession(TrainingStep(activations), default, default, DeviceMemorySettings.Default);
-        using var padValueSession = Torch.CreateSession(TrainingStep(padValue), default, default, DeviceMemorySettings.Default);
+        using var constantSession = Torch.CreateSession(TrainingStep(constant), default, LogSettings.Default, DeviceMemorySettings.Default);
+        using var activationSession = Torch.CreateSession(TrainingStep(activations), default, LogSettings.Default, DeviceMemorySettings.Default);
+        using var padValueSession = Torch.CreateSession(TrainingStep(padValue), default, LogSettings.Default, DeviceMemorySettings.Default);
         using var x = Torch.CreateTensor([1f, 2f], [2]);
         using var pads = Torch.CreateTensor([1L, 2L], [2]);
         using var w = Torch.CreateTensor([3f], []);
@@ -792,8 +793,8 @@ public class PyTorchBackendCoverageTests
         Assert.Equal("Tanh", Refusal(tanhOnPath).Operator);
         Assert.Equal("Tanh", Refusal(tanhInAFunction).Operator);
         Assert.Equal("Tanh", Refusal(tanhInABranch).Operator);
-        Torch.CreateSession(TrainingStep(tanhOffPath), default, default, DeviceMemorySettings.Default).Dispose();
-        Torch.CreateSession(TrainingStep(tanhPastAShape), default, default, DeviceMemorySettings.Default).Dispose();
+        Torch.CreateSession(TrainingStep(tanhOffPath), default, LogSettings.Default, DeviceMemorySettings.Default).Dispose();
+        Torch.CreateSession(TrainingStep(tanhPastAShape), default, LogSettings.Default, DeviceMemorySettings.Default).Dispose();
         Assert.Equal("AutoGrad", Refusal(inABranch).Operator);
         Assert.Equal("AutoGrad", Refusal(twice).Operator);
         Assert.Equal("AutoGrad", Refusal(integer).Operator);
@@ -886,7 +887,7 @@ public class PyTorchBackendCoverageTests
     }
 
     private static TorchUnsupportedModelException Refusal(GraphProto step, long version = 1)
-        => Assert.Throws<TorchUnsupportedModelException>(() => Torch.CreateSession(TrainingStep(step, version), default, default, DeviceMemorySettings.Default));
+        => Assert.Throws<TorchUnsupportedModelException>(() => Torch.CreateSession(TrainingStep(step, version), default, LogSettings.Default, DeviceMemorySettings.Default));
 
     private static IDisposable OperatorTableGradient(string opType, string gradient)
         => Shorokoo.PythonTranslation.Operators.OperatorTable.OverrideGradient(
@@ -1029,7 +1030,7 @@ public class PyTorchBackendCoverageTests
     [Fact]
     public void TestARunIsStoppedBetweenNodesWhenItsTokenIsCancelledWhileItRuns()
     {
-        using var session = Torch.CreateSession(Serialize(CountingLoop()), default, default, DeviceMemorySettings.Default);
+        using var session = Torch.CreateSession(Serialize(CountingLoop()), default, LogSettings.Default, DeviceMemorySettings.Default);
         using var cancelled = new CancellationTokenSource();
         cancelled.Cancel();
         using var later = new CancellationTokenSource(TimeSpan.FromMilliseconds(300));
@@ -1046,40 +1047,106 @@ public class PyTorchBackendCoverageTests
         Assert.Equal([5f], Count(5, CancellationToken.None)[0].GetTensorDataAsSpan<float>().ToArray());
     }
 
-    [Fact]
-    public void TestAWarningARunRaisesIsShownOnlyWhereItsSessionsLogSeverityAsksForWarnings()
+    private static readonly Lock WarningSpyGate = new();
+
+    internal static (string[] Shown, RuntimeLogMessage[] Collected) WarningsRaised(string module, string source)
     {
-        Torch.Start();
+        lock (WarningSpyGate)
+            using (PythonRuntime.Gil())
+            {
+                using var install = Py.CreateScope();
+                install.Exec($$"""
+                    import threading
+                    from {{module}} import runtime as rt
+                    if not hasattr(rt, "_spied"):
+                        rt._spied = threading.local()
+                        def spy(message, *rest, original=rt._show_warning, spied=rt._spied):
+                            shown = getattr(spied, "shown", None)
+                            if shown is None:
+                                original(message, *rest)
+                            else:
+                                shown.append(str(message))
+                        rt._show_warning = spy
+                    """);
+            }
         using (PythonRuntime.Gil())
         {
             using var scope = Py.CreateScope();
-            scope.Exec("""
+            scope.Exec($$"""
                 import warnings
-                from shorokoo_torch import runtime as rt
+                from {{module}} import runtime as rt
                 shown = []
-                original = rt._show_warning
-                rt._show_warning = lambda message, *rest: shown.append(str(message))
+                collected = []
+                rt._spied.shown = shown
                 try:
-                    for severity in (None, 0, 1, 2, 3, 4):
-                        token = rt._warning_severity.set(severity)
-                        try:
-                            warnings.warn_explicit(f"at {severity}", UserWarning, "model", 1)
-                        finally:
-                            rt._warning_severity.reset(token)
+                    warnings.warn_explicit("outside", UserWarning, "model", 1)
+                    token = rt._warnings_collected.set(collected)
+                    try:
+                        warnings.warn_explicit("inside", RuntimeWarning, "model", 2)
+                    finally:
+                        rt._warnings_collected.reset(token)
                 finally:
-                    rt._show_warning = original
+                    rt._spied.shown = None
                 """);
-            Assert.Equal(["at None", "at 0", "at 1", "at 2"], scope.Get<string[]>("shown"));
+            using var collected = new PyList(scope.Get("collected"));
+            return (scope.Get<string[]>("shown"), PythonWarnings.Read(collected, source));
         }
     }
+
+    internal static void AssertWarningsReachTheirLogSettings(string module, string source)
+    {
+        var (shown, collected) = WarningsRaised(module, source);
+        ConcurrentQueue<RuntimeLogMessage> warnings = [], errors = [];
+        PythonWarnings.Deliver(CoreUtilsCoverageTests.Into(warnings, ShorokooLogSeverity.Warning), collected);
+        PythonWarnings.Deliver(CoreUtilsCoverageTests.Into(errors, ShorokooLogSeverity.Error), collected);
+
+        Assert.Equal(["outside"], shown);
+        Assert.Equal([new RuntimeLogMessage(ShorokooLogSeverity.Warning, source, "RuntimeWarning", "model:2", "inside")], collected);
+        Assert.Equal(collected, warnings);
+        Assert.Empty(errors);
+    }
+
+    [Fact]
+    public void TestAWarningARunRaisesReachesItsRunsLogSettingsAndOneOutsideARunIsShown()
+    {
+        Torch.Start();
+        AssertWarningsReachTheirLogSettings("shorokoo_torch", TorchRuntime.Source);
+    }
+
+    private const string PaletteWithByteTransparency = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAABAQMAAADO7O3JAAAABlBMVEX/AAAAAP9sof2OAAAAAnRSTlOA/2ASuv4AAAAKSURBVHjaY3AAAABCAEGEv45iAAAAAElFTkSuQmCC";
+
+    internal static (string Source, string Category)[] RunWarnings<T>(IShorokooBackend backend, byte[] model, T[] input, ShorokooLogSeverity severity) where T : unmanaged
+    {
+        ConcurrentQueue<RuntimeLogMessage> sink = [];
+        using var session = backend.CreateSession(model, default, LogSettings.None, DeviceMemorySettings.Default);
+        using var x = backend.CreateTensor(input, [input.Length]);
+        foreach (var y in session.Run(new Dictionary<string, IShorokooTensorValue> { ["x0"] = x }, ["y"], new RunSettings { Log = CoreUtilsCoverageTests.Into(sink, severity) }))
+            y.Dispose();
+        return [.. sink.Select(m => (m.Source, m.Category))];
+    }
+
+    internal static void AssertEachRunsWarningReachesThatRunsLogSettingsAlone<T>(IShorokooBackend backend, byte[] model, T[] input, string source) where T : unmanaged
+    {
+        Assert.Equal([(source, "UserWarning")], RunWarnings(backend, model, input, ShorokooLogSeverity.Warning));
+        Assert.Empty(RunWarnings(backend, model, input, ShorokooLogSeverity.Error));
+        Assert.Equal([(source, "UserWarning")], RunWarnings(backend, model, input, ShorokooLogSeverity.Warning));
+    }
+
+    [Fact]
+    public void TestEveryRunAPillowWarningIsRaisedInDeliversItAloneToThatRunsLogSettingsAlone()
+        => Utils.OwnProcess.Run(typeof(PyTorchBackendCoverageTests), nameof(EveryRunAPillowWarningIsRaisedInDeliversItAloneToThatRunsLogSettingsAlone));
+
+    internal static void EveryRunAPillowWarningIsRaisedInDeliversItAloneToThatRunsLogSettingsAlone()
+        => AssertEachRunsWarningReachesThatRunsLogSettingsAlone(
+            Torch, Onnx("ImageDecoder", (int)ShorokooTensorElementType.UInt8), Convert.FromBase64String(PaletteWithByteTransparency), TorchRuntime.Source);
 
     [Fact]
     public void TestACpuSessionHasNoArenaFiguresLeavesItsOutputsInHostMemoryAndRunsEveryNodeOnTheHost()
     {
         var graph = ComputeContextLifetimeCoverageTests.GraphOf("a:float[2] b:float[2]", "O:float[2]",
             ComputeContextLifetimeCoverageTests.Op("Sub", "a b", "t"), ComputeContextLifetimeCoverageTests.Op("Neg", "t", "O"));
-        using var traced = Torch.CreateSession(Serialize(graph), default, default, DeviceMemorySettings.Default, new DiagnosticSettings { TraceNodePlacement = true });
-        using var plain = Torch.CreateSession(Serialize(graph), default, default, DeviceMemorySettings.Default);
+        using var traced = Torch.CreateSession(Serialize(graph), default, LogSettings.Default, DeviceMemorySettings.Default, new DiagnosticSettings { TraceNodePlacement = true });
+        using var plain = Torch.CreateSession(Serialize(graph), default, LogSettings.Default, DeviceMemorySettings.Default);
         using var a = Torch.CreateTensor([5f, 7f], [2]);
         using var b = Torch.CreateTensor([1f, 2f], [2]);
         var feeds = new Dictionary<string, IShorokooTensorValue> { ["a"] = a, ["b"] = b };
@@ -1180,7 +1247,7 @@ public class PyTorchBackendCoverageTests
     {
         var graph = ComputeContextLifetimeCoverageTests.GraphOf("a:float[3] b:float[3] c:float[3] g:float[3]", "O0:float[3] O1:float[3] O2:float[3]",
             Op("Mul", "a g", "t"), Op("Neg", "t", "O0"), Op("Sub", "b g", "O1"), Op("Add", "c g", "O2"));
-        using var session = Torch.CreateSession(Serialize(graph), default, default, DeviceMemorySettings.Default, DiagnosticSettings.Default,
+        using var session = Torch.CreateSession(Serialize(graph), default, LogSettings.Default, DeviceMemorySettings.Default, DiagnosticSettings.Default,
             [new OutputAlias("O0", "a"), new OutputAlias("O1", "b"), new OutputAlias("O2", "c")]);
 
         Assert.Equal("-,b,c -1 -1 -1 9 9 9 101 101 101", AliasedRun(session, graph));
@@ -1191,8 +1258,8 @@ public class PyTorchBackendCoverageTests
     public void TestTwoSessionsOverOneModelWithDifferentPairsEachRunTheirOwnTranslation()
     {
         var graph = ComputeContextLifetimeCoverageTests.GraphOf("b:float[3] c:float[3] g:float[3]", "O2:float[3] O1:float[3]", Op("Add", "c g", "O2"), Op("Sub", "b g", "O1"));
-        using var first = Torch.CreateSession(Serialize(graph), default, default, DeviceMemorySettings.Default, DiagnosticSettings.Default, [new OutputAlias("O2", "c")]);
-        using var second = Torch.CreateSession(Serialize(graph), default, default, DeviceMemorySettings.Default, DiagnosticSettings.Default, [new OutputAlias("O1", "b"), new OutputAlias("O2", "c")]);
+        using var first = Torch.CreateSession(Serialize(graph), default, LogSettings.Default, DeviceMemorySettings.Default, DiagnosticSettings.Default, [new OutputAlias("O2", "c")]);
+        using var second = Torch.CreateSession(Serialize(graph), default, LogSettings.Default, DeviceMemorySettings.Default, DiagnosticSettings.Default, [new OutputAlias("O1", "b"), new OutputAlias("O2", "c")]);
 
         Assert.Equal("c,- 101 101 101 9 9 9", AliasedRun(first, graph));
         Assert.Equal("c,b 101 101 101 9 9 9", AliasedRun(second, graph));
@@ -1274,7 +1341,7 @@ public class PyTorchBackendCoverageTests
         var model = Serialize(GraphOn("x:float[4]", "O", Op("Neg", "x", "O")));
         using var owner = context;
         using var session = context?.BuildSession(Torch, model, ShorokooGraphOptimization.EnableAll, DeviceMemorySettings.Default, placing: placing)
-            ?? Torch.CreateSession(model, default, default, DeviceMemorySettings.Default);
+            ?? Torch.CreateSession(model, default, LogSettings.Default, DeviceMemorySettings.Default);
         if (stopPlacing) session.StopPlacing();
         var x = (TorchTensorValue)Torch.CreateTensor([1f, 2f, 3f, 4f], [4]);
         TorchTensorValue seen;
@@ -1311,6 +1378,15 @@ public class PyTorchBackendCoverageTests
         Assert.True(PassHoldsNoMoreOnTorch(Benchmarks.MemoryPassConv.ComputationGraph, [8L, 3L, 64L, 64L]));
         Assert.True(PassHoldsNoMoreOnTorch(Benchmarks.MemoryPassMlp.ComputationGraph, [64L, 256L]));
         Assert.True(PassHoldsNoMoreOnTorch(ChunkedSdpaMeanPoolModel.ComputationGraph, [2L, 4L, 256L, 32L]));
+    }
+
+    [Fact]
+    public void TestATorchRigRecordsNoAnswerOfItsQuickModelOfARun()
+    {
+        using var context = new ComputeContext(Torch);
+        Assert.Empty(TrainingRig.FromScratch(Benchmarks.MemoryPassMlp.ComputationGraph, Shorokoo.Modules.Losses.L2Loss.ComputationGraph,
+            Shorokoo.Modules.Optimizers.SGDOptimizer.ComputationGraph, [TensorData([4L, 32L], new float[4 * 32])],
+            new Shorokoo.Modules.Optimizers.SGDOptimizerHyperparameters { LearningRate = 0.01f }, runtimeContext: context).RunModelAnswers);
     }
 
     [Fact]
@@ -1560,7 +1636,7 @@ public class PyTorchBackendCoverageTests
     // On a card, " allocating" follows where the consuming run did not allocate its outputs' bytes less.
     internal static string PlacedOn(TorchBackend backend, GraphProto graph, bool consume = true, bool feedTwice = false)
     {
-        using var session = backend.CreateSession(Serialize(graph), default, default, DeviceMemorySettings.Default, DiagnosticSettings.Default, []);
+        using var session = backend.CreateSession(Serialize(graph), default, LogSettings.Default, DeviceMemorySettings.Default, DiagnosticSettings.Default, []);
         var names = graph.Outputs.Select(o => o.Name).ToArray();
         (string[] Values, string Where, long Allocated, long Bytes) Run(bool consuming)
         {
@@ -1645,10 +1721,10 @@ public class PyTorchBackendCoverageTests
     [Fact]
     public void TestAnInitializerWhoseRawDataIsNotItsShapesSizeIsRefusedAtSessionCreation()
     {
-        Assert.Throws<TorchUnsupportedModelException>(() => Torch.CreateSession(RawInitialized(4), default, default, DeviceMemorySettings.Default));
-        Assert.Throws<TorchUnsupportedModelException>(() => Torch.CreateSession(RawInitialized(16), default, default, DeviceMemorySettings.Default));
-        Assert.Throws<TorchUnsupportedModelException>(() => Torch.CreateSession(RawInitialized(0), default, default, DeviceMemorySettings.Default));
-        Torch.CreateSession(RawInitialized(12), default, default, DeviceMemorySettings.Default).Dispose();
+        Assert.Throws<TorchUnsupportedModelException>(() => Torch.CreateSession(RawInitialized(4), default, LogSettings.Default, DeviceMemorySettings.Default));
+        Assert.Throws<TorchUnsupportedModelException>(() => Torch.CreateSession(RawInitialized(16), default, LogSettings.Default, DeviceMemorySettings.Default));
+        Assert.Throws<TorchUnsupportedModelException>(() => Torch.CreateSession(RawInitialized(0), default, LogSettings.Default, DeviceMemorySettings.Default));
+        Torch.CreateSession(RawInitialized(12), default, LogSettings.Default, DeviceMemorySettings.Default).Dispose();
     }
 
     [Fact]
@@ -1726,11 +1802,11 @@ public class PyTorchBackendCoverageTests
     public void TestAFunctionCallOmittingTrailingInputsPassesNoneAndOneWithMoreInputsOrOutputsThanTheFunctionIsRefused()
     {
         var first = Function("First", ["a", "b"], ["y"], "", Node("Neg", ["a"], ["y"]));
-        using var session = Torch.CreateSession(Serialize(Graph(["x"], ["y"], Node("First", ["x"], ["y"], "Functions")), first), default, default, DeviceMemorySettings.Default);
+        using var session = Torch.CreateSession(Serialize(Graph(["x"], ["y"], Node("First", ["x"], ["y"], "Functions")), first), default, LogSettings.Default, DeviceMemorySettings.Default);
 
         Assert.Equal([-1f, -2f], RunFloats(session, new() { ["x"] = [1f, 2f] }, ["y"])[0]);
-        Assert.Throws<TorchUnsupportedModelException>(() => Torch.CreateSession(Serialize(Graph(["x"], ["y"], Node("First", ["x", "x", "x"], ["y"], "Functions")), first), default, default, DeviceMemorySettings.Default));
-        Assert.Throws<TorchUnsupportedModelException>(() => Torch.CreateSession(Serialize(Graph(["x"], ["y"], Node("First", ["x"], ["y", "z"], "Functions")), first), default, default, DeviceMemorySettings.Default));
+        Assert.Throws<TorchUnsupportedModelException>(() => Torch.CreateSession(Serialize(Graph(["x"], ["y"], Node("First", ["x", "x", "x"], ["y"], "Functions")), first), default, LogSettings.Default, DeviceMemorySettings.Default));
+        Assert.Throws<TorchUnsupportedModelException>(() => Torch.CreateSession(Serialize(Graph(["x"], ["y"], Node("First", ["x"], ["y", "z"], "Functions")), first), default, LogSettings.Default, DeviceMemorySettings.Default));
     }
 
     [Fact]
@@ -1741,32 +1817,32 @@ public class PyTorchBackendCoverageTests
         call.Overload = "neg";
         var stepCall = Node("F", ["w"], ["t"], "Functions");
         stepCall.Overload = "neg";
-        using var session = Torch.CreateSession(Serialize(Graph(["x"], ["y"], call), overloads), default, default, DeviceMemorySettings.Default);
-        using var step = Torch.CreateSession(TrainingStep(Graph(["w"], ["g"], stepCall, Node("ReduceSum", ["t"], ["loss"]), AutoGrad(["loss", "w"], ["g"])), 1, overloads), default, default, DeviceMemorySettings.Default);
+        using var session = Torch.CreateSession(Serialize(Graph(["x"], ["y"], call), overloads), default, LogSettings.Default, DeviceMemorySettings.Default);
+        using var step = Torch.CreateSession(TrainingStep(Graph(["w"], ["g"], stepCall, Node("ReduceSum", ["t"], ["loss"]), AutoGrad(["loss", "w"], ["g"])), 1, overloads), default, LogSettings.Default, DeviceMemorySettings.Default);
 
         Assert.Equal([-1f, 2f], RunFloats(session, new() { ["x"] = [1f, -2f] }, ["y"])[0]);
         Assert.Equal([-1f, -1f], RunFloats(step, new() { ["w"] = [1f, -2f] }, ["g"])[0]);
-        Assert.Throws<TorchUnsupportedModelException>(() => Torch.CreateSession(Serialize(Graph(["x"], ["y"], call), overloads[0], overloads[0]), default, default, DeviceMemorySettings.Default));
+        Assert.Throws<TorchUnsupportedModelException>(() => Torch.CreateSession(Serialize(Graph(["x"], ["y"], call), overloads[0], overloads[0]), default, LogSettings.Default, DeviceMemorySettings.Default));
     }
 
     [Fact]
     public void TestALoopThatRunsNoIterationHandsOutEachScanOutputEmptyOfItsBodysDeclaredTypeAndShapeAndOneOfNoTypeIsRefused()
     {
-        using var session = Torch.CreateSession(Serialize(ScanLoop(typed: true)), default, default, DeviceMemorySettings.Default);
+        using var session = Torch.CreateSession(Serialize(ScanLoop(typed: true)), default, LogSettings.Default, DeviceMemorySettings.Default);
         using var m = Torch.CreateTensor([0L], []);
         using var v = Torch.CreateTensor([0f], []);
         using var scanned = session.Run(new Dictionary<string, IShorokooTensorValue> { ["m"] = m, ["v"] = v }, ["s"], RunSettings.Default)[0];
 
         Assert.Equal("Int64 0,2,3", $"{scanned.ElementType} {string.Join(",", scanned.Shape)}");
-        Assert.Throws<TorchUnsupportedModelException>(() => Torch.CreateSession(Serialize(ScanLoop(typed: false)), default, default, DeviceMemorySettings.Default));
+        Assert.Throws<TorchUnsupportedModelException>(() => Torch.CreateSession(Serialize(ScanLoop(typed: false)), default, LogSettings.Default, DeviceMemorySettings.Default));
     }
 
     [Fact]
     public void TestAnAttributeWithNeitherATypeNorAValueOrWithTextThatIsNotUtf8IsRefusedAtSessionCreation()
     {
-        Assert.Throws<TorchUnsupportedModelException>(() => Torch.CreateSession(Typed(11, ["x"], ["y"], [Node("ReduceSum", ["x"], ["y"], attributes: new AttributeProto { Name = "axes" })]), default, default, DeviceMemorySettings.Default));
-        Assert.Throws<TorchUnsupportedModelException>(() => Torch.CreateSession(Typed(21, ["x"], ["y"], [Node("Gelu", ["x"], ["y"], attributes: new AttributeProto { Name = "approximate", Type = AttributeProto.AttributeType.String, S = [0x74, 0xFF] })]), default, default, DeviceMemorySettings.Default));
-        Assert.Throws<TorchUnsupportedModelException>(() => Torch.CreateSession(Typed(21, ["x"], ["y"], [Node("Constant", [], ["y"], attributes: new AttributeProto { Name = "value_string", Type = AttributeProto.AttributeType.String, S = [0xC3] })]), default, default, DeviceMemorySettings.Default));
+        Assert.Throws<TorchUnsupportedModelException>(() => Torch.CreateSession(Typed(11, ["x"], ["y"], [Node("ReduceSum", ["x"], ["y"], attributes: new AttributeProto { Name = "axes" })]), default, LogSettings.Default, DeviceMemorySettings.Default));
+        Assert.Throws<TorchUnsupportedModelException>(() => Torch.CreateSession(Typed(21, ["x"], ["y"], [Node("Gelu", ["x"], ["y"], attributes: new AttributeProto { Name = "approximate", Type = AttributeProto.AttributeType.String, S = [0x74, 0xFF] })]), default, LogSettings.Default, DeviceMemorySettings.Default));
+        Assert.Throws<TorchUnsupportedModelException>(() => Torch.CreateSession(Typed(21, ["x"], ["y"], [Node("Constant", [], ["y"], attributes: new AttributeProto { Name = "value_string", Type = AttributeProto.AttributeType.String, S = [0xC3] })]), default, LogSettings.Default, DeviceMemorySettings.Default));
     }
 
     [Fact]
@@ -1937,7 +2013,7 @@ public class PyTorchBackendCoverageTests
     private static NodeProto Op(string op, string inputs, string outputs) => ComputeContextLifetimeCoverageTests.Op(op, inputs, outputs);
 
     private static IShorokooSession Aliasing(GraphProto graph)
-        => Torch.CreateSession(Serialize(graph), default, default, DeviceMemorySettings.Default, DiagnosticSettings.Default, [new OutputAlias("O", "a")]);
+        => Torch.CreateSession(Serialize(graph), default, LogSettings.Default, DeviceMemorySettings.Default, DiagnosticSettings.Default, [new OutputAlias("O", "a")]);
 
     private static (string? Input, string Outputs) Aliased(
         string inputs, string outputs, NodeProto[] nodes, float[]? b = null, bool consume = true, bool feedTwice = false, bool integers = false)
@@ -2089,7 +2165,7 @@ public class PyTorchBackendCoverageTests
     private static (ShorokooTensorElementType Type, string Shape, double[] Values)[] Run(
         IShorokooBackend backend, byte[] model, (string Name, float[] Data, long[] Shape)[] feeds, string[] outputs)
     {
-        using var session = backend.CreateSession(model, default, default, DeviceMemorySettings.Default);
+        using var session = backend.CreateSession(model, default, LogSettings.Default, DeviceMemorySettings.Default);
         var inputs = feeds.ToDictionary(f => f.Name, f => backend.CreateTensor(f.Data, f.Shape));
         var values = session.Run(inputs, outputs, RunSettings.Default);
         (ShorokooTensorElementType, string, double[])[] results = [.. values.Select(v => (v.ElementType, string.Join(",", v.Shape),

@@ -525,6 +525,21 @@ model.skpt
         "overrides": [                    // omitted when none
           { "collection": "Params", "path": [1, 3], "seed": 42 }
         ]
+      },
+
+      // What the backend's model of a run told the memory-aware pass: the peak, or null where
+      // it could not tell, by the SHA-256 of the question. The question hashes the step asked
+      // about (its values renamed in order of appearance) and the state it writes in place;
+      // the precision; the backend's type, the layout it runs and the kernel workarounds it
+      // names; the builds of the backend's assembly and of Shorokoo's; and the backend's
+      // run-model identity: for ONNX Runtime, its version and the build of the libraries over
+      // it, the processor's instruction sets and, on a card, its compute capability, and
+      // whether it fuses the step's optimizer updates, with the build of the library that does.
+      // A rig loaded where all of that is the same takes them in place of asking; anywhere
+      // else it asks anew. Omitted when the pass asked nothing.
+      "runModelAnswers": {
+        "9f2c…": 2689049,
+        "41ad…": null
       }
     }
   }

@@ -16,10 +16,23 @@ namespace Shorokoo.Jax;
 /// compiled when the session is created, so that a model the backend cannot compile — one that
 /// needs, as a number, something the graph computes from an input's values — is refused then.</para>
 ///
-/// <para>Every output is handed over as memory of its own, where the backend's runs leave their
-/// outputs: on a card, an array no other value shares a write to; on the CPU, a host array of its
-/// own. A JAX array is never written in place, so a run writes no output into a consumed input
-/// (<see cref="BindableAliases"/> is empty).</para>
+/// <para>Every output is handed over where the backend's runs leave their outputs: on a card, an
+/// array no other value shares a write to; on the CPU, a host array of its own.</para>
+///
+/// <para><b>Donation.</b> Output aliasing on JAX is XLA's buffer donation: the inputs of the pairs
+/// the session was built with (<see cref="BindableAliases"/>) are donated to every program compiled
+/// from the model, and XLA may then write an output over a donated input, as plain JAX does with
+/// <c>jax.jit(..., donate_argnums=...)</c>. A donated array is deleted by the run, so a run donates
+/// an input as it is only where it owns it: a value the run consumed (see
+/// <see cref="RunConsuming(IReadOnlyDictionary{string, IShorokooTensorValue}, IReadOnlyCollection{IShorokooTensorValue}, IReadOnlyList{string}, RunSettings, out IReadOnlyList{string})"/>),
+/// fed under that one input name. Every other value at a donated input -- one the run was lent -- is
+/// copied first, in the run's memory, and the copy donated, so a lent value is never written over
+/// or deleted, whatever the program. XLA works out for itself which outputs it can write over which
+/// donated inputs, and orders the program so that nothing reads a donated input after it is written
+/// over, so the session proves nothing of the pairs it is handed again (the framework hands it only
+/// those <see cref="OutputAliasProof"/> proves): an output XLA cannot write over an input is computed
+/// into memory of its own, as without donation. On a card the output written over a consumed input is in that input's memory, and the
+/// run says so; on the CPU every output is handed over as a host array of its own, so none is.</para>
 ///
 /// <para><b>Stopping.</b> A run is one compiled program, which cannot be stopped part way: a run
 /// whose token is cancelled before it starts is refused, and one cancelled while it runs finishes.</para>
@@ -36,8 +49,19 @@ internal sealed class JaxSession : IShorokooSession
     private readonly string[] _inputNames;
     private readonly string[] _outputNames;
     private readonly Dictionary<string, int> _outputIndex;
-    private readonly ShorokooLogSeverity _logSeverity;
     private readonly NodePlacement? _nodePlacement;
+
+    // The pairs a run may write in place, and the positions of their inputs, which every program
+    // compiled from the model donates.
+    private readonly OutputAlias[] _bindable;
+    private readonly int[] _donated;
+
+    // What every output of a program on a card is -- element type, shape, device -- by the token the
+    // runtime names the program and the outputs a run wanted by (runtime.run): the same every run, so
+    // read from JAX once. Under _gate.
+    private readonly Dictionary<long, JaxTensorValue.Description[]> _descriptions = [];
+
+    private readonly object _gate = new();
 
     // The loaded model: its code, its constants and the programs compiled from it. Held for the
     // session's life: it is what the model is.
@@ -45,8 +69,8 @@ internal sealed class JaxSession : IShorokooSession
     private int _disposed;
 
     private JaxSession(
-        JaxBackend backend, JaxRuntime runtime, TranslatedModel model, ShorokooLogSeverity logSeverity,
-        NodePlacement? nodePlacement, PyObject loaded)
+        JaxBackend backend, JaxRuntime runtime, TranslatedModel model,
+        NodePlacement? nodePlacement, PyObject loaded, OutputAlias[] bindable)
     {
         _backend = backend;
         _runtime = runtime;
@@ -54,10 +78,14 @@ internal sealed class JaxSession : IShorokooSession
         _outputNames = model.OutputNames;
         _outputIndex = new Dictionary<string, int>(StringComparer.Ordinal);
         for (int i = 0; i < _outputNames.Length; i++) _outputIndex.TryAdd(_outputNames[i], i);
-        _logSeverity = logSeverity;
         _nodePlacement = nodePlacement;
         _model = loaded;
+        _bindable = bindable;
+        _donated = DonatedPositions(model.InputNames, bindable);
     }
+
+    private static int[] DonatedPositions(string[] inputNames, OutputAlias[] bindable)
+        => [.. bindable.Select(pair => Array.IndexOf(inputNames, pair.Input)).Order()];
 
     /// <summary>The precision XLA compiles the products and convolutions of a session of
     /// <paramref name="backend"/> in, as JAX names it: <c>HIGH</c> — TensorFloat-32 for a
@@ -70,11 +98,13 @@ internal sealed class JaxSession : IShorokooSession
     /// <summary>Translates <paramref name="modelBytes"/>, loads it, and compiles it where its inputs'
     /// shapes are fixed.</summary>
     public static JaxSession Create(
-        JaxBackend backend, ReadOnlyMemory<byte> modelBytes, ShorokooLogSeverity logSeverity, DiagnosticSettings diagnostics,
-        PrecisionSettings precision)
+        JaxBackend backend, ReadOnlyMemory<byte> modelBytes, LogSettings log, DiagnosticSettings diagnostics,
+        PrecisionSettings precision, IReadOnlyList<OutputAlias> outputAliases)
     {
+        ArgumentNullException.ThrowIfNull(log);
         ArgumentNullException.ThrowIfNull(diagnostics);
         ArgumentNullException.ThrowIfNull(precision);
+        ArgumentNullException.ThrowIfNull(outputAliases);
         ModelProto proto;
         using (var stream = new MemoryStream(modelBytes.ToArray(), writable: false))
             proto = Shorokoo.Onnx.OnnxProtobuf.ReadModel(stream);
@@ -84,10 +114,29 @@ internal sealed class JaxSession : IShorokooSession
         var hash = Convert.ToHexStringLower(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(model.Source)))[..32];
         var placement = diagnostics.TraceNodePlacement ? Placement(proto.Graph!, backend.DeviceName) : null;
         var signature = FixedSignature(proto.Graph!, model.InputNames);
+        var bindable = Bindable(proto.Graph!, model, outputAliases);
 
         var runtime = backend.Runtime;
+        RuntimeLogMessage[] warnings = [];
+        try
+        {
+            return Load(backend, runtime, model, hash, placement, signature, precision, bindable, out warnings);
+        }
+        finally
+        {
+            PythonWarnings.Deliver(log, warnings);
+        }
+    }
+
+    private static JaxSession Load(
+        JaxBackend backend, JaxRuntime runtime, TranslatedModel model, string hash, NodePlacement? placement,
+        List<(ShorokooTensorElementType, long[])>? signature, PrecisionSettings precision, OutputAlias[] bindable,
+        out RuntimeLogMessage[] warnings)
+    {
+        warnings = [];
         using (PythonRuntime.Gil())
         {
+            using var warned = new PyList();
             PyObject? loaded = null;
             try
             {
@@ -97,8 +146,10 @@ internal sealed class JaxSession : IShorokooSession
                     using var value = ConstantValue(runtime, constant);
                     constants.Append(value);
                 }
+                using var donated = new PyList();
+                foreach (var position in DonatedPositions(model.InputNames, bindable)) PyCall.Append(donated, position);
                 loaded = PyCall.Invoke(runtime.LoadModel, model.Source, $"<shorokoo-model-{hash}>", constants, backend.DeviceName,
-                    Float32Precision(backend, precision));
+                    Float32Precision(backend, precision), donated);
                 if (signature is not null)
                 {
                     using var inputs = new PyList();
@@ -109,9 +160,16 @@ internal sealed class JaxSession : IShorokooSession
                         using var entry = new PyTuple([code, dims]);
                         inputs.Append(entry);
                     }
-                    PyCall.Invoke(runtime.Prepare, loaded, inputs, (int)logSeverity).Dispose();
+                    try
+                    {
+                        PyCall.Invoke(runtime.Prepare, loaded, inputs, warned).Dispose();
+                    }
+                    finally
+                    {
+                        warnings = PythonWarnings.Read(warned, JaxRuntime.Source);
+                    }
                 }
-                return new JaxSession(backend, runtime, model, logSeverity, placement, loaded);
+                return new JaxSession(backend, runtime, model, placement, loaded, bindable);
             }
             catch (PythonException ex)
             {
@@ -168,6 +226,46 @@ internal sealed class JaxSession : IShorokooSession
         return signature;
     }
 
+    /// <summary>
+    /// The pairs of <paramref name="pairs"/> a run of the model may write in place: those naming an
+    /// input and an output of the model, each input and each output once -- the first pair naming
+    /// either takes it -- whose types agree where the graph states them: one element type and, where
+    /// it states both shapes in full, one shape. XLA writes an output over a donated input only of
+    /// its shape and element type, so a pair of others would donate an input for nothing.
+    /// </summary>
+    internal static OutputAlias[] Bindable(GraphProto graph, TranslatedModel model, IReadOnlyList<OutputAlias> pairs)
+    {
+        var inputs = new HashSet<string>(StringComparer.Ordinal);
+        var outputs = new HashSet<string>(StringComparer.Ordinal);
+        var bindable = new List<OutputAlias>();
+        foreach (var pair in pairs)
+        {
+            if (!model.InputNames.Contains(pair.Input) || !model.OutputNames.Contains(pair.Output)) continue;
+            if (inputs.Contains(pair.Input) || outputs.Contains(pair.Output)) continue;
+            var input = graph.Inputs.FirstOrDefault(i => i.Name == pair.Input)?.Type?.TensorType;
+            var output = graph.Outputs.FirstOrDefault(o => o.Name == pair.Output)?.Type?.TensorType;
+            if (!TypesAgree(input, output)) continue;
+            inputs.Add(pair.Input);
+            outputs.Add(pair.Output);
+            bindable.Add(pair);
+        }
+        return [.. bindable];
+    }
+
+    private static bool TypesAgree(TypeProto.Tensor? input, TypeProto.Tensor? output)
+    {
+        if (input is null || output is null) return true;
+        if (input.ElemType != 0 && output.ElemType != 0 && input.ElemType != output.ElemType) return false;
+        return ConcreteShape(input.Shape) is not { } inShape
+               || ConcreteShape(output.Shape) is not { } outShape
+               || inShape.SequenceEqual(outShape);
+    }
+
+    private static long[]? ConcreteShape(TensorShapeProto? shape)
+        => shape is null || shape.Dims.Any(d => !d.ShouldSerializeDimValue() || d.DimValue <= 0)
+            ? null
+            : [.. shape.Dims.Select(d => d.DimValue)];
+
     /// <summary>Every node of <paramref name="graph"/>, run on <paramref name="device"/>: a JAX
     /// session runs its whole graph where the session is.</summary>
     internal static NodePlacement Placement(GraphProto graph, string device)
@@ -179,7 +277,7 @@ internal sealed class JaxSession : IShorokooSession
 
     public SessionOutputPlacement OutputPlacement => _backend.OnCuda ? SessionOutputPlacement.Device : SessionOutputPlacement.Host;
 
-    public IReadOnlyList<OutputAlias> BindableAliases => [];
+    public IReadOnlyList<OutputAlias> BindableAliases => _bindable;
 
     public NodePlacement? ReadNodePlacement() => _nodePlacement;
 
@@ -206,11 +304,59 @@ internal sealed class JaxSession : IShorokooSession
 
     /// <summary>Runs the model on <paramref name="inputs"/>, every one of them where this backend's
     /// runs read it, and leaves every output there: on the card for a CUDA session, and in host
-    /// memory on the CPU.</summary>
+    /// memory on the CPU. Every input is lent, so one the model donates is copied first.</summary>
     public IReadOnlyList<IShorokooTensorValue> Run(
         IReadOnlyDictionary<string, IShorokooTensorValue> inputs,
         IReadOnlyList<string> outputNames,
         RunSettings runSettings)
+        => RunCore(inputs, [], outputNames, runSettings, out _);
+
+    /// <summary>Runs with <paramref name="consumed"/> handed over: each is released through the
+    /// backend, exactly once, however the run ends.</summary>
+    public IReadOnlyList<IShorokooTensorValue> RunConsuming(
+        IReadOnlyDictionary<string, IShorokooTensorValue> inputs,
+        IReadOnlyCollection<IShorokooTensorValue> consumed,
+        IReadOnlyList<string> outputNames,
+        RunSettings runSettings)
+        => RunConsuming(inputs, consumed, outputNames, runSettings, out _);
+
+    /// <summary>
+    /// Runs with <paramref name="consumed"/> handed over, donating to the program, as it is, each
+    /// consumed value at an input of <see cref="BindableAliases"/> that no other input is fed, so
+    /// that XLA may write an output over it (see the class). <paramref name="aliasedInputs"/> names,
+    /// per output, the input whose consumed value it was written over -- on a card; on the CPU every
+    /// output is a host array of its own, and it is empty. Each consumed value is released through
+    /// the backend, exactly once, however the run ends: one the run donated is deleted by then,
+    /// which its release lets go of.
+    /// </summary>
+    public IReadOnlyList<IShorokooTensorValue> RunConsuming(
+        IReadOnlyDictionary<string, IShorokooTensorValue> inputs,
+        IReadOnlyCollection<IShorokooTensorValue> consumed,
+        IReadOnlyList<string> outputNames,
+        RunSettings runSettings,
+        out IReadOnlyList<string?> aliasedInputs)
+    {
+        ArgumentNullException.ThrowIfNull(consumed);
+        try
+        {
+            return RunCore(inputs, consumed, outputNames, runSettings, out aliasedInputs);
+        }
+        finally
+        {
+            // Under one hold of the interpreter lock, which each release would otherwise take for
+            // itself.
+            if (consumed.Count > 0)
+                using (PythonRuntime.Gil())
+                    foreach (var value in consumed) _backend.Release(value);
+        }
+    }
+
+    private IReadOnlyList<IShorokooTensorValue> RunCore(
+        IReadOnlyDictionary<string, IShorokooTensorValue> inputs,
+        IReadOnlyCollection<IShorokooTensorValue> consumed,
+        IReadOnlyList<string> outputNames,
+        RunSettings runSettings,
+        out IReadOnlyList<string?> aliasedInputs)
     {
         ArgumentNullException.ThrowIfNull(inputs);
         ArgumentNullException.ThrowIfNull(outputNames);
@@ -231,26 +377,23 @@ internal sealed class JaxSession : IShorokooSession
                 throw new ArgumentException($"The model's input '{_inputNames[i]}' was not fed.", nameof(inputs));
             feeds[i] = Fed(_inputNames[i], value);
         }
-        return Invoke(feeds, wanted);
+        return Invoke(feeds, wanted, Owned(feeds, consumed), runSettings.Log, out aliasedInputs);
     }
 
-    /// <summary>Runs with <paramref name="consumed"/> handed over: each is released through the
-    /// backend, exactly once, however the run ends. Nothing is written into them.</summary>
-    public IReadOnlyList<IShorokooTensorValue> RunConsuming(
-        IReadOnlyDictionary<string, IShorokooTensorValue> inputs,
-        IReadOnlyCollection<IShorokooTensorValue> consumed,
-        IReadOnlyList<string> outputNames,
-        RunSettings runSettings)
+    /// <summary>
+    /// The donated positions whose value this run owns, and so donates as it is: a value it
+    /// consumed, fed at no other input. Every other donated position the runtime copies first.
+    /// </summary>
+    private int[] Owned(JaxTensorValue[] feeds, IReadOnlyCollection<IShorokooTensorValue> consumed)
     {
-        ArgumentNullException.ThrowIfNull(consumed);
-        try
-        {
-            return Run(inputs, outputNames, runSettings);
-        }
-        finally
-        {
-            foreach (var value in consumed) _backend.Release(value);
-        }
+        if (_donated.Length == 0 || consumed.Count == 0) return [];
+        var taken = new HashSet<IShorokooTensorValue>(consumed, ReferenceEqualityComparer.Instance);
+        var fed = new Dictionary<JaxTensorValue, int>(feeds.Length, ReferenceEqualityComparer.Instance);
+        foreach (var feed in feeds) fed[feed] = fed.TryGetValue(feed, out var count) ? count + 1 : 1;
+        var owned = new List<int>(_donated.Length);
+        foreach (var position in _donated)
+            if (taken.Contains(feeds[position]) && fed[feeds[position]] == 1) owned.Add(position);
+        return [.. owned];
     }
 
     /// <summary>
@@ -276,19 +419,55 @@ internal sealed class JaxSession : IShorokooSession
             + "own moves (IShorokooBackend.CreateTensorInBackendMemory).");
     }
 
-    private IReadOnlyList<IShorokooTensorValue> Invoke(JaxTensorValue[] feeds, int[] wanted)
+    /// <summary>The run, with the Python warnings it raised delivered to <paramref name="log"/> once
+    /// it is over, however it ended (see <see cref="PythonWarnings"/>).</summary>
+    private IReadOnlyList<IShorokooTensorValue> Invoke(
+        JaxTensorValue[] feeds, int[] wanted, int[] owned, LogSettings log, out IReadOnlyList<string?> aliasedInputs)
     {
+        RuntimeLogMessage[] warnings = [];
+        try
+        {
+            using (PythonRuntime.Gil())
+            {
+                using var warned = new PyList();
+                try
+                {
+                    return InvokeWarning(feeds, wanted, owned, warned, out aliasedInputs);
+                }
+                finally
+                {
+                    warnings = PythonWarnings.Read(warned, JaxRuntime.Source);
+                }
+            }
+        }
+        finally
+        {
+            PythonWarnings.Deliver(log, warnings);
+        }
+    }
+
+    // The fields of a run's result (runtime.run).
+    private const int ResultToken = 0, ResultValues = 1, ResultDescriptions = 2, ResultAliased = 3,
+        ResultDonated = 4, ResultCopied = 5;
+
+    private IReadOnlyList<IShorokooTensorValue> InvokeWarning(
+        JaxTensorValue[] feeds, int[] wanted, int[] owned, PyList warned, out IReadOnlyList<string?> aliasedInputs)
+    {
+        aliasedInputs = [];
         using (PythonRuntime.Gil())
         {
             using var args = new PyList();
             foreach (var feed in feeds) args.Append(feed.Value);
+            using var ownedList = new PyList();
+            foreach (var position in owned) PyCall.Append(ownedList, position);
+
             using var wantedList = new PyList();
             foreach (var index in wanted) PyCall.Append(wantedList, index);
 
             PyObject results;
             try
             {
-                results = PyCall.Invoke(_runtime.Run, _model, args, wantedList, (int)_logSeverity);
+                results = PyCall.Invoke(_runtime.Run, _model, args, wantedList, ownedList, warned);
             }
             catch (PythonException ex)
             {
@@ -301,12 +480,20 @@ internal sealed class JaxSession : IShorokooSession
                 var outputs = new List<IShorokooTensorValue>(wanted.Length);
                 try
                 {
+                    using var values = results[ResultValues];
+                    var descriptions = Descriptions(results, values, wanted.Length);
                     for (int i = 0; i < wanted.Length; i++)
                     {
-                        using var pair = results[i];
-                        using var description = pair[1];
-                        outputs.Add(JaxTensorValue.Wrap(pair[0], description));
+                        if (descriptions is not null)
+                        {
+                            outputs.Add(JaxTensorValue.Wrap(values[i], descriptions[i]));
+                            continue;
+                        }
+                        using var description = Item(results, ResultDescriptions, i);
+                        outputs.Add(JaxTensorValue.Wrap(values[i], description));
                     }
+                    aliasedInputs = Aliased(results, wanted.Length);
+                    _backend.CountDonations(Number(results, ResultDonated), Number(results, ResultCopied));
                 }
                 catch
                 {
@@ -316,6 +503,68 @@ internal sealed class JaxSession : IShorokooSession
                 return outputs;
             }
         }
+    }
+
+    /// <summary>What the outputs of a run on a card are, by the token the run names its program and
+    /// outputs by -- read from JAX the first time and kept, since every run of that program wanting
+    /// those outputs hands over the same; null for a run on the CPU, whose result describes each
+    /// host array it hands over.</summary>
+    private JaxTensorValue.Description[]? Descriptions(PyObject results, PyObject values, int count)
+    {
+        var token = Number(results, ResultToken);
+        if (token < 0) return null;
+        lock (_gate)
+            if (_descriptions.TryGetValue(token, out var known)) return known;
+        // Read outside the lock: the interpreter may hand its own lock to another thread while
+        // reading them, and that thread may be waiting for this one.
+        var read = new JaxTensorValue.Description[count];
+        for (int i = 0; i < count; i++)
+        {
+            using var value = values[i];
+            using var description = _runtime.Describe.Invoke(value);
+            read[i] = JaxTensorValue.Description.Of(description);
+        }
+        lock (_gate)
+        {
+            // A session sees a handful of programs; one that sees programs without end keeps the
+            // descriptions of the latest.
+            if (_descriptions.Count >= DescriptionsKept) _descriptions.Clear();
+            _descriptions[token] = read;
+        }
+        return read;
+    }
+
+    private const int DescriptionsKept = 64;
+
+    /// <summary>Per output, the input whose consumed value the run wrote it over, or null; empty
+    /// where it wrote none over any.</summary>
+    private IReadOnlyList<string?> Aliased(PyObject results, int count)
+    {
+        using var aliased = results[ResultAliased];
+        if (aliased.IsNone()) return [];
+        var names = new string?[count];
+        var any = false;
+        for (int i = 0; i < count; i++)
+        {
+            using var item = aliased[i];
+            var position = item.As<int>();
+            if (position < 0) continue;
+            names[i] = _inputNames[position];
+            any = true;
+        }
+        return any ? names : [];
+    }
+
+    private static PyObject Item(PyObject sequence, int index, int item)
+    {
+        using var inner = sequence[index];
+        return inner[item];
+    }
+
+    private static long Number(PyObject sequence, int index)
+    {
+        using var item = sequence[index];
+        return item.As<long>();
     }
 
     public void Dispose()

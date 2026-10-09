@@ -69,14 +69,34 @@ namespace Shorokoo
         {
             private readonly long _bytes;
 
+            // The observer of the thread that reported the pressure, which the finalizer thread
+            // that withdraws it has no slot for.
+            private readonly Action<long>? _observer = PressureObserver;
+
             internal HeldMemoryPressure(long bytes)
             {
                 _bytes = bytes;
                 GC.AddMemoryPressure(bytes);
+                _observer?.Invoke(bytes);
             }
 
-            ~HeldMemoryPressure() => GC.RemoveMemoryPressure(_bytes);
+            ~HeldMemoryPressure()
+            {
+                GC.RemoveMemoryPressure(_bytes);
+                _observer?.Invoke(-_bytes);
+            }
         }
+
+        /// <summary>
+        /// Test hook: told the bytes of each pressure reported for a held tensor
+        /// (<see cref="HeldMemoryPressure"/>) as it is reported, and the same bytes negated as it is
+        /// withdrawn. Thread-scoped: a pressure keeps the hook of the thread that reported it, and
+        /// tells that hook of its withdrawal from the finalizer thread, so a hook installed by one
+        /// parallel test sees its own attributes and no other thread's. Still reset it in a
+        /// <c>finally</c>.
+        /// </summary>
+        [ThreadStatic]
+        internal static Action<long>? PressureObserver;
 
         /// <summary>The attribute's shape.</summary>
         public Shape Shape { get; }

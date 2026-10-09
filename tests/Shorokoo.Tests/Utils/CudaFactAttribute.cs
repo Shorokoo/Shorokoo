@@ -17,10 +17,15 @@ namespace Shorokoo.Tests.Utils;
 /// <para>The backend alone is not enough: a GPU backend deploys and loads on a machine with no
 /// card, and every test gated on it then failed inside ONNX Runtime's session creation instead of
 /// skipping. The device is asked the way <see cref="SideBySideCudaFactAttribute"/> asks it.</para>
+///
+/// <para>A test that reads what this process holds on the card passes <c>needsProcessFigure</c>
+/// and skips where the driver attributes no device memory to a process, as under WSL, where
+/// neither DXGI nor NVML gives a per-process figure
+/// (<see href="https://github.com/Shorokoo/Shorokoo/issues/552">Shorokoo/Shorokoo#552</see>).</para>
 /// </summary>
 public sealed class CudaFactAttribute : FactAttribute
 {
-    public CudaFactAttribute(string? extraNote = null)
+    public CudaFactAttribute(string? extraNote = null, bool needsProcessFigure = false)
     {
         string assemblyName;
         try
@@ -40,6 +45,9 @@ public sealed class CudaFactAttribute : FactAttribute
         else if (DeviceMemory.Read() is null)
             skip = $"No CUDA device answers on this machine -- the loaded backend is '{assemblyName}', " +
                    "but there is no card for it to run on. Run this on a CUDA machine.";
+        else if (needsProcessFigure && DeviceMemory.Read() is { ProcessBytes: null })
+            skip = "The driver attributes no device memory to this process -- under WSL, or where NVML " +
+                   "is absent or does not list this process id -- and this test reads that figure.";
 
         if (skip is null) return;
         if (!string.IsNullOrEmpty(extraNote)) skip += " " + extraNote;

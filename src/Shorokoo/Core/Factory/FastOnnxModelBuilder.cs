@@ -252,9 +252,20 @@ namespace Shorokoo.Core.Factory
             // outputs derived from it.
             if (vanillaExport) DeclareRepresentativeRanks(prepFast);
 
+            // The shapes the stated dimensions fix, which a workaround may decide by rather than leave
+            // to the backend: read before the pre-passes rewrite the graph.
+            var values = prepForOnnx && !vanillaExport && shapesAreConcrete ? ConcreteValues.At(prepFast, inputDims) : null;
+            var shapes = FastApplyKernelWorkarounds.ConcreteShapes(prepFast, workarounds, inputDims, values);
+
+            // A session built for these dimensions computes nothing it can work out from them
+            // alone: the shape arithmetic that would otherwise run on every step -- the axes a
+            // broadcast gradient is summed over, above all -- is baked in as constants, and what it
+            // made a no-op is dropped.
+            if (values is not null) FastBakeShapeArithmetic.Process(prepFast, values);
+
             // ----- 2. Run the Fast pre-passes in place. Capture the rename map
             // so we can also remap the tensor-info lookup we'll build below.
-            var tensorInfoLookup = RunPrePasses(prepFast, prepForOnnx, applyExecutionLowerings, workarounds, shapesAreConcrete, static _ => true)!;
+            var tensorInfoLookup = RunPrePasses(prepFast, prepForOnnx, applyExecutionLowerings, workarounds, shapesAreConcrete, static _ => true, shapes: shapes)!;
 
             // Each output likewise takes its declared rank, else the rank it recorded at the samples,
             // so an exported file gives every output a shape too (Shorokoo/Shorokoo#387).
@@ -320,6 +331,13 @@ namespace Shorokoo.Core.Factory
             // never trimmed on a guess.
             if (flattenFunctionBodies)
                 RemoveUnreferencedFunctions(model);
+
+            // ----- 4c. Execution dialect only: drop each Constant nothing reads. A kernel
+            // workaround that rewrites a call in place of the one it was given reads constants of its
+            // own, and the call's own operands are left with no reader; the runtime would drop them
+            // as it loads the model, warning about each one.
+            if (forSession)
+                RemoveConstantsNothingReads(model);
 
             // ----- 5. Lower deprecated Upsample nodes to Resize nodes so that
             // ONNX Runtime (opset 21) can execute them.
@@ -425,6 +443,56 @@ namespace Shorokoo.Core.Factory
                 Key = TrainingFormats.MetadataKey,
                 Value = TrainingFormats.OnnxAutoGrad,
             });
+        }
+
+        /// <summary>
+        /// Removes each <c>Constant</c> node of <paramref name="model"/> whose output nothing reads:
+        /// no node of the graph it is in or of a graph nested in that one, and no output of either.
+        /// The main graph and each function body are swept apart, as each names its values
+        /// apart. A <c>Constant</c> reads nothing, so removing one leaves no other unread.
+        /// </summary>
+        private static void RemoveConstantsNothingReads(ModelProto model)
+        {
+            static void Sweep(List<NodeProto> nodes, HashSet<string> read)
+            {
+                nodes.RemoveAll(n => n.OpType == OpCodes.CONSTANT && n.Domain is null or "" && n.Outputs.Count == 1
+                                     && !read.Contains(n.Outputs[0]));
+                foreach (var node in nodes)
+                    foreach (var attr in node.Attributes)
+                    {
+                        if (attr.G is { } g) Sweep(g.Nodes, read);
+                        foreach (var sub in attr.Graphs) Sweep(sub.Nodes, read);
+                    }
+            }
+
+            static void Reads(List<NodeProto> nodes, HashSet<string> read)
+            {
+                foreach (var node in nodes)
+                {
+                    read.UnionWith(node.Inputs);
+                    foreach (var attr in node.Attributes)
+                    {
+                        if (attr.G is { } g) ReadsOf(g, read);
+                        foreach (var sub in attr.Graphs) ReadsOf(sub, read);
+                    }
+                }
+            }
+
+            static void ReadsOf(GraphProto graph, HashSet<string> read)
+            {
+                Reads(graph.Nodes, read);
+                read.UnionWith(graph.Outputs.Select(o => o.Name));
+            }
+
+            var main = new HashSet<string>(StringComparer.Ordinal);
+            ReadsOf(model.Graph, main);
+            Sweep(model.Graph.Nodes, main);
+            foreach (var function in model.Functions)
+            {
+                var read = new HashSet<string>(function.Outputs, StringComparer.Ordinal);
+                Reads(function.Nodes, read);
+                Sweep(function.Nodes, read);
+            }
         }
 
         // ----------- function pruning -----------
@@ -1594,7 +1662,8 @@ namespace Shorokoo.Core.Factory
         /// </summary>
         private static Dictionary<FastTensorKey, FastTensorInfo>? RunPrePasses(
             InternalComputationGraph graph, bool prepForOnnx, bool applyExecutionLowerings, KernelWorkaroundSet? workarounds,
-            bool shapesAreConcrete, Func<InternalComputationGraph, bool> needsLookup, bool isFunctionBody = false)
+            bool shapesAreConcrete, Func<InternalComputationGraph, bool> needsLookup, bool isFunctionBody = false,
+            IReadOnlyDictionary<FastTensorKey, Shape>? shapes = null)
         {
             FastLowerAttributeTensorOps.Process(graph);
             if (applyExecutionLowerings) FastLowerStateUpdateLinksForInference.Process(graph);
@@ -1624,7 +1693,7 @@ namespace Shorokoo.Core.Factory
             // the export lowerings sit before them. What it splices in, and what the later passes
             // add only for that, is numbered last, so every value the graph holds without it keeps
             // its name.
-            var splices = FastApplyKernelWorkarounds.Process(graph, workarounds, shapesAreConcrete, isFunctionBody);
+            var splices = FastApplyKernelWorkarounds.Process(graph, workarounds, shapesAreConcrete, isFunctionBody, shapes);
             FastAddIdentityForOuterScopeValues.Process(graph);
             if (prepForOnnx) FastPrepForOnnx.Process(graph);
             var preRenameLookup = !needsLookup(graph) ? null

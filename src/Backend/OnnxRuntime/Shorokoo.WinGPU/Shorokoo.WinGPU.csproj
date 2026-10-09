@@ -21,4 +21,26 @@
   <ItemGroup>
     <ProjectReference Include="..\Shorokoo.OnnxRuntime\Shorokoo.OnnxRuntime.csproj" />
   </ItemGroup>
+
+  <!-- The CUDA build of Shorokoo's operators (native/shorokoo_adam_update.cu in
+       Shorokoo.OnnxRuntime), which a CUDA session registers to run each Adam or AdamW update as one
+       kernel, shipped beside ONNX Runtime's CUDA provider. A pack takes it from win-x64/ under
+       -p:ShorokooNativeAllocators=<folder>, where the native libraries were built apart (the
+       release workflow builds them on the oldest system each platform's ONNX Runtime supports);
+       without that folder, a pack on Windows takes the library its own build of
+       Shorokoo.OnnxRuntime made (with a CUDA toolkit at hand; see -p:ShorokooCudaOps). The package
+       is never packed without it. -->
+  <PropertyGroup>
+    <TargetsForTfmSpecificContentInPackage>$(TargetsForTfmSpecificContentInPackage);IncludeShorokooCudaOperators</TargetsForTfmSpecificContentInPackage>
+    <ShorokooCudaOperators Condition="'$(ShorokooNativeAllocators)' != ''">$(ShorokooNativeAllocators)/win-x64/shorokoo_ort_cuda_ops.dll</ShorokooCudaOperators>
+    <ShorokooCudaOperators Condition="'$(ShorokooNativeAllocators)' == '' and $([MSBuild]::IsOSPlatform('Windows'))">$(MSBuildThisFileDirectory)../Shorokoo.OnnxRuntime/obj/native/win-x64/shorokoo_ort_cuda_ops.dll</ShorokooCudaOperators>
+  </PropertyGroup>
+
+  <Target Name="IncludeShorokooCudaOperators">
+    <Error Condition="'$(ShorokooCudaOperators)' == '' or !Exists('$(ShorokooCudaOperators)')"
+           Text="The Shorokoo.WinGPU package carries the CUDA build of Shorokoo's operators (shorokoo_ort_cuda_ops.dll), and it was not found ('$(ShorokooCudaOperators)'). On Windows, build with a CUDA 13 toolkit and -p:ShorokooCudaOps=ON; on another platform, build the native folder on Windows with cmake (-DSHOROKOO_CUDA_OPS=ON -DSHOROKOO_OUTPUT_DIR=&lt;folder&gt;/win-x64) and pack with -p:ShorokooNativeAllocators=&lt;folder&gt;." />
+    <ItemGroup>
+      <TfmSpecificPackageFile Include="$(ShorokooCudaOperators)" PackagePath="runtimes/win-x64/native/" />
+    </ItemGroup>
+  </Target>
 </Project>

@@ -211,8 +211,8 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         // The probabilities are scaled per sample and s is subtracted at each sample's target
         // alone, by a ScatterND over the flattened tensor that adds into its data and so may
         // write in place. Without a class weight or an ignore index, s is one value for every
-        // sample, and the whole product is scaled by it once, at the end, where the scalar
-        // factors of the chain it flows into fold into it.
+        // sample, a rank-0 factor of the product, which folds with the scalar factors of the
+        // chain it flows into (FastFoldScalarFactors).
         //
         // For a backend that fuses elementwise operators (SoftmaxCrossEntropyLossGradientInFusion)
         // the trade goes the other way: the softmax recomputed from the scores shares its
@@ -262,9 +262,12 @@ namespace Shorokoo.Core.Nodes.AutoDiff
                 }
                 else
                 {
-                    var weightPerSample = weight is null
-                        ? OnnxOp.Expand(OnnxOp.Cast(Scalar(1.0f), saturate: null, to: floatType), OnnxOp.Shape(labels))
-                        : OnnxOp.Gather(weight, classIndex, axis: 0);
+                    // Gathered per label even without a class weight, from ones: XLA then keeps the
+                    // scale in the elementwise fusion, where one it can see is uniform it fuses into
+                    // the matrix product the gradient feeds.
+                    var classWeight = weight ?? OnnxOp.Expand(OnnxOp.Cast(Scalar(1.0f), saturate: null, to: floatType),
+                        OnnxOp.Reshape(OnnxOp.Gather(OnnxOp.Shape(scores), Scalar(1L), axis: 0), Vector(1L), allowZero: false));
+                    var weightPerSample = OnnxOp.Gather(classWeight, classIndex, axis: 0);
                     if (activeMask is not null)
                         weightPerSample = OnnxOp.Mul(weightPerSample, activeMask);
                     Variable upstream = reduction switch

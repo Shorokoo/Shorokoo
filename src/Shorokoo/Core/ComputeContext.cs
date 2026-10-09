@@ -627,6 +627,8 @@ namespace Shorokoo.Runtime
         /// trace of its own, which covers the runs from then on.</para>
         /// </summary>
         /// <exception cref="ObjectDisposedException">This graph's session has been released.</exception>
+        /// <exception cref="InvalidOperationException">The trace was recorded and the backend cannot
+        /// read it; the inner exception is the cause, and a second read throws the same.</exception>
         public NodePlacement? ReadNodePlacement()
         {
             lock (_sessionGate)

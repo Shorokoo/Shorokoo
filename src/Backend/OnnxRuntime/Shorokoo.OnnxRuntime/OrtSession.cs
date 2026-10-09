@@ -103,6 +103,7 @@ internal sealed class OrtSession : IShorokooSession
 
     private readonly object _profileGate = new();
     private NodePlacement? _nodePlacement;
+    private InvalidOperationException? _unreadTrace;
     private bool _profilingEnded;
 
     // The outputs this session may write into the memory of the input each is paired with, on a run
@@ -891,18 +892,34 @@ internal sealed class OrtSession : IShorokooSession
     /// this call, later runs are not in it, and the answer is kept so a second call gets the same
     /// one rather than asking a session that is no longer recording.</para>
     /// </summary>
+    /// <exception cref="InvalidOperationException">The trace was recorded and cannot be read: ending
+    /// the profiling failed, or the profile it wrote cannot be read. The inner exception is the
+    /// cause, and a second call throws the same failure.</exception>
     public NodePlacement? ReadNodePlacement()
     {
         if (_profileDirectory is null) return null;
         lock (_profileGate)
         {
-            if (_profilingEnded) return _nodePlacement;
-            _profilingEnded = true;
-            try
+            if (!_profilingEnded)
             {
-                _nodePlacement = OrtProfile.Read(_session.EndProfiling());
+                _profilingEnded = true;
+                string? profile = null;
+                try
+                {
+                    profile = _session.EndProfiling();
+                    _nodePlacement = OrtProfile.Read(profile);
+                }
+                catch (Exception cause)
+                {
+                    _unreadTrace = new InvalidOperationException(
+                        (profile is null
+                            ? "ONNX Runtime could not end the profiling of this session, so the node placement it traced cannot be read: "
+                            : $"The node placement this session traced cannot be read from its profile '{profile}': ")
+                        + cause.Message,
+                        cause);
+                }
             }
-            catch (Exception) { _nodePlacement = null; }
+            if (_unreadTrace is { } unread) throw unread;
             return _nodePlacement;
         }
     }

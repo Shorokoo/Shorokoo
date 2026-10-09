@@ -2188,6 +2188,22 @@ public class CoreUtilsCoverageTests
         Assert.Throws<ArgumentNullException>(() => placement.NodesOn(null!));
     }
 
+    [Fact]
+    public void TestAProfileThatCannotBeReadFailsWithItsCause()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"profile-{Guid.NewGuid():N}.json");
+        Exception? Reading(string? text)
+        {
+            if (text is not null) File.WriteAllText(path, text);
+            try { return Record.Exception(() => OrtProfile.Read(path)); }
+            finally { File.Delete(path); }
+        }
+        Assert.IsType<FileNotFoundException>(Reading(null));
+        Assert.IsAssignableFrom<System.Text.Json.JsonException>(Reading("[{"));
+        Assert.IsType<InvalidDataException>(Reading("{}"));
+        Assert.Null(Reading("[]"));
+    }
+
     /// <summary>
     /// The profiler's output prefix is read when profiling is switched on and a later change is
     /// ignored, so a session built to trace its nodes has to set the prefix first or write its

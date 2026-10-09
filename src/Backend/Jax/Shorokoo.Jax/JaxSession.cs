@@ -29,9 +29,9 @@ namespace Shorokoo.Jax;
 /// copied first, in the run's memory, and the copy donated, so a lent value is never written over
 /// or deleted, whatever the program. XLA works out for itself which outputs it can write over which
 /// donated inputs, and orders the program so that nothing reads a donated input after it is written
-/// over, so a pair needs no proof of Shorokoo's (<see cref="OutputAliasProof"/>) to be correct here:
-/// an output XLA cannot write over an input is computed into memory of its own, as without
-/// donation. On a card the output written over a consumed input is in that input's memory, and the
+/// over, so the session proves nothing of the pairs it is handed again (the framework hands it only
+/// those <see cref="OutputAliasProof"/> proves): an output XLA cannot write over an input is computed
+/// into memory of its own, as without donation. On a card the output written over a consumed input is in that input's memory, and the
 /// run says so; on the CPU every output is handed over as a host array of its own, so none is.</para>
 ///
 /// <para><b>Stopping.</b> A run is one compiled program, which cannot be stopped part way: a run
@@ -514,21 +514,24 @@ internal sealed class JaxSession : IShorokooSession
         var token = Number(results, ResultToken);
         if (token < 0) return null;
         lock (_gate)
-        {
             if (_descriptions.TryGetValue(token, out var known)) return known;
-            var read = new JaxTensorValue.Description[count];
-            for (int i = 0; i < count; i++)
-            {
-                using var value = values[i];
-                using var description = _runtime.Describe.Invoke(value);
-                read[i] = JaxTensorValue.Description.Of(description);
-            }
+        // Read outside the lock: the interpreter may hand its own lock to another thread while
+        // reading them, and that thread may be waiting for this one.
+        var read = new JaxTensorValue.Description[count];
+        for (int i = 0; i < count; i++)
+        {
+            using var value = values[i];
+            using var description = _runtime.Describe.Invoke(value);
+            read[i] = JaxTensorValue.Description.Of(description);
+        }
+        lock (_gate)
+        {
             // A session sees a handful of programs; one that sees programs without end keeps the
             // descriptions of the latest.
             if (_descriptions.Count >= DescriptionsKept) _descriptions.Clear();
             _descriptions[token] = read;
-            return read;
         }
+        return read;
     }
 
     private const int DescriptionsKept = 64;

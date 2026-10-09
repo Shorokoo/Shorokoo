@@ -438,7 +438,7 @@ It applies:
 
 On JAX the consumed state is **donated** to XLA, which writes each updated field over a donated one
 of its shape wherever its own analysis allows, whatever the training backend; state the step only
-reads is copied on the card first and the copy donated, so a checkpoint you hold is never written
+reads is copied in the run's memory first and the copy donated, so a checkpoint you hold is never written
 over ([jax-backend.md](jax-backend.md#runs)).
 
 On PyTorch the step goes further: the element-wise arithmetic leading to each new state value —

@@ -185,6 +185,40 @@ public class JaxCudaHardwareTests
     }
 
     [JaxCudaFact]
+    public void TestTwoThreadsRunningOneCardSessionForOutputsItHasNotHandedOverBeforeBothFinish()
+    {
+        string[] outputs = [.. Enumerable.Range(0, 400).Select(i => $"y{i}")];
+        var graph = ComputeContextLifetimeCoverageTests.GraphOf("x:float[2]", string.Join(" ", outputs),
+            [.. outputs.Select(y => ComputeContextLifetimeCoverageTests.Op("Neg", "x", y))]);
+        using var session = Cuda.Value.CreateSession(PyTorchBackendCoverageTests.Serialize(graph), default, LogSettings.Default, DeviceMemorySettings.Default);
+        using var x = Cuda.Value.CreateTensorInBackendMemory(ShorokooTensorElementType.Float, [.. MemoryMarshal.AsBytes<float>([1f, 2f])], [2]);
+        void Runs(int thread)
+        {
+            for (int i = 0; i < 40; i++)
+                foreach (var y in session.Run(new Dictionary<string, IShorokooTensorValue> { ["x"] = x }, outputs[(2 * i + thread)..], RunSettings.Default)) y.Dispose();
+        }
+        var interval = SwitchInterval(1e-6);
+        try
+        {
+            Assert.True(Task.WaitAll([Task.Run(() => Runs(0)), Task.Run(() => Runs(1))], TimeSpan.FromSeconds(120)));
+        }
+        finally
+        {
+            SwitchInterval(interval);
+        }
+    }
+
+    private static double SwitchInterval(double seconds)
+    {
+        using (Shorokoo.PythonHost.PythonRuntime.Gil())
+        {
+            using var scope = Python.Runtime.Py.CreateScope();
+            scope.Exec($"import sys\nwas = sys.getswitchinterval()\nsys.setswitchinterval({seconds.ToString(System.Globalization.CultureInfo.InvariantCulture)})");
+            return scope.Get<double>("was");
+        }
+    }
+
+    [JaxCudaFact]
     public void TestAResidentRunOnTheCardWritesTheStateItOwnsInPlaceCopiesTheStateItWasLentAndKeepsEveryHeldCheckpoint()
     {
         var donating = TrainingRigHelpers.JaxDonatingRun(Cuda.Value, null, aliasing: true);
@@ -199,8 +233,6 @@ public class JaxCudaHardwareTests
         Assert.Equal(0L, plain.Aliased);
     }
 
-    /// <summary>A scope holding the arrays of <paramref name="values"/> under their names, which
-    /// outlive the values' own release, so a test can ask after the run what became of them.</summary>
     private static Python.Runtime.PyModule Watching(params (string Name, IShorokooTensorValue Value)[] values)
     {
         using (Shorokoo.PythonHost.PythonRuntime.Gil())
@@ -211,8 +243,6 @@ public class JaxCudaHardwareTests
         }
     }
 
-    /// <summary>Whether each array <paramref name="scope"/> holds under <paramref name="names"/> was
-    /// deleted, and lets go of the scope.</summary>
     private static string Deleted(Python.Runtime.PyModule scope, params string[] names)
     {
         using (Shorokoo.PythonHost.PythonRuntime.Gil())

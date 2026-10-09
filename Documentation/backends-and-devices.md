@@ -166,8 +166,9 @@ What reaches the sink, per backend:
   an operator it is handed, at any severity. Such a message goes to the settings of the session
   build or run in progress on the thread that logged it, and where there is none, as on one of ONNX
   Runtime's own worker threads, to `LogSettings.Default`: warnings and above, to the standard error
-  stream. So does what a session the program builds itself through ONNX Runtime's own API logs. A program that makes ONNX Runtime's environment itself (`OrtEnv.CreateInstanceWithOptions`)
-  before the first backend is built keeps the logging it made the environment with, so none of its
+  stream. So do messages from sessions the program builds itself through ONNX Runtime's API. A
+  program that makes ONNX Runtime's environment itself (`OrtEnv.CreateInstanceWithOptions`) before
+  the first backend is built keeps the logging it made the environment with, so none of its
   messages reach these settings, and its sessions keep per-session thread pools
   ([The backend types](#the-backend-types)).
 - **PyTorch** and **JAX**. Each Python warning a run raises, as a `Warning` whose `Category` is the

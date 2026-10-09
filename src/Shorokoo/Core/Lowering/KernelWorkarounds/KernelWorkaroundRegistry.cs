@@ -26,12 +26,14 @@ internal static class KernelWorkaroundRegistry
     public static KernelWorkaroundSet OnnxRuntime { get; } = new(KernelWorkaroundSets.OnnxRuntime, OnnxRuntimeWorkarounds);
 
     /// <summary>
-    /// The rewrites around ONNX Runtime's kernels on its CUDA execution provider: every one of
-    /// <see cref="OnnxRuntime"/>, in its order, then the calls the provider runs on the CPU over
-    /// values from outside their body, which covers such calls the earlier rewrites build too.
+    /// The rewrites around ONNX Runtime's kernels on its CUDA execution provider: the cross-entropy
+    /// the provider has no kernel for, as the log-softmax and negative log-likelihood it is made
+    /// of, first, so the rewrites after it see those calls; every one of <see cref="OnnxRuntime"/>,
+    /// in its order; then the calls the provider runs on the CPU over values from outside their
+    /// body, which covers such calls the earlier rewrites build too.
     /// </summary>
     public static KernelWorkaroundSet OnnxRuntimeCuda { get; } = new(KernelWorkaroundSets.OnnxRuntimeCuda,
-        [.. OnnxRuntimeWorkarounds, new CudaHostFallbackBodyInputWorkaround()]);
+        [new CrossEntropyAsLogSoftmaxWorkaround(), .. OnnxRuntimeWorkarounds, new CudaHostFallbackBodyInputWorkaround()]);
 
     private static ImmutableArray<KernelWorkaround> OnnxRuntimeWorkarounds =>
     [

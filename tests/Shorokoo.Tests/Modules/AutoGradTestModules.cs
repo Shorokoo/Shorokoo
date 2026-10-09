@@ -3696,6 +3696,25 @@ namespace Shorokoo.Tests.Modules
         }
     }
 
+    /// <summary>A float64 loss differentiated: the gradient of <c>mean(x²)</c> is <c>2x / n</c>, and
+    /// of a mean cross-entropy <c>(softmax(x) − onehot) / n</c>.</summary>
+    [Module]
+    public partial class AutoGradFloat64LossCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float64> x)
+        {
+            var labels = Vector(2L, 0L, 3L);
+            var n = ((Tensor<int64>)OnnxOp.Size(x)).Cast<float64>().Scalar();
+            var meanGrad = (Tensor<float64>)Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(x, (x * x).Reduce(ReduceKind.Mean, keepDims: false).Scalar());
+            var ceGrad = (Tensor<float64>)Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(x,
+                ((Tensor<float64>)OnnxOp.SoftmaxCrossEntropyLoss(x, labels, null, null, "mean").output).Scalar());
+            var expectedCe = ((Tensor<float64>)OnnxOp.Softmax(x, axis: 1)
+                - (Tensor<float64>)OnnxOp.OneHot(labels, Scalar(4L), OnnxOp.Cast(Vector(0f, 1f), null, DType.Float64), axis: 1)) / Scalar(3.0);
+            return ((meanGrad - x * Scalar(2.0) / n).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar() < Scalar(1e-12))
+                & ((ceGrad - expectedCe).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar() < Scalar(1e-12));
+        }
+    }
+
     /// <summary><see cref="SoftmaxCrossEntropyClosedForms"/> over <c>[3, 4]</c> scores.</summary>
     [Module]
     public partial class AutoGradSoftmaxCrossEntropyLossClosedFormCheck

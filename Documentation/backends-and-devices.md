@@ -178,7 +178,9 @@ What reaches the sink, per backend:
   ([The backend types](#the-backend-types)).
 - **PyTorch** and **JAX**. Each Python warning a run raises, as a `Warning` whose `Category` is the
   warning's class and whose `Location` is the file and line that raised it; on JAX, also those raised
-  compiling a session whose inputs have fixed shapes, to the settings it is built under. A warning
+  compiling a session whose inputs have fixed shapes, to the settings it is built under. Python's
+  warning filters apply: a warning they show once per place — the default — reaches every run that
+  raises it, once per run, whichever run raised it before; one they ignore reaches none. A warning
   Python raises outside a run is shown as Python shows it. Nothing the libraries log natively is
   routed.
 

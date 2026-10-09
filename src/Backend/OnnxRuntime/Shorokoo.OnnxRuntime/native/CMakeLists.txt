@@ -74,7 +74,7 @@ endif()
 # host compiler is SHOROKOO_CUDA_HOST_COMPILER (the folder holding cl.exe, or the path of g++) where
 # given. Otherwise it is the first that compiles the kernel of: this build's own C++ compiler, then,
 # on Windows, each other MSVC toolset vswhere finds, newest first, and on Linux each g++-<version>
-# in /usr/bin, newest first. Each nvcc release accepts only the host compilers it knows (CUDA 13.0
+# in /usr/bin, newest first, then /usr/bin/g++. Each nvcc release accepts only the host compilers it knows (CUDA 13.0
 # and 13.1 the MSVC of Visual Studio 2019 and 2022, CUDA 13.2 and later that of Visual Studio 2026
 # too), so a machine whose newest Visual Studio is newer than its nvcc still builds the library with
 # an older toolset beside it.
@@ -168,6 +168,9 @@ else()
       file(GLOB versioned "/usr/bin/g++-[0-9]*")
       list(SORT versioned COMPARE NATURAL ORDER DESCENDING)
       list(APPEND candidates ${versioned})
+      if(EXISTS "/usr/bin/g++")
+        list(APPEND candidates "/usr/bin/g++")
+      endif()
     endif()
     list(REMOVE_DUPLICATES candidates)
 

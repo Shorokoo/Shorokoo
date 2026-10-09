@@ -24,15 +24,16 @@
 
   <!-- The CUDA build of Shorokoo's operators (native/shorokoo_adam_update.cu in
        Shorokoo.OnnxRuntime), which a CUDA session registers to run each Adam or AdamW update as one
-       kernel, shipped beside ONNX Runtime's CUDA provider. A pack on Linux takes the library its
-       own build of Shorokoo.OnnxRuntime made (with a CUDA toolkit at hand; see -p:ShorokooCudaOps);
-       a pack on another platform takes it from linux-x64/ under -p:ShorokooNativeAllocators=<folder>,
-       as Shorokoo.OnnxRuntime takes the other platform's allocator. The package is never packed
-       without it. -->
+       kernel, shipped beside ONNX Runtime's CUDA provider. A pack takes it from linux-x64/ under
+       -p:ShorokooNativeAllocators=<folder>, where the native libraries were built apart (the
+       release workflow builds them on the oldest system each platform's ONNX Runtime supports);
+       without that folder, a pack on Linux takes the library its own build of
+       Shorokoo.OnnxRuntime made (with a CUDA toolkit at hand; see -p:ShorokooCudaOps). The package
+       is never packed without it. -->
   <PropertyGroup>
     <TargetsForTfmSpecificContentInPackage>$(TargetsForTfmSpecificContentInPackage);IncludeShorokooCudaOperators</TargetsForTfmSpecificContentInPackage>
-    <ShorokooCudaOperators Condition="$([MSBuild]::IsOSPlatform('Linux'))">$(MSBuildThisFileDirectory)../Shorokoo.OnnxRuntime/obj/native/linux-x64/libshorokoo_ort_cuda_ops.so</ShorokooCudaOperators>
-    <ShorokooCudaOperators Condition="!$([MSBuild]::IsOSPlatform('Linux')) and '$(ShorokooNativeAllocators)' != ''">$(ShorokooNativeAllocators)/linux-x64/libshorokoo_ort_cuda_ops.so</ShorokooCudaOperators>
+    <ShorokooCudaOperators Condition="'$(ShorokooNativeAllocators)' != ''">$(ShorokooNativeAllocators)/linux-x64/libshorokoo_ort_cuda_ops.so</ShorokooCudaOperators>
+    <ShorokooCudaOperators Condition="'$(ShorokooNativeAllocators)' == '' and $([MSBuild]::IsOSPlatform('Linux'))">$(MSBuildThisFileDirectory)../Shorokoo.OnnxRuntime/obj/native/linux-x64/libshorokoo_ort_cuda_ops.so</ShorokooCudaOperators>
   </PropertyGroup>
 
   <Target Name="IncludeShorokooCudaOperators">

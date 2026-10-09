@@ -66,10 +66,12 @@ internal static unsafe class NativeAllocator
         => OperatingSystem.IsWindows() ? CudaOperatorsLibraryName + ".dll" : "lib" + CudaOperatorsLibraryName + ".so";
 
     private static readonly Lazy<string?> _locatedCudaOperators = new(
-        () => LocateFile(CudaOperatorsFileName), LazyThreadSafetyMode.ExecutionAndPublication);
+        () => LocateFile(CudaOperatorsFileName) is { } path && NativeLibrary.TryLoad(path, out _) ? path : null,
+        LazyThreadSafetyMode.ExecutionAndPublication);
 
     /// <summary>The path a CUDA session registers the operators from, found where the library is,
-    /// or null where that build is not deployed: a build from source makes it only where it finds a
+    /// or null where that build is not deployed or this system cannot load it (one built against a
+    /// newer C library than the system's, say): a build from source makes it only where it finds a
     /// CUDA toolkit to make it with, and a CUDA session without it runs each update as the chain of
     /// operators it is written as.</summary>
     internal static string? LocatedCudaOperators => _locatedCudaOperators.Value;

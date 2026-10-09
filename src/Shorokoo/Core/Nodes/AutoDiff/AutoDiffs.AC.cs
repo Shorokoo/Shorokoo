@@ -314,7 +314,15 @@ namespace Shorokoo.Core.Nodes.AutoDiff
                 .Select(m => m.GetCustomAttribute<AutoDiffAttribute>())
                 .Where(a => a is { UsesOutputs: true })
                 .Select(a => a!.OpName)
+                .Concat(VariadicGradientOpsUsingOutputs)
                 .ToHashSet();
+
+        /// <summary>
+        /// The variadic rules (registered in <see cref="RegisterVariadicGradientOps"/>) that read
+        /// the forward outputs appended after the inputs, as an <c>[AutoDiff]</c> rule flagged
+        /// <c>UsesOutputs</c> does: SoftmaxCrossEntropyLoss reads its log-probabilities.
+        /// </summary>
+        private static readonly string[] VariadicGradientOpsUsingOutputs = [SOFTMAX_CROSS_ENTROPY_LOSS];
 
         // ===== Concat (variadic) =====
 

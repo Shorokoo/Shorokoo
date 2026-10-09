@@ -870,7 +870,12 @@ public class NNLibraryOptimizerTrainingCoverageTests
     {
         var rig = TrainingRig.FromScratch(NNScaledBetweenProjectionsModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
             [TensorData([2L, 2L, 4L], [.. Enumerable.Range(0, 16).Select(i => i * 0.25f - 2f)])], 0.1f);
-        Assert.NotEmpty(rig.TrainingStepPureGraph.ToInternal().Nodes);
+        var step = rig.TrainingStepPureGraph.ToInternal();
+        var producer = step.Nodes.SelectMany(n => n.Outputs.OfType<FastTensorKey>().Select(o => (o, n))).ToDictionary(p => p.o, p => p.n);
+        bool IsHalf(FastTensorKey? k) => k is FastTensorKey key && producer[key].OpCode == OpCodes.CONSTANT
+            && producer[key].Attributes.GetAttributeVal(OnnxOpAttributeNames.AttrValue) is { } v && v.Shape.Dims.Length == 0 && v.Elements<float>()[0] == 0.5f;
+        Assert.Equal([OpCodes.MATMUL, OpCodes.MATMUL], step.Nodes.Where(n => n.OpCode == OpCodes.MUL && n.Inputs.Any(IsHalf))
+            .Select(n => producer[(FastTensorKey)n.Inputs.First(i => !IsHalf(i))!].OpCode));
     }
 
     private static int SequenceHeadStepOpsOn(Shorokoo.Core.Backends.IShorokooBackend backend, string opCode, bool logitSized = false)

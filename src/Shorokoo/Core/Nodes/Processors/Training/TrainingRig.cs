@@ -2802,10 +2802,10 @@ namespace Shorokoo
         /// <param name="lowerAutoGrad">False for a step whose gradient is left to the execution
         /// backend (<see cref="TrainingBackend.Native"/>): the pipeline stops before the autograd
         /// expansion, and the step keeps its one <c>AUTO_GRAD</c> node for the backend to run.</param>
-        /// <param name="runtimeBackend">The backend the step runs on, where the rig was given a
-        /// runtime context: whether it fuses elementwise operators and whether it folds a scale into a
-        /// matrix product decide the shape of a gradient where two are equal in value. With none, the
-        /// step runs on the default context, whose backend is ONNX Runtime's.</param>
+        /// <param name="runtimeBackend">The backend of the rig's runtime context, which runs the step:
+        /// whether it fuses elementwise operators and whether it folds a scale into a matrix product
+        /// decide the shape of a gradient where two are equal in value. Without one, the shapes are
+        /// those that suit ONNX Runtime.</param>
         private static InternalComputationGraph LowerGraph(
             InternalComputationGraph fast, ComputeContext mergeContext, BuildProgressReporter? progress = null,
             bool lowerAutoGrad = true, IShorokooBackend? runtimeBackend = null)
@@ -2869,10 +2869,10 @@ namespace Shorokoo
             // A gradient scaled by several scalars along a chain of products -- a mean's 1/N, a
             // soft cap's c and 1/c -- is scaled by their product once.
             Shorokoo.Core.Nodes.Processors.Fast.FastFoldScalarFactors.Process(fast);
-            // A scale by a scalar next to a matrix product is folded into the product by a backend;
-            // one with a reshape between them is a pass of its own.
-            Shorokoo.Core.Nodes.Processors.Fast.FastScaleBesideMatMul.Process(fast,
-                scalesFoldIntoMatMul: runtimeBackend?.FoldsScalesIntoMatMul ?? true);
+            // A scale by a scalar next to a matrix product is folded into the product by a backend
+            // that folds scales so; one with a reshape between them is a pass of its own.
+            if (runtimeBackend?.FoldsScalesIntoMatMul ?? true)
+                Shorokoo.Core.Nodes.Processors.Fast.FastScaleBesideMatMul.Process(fast);
             // A decay factor a baked zero weight decay folded to one scales a whole parameter by
             // it every step; the product is the parameter itself.
             Shorokoo.Core.Nodes.Processors.Fast.FastDropMultiplyByOne.Process(fast);

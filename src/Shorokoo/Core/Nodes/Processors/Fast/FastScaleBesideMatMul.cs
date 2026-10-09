@@ -25,30 +25,30 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     ///   <item><c>Mul(x, s)</c> read only by <c>Reshape</c>s, through which it flows into
     ///         <c>MatMul</c>s alone, becomes <c>Mul(Reshape(x), s)</c> for each of them. Across more
     ///         than one reshape the scale is multiplied once per reshape, which costs nothing only
-    ///         where each is folded into its product; so that happens only for a backend that folds
-    ///         scales so, and a static scale (<see cref="FastScalarValues.FindWithStatic"/>), which a
-    ///         session built at concrete dimensions holds as the constant such a fold needs.</item>
+    ///         where each is folded into its product; so that happens only for a static scale
+    ///         (<see cref="FastScalarValues.FindWithStatic"/>), which a session built at concrete
+    ///         dimensions holds as the constant such a fold needs.</item>
     /// </list>
+    /// <para>The training rig runs it only for a backend that folds scales into matrix products
+    /// (<c>IShorokooBackend.FoldsScalesIntoMatMul</c>): elsewhere a scale beside a product is no
+    /// cheaper than one a reshape away, and one moved across several reshapes costs a pass per
+    /// reshape.</para>
     /// <para>Only a top-level <c>Mul</c> by a rank-0 factor moves, and nothing a graph output
     /// reads. Each element is still multiplied by the same scalar once; a backend that then folds
     /// the scale into the product rounds it there.</para>
     /// </summary>
     internal static class FastScaleBesideMatMul
     {
-        /// <param name="graph">The step, rewritten in place.</param>
-        /// <param name="scalesFoldIntoMatMul">Whether the backend that runs it folds a scale into a
-        /// matrix product (see <c>IShorokooBackend.FoldsScalesIntoMatMul</c>): only then does a
-        /// static scale move across more than one reshape.</param>
-        public static void Process(InternalComputationGraph graph, bool scalesFoldIntoMatMul = true)
+        public static void Process(InternalComputationGraph graph)
         {
             // Each round moves a scale across one reshape; a scale behind a chain of them moves
             // once per round.
             bool any = false;
-            while (Round(graph, scalesFoldIntoMatMul)) any = true;
+            while (Round(graph)) any = true;
             if (any) FastProcessorHelper.RemoveUnreachableNodes(graph);
         }
 
-        private static bool Round(InternalComputationGraph graph, bool scalesFoldIntoMatMul)
+        private static bool Round(InternalComputationGraph graph)
         {
             var producer = new Dictionary<FastTensorKey, FastNode>();
             var readers = new Dictionary<FastTensorKey, List<FastNode>>();
@@ -132,7 +132,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 if (producer.TryGetValue(a, out var source) && IsMatMul(source)) continue;
                 var reshapes = ReadersOf(product);
                 if (reshapes.Count == 0 || !EndsInMatMuls(product) || reshapes.Any(touched.Contains)) continue;
-                var isStatic = scalesFoldIntoMatMul && staticValues.Contains(b);
+                var isStatic = staticValues.Contains(b);
                 // A reshape of a reshape of the product, its shape taken literally (allowzero),
                 // reshapes the product itself: rewired to read it, it is one more reshape the
                 // scale can follow, rather than a reader the scale has to pass two reshapes for.

@@ -329,9 +329,9 @@ public interface IShorokooBackend
 
     // Whether this backend folds a product by a scalar constant into the matrix product that reads
     // or feeds it -- ONNX Runtime makes the scale the alpha of the MatMul it fuses -- so that a scale
-    // beside a MatMul costs nothing. The training rig then moves a static scale across each of the
-    // reshapes between it and the MatMuls it flows into, which elsewhere would make one pass per
-    // reshape of what was one.
+    // beside a MatMul costs nothing. The training rig then moves a scale across the reshapes between
+    // it and the MatMuls it flows into -- a static one across each of several, which elsewhere would
+    // make one pass per reshape of what was one.
     //
     // A decorator forwards this, as it forwards every member with a default body.
     internal bool FoldsScalesIntoMatMul => false;

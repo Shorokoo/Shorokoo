@@ -1595,8 +1595,9 @@ public class ComputeContextLifetimeCoverageTests
     {
         string Temp(string prefix, string suffix = "") => Path.Combine(Path.GetTempPath(), $"{prefix}{Guid.NewGuid():N}{suffix}");
         string[] files = [Temp("shorokoo-model-", ".onnx"), Temp("shorokoo-model-", ".onnx"), Temp("shorokoo-model-", ".onnx")];
-        string[] folders = [Temp("shorokoo-runs-"), Temp("shorokoo-runs-")];
-        var (staleFile, heldFile, freshFile, staleFolder, heldFolder) = (files[0], files[1], files[2], folders[0], folders[1]);
+        string[] folders = [Temp("shorokoo-runs-"), Temp("shorokoo-runs-"), Temp("shorokoo-node-placement-"), Temp("shorokoo-node-placement-")];
+        var (staleFile, heldFile, freshFile) = (files[0], files[1], files[2]);
+        string[] staleFolders = [folders[0], folders[2]], heldFolders = [folders[1], folders[3]];
         var old = DateTime.UtcNow.AddDays(-2);
         try
         {
@@ -1607,19 +1608,19 @@ public class ComputeContextLifetimeCoverageTests
                 File.WriteAllBytes(Path.Combine(folder, OrtPlacements.KeptLockFile), [1]);
             }
             using (File.Open(heldFile, FileMode.Open, FileAccess.Read, FileShare.Read))
-            using (File.Open(Path.Combine(heldFolder, OrtPlacements.KeptLockFile), FileMode.Open, FileAccess.Read, FileShare.Read))
+            using (File.Open(Path.Combine(heldFolders[0], OrtPlacements.KeptLockFile), FileMode.Open, FileAccess.Read, FileShare.Read))
+            using (File.Open(Path.Combine(heldFolders[1], OrtPlacements.KeptLockFile), FileMode.Open, FileAccess.Read, FileShare.Read))
             {
                 File.SetLastWriteTimeUtc(staleFile, old);
                 File.SetLastWriteTimeUtc(heldFile, old);
-                Directory.SetLastWriteTimeUtc(staleFolder, old);
-                Directory.SetLastWriteTimeUtc(heldFolder, old);
+                foreach (var folder in folders) Directory.SetLastWriteTimeUtc(folder, old);
                 OrtPlacements.SweepStale();
             }
             Assert.False(File.Exists(staleFile));
-            Assert.False(Directory.Exists(staleFolder));
+            Assert.All(staleFolders, folder => Assert.False(Directory.Exists(folder)));
             Assert.True(File.Exists(heldFile));
             Assert.True(File.Exists(freshFile));
-            Assert.True(Directory.Exists(heldFolder));
+            Assert.All(heldFolders, folder => Assert.True(Directory.Exists(folder)));
         }
         finally
         {

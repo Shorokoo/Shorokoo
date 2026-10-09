@@ -855,14 +855,19 @@ public class NNLibraryOptimizerTrainingCoverageTests
     public void TestASequenceHeadsScalesSitOnItsMatMulsWhereOnnxRuntimeFoldsThem()
         => Assert.Equal(3, OptimizedSequenceHeadScalesOfLogits());
 
+    private static int FullSizeMuls(ComputationGraph model)
+    {
+        var rig = TrainingRig.FromScratch(model, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, [TensorData([32L, 48L], new float[32 * 48])], 0.1f);
+        var step = rig.TrainingStepPureGraph.ToInternal();
+        var shapes = new ShapeInferenceInterpreter().Infer(step, rig.OptimizationInputs);
+        return step.Nodes.Count(n => n.OpCode == OpCodes.MUL && shapes.GetTensorInfo(new FastTensorKey(n.Key, 0))?.ElementCount == 32 * 48);
+    }
+
     [Fact]
     public void TestScalesAppliedToASmallTensorStayOnItWhenTheyFold()
     {
-        var rig = TrainingRig.FromScratch(NNScaledBeforeBroadcastModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
-            [TensorData([32L, 48L], new float[32 * 48])], 0.1f);
-        var step = rig.TrainingStepPureGraph.ToInternal();
-        var shapes = new ShapeInferenceInterpreter().Infer(step, rig.OptimizationInputs);
-        Assert.Equal(4, step.Nodes.Count(n => n.OpCode == OpCodes.MUL && shapes.GetTensorInfo(new FastTensorKey(n.Key, 0))?.ElementCount == 32 * 48));
+        Assert.Equal(4, FullSizeMuls(NNScaledBeforeBroadcastModel.ComputationGraph));
+        Assert.Equal(4, FullSizeMuls(NNScalesMultipliedBeforeBroadcastModel.ComputationGraph));
     }
 
     [Fact]
@@ -908,6 +913,7 @@ public class NNLibraryOptimizerTrainingCoverageTests
         var scalars = Shorokoo.Core.Nodes.Processors.Fast.FastScalarValues.Find(step);
         Assert.Equal(0, step.Nodes.Count(n => n.OpCode == OpCodes.MUL && n.Inputs.Any(i => i is FastTensorKey k && scalars.Contains(k))
             && shapes.GetTensorInfo(new FastTensorKey(n.Key, 0))?.ElementCount == 6 * 48));
+        Assert.Equal(1, step.Nodes.Count(n => n.OpCode == OpCodes.GATHER && n.Inputs[1] == step.Inputs[^1]));
     }
 
     [Fact]

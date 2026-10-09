@@ -973,6 +973,13 @@ internal sealed unsafe class CachingAllocator
     /// (<see cref="Scope.End"/>). A card that cannot be waited for is in an error no later work on it
     /// survives, and the failure that ended the call is the one worth reporting, so that is not
     /// thrown over it.
+    ///
+    /// <para>It waits for the whole card, the work every other session has queued on it included,
+    /// so a call cancelled or failed beside another session's long run ends only once that run's
+    /// queued work is done. No one stream is known to carry all of the call's work: some of its
+    /// blocks are asked for on no stream, and the stream ONNX Runtime names on the others is its
+    /// own, released or handed to another run as the call returns. A call that completes waits for
+    /// nothing here.</para>
     /// </summary>
     private void AwaitUnfinishedCall()
     {

@@ -833,6 +833,78 @@ public class ComputeContextLifetimeCoverageTests
         Assert.False(FusesAdam("g"));
     }
 
+    private const string AdamChain = "p:float[2,3] m:float[2,3] v:float[2,3] g:float[2,3] b1:float[1] c1:float[1] b2:float[1] c2:float[1] e:float[1] k:float[1] c:bool[1]"
+        + " | P M V | ma=Mul(b1,m) gc=Mul(c1,g) M=Add(ma,gc) vb=Mul(b2,v) cg=Mul(c2,g) gg=Mul(cg,g) V=Add(vb,gg) r=Sqrt(V) d=Add(r,e) q=Div(M,d) u=Mul(q,k) P=Sub(p,u)";
+
+    /// <summary><see cref="AdamChain"/> with each (old, new) pair of <paramref name="edits"/>
+    /// replaced in turn; a node is <c>out=Op(a,b)</c>, or <c>out=If(c){x}</c> for an <c>If</c> whose
+    /// branches each hand back <c>x</c>.</summary>
+    private static GraphProto AdamChainWith(params string[] edits)
+    {
+        var text = AdamChain;
+        for (int i = 0; i < edits.Length; i += 2) text = text.Replace(edits[i], edits[i + 1]);
+        var parts = text.Split(" | ");
+        return GraphOf(parts[0], parts[1], [.. Names(parts[2]).Select(ChainNode)]);
+    }
+
+    private static NodeProto ChainNode(string spec)
+    {
+        var (output, rest) = (spec[..spec.IndexOf('=')], spec[(spec.IndexOf('=') + 1)..]);
+        var inputs = rest[(rest.IndexOf('(') + 1)..rest.IndexOf(')')].Replace(',', ' ');
+        if (!rest.Contains('{')) return Op(rest[..rest.IndexOf('(')], inputs, output);
+        GraphProto Branch()
+        {
+            var branch = GraphOf("", "t", Op("Identity", rest[(rest.IndexOf('{') + 1)..^1], "t"));
+            branch.Name = output;
+            return branch;
+        }
+        var node = Op("If", inputs, output, body: Branch());
+        node.Attributes.Add(new AttributeProto { Name = "else_branch", Type = AttributeProto.AttributeType.Graph, G = Branch() });
+        return node;
+    }
+
+    private static bool FusesAdamChain(params string[] edits) => OrtFusedUpdates.Fuse(new ModelProto { Graph = AdamChainWith(edits) });
+
+    [Fact]
+    public void TestAnAdamChainIsFusedOnlyWhereEachOperandIsInItsPlaceTheStateIsThreeInputsAndEveryCoefficientASingleValueOfNoGreaterRank()
+    {
+        Assert.True(FusesAdamChain());
+        Assert.True(FusesAdamChain(" P=Sub(p,u)", " w=Mul(p,y) P=Sub(w,u)", "k:float[1]", "k:float[1] y:float[1]"));
+        Assert.False(FusesAdamChain("Div(M,d)", "Div(d,M)"));
+        Assert.False(FusesAdamChain("Sub(p,u)", "Sub(u,p)"));
+        Assert.False(FusesAdamChain("k:float[1]", "k:float[1,1,1]"));
+        Assert.False(FusesAdamChain("k:float[1]", "k:float[2,3]"));
+        Assert.False(FusesAdamChain("g:float[2,3]", "g:float[3]"));
+        Assert.False(FusesAdamChain("Mul(b1,m)", "Mul(b1,v)"));
+        Assert.False(FusesAdamChain(" P=Sub(p,u)", " w=Mul(p,y) P=Sub(w,u)", "k:float[1]", "k:float[1] y:float[2,3]"));
+    }
+
+    [Fact]
+    public void TestAnAdamChainIsFusedOnlyWhereNothingElseReadsAnIntermediateAndNothingBeforeTheFusedNodeReadsWhatItWrites()
+    {
+        Assert.True(FusesAdamChain("k:float[1]", "kk:float[1]", " q=", " k=Identity(kk) z=Neg(M) q="));
+        Assert.True(FusesAdamChain("k:float[1]", "kk:float[1]", " q=", " k=Identity(kk) z=If(c){M} q="));
+        Assert.False(FusesAdamChain("k:float[1]", "kk:float[1]", " q=", " z=Neg(M) k=Identity(kk) q="));
+        Assert.False(FusesAdamChain("k:float[1]", "kk:float[1]", " q=", " z=If(c){M} k=Identity(kk) q="));
+        Assert.False(FusesAdamChain(" q=", " z=Neg(r) q="));
+        Assert.False(FusesAdamChain("| P M V |", "| P M V d |"));
+        Assert.False(FusesAdamChain(" q=", " z=If(c){r} q="));
+    }
+
+    [Fact]
+    public void TestATrainingStepWhoseSubgraphReadsAnAdamChainsIntermediateBuildsItsSession()
+    {
+        var model = new ModelProto { IrVersion = 10, Graph = AdamChainWith(" q=", " z=If(c){r} q=", "| P M V |", "| P M V z |") };
+        model.Graph.Name = "step";
+        model.OpsetImports.Add(new OperatorSetIdProto { Domain = "", Version = 21 });
+        using var bytes = new MemoryStream();
+        ProtoBuf.Serializer.Serialize(bytes, model);
+        using var session = new FusingHost().CreateSession(bytes.ToArray(), ShorokooGraphOptimization.TrainingStep, LogSettings.None, DeviceMemorySettings.Default);
+        Assert.NotNull(session);
+    }
+
+    private sealed class FusingHost : OrtBackend;
+
     private static PlacementProof PlacementsOver(GraphProto graph, string consumed, PlacementMemory? memory = null)
     {
         var inputs = graph.Inputs.Where(i => i.Type?.TensorType?.Shape is not null).ToDictionary(

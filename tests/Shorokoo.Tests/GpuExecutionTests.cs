@@ -1470,6 +1470,27 @@ public class GpuExecutionTests
     }
 
     [CudaFact]
+    public void CudaProvider_APadOfConstantPadsAlongConstantAxesPadsOnlyThoseAxesOnTheCard()
+    {
+        using var context = new ComputeContext { Diagnostics = new DiagnosticSettings { TraceNodePlacement = true } };
+        float[] Padded(long[] dims, long[] pads, long[] axes, bool concrete)
+        {
+            var x = InputTensor<float32>("x", rank: dims.Length);
+            var g = new InternalComputationGraph([x], [OnnxOp.Pad(x, Vector(pads), Scalar(9f), Vector(axes))]);
+            using var compiled = context.Compile(g, [concrete ? dims : null], trainingStep: false);
+            var padded = compiled.Execute(TensorData(dims, [1f, 2f, 3f, 4f]).Shared())[0].ToTensorData().CopyMemory<float>();
+            Assert.Equal(["CUDAExecutionProvider"], compiled.ReadNodePlacement()!.Nodes.Where(n => n.OpType == "Pad").Select(n => n.Provider));
+            return padded;
+        }
+        foreach (bool concrete in (bool[])[false, true])
+        {
+            Assert.Equal([9f, 1f, 2f, 9f, 9f, 9f, 3f, 4f, 9f, 9f], Padded([2L, 2L], [1L, 2L], [-1L], concrete));
+            Assert.Equal([9f, 9f, 1f, 2f, 3f, 4f], Padded([1L, 2L, 2L], [1L, 0L], [1L], concrete));
+            Assert.Equal([9f, 1f, 2f, 9f, 3f, 4f, 9f, 9f, 9f, 9f, 9f, 9f], Padded([1L, 2L, 2L], [0L, 1L, 1L, 0L], [0L, 2L], concrete));
+        }
+    }
+
+    [CudaFact]
     public void CudaProvider_OutputPlacementSeparatesADeviceGraphAPartitionedOneAndOneThatFellBack()
     {
         using var ctx = new ComputeContext();

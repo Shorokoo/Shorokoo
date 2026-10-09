@@ -1603,6 +1603,19 @@ public class CoreUtilsCoverageTests
         Assert.True(ReleasingWhatACardKeepsAnswersTheBytesItsMemoryShrankBy());
         Assert.Equal((0L, 4 * G, 4 * G), MemoryTheSystemWouldNotTakeBackStaysCountedAsCommitted());
         Assert.Equal((false, false, true), ABlockACallLetGoOfGoesBackWithinItOnlyToARequestOnTheStreamItWasTakenOn());
+        Assert.Equal((1, 0), (WaitsForTheCardAsACallEnds(unfinished: true), WaitsForTheCardAsACallEnds(unfinished: false)));
+    }
+
+    private static int WaitsForTheCardAsACallEnds(bool unfinished)
+    {
+        var card = new FakeCard();
+        var account = card.Allocator.Open("probe");
+        using (var charge = CachingAllocator.Charge(null, account))
+        {
+            card.Allocator.Free(card.Allocator.Allocate(FakeCard.GranuleBytes, out _, stream: 1));
+            if (unfinished) charge.Unfinished();
+        }
+        return card.Waits;
     }
 
     private static (bool, bool, bool) ABlockACallLetGoOfGoesBackWithinItOnlyToARequestOnTheStreamItWasTakenOn()

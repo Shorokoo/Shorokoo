@@ -88,6 +88,12 @@ namespace Shorokoo.Core.Backends;
 /// no stream orders after the run's kernels. A request without a stream, and a block taken without
 /// one, are therefore never matched within a run.</para>
 ///
+/// <para>That a request on a block's stream orders after everything that used the block rests on
+/// every kernel of a run that reads or writes it running on that one stream: a run has a single
+/// compute stream on the card, as ONNX Runtime's CUDA provider gives a session that executes
+/// sequentially (<c>ExecutionMode.ORT_SEQUENTIAL</c>, which every session is built with). Nothing
+/// here checks that a run uses one stream; a session executing on several would break it.</para>
+///
 /// <para><b>Refusing.</b> A request this cannot serve — one an account's limit has no room for, or
 /// one the device has no memory for — is answered with null and the reason, and the native side
 /// throws that reason as ONNX Runtime's own allocators throw theirs: the call that asked fails as an
@@ -958,8 +964,9 @@ internal sealed unsafe class CachingAllocator
 
     /// <summary>Waits for the work the card has in hand, as handing back memory some of that work may
     /// still read must.</summary>
-    /// <exception cref="InvalidOperationException">The card could not be waited for: nothing is handed
-    /// back that its work may still read.</exception>
+    /// <exception cref="InvalidOperationException">The card could not be waited for. A caller that
+    /// lets this stand hands back nothing that the card's work may still read;
+    /// <see cref="AwaitUnfinishedCall"/> does not let it stand.</exception>
     private void AwaitCard()
     {
         if (_backing is { } backing ? backing.AwaitDevice() : CudaRuntime.Synchronize(_device)) return;
@@ -972,7 +979,8 @@ internal sealed unsafe class CachingAllocator
     /// Waits for the work the card has in hand as a call that did not run to its end ends
     /// (<see cref="Scope.End"/>). A card that cannot be waited for is in an error no later work on it
     /// survives, and the failure that ended the call is the one worth reporting, so that is not
-    /// thrown over it.
+    /// thrown over it — and the call's memory is then kept or handed back as any call's is, without
+    /// the wait: on a card in that error no queued work runs on to read it.
     ///
     /// <para>It waits for the whole card, the work every other session has queued on it included,
     /// so a call cancelled or failed beside another session's long run ends only once that run's
@@ -1606,6 +1614,11 @@ internal sealed unsafe class CachingAllocator
     /// classes holding any, so the call's end visits those alone. Each remembers the stream it was
     /// taken on, the only stream it goes back to before the call ends. An account keeps one for its
     /// next call, so a call holds blocks without allocating.
+    ///
+    /// <para>A request looks through its class's pile from the newest block down for one on its
+    /// stream, so a pile holding many blocks of other streams costs it a scan of them. A block let go
+    /// of on no stream is never taken again within the call, so such blocks pile up until it ends:
+    /// every one a run lets go of on no stream stays held for the rest of that run.</para>
     /// </summary>
     internal sealed class HeldBlocks
     {

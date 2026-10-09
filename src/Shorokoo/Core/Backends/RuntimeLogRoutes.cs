@@ -99,8 +99,9 @@ internal static class RuntimeLogRoutes
     internal static bool IsOpen(string id) => _routes.ContainsKey(id);
 
     /// <summary>The settings a message logged through the logger <paramref name="logId"/> goes to:
-    /// those of a live route the id names — a run's logger is named by its session's id and its own,
-    /// joined by colons, and the run's comes first — unless this thread is building or running under
+    /// those of a live route the id names — ONNX Runtime names a run's logger by its session's log
+    /// id, a colon, and the run's tag, and where both name a live route the run's takes precedence —
+    /// unless this thread is building or running under
     /// that route, when the settings of that build or run; or else the settings in progress on this
     /// thread; or else <see cref="LogSettings.Default"/>.</summary>
     internal static LogSettings Resolve(string? logId)

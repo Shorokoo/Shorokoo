@@ -415,8 +415,9 @@ Runtime's builds a session of the step each time it is asked, at about the cost 
 compiling it, so it is asked only about each strategy's steps, once about each
 distinct one, and nothing more where it cannot tell the step as handed. A training
 checkpoint records its answers: a rig loaded from one on the same builds of
-Shorokoo and its backend, at the same precision, asks only what they do not
-answer. ONNX Runtime's model reads the
+Shorokoo and its backend, at the same precision and, for ONNX Runtime, on the same
+kind of processor or card (its instruction sets, and a card's compute capability),
+asks only what they do not answer. ONNX Runtime's model reads the
 graph ONNX Runtime optimizes and runs, in the order it runs it, with the buffers
 its allocation plan keeps for later values of the same shape and the scratch its
 kernels take: convolutions' and recurrent layers' working buffers on the host, and

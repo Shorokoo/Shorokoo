@@ -31,6 +31,16 @@ public partial class GatheredTableGradientModel
         => Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(table, table.Gather(ids).Reduce(ReduceKind.Sum, keepDims: false).Scalar());
 }
 
+/// <summary>The gradient of a cross-entropy over <c>float64</c> scores, taken through a <c>float32</c>
+/// loss.</summary>
+[Module]
+public partial class Float64CrossEntropyGradientModel
+{
+    public static Tensor<float64> Inline(Tensor<float64> x, Tensor<int64> labels)
+        => (Tensor<float64>)Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(x,
+            ((Tensor<float64>)OnnxOp.SoftmaxCrossEntropyLoss(x, labels, null, null, "mean").output).Cast<float32>().Scalar());
+}
+
 /// <summary>The gradient of the product of two scalars: a broadcasting op's gradient over operands
 /// of rank zero.</summary>
 [Module]
@@ -1472,6 +1482,23 @@ public class GpuExecutionTests
             blocks, null, axis: 1, blockSize: 2), data).CopyMemory<float>());
         Assert.Equal([0d, 5d, 0d, 0d], OnTheCard(f, OnnxOp.ScatterND(OnnxOp.Cast(OnnxOp.Mul(f, Scalar(0f)), null, DType.Float64), Vector(0L, 1L).Reshape(Vector(1L, 2L)), Vector(5d), null),
             TensorData([2L, 2L], [1f, 2f, 3f, 4f])).CopyMemory<double>());
+    }
+
+    [CudaFact]
+    public void CudaProvider_TheCrossEntropyGradientOfFloat64ScoresRunsOnTheCard()
+    {
+        double[] x = [0.5, -1.0, 2.0, 0.25, 1.5, 3.0, -2.0, 0.0, -0.75, 1.0, 2.5, -1.5];
+        long[] labels = [2L, 0L, 3L];
+        var scores = TensorData(DType.Float64, [3L, 4L], [.. x.Select(v => (object)v)]);
+        using var context = new ComputeContext();
+        using var compiled = context.Compile(Float64CrossEntropyGradientModel.ComputationGraph
+            .ToConcreteArchitecture([scores, TensorData([3L], labels)]).ToConcreteModel());
+        var gradient = compiled.Execute(scores, TensorData([3L], labels))[0].ToTensorData().CopyMemory<double>();
+        for (int i = 0; i < 12; i++)
+        {
+            var row = x.Skip(i / 4 * 4).Take(4).Select(Math.Exp).ToArray();
+            Assert.Equal((row[i % 4] / row.Sum() - (labels[i / 4] == i % 4 ? 1 : 0)) / 3, gradient[i], 1e-12);
+        }
     }
 
     private static TensorData OnTheCard<T>(Tensor<T> x, Variable output, TensorData data) where T : IVarType

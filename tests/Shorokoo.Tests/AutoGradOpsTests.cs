@@ -1,4 +1,5 @@
 using static Shorokoo.Tests.AutoGradOpsRunners;
+using Shorokoo.Core.Backends;
 using Shorokoo.PyTorch.Cpu;
 using Shorokoo.Runtime;
 
@@ -180,10 +181,22 @@ public class AutoGradElementwiseOpsCoverageTests
     }
 
     // Shorokoo/Shorokoo#551: the backward pass is seeded with a float32 one whatever the loss's type.
-    [Fact(Skip = "Shorokoo/Shorokoo#551: a float64 loss's gradient is seeded as float32")]
-    public void TestAutoGradOfAFloat64Loss()
-        => Assert.True(AutoTest.AdvancedTestGraph<AutoGradFloat64LossCheck>(
-            [], [TensorData(DType.Float64, [3L, 4L], 0.5, -1.0, 2.0, 0.25, 1.5, 3.0, -2.0, 0.0, -0.75, 1.0, 2.5, -1.5)]));
+    [Fact(Skip = "Shorokoo/Shorokoo#551: a loss's gradient is seeded as float32 whatever the loss's type")]
+    public void TestAutoGradOfAFloat64OrHalfPrecisionLoss()
+    {
+        float[] x = [0.5f, -1f, 2f, 0.25f, 1.5f, 3f, -2f, 0f, -0.75f, 1f, 2.5f, -1.5f];
+        Assert.True(AutoTest.AdvancedTestGraph<AutoGradFloat64LossCheck>([], [TensorData(DType.Float64, [3L, 4L], [.. x.Select(v => (object)(double)v)])]));
+        Assert.True(AutoTest.AdvancedTestGraph<AutoGradFloat16LossCheck>([], [TensorData(DType.Float16, [3L, 4L], [.. x.Select(v => (object)(Float16)v)])]));
+        Assert.True(AutoTest.AdvancedTestGraph<AutoGradBFloat16LossCheck>([], [TensorData(DType.BFloat16, [3L, 4L], [.. x.Select(v => (object)(BFloat16)v)])]));
+    }
+
+    [Fact]
+    public void TestAutoGradLossGradientsAtTheEdgesOfTheirInputs()
+    {
+        Run<AutoGradLossOfAnAllIgnoredBatchCheck>(0.5f);
+        RunTensor<AutoGradCrossEntropyLossAtANegativeLabelCheck>([3L, 4L], 0.5f, -1f, 2f, 0.25f, 1.5f, 3f, -2f, 0f, -0.75f, 1f, 2.5f, -1.5f);
+        RunTensor<AutoGradHalfPrecisionMeanLossOverManySamplesCheck>([70000L, 2L], new float[140000]);
+    }
 
     [Fact]
     public void TestAutoGradLossGradients()

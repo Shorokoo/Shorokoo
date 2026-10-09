@@ -856,6 +856,14 @@ public class NNLibraryOptimizerTrainingCoverageTests
         => Assert.Equal(3, OptimizedSequenceHeadScalesOfLogits());
 
     [Fact]
+    public void TestAScaleBetweenTwoProjectionsSettlesBesideOne()
+    {
+        var rig = TrainingRig.FromScratch(NNScaledBetweenProjectionsModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            [TensorData([2L, 2L, 4L], [.. Enumerable.Range(0, 16).Select(i => i * 0.25f - 2f)])], 0.1f);
+        Assert.NotEmpty(rig.TrainingStepPureGraph.ToInternal().Nodes);
+    }
+
+    [Fact]
     public void TestAnExponentialActivationsGradientReadsItsOutputRatherThanExponentiatingAgain()
     {
         var rig = TrainingRig.FromScratch(NNExponentialActivationsModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,

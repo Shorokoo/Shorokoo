@@ -119,6 +119,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
                 // Coming back: Mul(x, s) flowing through reshapes into matrix products only -> each
                 // reshape reads x, and the scale follows it.
+                // A scale on a MatMul's own output is already beside it: moving it on would undo
+                // the move above and, at the next round, have it made again.
+                if (producer.TryGetValue(a, out var source) && IsMatMul(source)) continue;
                 var reshapes = ReadersOf(product);
                 if (reshapes.Count == 0 || !EndsInMatMuls(product) || reshapes.Any(touched.Contains)) continue;
                 var isStatic = staticValues.Contains(b);

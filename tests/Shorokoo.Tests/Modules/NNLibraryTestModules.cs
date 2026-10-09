@@ -2574,6 +2574,17 @@ public partial class NNSoftCappedSequenceHeadModel
             * Scalar(1f / 15f)).Tanh() * Scalar(15f);
 }
 
+/// <summary>A projection reshaped, scaled by a constant and projected again by a fixed matrix: a
+/// scale between two matrix products, beside both, whose product nothing but the second reads.</summary>
+[Module]
+public partial class NNScaledBetweenProjectionsModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+        => (x.MatMul(Normal.Init(Vector(4L, 6L))).Reshape([Scalar(-1L), Scalar(6L)]) * Scalar(0.5f))
+            .MatMul((Tensor<float32>)OnnxOp.Reshape(Vector(1f, -1f, 2f, 0.5f, 3f, -2f, 1.5f, 0f, -1f, 2.5f, 1f, -0.5f, 0.25f, 2f, -3f, 1f, 0.75f, -1.25f),
+                Vector(6L, 3L), allowZero: false));
+}
+
 /// <summary>A batch of rows projected by a <c>[3, 5]</c> weight, then through <c>Elu</c>, <c>Selu</c>
 /// and <c>Celu</c>, summed: the exponential activations, each differentiated once.</summary>
 [Module]

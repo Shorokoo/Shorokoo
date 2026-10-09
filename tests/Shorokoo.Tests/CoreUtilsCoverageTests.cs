@@ -664,14 +664,47 @@ public class CoreUtilsCoverageTests
     }
 
     [Fact]
-    public void TestAttributesPastTwoGibibytesLeftToTheCollectorMakeItCollect()
-        => Utils.OwnProcess.Run(typeof(CoreUtilsCoverageTests), nameof(AttributesPastTwoGibibytesLeftToTheCollectorMakeItCollect));
-
-    internal static void AttributesPastTwoGibibytesLeftToTheCollectorMakeItCollect()
+    public void TestAHeldTensorWeighsOnTheCollectorOnceUntilTheLastAttributeOverItIsCollected()
     {
-        var collections = GC.CollectionCount(2);
-        for (int i = 0; i < 8; i++) AttributePastTwoGibibytes();
-        Assert.True(GC.CollectionCount(2) - collections >= 3);
+        const long Bytes = (1L << 31) + 8;
+        ConcurrentQueue<long> told = new();
+        TensorAttribute.PressureObserver = told.Enqueue;
+        try
+        {
+            var (attributes, native) = TwoAttributesOverOneHeldTensor();
+            Collected();
+            Assert.Equal([Bytes], told);
+            Assert.True(native.IsAlive);
+            attributes[0] = null;
+            Collected();
+            Assert.Equal([Bytes], told);
+            Assert.True(native.IsAlive);
+            attributes[1] = null;
+            Collected();
+            Assert.Equal([Bytes, -Bytes], told);
+            Assert.False(native.IsAlive);
+        }
+        finally
+        {
+            TensorAttribute.PressureObserver = null;
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static (TensorAttribute?[] Attributes, WeakReference Native) TwoAttributesOverOneHeldTensor()
+    {
+        var (attribute, value) = AttributePastTwoGibibytes();
+        return ([attribute, attribute.WithDType(DType.Int8)], new WeakReference(((OrtTensorValue)value).Inner, trackResurrection: true));
+    }
+
+    private static void Collected()
+    {
+        for (int i = 0; i < 3; i++)
+        {
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+        }
+        GC.Collect();
     }
 
     // Keeps what the first write hands it, and stops the writer there.
@@ -2202,6 +2235,16 @@ public class CoreUtilsCoverageTests
         Assert.IsAssignableFrom<System.Text.Json.JsonException>(Reading("[{"));
         Assert.IsType<InvalidDataException>(Reading("{}"));
         Assert.Null(Reading("[]"));
+
+        using var traced = new ComputeContext { Diagnostics = new DiagnosticSettings { TraceNodePlacement = true } };
+        var compiled = Doubling(traced);
+        compiled.Execute(ThreeFloats());
+        var profile = Assert.Single(Directory.GetFiles(((OrtSession)compiled.Session).ProfileDirectory!, "*.json"));
+        InvalidOperationException unread;
+        using (new FileStream(profile, FileMode.Open, FileAccess.ReadWrite, OperatingSystem.IsWindows() ? FileShare.ReadWrite : FileShare.None))
+            unread = Assert.Throws<InvalidOperationException>(() => compiled.ReadNodePlacement());
+        Assert.IsType<IOException>(unread.InnerException);
+        Assert.Same(unread, Assert.Throws<InvalidOperationException>(() => compiled.ReadNodePlacement()));
     }
 
     /// <summary>

@@ -1086,6 +1086,18 @@ namespace Shorokoo.Tests.Modules
             => AutoGradCheckHelpers.ElementwiseDirectionalDerivCheck(x, z => z.Celu(1.0f));
     }
 
+    /// <summary>Σ elu(x, α) for α = 0.5 and α = −0.5 (an output above zero on both sides of the
+    /// switch), Σ selu(x, 2, 0.5) and Σ celu(x, 2), each checked element-wise.</summary>
+    [Module]
+    public partial class AutoGradExponentialActivationsParameterCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x)
+            => AutoGradCheckHelpers.ElementwiseDirectionalDerivCheck(x, z => (Tensor<float32>)OnnxOp.Elu(z, 0.5f))
+               & AutoGradCheckHelpers.ElementwiseDirectionalDerivCheck(x, z => (Tensor<float32>)OnnxOp.Elu(z, -0.5f))
+               & AutoGradCheckHelpers.ElementwiseDirectionalDerivCheck(x, z => (Tensor<float32>)OnnxOp.Selu(z, 2f, 0.5f))
+               & AutoGradCheckHelpers.ElementwiseDirectionalDerivCheck(x, z => (Tensor<float32>)OnnxOp.Celu(z, 2f));
+    }
+
     /// <summary>loss = hardSigmoid(x). Piecewise-linear; smooth in (-2.5, 2.5).</summary>
     [Module]
     public partial class AutoGradHardSigmoidCheck

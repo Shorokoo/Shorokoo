@@ -2563,6 +2563,18 @@ public partial class NNSoftCappedTableProjectionModel
         => (Normal.Init(Vector(64L, 4L)).Gather(tokens).MatMul(Normal.Init(Vector(4L, 48L))) * Scalar(1f / 15f)).Tanh() * Scalar(15f);
 }
 
+/// <summary>A batch of rows projected by a <c>[3, 5]</c> weight, then through <c>Elu</c>, <c>Selu</c>
+/// and <c>Celu</c>, summed: the exponential activations, each differentiated once.</summary>
+[Module]
+public partial class NNExponentialActivationsModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+    {
+        var h = x.MatMul(Normal.Init(Vector(3L, 5L)));
+        return (Tensor<float32>)OnnxOp.Elu(h, 0.5f) + (Tensor<float32>)OnnxOp.Selu(h) + (Tensor<float32>)OnnxOp.Celu(h, 2f);
+    }
+}
+
 /// <summary><see cref="NNGatheredTableProjectionModel"/> over an <c>[8256, 4]</c> table: more
 /// elements than one task of the fused update takes, and a part task at its end.</summary>
 [Module]

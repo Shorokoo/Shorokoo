@@ -832,6 +832,14 @@ public class NNLibraryOptimizerTrainingCoverageTests
         Assert.Equal(1, CrossEntropySessionOps(NNSoftCappedTableProjectionModel.ComputationGraph, OpCodes.LOG_SOFTMAX));
     }
 
+    [Fact]
+    public void TestAnExponentialActivationsGradientReadsItsOutputRatherThanExponentiatingAgain()
+    {
+        var rig = TrainingRig.FromScratch(NNExponentialActivationsModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            [TensorData([4L, 3L], [0.5f, -1f, 2f, 0.25f, 1.5f, -3f, -2f, 0f, -0.75f, 1f, 2.5f, -1.5f])], 0.1f);
+        Assert.Equal(0, rig.TrainingStepPureGraph.ToInternal().Nodes.Count(n => n.OpCode == OpCodes.EXP));
+    }
+
     private static int StepScatterNDsWithoutReduction(ComputationGraph model, TensorData sample)
     {
         var rig = TrainingRig.FromScratch(model, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, [sample], 0.1f);

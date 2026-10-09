@@ -87,6 +87,7 @@ public class AutoGradElementwiseOpsCoverageTests
         RunTensor<AutoGradEluCheck>([2L], 2f, -1f);
         RunTensor<AutoGradSeluCheck>([2L], 2f, -1f);
         RunTensor<AutoGradCeluCheck>([2L], 2f, -1f);
+        RunTensor<AutoGradExponentialActivationsParameterCheck>([4L], 2f, -1f, 0.5f, -0.25f);
         Run<AutoGradSigmoidExpChainCheck>(0f);
         Run<AutoGradLeakyReluExpChainCheck>(0f);
         Run<AutoGradHardSigmoidCheck>(0.5f);

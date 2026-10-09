@@ -995,7 +995,7 @@ public class GpuExecutionTests
     // A resident AdamW run of WideLinearModel, shrinking as under a budget: the plain step holds the
     // new state beside the consumed one, two of its three parameter-sized values at once on the card
     // (the third is written after a temporary goes).
-    [CudaFact]
+    [CudaFact(needsProcessFigure: true)]
     public void CudaProvider_WritingAStepsStateOverWhatItConsumedTakesMostOfTheStateOffTheCardsPeak()
     {
         DeviceMemory.ResetPeak();
@@ -1014,7 +1014,7 @@ public class GpuExecutionTests
         }
     }
 
-    [CudaFact]
+    [CudaFact(needsProcessFigure: true)]
     public void CudaProvider_PlacingAStepsStateOverWhatItConsumedTakesTheStateOffTheCardsPeakAsAliasingDoes()
     {
         DeviceMemory.ResetPeak();
@@ -1125,7 +1125,7 @@ public class GpuExecutionTests
     /// use its weights and each output's own bytes once a run that hands its memory back is over,
     /// nothing beyond what is in use, and its weights alone once the outputs are let go of.
     /// </summary>
-    [CudaFact]
+    [CudaFact(needsProcessFigure: true)]
     public void CudaProvider_AKeptOutputHoldsOnlyItsOwnBytesOnTheCardAndNothingOfItsSessionsArena()
     {
         const long MiB = 1024 * 1024;
@@ -1170,7 +1170,7 @@ public class GpuExecutionTests
     /// allocator holds exactly its bytes more while it is kept and nothing more once it is let go,
     /// and the card holds less than the output twice over for the run's every block.
     /// </summary>
-    [CudaFact]
+    [CudaFact(needsProcessFigure: true)]
     public void CudaProvider_AnOutputWhoseShapeTheRunLearnsIsOnTheCardOnceAsTheBlockItsSessionWroteItInto()
     {
         using var ctx = new ComputeContext();
@@ -1193,7 +1193,7 @@ public class GpuExecutionTests
     /// has, and hands them back to the card as a run that hands back its memory ends, or as the
     /// program asks.
     /// </summary>
-    [CudaFact]
+    [CudaFact(needsProcessFigure: true)]
     public void CudaProvider_TheCardsAllocatorHandsBackWhatNoTensorUsesAsARunThatHandsBackItsMemoryEndsOrTheProgramAsks()
     {
         const long MiB = 1024 * 1024;
@@ -1360,14 +1360,6 @@ public class GpuExecutionTests
         return DeviceMemory.Read()!.Value.ProcessBytes!.Value;
     }
 
-    /// <summary>
-    /// A graph the provider cannot run whole: one output is computed on the card and one on the
-    /// host, which is what <see cref="SessionOutputPlacement.Mixed"/ > is for, and the crossing
-    /// is charged to the pinned host arena rather than to the device one. A graph with no node the
-    /// provider can run is <see cref="SessionOutputPlacement.Host"/>, its device memory holding
-    /// nothing but the output it copies onto the card, and one it runs whole is
-    /// <see cref="SessionOutputPlacement.Device"/>. Every output comes back on the card.
-    /// </summary>
     [CudaFact]
     public void CudaProvider_TheGradientOfAProductOfScalarsRunsOnTheCard()
     {
@@ -1509,6 +1501,14 @@ public class GpuExecutionTests
         }
     }
 
+    /// <summary>
+    /// A graph the provider cannot run whole: one output is computed on the card and one on the
+    /// host, which is what <see cref="SessionOutputPlacement.Mixed"/> is for, and the crossing
+    /// is charged to the pinned host arena rather than to the device one. A graph with no node the
+    /// provider can run is <see cref="SessionOutputPlacement.Host"/>, its device memory holding
+    /// nothing but the output it copies onto the card, and one it runs whole is
+    /// <see cref="SessionOutputPlacement.Device"/>. Every output comes back on the card.
+    /// </summary>
     [CudaFact]
     public void CudaProvider_OutputPlacementSeparatesADeviceGraphAPartitionedOneAndOneThatFellBack()
     {
@@ -1654,7 +1654,7 @@ public class GpuExecutionTests
     /// The card's figure for this process alone, which #406 asked for: a gigabyte held on the card
     /// is in it, and it is a part of what the card reports across every process.
     /// </summary>
-    [CudaFact]
+    [CudaFact(needsProcessFigure: true)]
     public void CudaProvider_TheProcessFigureHoldsWhatThisProcessPutOnTheCard()
     {
         using var ctx = new ComputeContext();

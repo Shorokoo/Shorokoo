@@ -1613,6 +1613,19 @@ public class CoreUtilsCoverageTests
         Assert.True(ReleasingWhatACardKeepsAnswersTheBytesItsMemoryShrankBy());
         Assert.Equal((0L, 4 * G, 4 * G), MemoryTheSystemWouldNotTakeBackStaysCountedAsCommitted());
         Assert.Equal((false, false, true), ABlockACallLetGoOfGoesBackWithinItOnlyToARequestOnTheStreamItWasTakenOn());
+        Assert.Equal((1, 0), (WaitsForTheCardAsACallEnds(unfinished: true), WaitsForTheCardAsACallEnds(unfinished: false)));
+    }
+
+    private static int WaitsForTheCardAsACallEnds(bool unfinished)
+    {
+        var card = new FakeCard();
+        var account = card.Allocator.Open("probe");
+        using (var charge = CachingAllocator.Charge(null, account))
+        {
+            card.Allocator.Free(card.Allocator.Allocate(FakeCard.GranuleBytes, out _, stream: 1));
+            if (unfinished) charge.Unfinished();
+        }
+        return card.Waits;
     }
 
     private static (bool, bool, bool) ABlockACallLetGoOfGoesBackWithinItOnlyToARequestOnTheStreamItWasTakenOn()
@@ -2173,6 +2186,22 @@ public class CoreUtilsCoverageTests
         Assert.Empty(new NodePlacement([]).Providers);
         Assert.Throws<ArgumentNullException>(() => new NodePlacement(null!));
         Assert.Throws<ArgumentNullException>(() => placement.NodesOn(null!));
+    }
+
+    [Fact]
+    public void TestAProfileThatCannotBeReadFailsWithItsCause()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"profile-{Guid.NewGuid():N}.json");
+        Exception? Reading(string? text)
+        {
+            if (text is not null) File.WriteAllText(path, text);
+            try { return Record.Exception(() => OrtProfile.Read(path)); }
+            finally { File.Delete(path); }
+        }
+        Assert.IsType<FileNotFoundException>(Reading(null));
+        Assert.IsAssignableFrom<System.Text.Json.JsonException>(Reading("[{"));
+        Assert.IsType<InvalidDataException>(Reading("{}"));
+        Assert.Null(Reading("[]"));
     }
 
     /// <summary>

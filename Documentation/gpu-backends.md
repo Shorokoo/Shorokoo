@@ -510,7 +510,8 @@ if (compiled.ReadNodePlacement() is { } placement)
 
 `Providers` lists each provider that ran anything, busiest first; more than one on a GPU session
 *is* fallback. **Reading the trace stops the recording**: later runs are not included, and a
-second read returns the same trace. `Nodes` is in execution order; inserted `MemcpyToHost` /
+second read returns the same trace. A trace that was recorded but cannot be read throws an
+`InvalidOperationException` whose inner exception is the cause. `Nodes` is in execution order; inserted `MemcpyToHost` /
 `MemcpyFromHost` nodes get indices above all original nodes, so treat
 `NodeExecution.NodeIndex` as a name, not an order.
 

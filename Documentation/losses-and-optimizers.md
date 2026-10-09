@@ -184,7 +184,8 @@ hyperparameter set (`<Name>Hyperparameters`, e.g. `AdamOptimizerHyperparameters`
   `Shorokoo.LinuxGPU` packages carry it). Anywhere else — on the PyTorch and JAX backends, for
   another dtype or a parameter of unstated shape, or on a CUDA backend built from source where no
   CUDA toolkit was at hand to build that library (see the repository's README) — it runs as those
-  operators, twelve passes over the parameter (thirteen with a weight decay). Every element is updated every step, rows the batch did not read included.
+  operators, twelve passes over the parameter (thirteen with a weight decay). Every element is
+  updated every step, rows the batch did not read included.
 - **RMSprop** with `momentum = 0` is plain RMSprop (both state tensors still exist).
 - **Adamax** puts `ε` inside the max and bias-corrects only `m`.
 - **NAdam** has no weight decay.

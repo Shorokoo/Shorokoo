@@ -133,26 +133,20 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     return (FastTensorKey)mul.Outputs[0]!;
                 }
 
-                // The operands of the root: the scaled tensors' product, scaled, then the others.
-                var operands = new List<FastTensorKey>();
-                if (scaled.Count > 0)
-                {
-                    var product = scaled[0];
-                    for (int t = 1; t < scaled.Count; t++) product = Multiply(product, scaled[t]);
-                    operands.Add(product);
-                }
+                // The terms, multiplied from the left: the scaled tensors, the scale, then the others.
+                List<FastTensorKey> terms = [.. scaled];
                 if (scale.Count > 0)
                 {
                     var scaleProduct = scale[0];
                     for (int t = 1; t < scale.Count; t++) scaleProduct = Multiply(scaleProduct, scale[t]);
-                    operands.Add(scaleProduct);
+                    terms.Add(scaleProduct);
                 }
-                operands.AddRange(rest);
-                var left = operands[0];
-                for (int o = 1; o < operands.Count - 1; o++) left = Multiply(left, operands[o]);
+                terms.AddRange(rest);
+                var left = terms[0];
+                for (int t = 1; t < terms.Count - 1; t++) left = Multiply(left, terms[t]);
 
                 root.FullInputs.Clear();
-                root.FullInputs[""] = new List<FastTensorKey?> { left, operands[^1] };
+                root.FullInputs[""] = new List<FastTensorKey?> { left, terms[^1] };
                 graph.Nodes.InsertRange(graph.Nodes.IndexOf(root), built);
                 foreach (var gone in inner) graph.Nodes.Remove(gone);
                 changed = true;

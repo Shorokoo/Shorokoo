@@ -127,9 +127,13 @@
     ProjectReference above deploys; the package is already restored by the solution, since
     Shorokoo.LinuxGPU references it, so this costs a file copy and no download.
   -->
+  <!-- Under ShorokooGpuTests the package's natives are the default backend's, which Shorokoo.LinuxGPU
+       brings and a reference excluding the package's assets would keep out of the output. -->
   <ItemGroup Condition="$([MSBuild]::IsOSPlatform('Linux'))">
-    <PackageReference Include="Microsoft.ML.OnnxRuntime.Gpu.Linux" Version="1.30.0"
+    <PackageReference Include="Microsoft.ML.OnnxRuntime.Gpu.Linux" Version="1.30.0" Condition="'$(ShorokooGpuTests)' != 'true'"
                       ExcludeAssets="all" GeneratePathProperty="true" />
+    <PackageReference Include="Microsoft.ML.OnnxRuntime.Gpu.Linux" Version="1.30.0" Condition="'$(ShorokooGpuTests)' == 'true'"
+                      GeneratePathProperty="true" />
     <ShorokooBackendNatives BackendId="cuda" Condition="'$(ShorokooDeployGpuBackend)' != 'true'"
       Include="$(PkgMicrosoft_ML_OnnxRuntime_Gpu_Linux)\runtimes\linux-x64\native\libonnxruntime.so;$(PkgMicrosoft_ML_OnnxRuntime_Gpu_Linux)\runtimes\linux-x64\native\libonnxruntime_providers_shared.so" />
     <ShorokooBackendNatives BackendId="traced"

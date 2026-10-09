@@ -1113,6 +1113,33 @@ public class PyTorchBackendCoverageTests
         AssertWarningsReachTheirLogSettings("shorokoo_torch", TorchRuntime.Source);
     }
 
+    private const string PaletteWithByteTransparency = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAABAQMAAADO7O3JAAAABlBMVEX/AAAAAP9sof2OAAAAAnRSTlOA/2ASuv4AAAAKSURBVHjaY3AAAABCAEGEv45iAAAAAElFTkSuQmCC";
+
+    internal static (string Source, string Category)[] RunWarnings<T>(IShorokooBackend backend, byte[] model, T[] input, ShorokooLogSeverity severity) where T : unmanaged
+    {
+        ConcurrentQueue<RuntimeLogMessage> sink = [];
+        using var session = backend.CreateSession(model, default, LogSettings.None, DeviceMemorySettings.Default);
+        using var x = backend.CreateTensor(input, [input.Length]);
+        foreach (var y in session.Run(new Dictionary<string, IShorokooTensorValue> { ["x0"] = x }, ["y"], new RunSettings { Log = CoreUtilsCoverageTests.Into(sink, severity) }))
+            y.Dispose();
+        return [.. sink.Select(m => (m.Source, m.Category))];
+    }
+
+    internal static void AssertEachRunsWarningReachesThatRunsLogSettingsAlone<T>(IShorokooBackend backend, byte[] model, T[] input, string source) where T : unmanaged
+    {
+        Assert.Equal([(source, "UserWarning")], RunWarnings(backend, model, input, ShorokooLogSeverity.Warning));
+        Assert.Empty(RunWarnings(backend, model, input, ShorokooLogSeverity.Error));
+        Assert.Equal([(source, "UserWarning")], RunWarnings(backend, model, input, ShorokooLogSeverity.Warning));
+    }
+
+    [Fact]
+    public void TestEveryRunAPillowWarningIsRaisedInDeliversItAloneToThatRunsLogSettingsAlone()
+        => Utils.OwnProcess.Run(typeof(PyTorchBackendCoverageTests), nameof(EveryRunAPillowWarningIsRaisedInDeliversItAloneToThatRunsLogSettingsAlone));
+
+    internal static void EveryRunAPillowWarningIsRaisedInDeliversItAloneToThatRunsLogSettingsAlone()
+        => AssertEachRunsWarningReachesThatRunsLogSettingsAlone(
+            Torch, Onnx("ImageDecoder", (int)ShorokooTensorElementType.UInt8), Convert.FromBase64String(PaletteWithByteTransparency), TorchRuntime.Source);
+
     [Fact]
     public void TestACpuSessionHasNoArenaFiguresLeavesItsOutputsInHostMemoryAndRunsEveryNodeOnTheHost()
     {

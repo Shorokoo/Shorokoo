@@ -147,6 +147,25 @@ register, CMake and a C++ compiler:
 `dotnet build` then builds the native library with everything else, and
 `-p:ShorokooCMake=<path>` names a CMake of your choosing.
 
+The CUDA backends have a native library of their own, the CUDA build of those
+operators, which runs each Adam or AdamW parameter update of a training step on
+the card as one kernel. The build makes it where it finds a CUDA 13 toolkit
+(`nvcc` on the `PATH`, `CUDA_PATH`, or `CUDAToolkit_ROOT` naming one) whose `nvcc`
+accepts a C++ compiler at hand, and otherwise leaves it out and goes on: a CUDA
+backend without it runs the same updates as the ONNX operators they are written
+as, with the same result to the bit, only slower. CUDA 13.0 and 13.1 accept the
+MSVC of Visual Studio 2019 and 2022; CUDA 13.2 and later that of Visual Studio
+2026 too. On Windows the build tries each Visual Studio toolset installed, newest
+first, so a newer Visual Studio beside an older one is no obstacle.
+
+- `-p:ShorokooCudaOps=ON` requires the library, and fails the build naming each
+  compiler tried and why `nvcc` refused it; `-p:ShorokooCudaOps=OFF` never builds
+  it; `AUTO`, the default, builds it where it can.
+- `-p:ShorokooCudaHostCompiler=<path>` names the compiler `nvcc` uses: the folder
+  holding `cl.exe`, or the path of `g++`.
+
+The Shorokoo.WinGPU and Shorokoo.LinuxGPU packages carry the library, built.
+
 ## Samples
 
 - [`samples/RetinaNet`](samples/RetinaNet) — ResNet backbones and a RetinaNet detector

@@ -21,7 +21,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     ///
     /// <para>A product is a tree of top-level <c>Mul</c>s: each <c>Mul</c> it reads that is read by
     /// nothing else (and is no graph output) belongs to it, and whatever else it reads is one of
-    /// its factors. A factor is a scalar where the graph states its rank as 0, so it can never
+    /// its factors. A factor is a scalar where it is one by construction
+    /// (<see cref="FastScalarValues"/>), so it can never
     /// change the product's shape. Only a tree with at least two scalar factors is rebuilt — one
     /// scalar is already one pass — and the tree's root keeps its node, so whatever reads the
     /// product reads it where it did. Reassociating a floating-point product moves its rounding,
@@ -81,8 +82,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             }
             if (roots.Count == 0) return;
 
-            var info = FastTensorInfoProcessor.BuildTensorInfoLookup(graph);
-            bool IsScalar(FastTensorKey key) => info.TryGetValue(key, out var i) && i.Structure == DataStructure.Tensor && i.Rank == 0;
+            var scalarValues = FastScalarValues.Find(graph);
+            bool IsScalar(FastTensorKey key) => scalarValues.Contains(key);
 
             bool changed = false;
             foreach (var (root, inner, factors) in roots)

@@ -2863,6 +2863,9 @@ namespace Shorokoo
             // A gradient scaled by several scalars along a chain of products -- a mean's 1/N, a
             // soft cap's c and 1/c -- is scaled by their product once.
             Shorokoo.Core.Nodes.Processors.Fast.FastFoldScalarFactors.Process(fast);
+            // A scale by a scalar next to a matrix product is folded into the product by a backend;
+            // one with a reshape between them is a pass of its own.
+            Shorokoo.Core.Nodes.Processors.Fast.FastScaleBesideMatMul.Process(fast);
             // A decay factor a baked zero weight decay folded to one scales a whole parameter by
             // it every step; the product is the parameter itself.
             Shorokoo.Core.Nodes.Processors.Fast.FastDropMultiplyByOne.Process(fast);

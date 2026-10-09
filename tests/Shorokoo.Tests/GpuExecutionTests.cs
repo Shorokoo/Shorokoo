@@ -362,13 +362,31 @@ public class GpuExecutionTests
     }
 
     [CudaFact]
+    public void CudaProvider_AnAppliedScheduledHyperparameterIsTheScheduledValueOnEveryStep()
+    {
+        var (sample, input, target) = TrainingRigHelpers.ScalarMultiplyBatches();
+        using var context = new ComputeContext();
+        var rig = TrainingRig.FromScratch(ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, MixedDTypeHyperOptimizer.ComputationGraph,
+            sample, new MixedDTypeHyperOptimizerHyperparameters { LearningRate = Schedules.Constant(0.1f) }, runtimeContext: context);
+        var ckpt = rig.CreateInitialCheckpoint();
+        var applied = new float[300];
+        for (int i = 0; i < applied.Length; i++)
+        {
+            ckpt = rig.TrainStep(ckpt, input.Shared(), target.Shared());
+            applied[i] = ckpt.AppliedHyperparameters!["learningRate"].ToSingle();
+        }
+        Assert.Equal(Enumerable.Repeat(0.1f, applied.Length), applied);
+    }
+
+    [CudaFact]
     public void CudaProvider_AGatheredTablesGradientSumsRepeatedIdsOnTheCardWithoutAWarning()
     {
         long[] ids = [5, 9, 5, 5, 0, 9, 5, 63];
         System.Collections.Concurrent.ConcurrentQueue<RuntimeLogMessage> logged = [];
         var warnings = new RunSettings { Log = new LogSettings { Sink = logged.Enqueue } };
+        using var context = new ComputeContext { RunSettings = warnings };
         var rig = TrainingRig.FromScratch(NNGatheredTableModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
-            [TensorData([ids.Length], ids)], new SGDOptimizerHyperparameters { LearningRate = 1f }, runtimeContext: new ComputeContext { RunSettings = warnings });
+            [TensorData([ids.Length], ids)], new SGDOptimizerHyperparameters { LearningRate = 1f }, runtimeContext: context);
         var initial = rig.CreateInitialCheckpoint();
         var before = Weights(initial);
         var after = Weights(rig.TrainStep(initial, rig.InputDef.FromOrderedData(TensorData([ids.Length], ids)).Shared(),
@@ -1346,9 +1364,7 @@ public class GpuExecutionTests
         var rig = TrainingRig.FromScratch(model, L2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph, [x.CopyTo(ComputeContext.Host)],
             new AdamWOptimizerHyperparameters { LearningRate = 0.01f }, runtimeContext: context);
         rig.TrainStep(rig.CreateInitialCheckpoint(), rig.InputDef.FromOrderedData(x), rig.TargetDef.FromOrderedData(NNLibraryFixtures.RangeTensor(targetRows, 0.02f)));
-        var steps = (System.Collections.IDictionary)typeof(TrainingRig)
-            .GetField("_compiledTrainSteps", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(rig)!;
-        return [.. steps.Values.Cast<CompiledGraph>().Single().ReadNodePlacement()!.Nodes
+        return [.. NNLibraryFixtures.OnlyCompiledTrainStep(rig).ReadNodePlacement()!.Nodes
             .Where(n => n.Provider != "CUDAExecutionProvider" || n.OpType.StartsWith("Memcpy", StringComparison.Ordinal))
             .Select(n => n.OpType)];
     }

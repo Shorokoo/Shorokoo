@@ -39,6 +39,10 @@ internal static class NNLibraryFixtures
         return TensorData(DType.Float32, dims,
             Enumerable.Range(0, (int)total).Select(i => (object)(i * scale + offset + curv * i * i)).ToArray());
     }
+    internal static CompiledGraph OnlyCompiledTrainStep(TrainingRig rig)
+        => ((System.Collections.IDictionary)typeof(TrainingRig)
+            .GetField("_compiledTrainSteps", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(rig)!)
+            .Values.Cast<CompiledGraph>().Single();
 }
 
 [Trait("Domain", "Modules")]
@@ -818,9 +822,7 @@ public class NNLibraryOptimizerTrainingCoverageTests
             if (runtimeValue is { } value) run.Step(rig.MakeHyperparameters(value), x, y);
             else run.Step(x, y);
         }
-        var steps = (System.Collections.IDictionary)typeof(TrainingRig)
-            .GetField("_compiledTrainSteps", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(rig)!;
-        var nodes = steps.Values.Cast<CompiledGraph>().Single().ReadNodePlacement()!.Nodes;
+        var nodes = OnlyCompiledTrainStep(rig).ReadNodePlacement()!.Nodes;
         var checkpoint = run.TakeCheckpoint();
         return (nodes.Where(n => n.OutputBytes % (rows * 4 * 4) == 0 && n.OutputBytes > 0 && n.OpType != "Gather")
                 .GroupBy(n => n.OpType).ToDictionary(g => g.Key, g => g.Count()),
@@ -869,9 +871,7 @@ public class NNLibraryOptimizerTrainingCoverageTests
         var rig = TrainingRig.FromScratch(model, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
             [new TensorDataModelParam("x", ModelParamType.InputParam, x)], [0.1f], runtimeContext: context);
         rig.TrainStep(rig.CreateInitialCheckpoint(), rig.InputDef.FromOrderedData(x), rig.TargetDef.FromOrderedData(RangeTensor(rows)));
-        var steps = (System.Collections.IDictionary)typeof(TrainingRig)
-            .GetField("_compiledTrainSteps", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(rig)!;
-        var nodes = steps.Values.Cast<CompiledGraph>().Single().ReadNodePlacement()!.Nodes;
+        var nodes = OnlyCompiledTrainStep(rig).ReadNodePlacement()!.Nodes;
         return [.. opTypes.Select(op => nodes.Count(n => n.OpType == op))];
     }
 

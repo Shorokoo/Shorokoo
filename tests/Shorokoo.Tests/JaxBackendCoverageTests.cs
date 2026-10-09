@@ -37,10 +37,10 @@ public class JaxBackendCoverageTests
                 install.Exec("""
                     import threading, warnings
                     from shorokoo_jax import ops_elementwise as ops
-                    if not hasattr(ops, "_neg_warns"):
-                        ops._neg_warns = threading.local()
-                        def neg(x, original=ops.neg, local=ops._neg_warns):
-                            if getattr(local, "on", False):
+                    if not hasattr(ops, "_neg_warns_on_threads"):
+                        ops._neg_warns_on_threads = set()
+                        def neg(x, original=ops.neg, threads=ops._neg_warns_on_threads):
+                            if threading.get_ident() in threads:
                                 warnings.warn("negated", UserWarning)
                             return original(x)
                         ops.neg = neg
@@ -51,7 +51,7 @@ public class JaxBackendCoverageTests
             using (PythonRuntime.Gil())
             {
                 using var scope = Py.CreateScope();
-                scope.Exec($"from shorokoo_jax import ops_elementwise as ops; ops._neg_warns.on = {(on ? "True" : "False")}");
+                scope.Exec($"import threading; from shorokoo_jax import ops_elementwise as ops; ops._neg_warns_on_threads.{(on ? "add" : "discard")}(threading.get_ident())");
             }
         }
         Set(true);

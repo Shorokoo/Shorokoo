@@ -192,6 +192,9 @@ public class AutoGradElementwiseOpsCoverageTests
         Run<AutoGradSoftmaxCrossEntropyLossMeanCheck>(2f);
         Run<AutoGradSoftmaxCrossEntropyLossNoneCheck>(2f);
         Run<AutoGradSoftmaxCrossEntropyLossWeightIgnoreCheck>(2f);
+        RunTensor<AutoGradSoftmaxCrossEntropyLossClosedFormCheck>([3L, 4L], 0.5f, -1f, 2f, 0.25f, 1.5f, 3f, -2f, 0f, -0.75f, 1f, 2.5f, -1.5f);
+        RunTensor<AutoGradSoftmaxCrossEntropyLossRank3ClosedFormCheck>([2L, 4L, 3L], 0.5f, -1f, 2f, 0.25f, 1.5f, 3f, -2f, 0f, -0.75f, 1f,
+            2.5f, -1.5f, 1f, -0.5f, 0.75f, 2f, -3f, 0.5f, 1.25f, -1f, 0f, 0.5f, -2.5f, 1.5f);
     }
 }
 

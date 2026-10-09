@@ -2554,6 +2554,15 @@ public partial class NNGatheredTableProjectionModel
         => Normal.Init(Vector(64L, 4L)).Gather(tokens).MatMul(Normal.Init(Vector(4L, 48L)));
 }
 
+/// <summary><see cref="NNGatheredTableProjectionModel"/>'s logits soft-capped at 15 as
+/// <c>tanh(logits / 15) · 15</c>: the head of a language model that bounds its logits.</summary>
+[Module]
+public partial class NNSoftCappedTableProjectionModel
+{
+    public static Tensor<float32> Inline(Tensor<int64> tokens)
+        => (Normal.Init(Vector(64L, 4L)).Gather(tokens).MatMul(Normal.Init(Vector(4L, 48L))) * Scalar(1f / 15f)).Tanh() * Scalar(15f);
+}
+
 /// <summary><see cref="NNGatheredTableProjectionModel"/> over an <c>[8256, 4]</c> table: more
 /// elements than one task of the fused update takes, and a part task at its end.</summary>
 [Module]

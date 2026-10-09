@@ -171,8 +171,9 @@ a resident run handed out or began from `.Shared()` — is copied in the run's m
 copy donated, so it is never written over or deleted. XLA orders the program so that nothing reads a
 donated input after it is written over, and computes an output it cannot write over its input into
 memory of its own, so results are the same with or without donation. On a card a resident run thus
-holds its state once rather than twice; on the CPU every input and output crosses into and out of
-JAX by copy anyway, so donation only spares JAX's own buffers.
+holds its state once rather than twice; on the CPU JAX reads an input in host memory in place where
+it can, and every output is handed back as a host copy of its own, so donation only spares JAX's own
+buffers.
 
 Floating-point products and convolutions run in the operands' full precision unless the context
 allows TensorFloat-32 ([Precision](gpu-backends.md#precision-gpu-backends)): the precision is compiled

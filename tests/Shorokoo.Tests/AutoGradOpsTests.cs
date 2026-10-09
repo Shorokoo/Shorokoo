@@ -196,6 +196,8 @@ public class AutoGradElementwiseOpsCoverageTests
         Run<AutoGradLossOfAnAllIgnoredBatchCheck>(0.5f);
         RunTensor<AutoGradCrossEntropyLossAtANegativeLabelCheck>([3L, 4L], 0.5f, -1f, 2f, 0.25f, 1.5f, 3f, -2f, 0f, -0.75f, 1f, 2.5f, -1.5f);
         RunTensor<AutoGradHalfPrecisionMeanLossOverManySamplesCheck>([70000L, 2L], new float[140000]);
+        Assert.True(AutoTest.AdvancedTestGraph<AutoGradFloat64LossesThroughAFloat32LossCheck>(
+            [], [TensorData(DType.Float64, [3L, 4L], 0.5, -1.0, 2.0, 0.25, 1.5, 3.0, -2.0, 0.0, -0.75, 1.0, 2.5, -1.5)]));
     }
 
     [Fact]

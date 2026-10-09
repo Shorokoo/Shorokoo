@@ -3715,6 +3715,25 @@ namespace Shorokoo.Tests.Modules
         }
     }
 
+    /// <summary>
+    /// The gradients of a cross-entropy and a negative log-likelihood over <c>float64</c> scores, each
+    /// taken through a <c>float32</c> loss: <c>(softmax(x) − onehot) / n</c> and <c>−onehot / n</c>.
+    /// </summary>
+    [Module]
+    public partial class AutoGradFloat64LossesThroughAFloat32LossCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float64> x)
+        {
+            var labels = Vector(2L, 0L, 3L);
+            var onehot = (Tensor<float64>)OnnxOp.Cast(OnnxOp.OneHot(labels, Scalar(4L), Vector(0f, 1f), axis: 1), null, DType.Float64);
+            Tensor<float64> Grad(Variable loss) => (Tensor<float64>)Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(x, ((Tensor<float64>)loss).Cast<float32>().Scalar());
+            Scalar<bit> Near(Tensor<float64> actual, Tensor<float64> expected)
+                => (actual - expected).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar() < Scalar(1e-12);
+            return Near(Grad(OnnxOp.SoftmaxCrossEntropyLoss(x, labels, null, null, "mean").output), ((Tensor<float64>)OnnxOp.Softmax(x, axis: 1) - onehot) / Scalar(3.0))
+                & Near(Grad(OnnxOp.NegativeLogLikelihoodLoss(x, labels, null, null, "mean")), onehot / Scalar(-3.0));
+        }
+    }
+
     /// <summary><see cref="AutoGradFloat64LossCheck"/> over a <c>float16</c> loss.</summary>
     [Module]
     public partial class AutoGradFloat16LossCheck

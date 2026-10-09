@@ -60,7 +60,8 @@ internal static class OrtLogTriage
 
     /// <summary>The severity the message <paramref name="text"/>, which ONNX Runtime logged at
     /// <paramref name="severity"/> from <paramref name="location"/> (<c>graph.cc:124
-    /// onnxruntime::MergeShapeInfo</c>), is delivered at.</summary>
+    /// onnxruntime::MergeShapeInfo</c> on Windows, <c>graph.cc:124 MergeShapeInfo</c> on Linux), is
+    /// delivered at.</summary>
     internal static ShorokooLogSeverity Of(ShorokooLogSeverity severity, string? location, string? text)
     {
         if (severity == ShorokooLogSeverity.Verbose || string.IsNullOrEmpty(location) || string.IsNullOrEmpty(text))
@@ -70,9 +71,17 @@ internal static class OrtLogTriage
         if (file.IndexOf(':') is var colon and >= 0) file = file[..colon];
         var function = space < 0 ? ReadOnlySpan<char>.Empty : location.AsSpan(space + 1).Trim();
         foreach (var known in NoUserCanActOn)
-            if (file.SequenceEqual(known.File) && function.SequenceEqual(known.Function)
+            if (file.SequenceEqual(known.File) && Names(known.Function, function)
                 && text.Contains(known.Text, StringComparison.Ordinal))
                 return ShorokooLogSeverity.Verbose;
         return severity;
     }
+
+    /// <summary>Whether <paramref name="function"/>, as a location names it, is the function
+    /// <paramref name="qualified"/>: by its qualified name, as an MSVC build of ONNX Runtime names it,
+    /// or by its bare name, as a gcc build does.</summary>
+    private static bool Names(string qualified, ReadOnlySpan<char> function) =>
+        function.SequenceEqual(qualified)
+        || (function.Length > 0 && qualified.AsSpan().EndsWith(function)
+            && qualified.AsSpan(0, qualified.Length - function.Length).EndsWith("::"));
 }

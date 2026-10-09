@@ -450,4 +450,5 @@ def image_decoder(encoded, /, *, pixel_format="RGB"):
         pixels = pixels[:, :, ::-1]
     elif pixel_format != "RGB":
         raise NotImplementedError(f"ImageDecoder pixel_format '{pixel_format}'")
-    return torch.from_numpy(np.ascontiguousarray(pixels)).to(_rt.device())
+    # Pillow's pixels are a read-only buffer: the output is a copy the run owns.
+    return torch.from_numpy(np.array(pixels, order="C")).to(_rt.device())

@@ -115,18 +115,24 @@ run emits to that run's settings alone, even while another run of the same sessi
 using Shorokoo.Core.Backends;
 using Shorokoo.Runtime;
 
-var ctx = new ComputeContext
-{
-    RunSettings = new RunSettings { Log = new LogSettings { MinimumSeverity = ShorokooLogSeverity.Error } },
-};
+var ctx = new ComputeContext();                                         // warnings and above, to stderr
 var compiled = ctx.Compile(graph);
-compiled.Execute(x.Shared());                                           // errors only, to stderr
+compiled.Execute(x.Shared());                                           // this run's warnings, to stderr
 compiled.Execute([x.Shared()], ctx.RunSettings with
 {
     Log = new LogSettings { Sink = m => logger.Log(m.Severity.ToString(), m.Text) },   // this run's warnings, to your logger
 });
+var errorsOnly = new ComputeContext                                     // errors only, to stderr
+{
+    RunSettings = new RunSettings { Log = new LogSettings { MinimumSeverity = ShorokooLogSeverity.Error } },
+};
 var quiet = new ComputeContext { RunSettings = new RunSettings { Log = LogSettings.None } };   // nothing at all
 ```
+
+A run's settings choose where its messages go and from which severity on, but what ONNX Runtime
+says through a session's logger it says only from the severity the session was built at (see
+below): a run asking for warnings from a session compiled on `errorsOnly` gets that logger's errors
+alone.
 
 The sink is called on whichever thread the runtime emits from — the one that builds or runs the
 session, or one of the runtime's own — possibly on several at once, so it must be thread-safe. An
@@ -140,9 +146,9 @@ What reaches the sink, per backend:
   and each run with settings other than its session's through one named for the run, so every
   message goes to the build or run it came from. ONNX Runtime also logs much of what happens during
   a run through the session's logger; that goes to the run in progress on the thread that logged it.
-  A session's and a run's loggers log from the severity their settings ask for. A run asking for
-  less than its session was built at gets what the session's logger says during it from the
-  session's level, so compile on a context asking for as much to see all of it.
+  A session's and a run's loggers log from the severity their settings ask for, so a run gets what
+  its session's logger says only from the severity the session was built at: to see all of it at
+  a run's severity, compile on a context asking for at least as much.
 
   Some of what ONNX Runtime logs reports on something no user can act on, and arrives as `Verbose`
   whatever severity ONNX Runtime gave it, so that every warning that reaches a sink at the default
@@ -166,13 +172,16 @@ What reaches the sink, per backend:
   an operator it is handed, at any severity. Such a message goes to the settings of the session
   build or run in progress on the thread that logged it, and where there is none, as on one of ONNX
   Runtime's own worker threads, to `LogSettings.Default`: warnings and above, to the standard error
-  stream. So does what a session the program builds itself through ONNX Runtime's own API logs. A program that makes ONNX Runtime's environment itself (`OrtEnv.CreateInstanceWithOptions`)
-  before the first backend is built keeps the logging it made the environment with, so none of its
+  stream. So do messages from sessions the program builds itself through ONNX Runtime's API. A
+  program that makes ONNX Runtime's environment itself (`OrtEnv.CreateInstanceWithOptions`) before
+  the first backend is built keeps the logging it made the environment with, so none of its
   messages reach these settings, and its sessions keep per-session thread pools
   ([The backend types](#the-backend-types)).
 - **PyTorch** and **JAX**. Each Python warning a run raises, as a `Warning` whose `Category` is the
   warning's class and whose `Location` is the file and line that raised it; on JAX, also those raised
-  compiling a session whose inputs have fixed shapes, to the settings it is built under. A warning
+  compiling a session whose inputs have fixed shapes, to the settings it is built under. Python's
+  warning filters apply: a warning they show once per place — the default — reaches every run that
+  raises it, once per run, whichever run raised it before; one they ignore reaches none. A warning
   Python raises outside a run is shown as Python shows it. Nothing the libraries log natively is
   routed.
 

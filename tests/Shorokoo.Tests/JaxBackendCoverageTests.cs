@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using Python.Runtime;
 using Shorokoo.Core.Backends;
 using Shorokoo.Core.Factory.IR;
@@ -22,6 +23,59 @@ public class JaxBackendCoverageTests
     {
         Jax.Start();
         AssertWarningsReachTheirLogSettings("shorokoo_jax", JaxRuntime.Source);
+    }
+
+    private static readonly Lock NegWarnsGate = new();
+
+    private static void WarningOnNegOnThisThread(Action body)
+    {
+        Jax.Start();
+        lock (NegWarnsGate)
+            using (PythonRuntime.Gil())
+            {
+                using var install = Py.CreateScope();
+                install.Exec("""
+                    import threading, warnings
+                    from shorokoo_jax import ops_elementwise as ops
+                    if not hasattr(ops, "_neg_warns"):
+                        ops._neg_warns = threading.local()
+                        def neg(x, original=ops.neg, local=ops._neg_warns):
+                            if getattr(local, "on", False):
+                                warnings.warn("negated", UserWarning)
+                            return original(x)
+                        ops.neg = neg
+                    """);
+            }
+        void Set(bool on)
+        {
+            using (PythonRuntime.Gil())
+            {
+                using var scope = Py.CreateScope();
+                scope.Exec($"from shorokoo_jax import ops_elementwise as ops; ops._neg_warns.on = {(on ? "True" : "False")}");
+            }
+        }
+        Set(true);
+        try
+        {
+            body();
+        }
+        finally
+        {
+            Set(false);
+        }
+    }
+
+    [Fact]
+    public void TestEveryRunAWarningIsRaisedInDeliversItToThatRunsLogSettingsAloneAndACompileToTheBuilds()
+    {
+        ConcurrentQueue<RuntimeLogMessage> built = [];
+        WarningOnNegOnThisThread(() =>
+        {
+            AssertEachRunsWarningReachesThatRunsLogSettingsAlone(Jax, PyTorchBackendCoverageTests.Onnx("Neg", (int)ShorokooTensorElementType.Float), [1f, 2f], JaxRuntime.Source);
+            Jax.CreateSession(Serialize(ComputeContextLifetimeCoverageTests.GraphOf("x0:float[2]", "y", ComputeContextLifetimeCoverageTests.Op("Neg", "x0", "y"))),
+                default, CoreUtilsCoverageTests.Into(built, ShorokooLogSeverity.Warning), DeviceMemorySettings.Default).Dispose();
+        });
+        Assert.Equal([(JaxRuntime.Source, "UserWarning")], built.Select(m => (m.Source, m.Category)));
     }
 
     [Fact]

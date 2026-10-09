@@ -14,16 +14,16 @@ namespace Shorokoo.Core.Backends;
 /// using Shorokoo.Core.Backends;
 /// using Shorokoo.Runtime;
 ///
-/// var ctx = new ComputeContext(backend)
-/// {
-///     RunSettings = new RunSettings { Log = new LogSettings { MinimumSeverity = ShorokooLogSeverity.Error } },
-/// };
+/// var ctx = new ComputeContext(backend);          // warnings and above, to the standard error stream
 /// var compiled = ctx.Compile(graph);
 /// compiled.Execute([x], ctx.RunSettings with
 /// {
-///     Log = new LogSettings { MinimumSeverity = ShorokooLogSeverity.Verbose, Sink = m => logger.Log(m.ToString()) },
+///     Log = new LogSettings { Sink = m => logger.Log(m.ToString()) },   // this run's warnings, to a logger
 /// });
 /// </code>
+/// <para>A run's settings choose where its messages go and from which severity on, but what a
+/// runtime says through a session's own logger during the run it says only from the severity the
+/// session was built at, so a run sees all of it only when its context asks for at least as much.</para>
 /// </summary>
 public sealed record LogSettings
 {

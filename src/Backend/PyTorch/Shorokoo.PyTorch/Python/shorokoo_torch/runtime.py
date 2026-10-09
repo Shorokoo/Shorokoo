@@ -10,6 +10,7 @@ import collections
 import contextvars
 import ctypes
 import linecache
+import sys
 import warnings
 
 import numpy as np
@@ -400,12 +401,37 @@ def _collect_warning(message, category, filename, lineno, file=None, line=None):
     message, location), rather than showing it: the .NET side delivers it to the run's own log
     settings. The interpreter's warning machinery is the whole process's, so the list is read per
     run. A warning raised outside a run goes on to whatever showed warnings when this hook was
-    installed, another backend's hook included."""
+    installed, another backend's hook included. A warning the filters show once per place reaches
+    each run that raises it, once."""
     collected = _warnings_collected.get()
     if collected is None:
         _show_warning(message, category, filename, lineno, file, line)
         return
-    collected.append((getattr(category, "__name__", str(category)), str(message), f"{filename}:{lineno}"))
+    entry = (getattr(category, "__name__", str(category)), str(message), f"{filename}:{lineno}")
+    if _forget_shown(message, category, lineno) and entry in collected:
+        return
+    collected.append(entry)
+
+
+def _forget_shown(message, category, lineno):
+    """Takes back the record Python made, as it showed this warning, that it was shown from its
+    place -- under the default filter action, a warning is shown once per place in the whole
+    process -- so that the next run raising it there collects it too. The record is in the
+    `__warningregistry__` of the module the warning is attributed to, whose frame is on this
+    thread's stack, or of `sys` for a warning raised with none. True where there was one: a place
+    whose warnings the filters show once is collected once per run."""
+    key = (str(message), category, lineno)
+    found = False
+    frame = sys._getframe(1)
+    while frame is not None:
+        registry = frame.f_globals.get("__warningregistry__")
+        if isinstance(registry, dict) and registry.pop(key, None) is not None:
+            found = True
+        frame = frame.f_back
+    registry = sys.__dict__.get("__warningregistry__")
+    if isinstance(registry, dict) and registry.pop(key, None) is not None:
+        found = True
+    return found
 
 
 if getattr(warnings.showwarning, "__name__", "") != "_collect_warning":

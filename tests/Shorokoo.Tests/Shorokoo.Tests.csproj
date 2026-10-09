@@ -105,7 +105,9 @@
   </ItemGroup>
 
   <!--
-    A second native ONNX Runtime, deployed under ort/cuda/, for the side-by-side backend tests.
+    A second native ONNX Runtime, deployed under ort/cuda/, for the side-by-side backend tests,
+    and a copy of it under ort/traced/: a runtime of its own for the one test whose traced run must
+    be the first its runtime sees.
     They need a runtime separate from the one the default backend above loaded, and a folder of
     its own is what makes it separate: both packages deliver their library at the same
     runtimes/<rid>/native/ path, so two of them deployed normally are one of them deployed twice.
@@ -125,6 +127,8 @@
                       ExcludeAssets="all" GeneratePathProperty="true" />
     <ShorokooBackendNatives BackendId="cuda" Condition="'$(ShorokooDeployGpuBackend)' != 'true'"
       Include="$(PkgMicrosoft_ML_OnnxRuntime_Gpu_Linux)\runtimes\linux-x64\native\libonnxruntime.so;$(PkgMicrosoft_ML_OnnxRuntime_Gpu_Linux)\runtimes\linux-x64\native\libonnxruntime_providers_shared.so" />
+    <ShorokooBackendNatives BackendId="traced"
+      Include="$(PkgMicrosoft_ML_OnnxRuntime_Gpu_Linux)\runtimes\linux-x64\native\libonnxruntime.so;$(PkgMicrosoft_ML_OnnxRuntime_Gpu_Linux)\runtimes\linux-x64\native\libonnxruntime_providers_shared.so" />
   </ItemGroup>
 
   <!-- The same arrangement on Windows: the CUDA-flavoured onnxruntime.dll under ort/cuda/, a
@@ -134,6 +138,8 @@
     <PackageReference Include="Microsoft.ML.OnnxRuntime.Gpu.Windows" Version="1.30.0"
                       ExcludeAssets="all" GeneratePathProperty="true" />
     <ShorokooBackendNatives BackendId="cuda" Condition="'$(ShorokooDeployGpuBackend)' != 'true'"
+      Include="$(PkgMicrosoft_ML_OnnxRuntime_Gpu_Windows)\runtimes\win-x64\native\onnxruntime.dll;$(PkgMicrosoft_ML_OnnxRuntime_Gpu_Windows)\runtimes\win-x64\native\onnxruntime_providers_shared.dll" />
+    <ShorokooBackendNatives BackendId="traced"
       Include="$(PkgMicrosoft_ML_OnnxRuntime_Gpu_Windows)\runtimes\win-x64\native\onnxruntime.dll;$(PkgMicrosoft_ML_OnnxRuntime_Gpu_Windows)\runtimes\win-x64\native\onnxruntime_providers_shared.dll" />
   </ItemGroup>
 

@@ -352,7 +352,16 @@ public abstract class JaxBackend : IShorokooBackend
         var runtime = Runtime;
         using (PythonRuntime.Gil())
         {
-            using var host = JaxTensorValue.Wrap(runtime, runtime.HostCopy.Invoke(jax.Value));
+            PyObject copy;
+            try
+            {
+                copy = runtime.HostCopy.Invoke(jax.Value);
+            }
+            catch (PythonException ex)
+            {
+                throw MoveFailure(ex, "copying a tensor to the host");
+            }
+            using var host = JaxTensorValue.Wrap(runtime, copy);
             return host.GetTensorDataAsSpan<byte>().ToArray();
         }
     }
@@ -380,7 +389,16 @@ public abstract class JaxBackend : IShorokooBackend
         var runtime = Runtime;
         using (PythonRuntime.Gil())
         fixed (byte* target = destination)
-            PyCall.Invoke(runtime.CopyRangeToHost, jax.Value, byteOffset, (long)target, destination.Length).Dispose();
+        {
+            try
+            {
+                PyCall.Invoke(runtime.CopyRangeToHost, jax.Value, byteOffset, (long)target, destination.Length).Dispose();
+            }
+            catch (PythonException ex)
+            {
+                throw MoveFailure(ex, "copying a range of a tensor to the host");
+            }
+        }
         GC.KeepAlive(jax);
         return true;
     }
@@ -408,9 +426,24 @@ public abstract class JaxBackend : IShorokooBackend
         var runtime = Runtime;
         using (PythonRuntime.Gil())
         fixed (byte* bytes = source)
-            jax.Hold(PyCall.Invoke(runtime.CopyHostToRange, jax.Value, byteOffset, (long)bytes, source.Length));
+        {
+            try
+            {
+                jax.Hold(PyCall.Invoke(runtime.CopyHostToRange, jax.Value, byteOffset, (long)bytes, source.Length));
+            }
+            catch (PythonException ex)
+            {
+                throw MoveFailure(ex, "copying host bytes into a range of a tensor");
+            }
+        }
         return true;
     }
+
+    /// <summary>A failure JAX raised moving a tensor's contents between host memory and a card, as the
+    /// backend reports it. A run on a card is still computing when it returns, so a failure of the run
+    /// itself surfaces at the first read of what it computed: here.</summary>
+    private InvalidOperationException MoveFailure(PythonException ex, string what)
+        => new($"{Description} failed {what}: {ex.Format()}", ex);
 
     /// <summary>
     /// <paramref name="value"/> where it is a device array of this runtime's larger than the one

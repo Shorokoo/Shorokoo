@@ -69,6 +69,9 @@ def unpack(archive: str, root: str) -> None:
                 if os.path.lexists(target):
                     os.remove(target)
                 os.symlink(entry.linkname, target)
+            elif entry.islnk():
+                linked = entry.linkname.split("/", 1)[1] if "/" in entry.linkname else ""
+                shutil.copy2(inside(root, linked), target)
             elif entry.isfile():
                 with t.extractfile(entry) as source, open(target, "wb") as out:
                     shutil.copyfileobj(source, out)

@@ -111,11 +111,13 @@ endfunction()
 
 if(shorokoo_cuda_ops STREQUAL "OFF")
   shorokoo_cuda_unavailable("SHOROKOO_CUDA_OPS is OFF.")
+elseif(CMAKE_VERSION VERSION_LESS 3.18)
+  shorokoo_cuda_unavailable("building it takes CMake 3.18 or later, and this is CMake ${CMAKE_VERSION}.")
 else()
-  # The toolkit is looked for afresh unless the folders naming it are those the cache was filled
-  # from; what was found before would otherwise stay in the cache.
+  # The toolkit is looked for afresh where the folders naming it changed since the configuration
+  # that filled the cache; what was found before would otherwise stay in it.
   set(root_key "${CUDAToolkit_ROOT}|$ENV{CUDAToolkit_ROOT}|$ENV{CUDA_PATH}")
-  if(NOT DEFINED SHOROKOO_CUDA_ROOT_KEY OR NOT SHOROKOO_CUDA_ROOT_KEY STREQUAL root_key)
+  if(DEFINED SHOROKOO_CUDA_ROOT_KEY AND NOT SHOROKOO_CUDA_ROOT_KEY STREQUAL root_key)
     get_cmake_property(cached CACHE_VARIABLES)
     foreach(variable IN LISTS cached)
       if(variable MATCHES "^(_cmake_CUDAToolkit_|CUDAToolkit_|CUDA_)" AND NOT variable STREQUAL "CUDAToolkit_ROOT")

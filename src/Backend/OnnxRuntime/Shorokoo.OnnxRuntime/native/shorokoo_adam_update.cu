@@ -38,8 +38,9 @@ __global__ void AdamUpdate(ShorokooAdamUpdate u) {
 }  // namespace
 
 // The launch runs on the calling thread's current device, which ONNX Runtime makes the device of
-// the stream it hands its kernels; where it is another, the stream's device is made current first,
-// since a kernel launched into another device's stream fails.
+// the stream it hands its kernels; where it is another, the stream's device is made current for the
+// launch, since a kernel launched into another device's stream fails, and the thread's own is made
+// current again after it.
 extern "C" int shorokoo_adam_update_launch(const ShorokooAdamUpdate* update, void* stream) {
     if (update->count == 0) return 0;
     const size_t blocks = (update->count + Threads - 1) / Threads;
@@ -48,13 +49,18 @@ extern "C" int shorokoo_adam_update_launch(const ShorokooAdamUpdate* update, voi
     int device = 0, current = 0;
     cudaError_t failed = cudaStreamGetDevice(s, &device);
     if (failed == cudaSuccess) failed = cudaGetDevice(&current);
-    if (failed == cudaSuccess && device != current) failed = cudaSetDevice(device);
     if (failed != cudaSuccess) return static_cast<int>(failed);
+    if (device != current && (failed = cudaSetDevice(device)) != cudaSuccess) return static_cast<int>(failed);
     if (update->decay != nullptr)
         AdamUpdate<true><<<static_cast<unsigned>(blocks), Threads, 0, s>>>(*update);
     else
         AdamUpdate<false><<<static_cast<unsigned>(blocks), Threads, 0, s>>>(*update);
-    return static_cast<int>(cudaGetLastError());
+    failed = cudaGetLastError();
+    if (device != current) {
+        const cudaError_t restored = cudaSetDevice(current);
+        if (failed == cudaSuccess) failed = restored;
+    }
+    return static_cast<int>(failed);
 }
 
 extern "C" const char* shorokoo_cuda_error_text(int error) {

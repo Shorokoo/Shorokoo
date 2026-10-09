@@ -429,12 +429,13 @@ class Model:
                 copied = len(lent)
             donated = len(self.donated) - copied
             if self.on_device and donated:
-                # Read before the run, which deletes what it donates.
-                given = {args[i].unsafe_buffer_pointer(): i for i in self.donated if i in owned}
+                # Read before the run, which deletes what it donates. An array of no elements has no
+                # buffer -- every one is at address 0 -- so none is written over.
+                given = {args[i].unsafe_buffer_pointer(): i for i in self.donated if i in owned and args[i].nbytes}
         outputs = program.compiled(_fresh_key(), self._large_values, *args)
         aliased = None
         if given:
-            aliased = [given.get(outputs[k].unsafe_buffer_pointer(), -1) for k in wanted]
+            aliased = [given.get(outputs[k].unsafe_buffer_pointer(), -1) if outputs[k].nbytes else -1 for k in wanted]
         return program, outputs, aliased, donated, copied
 
 
@@ -490,13 +491,33 @@ def run(model, args, wanted, owned=(), warned=None):
     finally:
         _warnings_collected.reset(token)
     if model.on_device:
-        return (program.token(tuple(wanted)), tuple(outputs[index] for index in wanted), None, aliased,
+        return (program.token(tuple(wanted)), _handed_over(outputs, wanted, aliased), None, aliased,
                 donated, copied)
     # Every output, wanted or not: the run reads host memory the .NET side may write once this
     # returns.
     jax.block_until_ready(outputs)
     values = [host_copy(outputs[index]) for index in wanted]
     return -1, values, [describe(value) for value in values], aliased, donated, copied
+
+
+def _handed_over(outputs, wanted, aliased):
+    """The device arrays a run hands over, one per index in `wanted`: an output wanted more than once
+    is handed over as it is the first time and as a copy of its own every other, so that no two
+    values hold one array, which a later run donating either would delete under the other. A copy
+    was written over no input, and `aliased` says so."""
+    values = [outputs[index] for index in wanted]
+    seen = set()
+    repeats = []
+    for k, index in enumerate(wanted):
+        if index in seen:
+            repeats.append(k)
+        seen.add(index)
+    if repeats:
+        for k, copy in zip(repeats, _copies([values[k] for k in repeats])):
+            values[k] = copy
+            if aliased is not None:
+                aliased[k] = -1
+    return tuple(values)
 
 
 def jax_version():

@@ -897,6 +897,20 @@ public class NNLibraryOptimizerTrainingCoverageTests
     }
 
     [Fact]
+    public void TestABackendThatFusesElementwiseOperatorsScalesTheCrossEntropyGradientPerSampleInsideTheFusion()
+    {
+        using var context = new ComputeContext(new Shorokoo.Jax.Cpu.JaxCpuBackend());
+        var rig = TrainingRig.FromScratch(NNGatheredTableProjectionModel.ComputationGraph, CrossEntropyLoss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            [new TensorDataModelParam("tokens", ModelParamType.InputParam, TensorData([6L], [3L, 9L, 3L, 0L, 41L, 7L]))],
+            new SGDOptimizerHyperparameters { LearningRate = 0.1f }, runtimeContext: context);
+        var step = rig.TrainingStepPureGraph.ToInternal();
+        var shapes = new ShapeInferenceInterpreter().Infer(step, rig.OptimizationInputs);
+        var scalars = Shorokoo.Core.Nodes.Processors.Fast.FastScalarValues.Find(step);
+        Assert.Equal(0, step.Nodes.Count(n => n.OpCode == OpCodes.MUL && n.Inputs.Any(i => i is FastTensorKey k && scalars.Contains(k))
+            && shapes.GetTensorInfo(new FastTensorKey(n.Key, 0))?.ElementCount == 6 * 48));
+    }
+
+    [Fact]
     public void TestABackendThatDoesNotFoldAScaleIntoAProductScalesTheLogitsGradientOnce()
         => Assert.Equal(5, SequenceHeadStepOpsOn(new Shorokoo.PyTorch.Cpu.TorchCpuBackend(), OpCodes.MUL, logitSized: true));
 

@@ -283,6 +283,52 @@ namespace Shorokoo
         }
 
         /// <summary>
+        /// <paramref name="graph"/> as a session built for the shapes of <paramref name="exemplars"/>
+        /// runs it -- its shape arithmetic baked, reversibly
+        /// (<see cref="Shorokoo.Core.Nodes.Processors.Fast.FastBakeShapeArithmetic.Reversibly"/>) -- with
+        /// its shapes and what turns a rewrite of it back into a step for every shape; null where an
+        /// exemplar states no shape, or nothing is baked.
+        /// </summary>
+        private static (InternalComputationGraph Graph, ShapeInferenceResult ShapeInfo,
+            Shorokoo.Core.Nodes.Processors.Fast.FastBakeShapeArithmetic.Reversal Reversal)? BakedForThePass(
+            InternalComputationGraph graph, IRuntimeTensor[] exemplars, ShapeInferenceInterpreter shapeInferencer)
+        {
+            var dims = new long[]?[exemplars.Length];
+            for (int i = 0; i < dims.Length; i++)
+            {
+                if (exemplars[i] is not RuntimeTensor { Shape: { } shape }) return null;
+                dims[i] = [.. shape.Dims.Select(d => (long)d)];
+            }
+            if (Shorokoo.Core.Nodes.Processors.Fast.ConcreteValues.At(graph, dims) is not { } values) return null;
+            var view = graph.Clone();
+            if (Shorokoo.Core.Nodes.Processors.Fast.FastBakeShapeArithmetic.Reversibly(view, values) is not { } reversal) return null;
+            return (view, shapeInferencer.Infer(view, exemplars), reversal);
+        }
+
+        /// <summary>
+        /// <paramref name="onView"/>, the pass's result on <paramref name="view"/>, with the graph it
+        /// chose carried back to the step it was baked from, <paramref name="step"/> -- the step itself,
+        /// with <paramref name="stepShapes"/>, where the pass chose the view as handed -- with its shapes; null where the
+        /// rewrite cannot be carried back.
+        /// </summary>
+        private static GraphOptimizationResult? CarriedBack(GraphOptimizationResult onView, InternalComputationGraph view,
+            InternalComputationGraph step, ShapeInferenceResult stepShapes, Shorokoo.Core.Nodes.Processors.Fast.FastBakeShapeArithmetic.Reversal reversal,
+            IRuntimeTensor[] exemplars, ShapeInferenceInterpreter shapeInferencer)
+        {
+            var chosen = ReferenceEquals(onView.OptimizedGraph, view) ? step : reversal.Restore(onView.OptimizedGraph);
+            if (chosen is null) return null;
+            return new GraphOptimizationResult
+            {
+                StrategyName = onView.StrategyName,
+                BackendPeakBytes = onView.BackendPeakBytes,
+                OptimizedGraph = chosen,
+                ShapeInfo = ReferenceEquals(chosen, step) ? stepShapes : shapeInferencer.Infer(chosen, exemplars),
+                Evaluation = onView.Evaluation,
+                AllStrategies = [.. onView.AllStrategies.Select(s => ReferenceEquals(s.Graph, onView.OptimizedGraph) ? (s.Name, s.Evaluation, chosen) : s)],
+            };
+        }
+
+        /// <summary>
         /// What the backend of the context this rig's steps run on holds at the peak of a run of a
         /// step graph, at the shapes of <paramref name="exemplars"/> — the model it would be handed,
         /// built as a compile builds it, with the state pairs that model proves written in place where
@@ -531,9 +577,10 @@ namespace Shorokoo
 
         /// <summary>
         /// Compute time + peak memory the <see cref="GraphEvaluator"/> projected for the
-        /// unoptimized <see cref="PreOptimizationGraph"/>, under the same shape inference
-        /// the optimizer used. Compare with <see cref="OptimizationResult"/>'s evaluation
-        /// to quantify the optimizer's improvement.
+        /// unoptimized <see cref="PreOptimizationGraph"/> as the optimizer was handed it -- its shape
+        /// arithmetic baked at <see cref="OptimizationInputShapes"/>, where the optimizer rewrote it
+        /// so -- under the same shape inference the optimizer used. Compare with
+        /// <see cref="OptimizationResult"/>'s evaluation to quantify the optimizer's improvement.
         /// </summary>
         internal GraphEvaluationResult PreOptimizationEval { get; private set; } = null!;
 
@@ -5095,16 +5142,29 @@ namespace Shorokoo
             var evaluator = new Shorokoo.Core.AutoDiffCheckpointing.GraphEvaluator(state: new StepState(
                 StateAliasCandidates(), (_runtimeContext?.OutputAliasing ?? true) || _runtimeContext?.ValuePlacement == true),
                 layout: _runtimeContext?.ResolvedBackend.RunLayout ?? RunLayout.OnnxRuntime);
-            var baselineEval = evaluator.Evaluate(graph, shapeInfo);
+            // The pass rewrites the step a session built for the exemplars' shapes runs, whose shape
+            // arithmetic is baked into constants (FastBakeShapeArithmetic) -- most of a lowered
+            // step's nodes, and none of them run there -- and carries its rewrite back to the step,
+            // which serves every shape. Where the rewrite cannot be carried back, the pass rewrites
+            // the step as it stands.
+            var baked = TrainingBackend.LowersAutoGrad ? BakedForThePass(graph, allInputs, shapeInferencer) : null;
+            var baselineEval = baked is { } view ? evaluator.Evaluate(view.Graph, view.ShapeInfo) : evaluator.Evaluate(graph, shapeInfo);
             GraphOptimizationResult optResult;
             if (TrainingBackend.LowersAutoGrad)
             {
                 Stage("OptimizeTrainingStepGraph");
-                var optimizer = new MemoryAwareGraphOptimizer(
+                MemoryAwareGraphOptimizer Optimizer() => new(
                     memoryFactor: PassMemoryWeight.Value ?? MemoryAwareGraphOptimizer.DefaultMemoryWeight,
                     evaluator: evaluator, shapeInference: shapeInferencer, backendPeak: BackendPeakOf(allInputs),
                     weighPlateaus: _runtimeContext?.ResolvedBackend.ModelsARunQuickly ?? false);
-                optResult = optimizer.OptimizeWithShapeInfo(graph, shapeInfo);
+                GraphOptimizationResult? carried = null;
+                if (baked is { } passView)
+                {
+                    var onView = Optimizer().OptimizeWithShapeInfo(passView.Graph, passView.ShapeInfo);
+                    carried = CarriedBack(onView, passView.Graph, graph, shapeInfo, passView.Reversal, allInputs, shapeInferencer);
+                }
+                if (carried is null && baked is not null) baselineEval = evaluator.Evaluate(graph, shapeInfo);
+                optResult = carried ?? Optimizer().OptimizeWithShapeInfo(graph, shapeInfo);
             }
             else
             {

@@ -3098,6 +3098,38 @@ public class TrainingRigTrainingLoopCoverageTests
         Assert.True(rig.HasGenericTrainStepSession);
     }
 
+    [Fact]
+    public void TestAStepThePassRewroteBakedAtItsShapesTrainsAsHandedAtEveryOtherShapeCoverage()
+    {
+        var sample = TensorData([8L, 256L], NNLibraryTrainingFixtures.Ramp(8 * 256, 0.001f, -0.5f));
+        var rig = TrainingRig.FromScratch(Benchmarks.MemoryPassMlp.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            [sample], new SGDOptimizerHyperparameters { LearningRate = 0.01f });
+        var handed = rig.PreOptimizationGraph.ToInternal();
+        Assert.NotEqual("Baseline", rig.OptimizationResult.StrategyName);
+        Assert.True(rig.OptimizationResult.AllStrategies[0].Graph.Nodes.Count < handed.Nodes.Count);
+
+        var ckpt = rig.CreateInitialCheckpoint();
+        var reference = ComputeContext.Default.Compile(handed, inputDims: null, trainingStep: true);
+        var generic = ComputeContext.Default.Compile(rig.TrainingStepPureGraph.ToInternal(), inputDims: null, trainingStep: true);
+        float[] Outputs(CompiledGraph step, TensorDataStruct input, TensorDataStruct target) =>
+            [.. step.Execute(ComputeContext.ExpandStructInputs(
+                [ckpt.TrainableParams.Shared(), ckpt.ModelState.Shared(), ckpt.OptimizerState.Shared(), input.Shared(), target.Shared()]))
+                .SelectMany(o => o.ToTensorData<float32>().CopyMemory<float>())];
+        foreach (var n in (long[])[1, 3])
+        {
+            var input = rig.InputDef.FromOrderedData(TensorData([n, 256L], NNLibraryTrainingFixtures.Ramp(n * 256, 0.002f, -0.3f)));
+            var target = rig.TargetDef.FromOrderedData(TensorData([n, 64L], NNLibraryTrainingFixtures.Ramp(n * 64, 0.01f, 0f)));
+            var expected = Outputs(reference, input, target);
+            var stepped = rig.TrainStep(ckpt.Shared(), input.Shared(), target.Shared());
+            float[] trained = [.. rig.TrainableParamStructDef.Fields.SelectMany(f => ((TensorData)stepped.TrainableParams.Fields[f.Name]).As<float32>().CopyMemory<float>()), stepped.Loss!.Value];
+            foreach (var actual in (float[][])[trained, Outputs(generic, input, target)])
+            {
+                Assert.Equal(expected.Length, actual.Length);
+                foreach (var (x, y) in expected.Zip(actual)) AssertClose(x, y, 1e-4f);
+            }
+        }
+    }
+
     private static int OrtOptimizedNodeCount(ModelProto model, string opType)
     {
         var bytes = new MemoryStream();

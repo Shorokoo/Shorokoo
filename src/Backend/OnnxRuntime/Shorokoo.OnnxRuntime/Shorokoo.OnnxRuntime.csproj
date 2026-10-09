@@ -62,14 +62,26 @@
 
   <!-- The CUDA build of the operators (native/shorokoo_adam_update.cu), which a CUDA session
        registers in place of the CPU one: built where CMake finds a CUDA toolkit of ONNX Runtime's
-       GPU package's major version and an nvcc that compiles (-p:ShorokooCudaOps=AUTO, the default;
-       ON requires it, OFF leaves it out), and copied beside the allocator where it was built. Not
-       packed: a package carries it only once each platform's GPU backend ships its build. -->
+       GPU package's major version and an nvcc that compiles the kernel with a host compiler at
+       hand (-p:ShorokooCudaOps=AUTO, the default; ON requires it and fails the build saying what is
+       missing; OFF leaves it out), and copied beside the allocator where it was built.
+       -p:ShorokooCudaHostCompiler=<cl.exe folder or g++ path> names nvcc's host compiler outright.
+       Not packed here: the GPU backend packages, Shorokoo.WinGPU and Shorokoo.LinuxGPU, carry it,
+       as they carry ONNX Runtime's CUDA provider. -->
   <PropertyGroup>
     <ShorokooCudaOps Condition="'$(ShorokooCudaOps)' == ''">AUTO</ShorokooCudaOps>
     <ShorokooCudaOpsFile Condition="$([MSBuild]::IsOSPlatform('Windows'))">shorokoo_ort_cuda_ops.dll</ShorokooCudaOpsFile>
     <ShorokooCudaOpsFile Condition="$([MSBuild]::IsOSPlatform('Linux'))">libshorokoo_ort_cuda_ops.so</ShorokooCudaOpsFile>
+    <!-- The settings the native build was configured with, an input of it, so that changing one
+         configures it again rather than leaving the last build's library in place. -->
+    <ShorokooNativeSettingsFile>$(ShorokooAllocatorBuildDir).settings</ShorokooNativeSettingsFile>
   </PropertyGroup>
+
+  <Target Name="RecordShorokooNativeSettings" BeforeTargets="BuildShorokooAllocator" Condition="'$(ShorokooAllocatorRid)' != ''">
+    <MakeDir Directories="$([System.IO.Path]::GetDirectoryName('$(ShorokooNativeSettingsFile)'))" />
+    <WriteLinesToFile File="$(ShorokooNativeSettingsFile)" Lines="ShorokooCudaOps=$(ShorokooCudaOps);ShorokooCudaHostCompiler=$(ShorokooCudaHostCompiler)"
+                      Overwrite="true" WriteOnlyWhenDifferent="true" />
+  </Target>
 
   <Target Name="IncludeShorokooCudaOperators" AfterTargets="BuildShorokooAllocator" Condition="'$(ShorokooAllocatorRid)' != ''">
     <ItemGroup>
@@ -113,7 +125,7 @@
           Condition="'$(ShorokooAllocatorRid)' != ''"
           DependsOnTargets="LocateShorokooCMake"
           BeforeTargets="BeforeBuild"
-          Inputs="$(ShorokooAllocatorSource)/shorokoo_ort_allocator.cpp;$(ShorokooAllocatorSource)/shorokoo_ort_ops.cpp;$(ShorokooAllocatorSource)/shorokoo_adam_update.cu;$(ShorokooAllocatorSource)/shorokoo_adam_update.h;$(ShorokooAllocatorSource)/CMakeLists.txt;$(PkgMicrosoft_ML_OnnxRuntime)/build/native/include/onnxruntime_c_api.h"
+          Inputs="$(ShorokooNativeSettingsFile);$(ShorokooAllocatorSource)/shorokoo_ort_allocator.cpp;$(ShorokooAllocatorSource)/shorokoo_ort_ops.cpp;$(ShorokooAllocatorSource)/shorokoo_adam_update.cu;$(ShorokooAllocatorSource)/shorokoo_adam_update.h;$(ShorokooAllocatorSource)/CMakeLists.txt;$(PkgMicrosoft_ML_OnnxRuntime)/build/native/include/onnxruntime_c_api.h"
           Outputs="$(ShorokooAllocatorOutDir)/$(ShorokooAllocatorFile)">
     <Exec Command="&quot;$(ShorokooCMake)&quot; --version" ConsoleToMSBuild="true" StandardOutputImportance="low"
           IgnoreExitCode="true" IgnoreStandardErrorWarningFormat="true" EchoOff="true">
@@ -122,9 +134,11 @@
     <Error Condition="'$(_ShorokooCMakeFound)' != '0'"
            Text="Shorokoo.OnnxRuntime builds a native library of its own, which takes CMake and a C++ compiler, and '$(ShorokooCMake)' did not run. On Windows, install Visual Studio (2019 or later, the Build Tools will do) with its C++ workload, which brings both; on Linux, install cmake and g++. Or name a CMake with -p:ShorokooCMake=&lt;path&gt;." />
     <Exec Command="&quot;$(ShorokooCMake)&quot; -S &quot;$(ShorokooAllocatorSource)&quot; -B &quot;$(ShorokooAllocatorBuildDir)&quot; -DSHOROKOO_OUTPUT_DIR=&quot;$(ShorokooAllocatorOutDir)&quot; -DSHOROKOO_ORT_INCLUDE_DIR=&quot;$(PkgMicrosoft_ML_OnnxRuntime)/build/native/include&quot; -DSHOROKOO_CUDA_OPS=$(ShorokooCudaOps) -DSHOROKOO_CUDA_HOST_COMPILER=&quot;$(ShorokooCudaHostCompiler)&quot;"
-          StandardOutputImportance="low" />
+          StandardOutputImportance="low" StandardErrorImportance="high" />
     <Exec Command="&quot;$(ShorokooCMake)&quot; --build &quot;$(ShorokooAllocatorBuildDir)&quot; --config Release"
           StandardOutputImportance="low" />
+    <!-- Newer than every input, which a build with nothing to recompile leaves it otherwise. -->
+    <Touch Files="$(ShorokooAllocatorOutDir)/$(ShorokooAllocatorFile)" />
   </Target>
 
   <Target Name="RequireEveryShorokooAllocator" BeforeTargets="GenerateNuspec">

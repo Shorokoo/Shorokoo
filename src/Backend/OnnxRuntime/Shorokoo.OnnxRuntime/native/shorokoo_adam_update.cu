@@ -37,11 +37,19 @@ __global__ void AdamUpdate(ShorokooAdamUpdate u) {
 
 }  // namespace
 
+// The launch runs on the calling thread's current device, which ONNX Runtime makes the device of
+// the stream it hands its kernels; where it is another, the stream's device is made current first,
+// since a kernel launched into another device's stream fails.
 extern "C" int shorokoo_adam_update_launch(const ShorokooAdamUpdate* update, void* stream) {
     if (update->count == 0) return 0;
     const size_t blocks = (update->count + Threads - 1) / Threads;
     if (blocks > 0x7fffffffu) return static_cast<int>(cudaErrorInvalidConfiguration);
     const auto s = static_cast<cudaStream_t>(stream);
+    int device = 0, current = 0;
+    cudaError_t failed = cudaStreamGetDevice(s, &device);
+    if (failed == cudaSuccess) failed = cudaGetDevice(&current);
+    if (failed == cudaSuccess && device != current) failed = cudaSetDevice(device);
+    if (failed != cudaSuccess) return static_cast<int>(failed);
     if (update->decay != nullptr)
         AdamUpdate<true><<<static_cast<unsigned>(blocks), Threads, 0, s>>>(*update);
     else

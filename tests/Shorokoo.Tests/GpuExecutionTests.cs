@@ -1330,8 +1330,10 @@ public class GpuExecutionTests
     }
 
     [CudaFact]
-    public void CudaProvider_AnAdamOrAdamWStepUpdatesATableInOneFusedPassToTheBit()
+    public void CudaProvider_AnAdamOrAdamWStepUpdatesEveryParameterInOneFusedPassToTheBit()
     {
+        Assert.NotNull(Shorokoo.OnnxRuntime.NativeAllocator.LocatedCudaOperators);
+        Assert.Equal(2, NNLibraryOptimizerTrainingCoverageTests.ResidentSteps(new FusingCardBackend(true), AdamOptimizer.ComputationGraph, [0.001f, 0.9f, 0.999f, 1e-8f], null).Fused);
         NNLibraryOptimizerTrainingCoverageTests.AssertFusedToTheBit(fuses => new FusingCardBackend(fuses), AdamOptimizer.ComputationGraph, [0.001f, 0.9f, 0.999f, 1e-8f]);
         NNLibraryOptimizerTrainingCoverageTests.AssertFusedToTheBit(fuses => new FusingCardBackend(fuses), AdamWOptimizer.ComputationGraph, [0.001f, 0.9f, 0.999f, 1e-8f, 0.01f]);
         NNLibraryOptimizerTrainingCoverageTests.AssertFusedToTheBit(fuses => new FusingCardBackend(fuses), AdamWOptimizer.ComputationGraph, [0.01f, 0.8f, 0.9f, 1e-6f, 0f]);

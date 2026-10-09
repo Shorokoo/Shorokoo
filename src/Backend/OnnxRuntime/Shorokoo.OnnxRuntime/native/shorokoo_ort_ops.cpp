@@ -38,6 +38,8 @@
 #include "onnxruntime_c_api.h"
 
 #if defined(SHOROKOO_CUDA)
+#include <cstdio>
+
 #include "shorokoo_adam_update.h"
 #endif
 
@@ -279,7 +281,10 @@ OrtStatus* ORT_API_CALL Compute(void* kernel, OrtKernelContext* context) {
     void* stream = nullptr;
     SHOROKOO_TRY(api->KernelContext_GetGPUComputeStream(context, &stream));
     const int failed = shorokoo_adam_update_launch(&u, stream);
-    return failed == 0 ? nullptr : api->CreateStatus(ORT_FAIL, shorokoo_cuda_error_text(failed));
+    if (failed == 0) return nullptr;
+    char message[256];
+    std::snprintf(message, sizeof message, "AdamUpdate's CUDA kernel was not launched: %s", shorokoo_cuda_error_text(failed));
+    return api->CreateStatus(ORT_FAIL, message);
 }
 #endif
 

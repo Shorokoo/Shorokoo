@@ -811,9 +811,9 @@ public class NNLibraryOptimizerTrainingCoverageTests
         bool fuses, ComputationGraph optimizer, Hyperparameter[] hyperparameters, float? runtimeValue, ComputationGraph? table = null, long rows = 64)
         => ResidentSteps(new HostBackend(fuses), optimizer, hyperparameters, runtimeValue, table, rows);
 
-    private static (Dictionary<string, int> TableSized, float[][] State, long InPlace, int Fused) ResidentSteps(
+    internal static (Dictionary<string, int> TableSized, float[][] State, long InPlace, int Fused) ResidentSteps(
         Shorokoo.OnnxRuntime.OrtBackend backend, ComputationGraph optimizer, Hyperparameter[] hyperparameters, float? runtimeValue,
-        ComputationGraph? table, long rows)
+        ComputationGraph? table = null, long rows = 64)
     {
         using var context = new ComputeContext(backend) { Diagnostics = new Shorokoo.Core.Backends.DiagnosticSettings { TraceNodePlacement = true } };
         var rig = TrainingRig.FromScratch(table ?? NNGatheredTableProjectionModel.ComputationGraph, L2Loss.ComputationGraph, optimizer,
@@ -881,9 +881,7 @@ public class NNLibraryOptimizerTrainingCoverageTests
             [new TensorDataModelParam("tokens", ModelParamType.InputParam, TensorData([3L], 1L, 5L, 9L))], hyperparameters, runtimeContext: context);
         using var run = rig.BeginResidentRun();
         run.Step(rig.InputDef.FromOrderedData(TensorData([3L], 1L, 5L, 9L)), rig.TargetDef.FromOrderedData(TensorData([3L], 2L, 7L, 40L)));
-        var steps = (System.Collections.IDictionary)typeof(TrainingRig)
-            .GetField("_compiledTrainSteps", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(rig)!;
-        return steps.Values.Cast<CompiledGraph>().Single().ReadNodePlacement()!.Nodes.Count(n => n.OpType == "AdamUpdate");
+        return OnlyCompiledTrainStep(rig).ReadNodePlacement()!.Nodes.Count(n => n.OpType == "AdamUpdate");
     }
 
     [Fact]

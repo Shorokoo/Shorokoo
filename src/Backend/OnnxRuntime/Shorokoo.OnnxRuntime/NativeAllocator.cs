@@ -57,28 +57,37 @@ internal static unsafe class NativeAllocator
     }
 
     /// <summary>The CUDA build of the library's operators (<c>native/shorokoo_adam_update.cu</c>),
-    /// which a CUDA session registers in place of the CPU one.</summary>
+    /// which a CUDA session registers in place of the CPU one. It ships in the GPU backend
+    /// packages, Shorokoo.WinGPU and Shorokoo.LinuxGPU, beside ONNX Runtime's CUDA provider.</summary>
     internal const string CudaOperatorsLibraryName = "shorokoo_ort_cuda_ops";
 
-    private static readonly Lazy<string?> _locatedCudaOperators = new(
-        () => LocateFile(OperatingSystem.IsWindows() ? CudaOperatorsLibraryName + ".dll" : "lib" + CudaOperatorsLibraryName + ".so"),
-        LazyThreadSafetyMode.ExecutionAndPublication);
+    /// <summary>The CUDA operators library's file on this operating system.</summary>
+    internal static string CudaOperatorsFileName
+        => OperatingSystem.IsWindows() ? CudaOperatorsLibraryName + ".dll" : "lib" + CudaOperatorsLibraryName + ".so";
 
-    /// <summary>The path a CUDA session registers the operators from, found as the library is, or
-    /// null where that build is not deployed: it is made only where the build finds a CUDA toolkit
-    /// to make it with.</summary>
+    private static readonly Lazy<string?> _locatedCudaOperators = new(
+        () => LocateFile(CudaOperatorsFileName), LazyThreadSafetyMode.ExecutionAndPublication);
+
+    /// <summary>The path a CUDA session registers the operators from, found where the library is,
+    /// or null where that build is not deployed: a build from source makes it only where it finds a
+    /// CUDA toolkit to make it with, and a CUDA session without it runs each update as the chain of
+    /// operators it is written as.</summary>
     internal static string? LocatedCudaOperators => _locatedCudaOperators.Value;
 
     /// <summary>The path the library is deployed at, beside this assembly or under
-    /// <c>runtimes/&lt;rid&gt;/native/</c> there, or null where it is in neither.</summary>
+    /// <c>runtimes/&lt;rid&gt;/native/</c> there, or in a folder the host probes for natives, or
+    /// null where it is in none of them.</summary>
     internal static string? Locate() => LocateFile(FileName);
 
     private static string? LocateFile(string fileName)
     {
         var location = typeof(NativeAllocator).Assembly.Location;
-        string[] directories = !string.IsNullOrEmpty(location) && Path.GetDirectoryName(location) is { Length: > 0 } dir
-            ? [dir, AppContext.BaseDirectory]
-            : [AppContext.BaseDirectory];
+        List<string> directories = [];
+        if (!string.IsNullOrEmpty(location) && Path.GetDirectoryName(location) is { Length: > 0 } dir) directories.Add(dir);
+        directories.Add(AppContext.BaseDirectory);
+        // The folders the host itself probes for natives, a deps.json's included.
+        if (AppContext.GetData("NATIVE_DLL_SEARCH_DIRECTORIES") is string probed)
+            directories.AddRange(probed.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
         var rid = (OperatingSystem.IsWindows() ? "win-" : "linux-")
             + RuntimeInformation.ProcessArchitecture.ToString().ToLowerInvariant();
         foreach (var directory in directories)

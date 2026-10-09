@@ -6,6 +6,9 @@
 #
 #   cmake -S . -B build -DSHOROKOO_OUTPUT_DIR=out -DSHOROKOO_ORT_INCLUDE_DIR=<folder>
 #   cmake --build build --config Release
+#
+# The same operators' CUDA build, a library of its own, is made beside it where a CUDA toolkit is
+# at hand (see SHOROKOO_CUDA_OPS below).
 cmake_minimum_required(VERSION 3.16)
 project(shorokoo_ort_allocator LANGUAGES CXX)
 
@@ -54,37 +57,66 @@ endif()
 
 # The same operators for ONNX Runtime's CUDA execution provider: shorokoo_ort_ops.cpp built again
 # with SHOROKOO_CUDA, beside the kernel in shorokoo_adam_update.cu, into a library of its own that
-# only a CUDA session registers, so that the library above needs nothing of CUDA's.
+# only a CUDA session registers, so that the library above needs nothing of CUDA's. The CUDA runtime
+# is linked in statically, so the library needs nothing beside the operating system's own libraries
+# and the card's driver.
 #
 # SHOROKOO_CUDA_OPS: AUTO (the default) builds it where a CUDA toolkit of the major version
 # ONNX Runtime's GPU package is built against (SHOROKOO_CUDA_MAJOR) is found and its nvcc compiles
-# with one of the host compilers at hand, and otherwise leaves it out and says so; ON requires it;
-# OFF never builds it. A CUDA session that finds no such library runs the chain of operators.
+# the kernel with one of the host compilers at hand, and otherwise leaves it out with a status
+# message; ON requires it, and stops the build saying what was missing; OFF never builds it. A CUDA
+# session that finds no such library runs the chain of operators the update is written as.
+# CUDAToolkit_ROOT (a variable or an environment variable) names the toolkit where nvcc is not on
+# the PATH.
 #
 # nvcc compiles the kernel as a custom command rather than as CMake's CUDA language, which the
 # Visual Studio generator supports only where CUDA's Visual Studio integration is installed. Its
-# host compiler is SHOROKOO_CUDA_HOST_COMPILER (the folder holding cl.exe, or the path of g++)
-# where given; otherwise this build's own C++ compiler and, on Windows, where nvcc refuses or
-# cannot parse a Visual Studio newer than it knows, each other MSVC toolset vswhere finds.
+# host compiler is SHOROKOO_CUDA_HOST_COMPILER (the folder holding cl.exe, or the path of g++) where
+# given. Otherwise it is the first that compiles the kernel of: this build's own C++ compiler, then,
+# on Windows, each other MSVC toolset vswhere finds, newest first, and on Linux each g++-<version>
+# in /usr/bin, newest first. Each nvcc release accepts only the host compilers it knows (CUDA 13.0
+# and 13.1 the MSVC of Visual Studio 2019 and 2022, CUDA 13.2 and later that of Visual Studio 2026
+# too), so a machine whose newest Visual Studio is newer than its nvcc still builds the library with
+# an older toolset beside it.
 set(SHOROKOO_CUDA_OPS AUTO CACHE STRING "Build the CUDA operators library: AUTO, ON or OFF")
+set_property(CACHE SHOROKOO_CUDA_OPS PROPERTY STRINGS AUTO ON OFF)
 set(SHOROKOO_CUDA_MAJOR 13 CACHE STRING "The CUDA major version ONNX Runtime's GPU package is built against")
 set(SHOROKOO_CUDA_HOST_COMPILER "" CACHE STRING "The host compiler nvcc uses (-ccbin)")
 set(SHOROKOO_CUDA_ARCHITECTURES "75;80;86;89;90;100;120" CACHE STRING
-  "Compute capabilities to build machine code for; the last also as PTX for newer cards")
+  "Compute capabilities to build machine code for; the first also as PTX, which every newer card compiles")
 
+string(TOUPPER "${SHOROKOO_CUDA_OPS}" shorokoo_cuda_ops)
+if(NOT shorokoo_cuda_ops MATCHES "^(AUTO|ON|OFF)$")
+  message(FATAL_ERROR "SHOROKOO_CUDA_OPS is '${SHOROKOO_CUDA_OPS}'; it takes AUTO, ON or OFF.")
+endif()
+
+if(WIN32)
+  set(shorokoo_cuda_ops_file "shorokoo_ort_cuda_ops.dll")
+else()
+  set(shorokoo_cuda_ops_file "libshorokoo_ort_cuda_ops.so")
+endif()
+
+# Leaves the library out: an error where it is required, a status message otherwise. A copy an
+# earlier configuration built is removed from the output, which would otherwise be deployed as if
+# this one had built it.
 function(shorokoo_cuda_unavailable reason)
-  if(SHOROKOO_CUDA_OPS STREQUAL "ON")
+  if(shorokoo_cuda_ops STREQUAL "ON")
     message(FATAL_ERROR "SHOROKOO_CUDA_OPS is ON, but ${reason}")
   endif()
   message(STATUS "The CUDA operators library is not built: ${reason}")
+  if(SHOROKOO_OUTPUT_DIR)
+    file(REMOVE "${SHOROKOO_OUTPUT_DIR}/${shorokoo_cuda_ops_file}")
+  endif()
 endfunction()
 
-if(NOT SHOROKOO_CUDA_OPS STREQUAL "OFF")
+if(shorokoo_cuda_ops STREQUAL "OFF")
+  shorokoo_cuda_unavailable("SHOROKOO_CUDA_OPS is OFF.")
+else()
   find_package(CUDAToolkit QUIET)
-  if(NOT CUDAToolkit_FOUND)
-    shorokoo_cuda_unavailable("no CUDA toolkit was found (CUDAToolkit_ROOT names one).")
+  if(NOT CUDAToolkit_FOUND OR NOT CUDAToolkit_NVCC_EXECUTABLE OR NOT TARGET CUDA::cudart_static)
+    shorokoo_cuda_unavailable("no CUDA toolkit with nvcc and the static CUDA runtime was found (CUDAToolkit_ROOT names one).")
   elseif(NOT CUDAToolkit_VERSION_MAJOR STREQUAL SHOROKOO_CUDA_MAJOR)
-    shorokoo_cuda_unavailable("the CUDA toolkit found is ${CUDAToolkit_VERSION}, and ONNX Runtime's GPU package is built against CUDA ${SHOROKOO_CUDA_MAJOR} (CUDAToolkit_ROOT names another).")
+    shorokoo_cuda_unavailable("the CUDA toolkit found is ${CUDAToolkit_VERSION}, and ONNX Runtime's GPU package is built against CUDA ${SHOROKOO_CUDA_MAJOR} (CUDAToolkit_ROOT names another toolkit).")
   else()
     set(candidates "")
     if(SHOROKOO_CUDA_HOST_COMPILER)
@@ -98,59 +130,87 @@ if(NOT SHOROKOO_CUDA_OPS STREQUAL "OFF")
                           -property installationPath
                         OUTPUT_VARIABLE installations OUTPUT_STRIP_TRAILING_WHITESPACE)
         string(REPLACE "\n" ";" installations "${installations}")
+        set(toolsets "")
         foreach(installation IN LISTS installations)
           string(STRIP "${installation}" installation)
-          file(GLOB toolsets LIST_DIRECTORIES true "${installation}/VC/Tools/MSVC/*")
-          list(SORT toolsets COMPARE NATURAL ORDER DESCENDING)
-          foreach(toolset IN LISTS toolsets)
-            if(EXISTS "${toolset}/bin/Hostx64/x64/cl.exe")
-              file(TO_CMAKE_PATH "${toolset}/bin/Hostx64/x64" folder)
-              list(APPEND candidates "${folder}")
-            endif()
-          endforeach()
+          file(GLOB found LIST_DIRECTORIES true "${installation}/VC/Tools/MSVC/*")
+          list(APPEND toolsets ${found})
+        endforeach()
+        # Newest first across every installation: the folder names are the toolset versions.
+        set(keyed "")
+        foreach(toolset IN LISTS toolsets)
+          get_filename_component(version "${toolset}" NAME)
+          list(APPEND keyed "${version}|${toolset}")
+        endforeach()
+        list(SORT keyed COMPARE NATURAL ORDER DESCENDING)
+        foreach(entry IN LISTS keyed)
+          string(REGEX REPLACE "^[^|]*\\|" "" toolset "${entry}")
+          if(EXISTS "${toolset}/bin/Hostx64/x64/cl.exe")
+            file(TO_CMAKE_PATH "${toolset}/bin/Hostx64/x64" folder)
+            list(APPEND candidates "${folder}")
+          endif()
         endforeach()
       endif()
-      list(REMOVE_DUPLICATES candidates)
     else()
       list(APPEND candidates "${CMAKE_CXX_COMPILER}")
+      file(GLOB versioned "/usr/bin/g++-[0-9]*")
+      list(SORT versioned COMPARE NATURAL ORDER DESCENDING)
+      list(APPEND candidates ${versioned})
     endif()
+    list(REMOVE_DUPLICATES candidates)
 
-    set(probe "${CMAKE_CURRENT_BINARY_DIR}/shorokoo_cuda_probe.cu")
-    file(WRITE "${probe}" "__global__ void probe(float* x) { x[threadIdx.x] += 1.0f; }\n")
+    if(MSVC)
+      set(object_suffix ".obj")
+      # The static C runtime, as the libraries are linked (see above). nvcc sets up the environment
+      # of the toolset it is handed itself, so none of another toolset's may reach it.
+      set(host_flags "-Xcompiler=/MT,/EHsc")
+      set(nvcc_launch "${CMAKE_COMMAND}" -E env --unset=INCLUDE --unset=LIB --unset=LIBPATH --unset=EXTERNAL_INCLUDE)
+    else()
+      set(object_suffix ".o")
+      set(host_flags "-Xcompiler=-fPIC,-fvisibility=hidden")
+      set(nvcc_launch "")
+    endif()
+    # --fmad=false: no multiply and add contracted into one, so that each operation rounds as the
+    # ONNX operator it stands for does (the kernel's intrinsics say so too).
+    set(nvcc_flags -O3 --fmad=false -std=c++17 ${host_flags})
+
+    # The kernel itself, compiled for one architecture with each candidate until one succeeds: a
+    # host compiler nvcc refuses, or whose headers it cannot parse, fails here rather than in the
+    # build.
+    list(GET SHOROKOO_CUDA_ARCHITECTURES 0 oldest)
+    set(probe "${CMAKE_CURRENT_BINARY_DIR}/shorokoo_cuda_probe${object_suffix}")
     set(SHOROKOO_CUDA_CCBIN "")
+    set(refusals "")
     foreach(candidate IN LISTS candidates)
-      execute_process(COMMAND "${CUDAToolkit_NVCC_EXECUTABLE}" -c "${probe}" -o "${probe}.obj" -ccbin "${candidate}"
-                      RESULT_VARIABLE probed OUTPUT_QUIET ERROR_QUIET)
+      execute_process(COMMAND ${nvcc_launch} "${CUDAToolkit_NVCC_EXECUTABLE}" -c "${CMAKE_CURRENT_SOURCE_DIR}/shorokoo_adam_update.cu"
+                        -o "${probe}" -ccbin "${candidate}" ${nvcc_flags} "-gencode=arch=compute_${oldest},code=sm_${oldest}"
+                      RESULT_VARIABLE probed OUTPUT_VARIABLE said ERROR_VARIABLE said)
       if(probed EQUAL 0)
         set(SHOROKOO_CUDA_CCBIN "${candidate}")
         break()
       endif()
+      string(REGEX MATCH "[^\n]*(error|Error|ERROR)[^\n]*" why "${said}")
+      if(NOT why)
+        string(STRIP "${said}" why)
+      endif()
+      string(APPEND refusals "\n  ${candidate}: ${why}")
     endforeach()
+    file(REMOVE "${probe}")
 
     if(NOT SHOROKOO_CUDA_CCBIN)
-      shorokoo_cuda_unavailable("nvcc ${CUDAToolkit_VERSION} compiles with none of the host compilers ${candidates} (SHOROKOO_CUDA_HOST_COMPILER names one it supports).")
+      shorokoo_cuda_unavailable("nvcc ${CUDAToolkit_VERSION} (${CUDAToolkit_NVCC_EXECUTABLE}) compiles the kernel with none of the host compilers at hand:${refusals}\nInstall a host compiler this nvcc supports (see CUDA's installation guide), or name one with SHOROKOO_CUDA_HOST_COMPILER.")
     else()
       message(STATUS "The CUDA operators library is built with nvcc ${CUDAToolkit_VERSION}, host compiler ${SHOROKOO_CUDA_CCBIN}")
       set(gencode "")
-      list(GET SHOROKOO_CUDA_ARCHITECTURES -1 newest)
       foreach(arch IN LISTS SHOROKOO_CUDA_ARCHITECTURES)
         list(APPEND gencode "-gencode=arch=compute_${arch},code=sm_${arch}")
       endforeach()
-      list(APPEND gencode "-gencode=arch=compute_${newest},code=compute_${newest}")
-      if(MSVC)
-        set(object "${CMAKE_CURRENT_BINARY_DIR}/shorokoo_adam_update.obj")
-        # The static C runtime, as the libraries are linked (see above).
-        set(host "-Xcompiler=/MT,/EHsc")
-      else()
-        set(object "${CMAKE_CURRENT_BINARY_DIR}/shorokoo_adam_update.o")
-        set(host "-Xcompiler=-fPIC,-fvisibility=hidden")
-      endif()
-      # --fmad=false: no multiply and add contracted into one, so that each operation rounds as the
-      # ONNX operator it stands for does (the kernel's intrinsics say so too).
+      list(APPEND gencode "-gencode=arch=compute_${oldest},code=compute_${oldest}")
+      set(object "${CMAKE_CURRENT_BINARY_DIR}/shorokoo_adam_update${object_suffix}")
       add_custom_command(
         OUTPUT "${object}"
-        COMMAND "${CUDAToolkit_NVCC_EXECUTABLE}" -c "${CMAKE_CURRENT_SOURCE_DIR}/shorokoo_adam_update.cu" -o "${object}"
-                -ccbin "${SHOROKOO_CUDA_CCBIN}" -O3 --fmad=false -std=c++17 ${host} ${gencode}
+        COMMAND ${nvcc_launch} "${CUDAToolkit_NVCC_EXECUTABLE}" -c "${CMAKE_CURRENT_SOURCE_DIR}/shorokoo_adam_update.cu" -o "${object}"
+                -ccbin "${SHOROKOO_CUDA_CCBIN}" ${nvcc_flags} ${gencode}
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shorokoo_adam_update.cu" "${CMAKE_CURRENT_SOURCE_DIR}/shorokoo_adam_update.h"
         COMMENT "nvcc shorokoo_adam_update.cu"
         VERBATIM)
@@ -170,7 +230,9 @@ if(NOT SHOROKOO_CUDA_OPS STREQUAL "OFF")
         target_compile_options(shorokoo_ort_cuda_ops PRIVATE /W4 /WX /EHsc /fp:precise)
       else()
         target_compile_options(shorokoo_ort_cuda_ops PRIVATE -Wall -Wextra -Werror -ffp-contract=off -fno-math-errno)
-        target_link_options(shorokoo_ort_cuda_ops PRIVATE -Wl,--no-undefined)
+        # The static runtime's symbols kept inside the library, so that none of them stands in for
+        # the shared CUDA runtime ONNX Runtime's CUDA provider loads.
+        target_link_options(shorokoo_ort_cuda_ops PRIVATE -Wl,--no-undefined -Wl,--exclude-libs,ALL)
       endif()
       if(SHOROKOO_OUTPUT_DIR)
         set_target_properties(shorokoo_ort_cuda_ops PROPERTIES

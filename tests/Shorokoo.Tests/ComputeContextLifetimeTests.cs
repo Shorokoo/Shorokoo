@@ -964,8 +964,15 @@ public class ComputeContextLifetimeCoverageTests
     }
 
     [Fact]
-    public void TestAPlacementsShapesFollowTheShapeArithmeticFusedOperatorsAndTransposedConvolutionsOfATrainingStep()
+    public void TestAPlacementsShapesFollowTheShapeArithmeticFusedOperatorsTransposedConvolutionsAndLossesOfATrainingStep()
     {
+        Assert.Equal("", ShapeOf(GraphOf("x:float[4,3] l:int64[4]", "L P", Op("SoftmaxCrossEntropyLoss", "x l", "L P")), "L"));
+        Assert.Equal("4 4x3", ShapeOf(GraphOf("x:float[4,3] l:int64[4]", "L P", WithText(Op("SoftmaxCrossEntropyLoss", "x l", "L P"), "reduction", "none")), "L", "P"));
+        Assert.Equal("2x5 2x3x5", ShapeOf(GraphOf("x:float[2,3,5] l:int64[2,5]", "L P", WithText(Op("SoftmaxCrossEntropyLoss", "x l", "L P"), "reduction", "none")), "L", "P"));
+        Assert.Equal("3x2x5", ShapeOf(GraphOf("i:int64[3,2] v:float[2]", "O", Op("OneHot", "i five v", "O")), "O"));
+        Assert.Equal("5x3x2", ShapeOf(GraphOf("i:int64[3,2] v:float[2]", "O", Op("OneHot", "i five v", "O", attribute: ("axis", 0))), "O"));
+        Assert.Equal("3x5x2", ShapeOf(GraphOf("i:int64[3,2] v:float[2]", "O", Op("OneHot", "i five v", "O", attribute: ("axis", -2))), "O"));
+        Assert.Equal("3x5:7", ShapeOf(GraphOf("i:int64[3] v:int64[2]", "O", Op("OneHot", "i five v", "O")), "O"));
         Assert.Equal("4:7=1,4,2,1", ShapeOf(WithInts(GraphOf("a:float[4,2]", "O", Op("Shape", "a", "s"), Op("Pad", "s pads one", "O")), "pads", 1, 1), "O"));
         Assert.Equal("1:7=4", ShapeOf(GraphOf("a:float[4,2]", "O", Op("Shape", "a", "s"), Op("Greater", "s two", "g"), Op("Compress", "s g", "O")), "O"));
         Assert.Equal("1:7=0", ShapeOf(GraphOf("a:float[4]", "O", Op("Shape", "a", "s"), Op("Shape", "s", "n"), Op("Expand", "zero n", "O")), "O"));
@@ -1000,6 +1007,12 @@ public class ComputeContextLifetimeCoverageTests
         loop.Inputs.Insert(1, "");
         loop.Attributes.Add(new AttributeProto { Name = "body", Type = AttributeProto.AttributeType.Graph, G = body });
         return loop;
+    }
+
+    private static NodeProto WithText(NodeProto node, string name, string text)
+    {
+        node.Attributes.Add(new AttributeProto { Name = name, Type = AttributeProto.AttributeType.String, S = System.Text.Encoding.UTF8.GetBytes(text) });
+        return node;
     }
 
     internal static NodeProto With(NodeProto node, string name, params long[] ints)

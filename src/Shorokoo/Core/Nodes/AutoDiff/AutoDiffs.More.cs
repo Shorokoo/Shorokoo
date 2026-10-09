@@ -84,7 +84,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         // so the rules read the forward output rather than exponentiating the input again: with
         // a positive alpha (and gamma) the output is positive exactly where the input is, so the
         // input need not even be kept for the backward pass. A non-positive parameter, where the
-        // output's sign no longer tells the branches apart, takes the mask from the input.
+        // output's sign does not tell the branches apart, takes the mask from the input.
 
         [AutoDiff(ELU, UsesOutputs = true)]
         public static Variable?[] Elu<T>(Tensor<T> x, Tensor<T> y, Tensor<T> grad, float? alpha) where T : IVarType

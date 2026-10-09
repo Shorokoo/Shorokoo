@@ -10,9 +10,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// Moves a product by a scalar across the <c>Reshape</c> that stands between it and a
     /// <c>MatMul</c>, so that the scale sits directly on the <c>MatMul</c>'s output or input.
     ///
-    /// <para>A scale by a constant is free beside a matrix product: ONNX Runtime folds a
-    /// <c>Mul</c> by a scalar constant into the <c>alpha</c> of the <c>MatMul</c> it reads or feeds,
-    /// and so does any backend that computes the product as a GEMM. A <c>Reshape</c> in between
+    /// <para>A scale by a constant is free beside a matrix product where the backend folds it in:
+    /// ONNX Runtime makes a <c>Mul</c> by a scalar constant that reads or feeds a <c>MatMul</c> the
+    /// <c>alpha</c> of the <c>FusedMatMul</c> it rewrites the pair into. A <c>Reshape</c> in between
     /// hides the pair, and the scale costs a pass over the whole tensor. Both shapes occur at a
     /// language model's head: <c>MatMul</c>, <c>Reshape</c> to <c>[tokens, vocabulary]</c>, then
     /// <c>Mul</c> by a soft cap's <c>1/c</c> going forward; and coming back, the logits' gradient
@@ -24,27 +24,31 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     ///         reader;</item>
     ///   <item><c>Mul(x, s)</c> read only by <c>Reshape</c>s, through which it flows into
     ///         <c>MatMul</c>s alone, becomes <c>Mul(Reshape(x), s)</c> for each of them. Across more
-    ///         than one reshape the scale is multiplied once per reshape, which a backend folding
-    ///         it into each product does for nothing; so that happens only for a static scale
-    ///         (<see cref="FastScalarValues.FindWithStatic"/>), which a session built at concrete
-    ///         dimensions holds as the constant such a fold needs.</item>
+    ///         than one reshape the scale is multiplied once per reshape, which costs nothing only
+    ///         where each is folded into its product; so that happens only for a backend that folds
+    ///         scales so, and a static scale (<see cref="FastScalarValues.FindWithStatic"/>), which a
+    ///         session built at concrete dimensions holds as the constant such a fold needs.</item>
     /// </list>
     /// <para>Only a top-level <c>Mul</c> by a rank-0 factor moves, and nothing a graph output
-    /// reads. The values are the same to the bit: each element is still multiplied by the same
-    /// scalar once.</para>
+    /// reads. Each element is still multiplied by the same scalar once; a backend that then folds
+    /// the scale into the product rounds it there.</para>
     /// </summary>
     internal static class FastScaleBesideMatMul
     {
-        public static void Process(InternalComputationGraph graph)
+        /// <param name="graph">The step, rewritten in place.</param>
+        /// <param name="scalesFoldIntoMatMul">Whether the backend that runs it folds a scale into a
+        /// matrix product (see <c>IShorokooBackend.FoldsScalesIntoMatMul</c>): only then does a
+        /// static scale move across more than one reshape.</param>
+        public static void Process(InternalComputationGraph graph, bool scalesFoldIntoMatMul = true)
         {
             // Each round moves a scale across one reshape; a scale behind a chain of them moves
             // once per round.
             bool any = false;
-            while (Round(graph)) any = true;
+            while (Round(graph, scalesFoldIntoMatMul)) any = true;
             if (any) FastProcessorHelper.RemoveUnreachableNodes(graph);
         }
 
-        private static bool Round(InternalComputationGraph graph)
+        private static bool Round(InternalComputationGraph graph, bool scalesFoldIntoMatMul)
         {
             var producer = new Dictionary<FastTensorKey, FastNode>();
             var readers = new Dictionary<FastTensorKey, List<FastNode>>();
@@ -102,6 +106,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 {
                     var shape = reshape.Inputs[1];
                     var (reshapeAttributes, mulAttributes) = (reshape.Attributes, mul.Attributes);
+                    // Each node keeps its key, which its readers know it by, and takes the other's
+                    // operator: its name and call stack go with the operator.
+                    (reshape.FriendlyName, mul.FriendlyName) = (mul.FriendlyName, reshape.FriendlyName);
+                    (reshape.CallStack, mul.CallStack) = (mul.CallStack, reshape.CallStack);
                     reshape.OpCode = OpCodes.MUL;
                     reshape.Attributes = mulAttributes;
                     reshape.FullInputs.Clear();
@@ -124,7 +132,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 if (producer.TryGetValue(a, out var source) && IsMatMul(source)) continue;
                 var reshapes = ReadersOf(product);
                 if (reshapes.Count == 0 || !EndsInMatMuls(product) || reshapes.Any(touched.Contains)) continue;
-                var isStatic = staticValues.Contains(b);
+                var isStatic = scalesFoldIntoMatMul && staticValues.Contains(b);
                 // A reshape of a reshape of the product, its shape taken literally (allowzero),
                 // reshapes the product itself: rewired to read it, it is one more reshape the
                 // scale can follow, rather than a reader the scale has to pass two reshapes for.
@@ -156,7 +164,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                         Attributes = r.Attributes,
                         FullInputs = { [""] = new List<FastTensorKey?> { a, r.Inputs[1] } },
                         FullOutputs = { [""] = new List<FastTensorKey?> { new FastTensorKey(key, 0) } },
+                        FriendlyName = r.FriendlyName,
+                        CallStack = r.CallStack,
                     };
+                    (r.FriendlyName, r.CallStack) = (mul.FriendlyName, mul.CallStack);
                     r.OpCode = OpCodes.MUL;
                     r.Attributes = mul.Attributes;
                     r.FullInputs.Clear();

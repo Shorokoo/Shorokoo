@@ -317,6 +317,25 @@ public interface IShorokooBackend
     // A decorator forwards this, as it forwards every member with a default body.
     internal Shorokoo.Core.AutoDiffCheckpointing.RunLayout RunLayout => Shorokoo.Core.AutoDiffCheckpointing.RunLayout.OnnxRuntime;
 
+    // Whether this backend compiles a graph into kernels that fuse chains of elementwise operators
+    // and the reductions they feed -- XLA, behind the JAX backends -- rather than running each node
+    // as a kernel of its own. There a value recomputed in the fusion that reads it costs no pass of
+    // its own, while one the backward pass reads from the forward pass has to be written out; so the
+    // training rig's autodiff recomputes where a gradient rule has the choice (a cross-entropy's
+    // softmax, say), and reuses what the forward pass wrote everywhere else.
+    //
+    // A decorator forwards this, as it forwards every member with a default body.
+    internal bool FusesElementwiseOperators => false;
+
+    // Whether this backend folds a product by a scalar constant into the matrix product that reads
+    // or feeds it -- ONNX Runtime makes the scale the alpha of the MatMul it fuses -- so that a scale
+    // beside a MatMul costs nothing. The training rig then moves a static scale across each of the
+    // reshapes between it and the MatMuls it flows into, which elsewhere would make one pass per
+    // reshape of what was one.
+    //
+    // A decorator forwards this, as it forwards every member with a default body.
+    internal bool FoldsScalesIntoMatMul => false;
+
     IShorokooTensorValue CreateTensor<T>(T[] data, long[] shape) where T : unmanaged;
 
     IShorokooTensorValue CreateTensorFromRawBytes(

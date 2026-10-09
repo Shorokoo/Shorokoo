@@ -459,6 +459,10 @@ public static class IsolatedBackend
 
         bool IShorokooBackend.ModelsARunQuickly => _inner.ModelsARunQuickly;
 
+        bool IShorokooBackend.FusesElementwiseOperators => _inner.FusesElementwiseOperators;
+
+        bool IShorokooBackend.FoldsScalesIntoMatMul => _inner.FoldsScalesIntoMatMul;
+
         string? IShorokooBackend.RunModelIdentity => _inner.RunModelIdentity;
 
         public IShorokooTensorValue CreateTensor<T>(T[] data, long[] shape) where T : unmanaged

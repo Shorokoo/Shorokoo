@@ -2506,7 +2506,8 @@ namespace Shorokoo
             // in place on fastTraining and returns the same graph for the public-facing
             // TrainingStepPureGraph property.
             _trainingStepWorkGraph = LowerGraph(
-                fastTraining, MergeContext, progress, lowerAutoGrad: TrainingBackend.LowersAutoGrad);
+                fastTraining, MergeContext, progress, lowerAutoGrad: TrainingBackend.LowersAutoGrad,
+                runtimeBackend: _runtimeContext?.ResolvedBackend);
 
             UpdatedParamFieldCount = TrainableParamStructDef.Fields.Length;
             UpdatedStateFieldCount = ModelStateDef.Fields.Length;
@@ -2801,9 +2802,13 @@ namespace Shorokoo
         /// <param name="lowerAutoGrad">False for a step whose gradient is left to the execution
         /// backend (<see cref="TrainingBackend.Native"/>): the pipeline stops before the autograd
         /// expansion, and the step keeps its one <c>AUTO_GRAD</c> node for the backend to run.</param>
+        /// <param name="runtimeBackend">The backend the step runs on, where the rig was given a
+        /// runtime context: whether it fuses elementwise operators and whether it folds a scale into a
+        /// matrix product decide the shape of a gradient where two are equal in value. With none, the
+        /// step runs on the default context, whose backend is ONNX Runtime's.</param>
         private static InternalComputationGraph LowerGraph(
             InternalComputationGraph fast, ComputeContext mergeContext, BuildProgressReporter? progress = null,
-            bool lowerAutoGrad = true)
+            bool lowerAutoGrad = true, IShorokooBackend? runtimeBackend = null)
         {
             void Stage(string stage) => progress?.Report(BuildPhase.TrainingStep, stage);
 
@@ -2856,7 +2861,8 @@ namespace Shorokoo
 
             // Lower AUTO_GRAD nodes natively on the Fast graph — no CG round-trip needed.
             Stage("ExpandAutoGrad");
-            Shorokoo.Core.Nodes.Processors.AutoGrad.FastProcessAutoGradProcessor.Process(fast);
+            Shorokoo.Core.Nodes.Processors.AutoGrad.FastProcessAutoGradProcessor.Process(fast,
+                recomputeInFusion: runtimeBackend?.FusesElementwiseOperators ?? false);
 
             Stage("SimplifyAfterAutoGrad");
             Shorokoo.Core.Nodes.Processors.Fast.FastSimplify.Process(fast);
@@ -2865,7 +2871,8 @@ namespace Shorokoo
             Shorokoo.Core.Nodes.Processors.Fast.FastFoldScalarFactors.Process(fast);
             // A scale by a scalar next to a matrix product is folded into the product by a backend;
             // one with a reshape between them is a pass of its own.
-            Shorokoo.Core.Nodes.Processors.Fast.FastScaleBesideMatMul.Process(fast);
+            Shorokoo.Core.Nodes.Processors.Fast.FastScaleBesideMatMul.Process(fast,
+                scalesFoldIntoMatMul: runtimeBackend?.FoldsScalesIntoMatMul ?? true);
             // A decay factor a baked zero weight decay folded to one scales a whole parameter by
             // it every step; the product is the parameter itself.
             Shorokoo.Core.Nodes.Processors.Fast.FastDropMultiplyByOne.Process(fast);

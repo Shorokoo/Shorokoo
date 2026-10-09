@@ -327,6 +327,15 @@ namespace Shorokoo.Core.Nodes.AutoDiff
                 .ToHashSet();
 
         /// <summary>
+        /// Replaces, in a table from <see cref="GetGradientOps"/>, each rule that reads what the
+        /// forward pass wrote with the one that recomputes it, for a backend that fuses the
+        /// recomputation into the elementwise chain it feeds: the cross-entropy's softmax.
+        /// </summary>
+        public static void RecomputeInFusion(
+            Dictionary<string, Func<Variable?[], Variable?[], OnnxCSharpAttributes, Variable?[]>> gradientOps)
+            => gradientOps[SOFTMAX_CROSS_ENTROPY_LOSS] = SoftmaxCrossEntropyLossGradientInFusion;
+
+        /// <summary>
         /// The variadic rules (registered in <see cref="RegisterVariadicGradientOps"/>) that read
         /// the forward outputs appended after the inputs, as an <c>[AutoDiff]</c> rule flagged
         /// <c>UsesOutputs</c> does: SoftmaxCrossEntropyLoss reads its log-probabilities.

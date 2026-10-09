@@ -46,10 +46,10 @@
     DefaultBackend auto-discovers that DLL in the output folder (tests don't set
     it explicitly, so the discovery fallback is exercised).
 
-    On this Linux sandbox we reference Shorokoo.LinuxCPU. On a Windows dev box
-    swap the ProjectReference for Shorokoo.WinCPU or Shorokoo.WinGPU.
+    Linux references Shorokoo.LinuxCPU and Windows Shorokoo.WinCPU; -p:ShorokooGpuTests=true
+    (below) swaps in the platform's GPU backend.
   -->
-  <ItemGroup Condition="$([MSBuild]::IsOSPlatform('Linux'))">
+  <ItemGroup Condition="$([MSBuild]::IsOSPlatform('Linux')) AND '$(ShorokooGpuTests)' != 'true'">
     <ProjectReference Include="..\..\src\Backend\OnnxRuntime\Shorokoo.LinuxCPU\Shorokoo.LinuxCPU.csproj" />
   </ItemGroup>
 
@@ -58,9 +58,10 @@
   </ItemGroup>
 
   <!--
-    -p:ShorokooGpuTests=true deploys Shorokoo.WinGPU as the default backend instead of
-    Shorokoo.WinCPU, which is what CudaFactAttribute gates on: it skips unless the discovered
-    backend's assembly name ends in "GPU", and that a card answers. Opt-in rather than the default
+    -p:ShorokooGpuTests=true deploys Shorokoo.WinGPU (Shorokoo.LinuxGPU on Linux) as the default
+    backend instead of Shorokoo.WinCPU (Shorokoo.LinuxCPU), which is what CudaFactAttribute gates
+    on: it skips unless the discovered backend's assembly name ends in "GPU", and that a card
+    answers. Opt-in rather than the default
     because it changes the backend every test in the process runs on, as below; a box with no card
     skips those tests either way. Exactly one of the two deploys, since two backend assemblies side
     by side are what DefaultBackend's discovery refuses.
@@ -82,6 +83,10 @@
   -->
   <ItemGroup Condition="$([MSBuild]::IsOSPlatform('Windows')) AND '$(ShorokooGpuTests)' == 'true'">
     <ProjectReference Include="..\..\src\Backend\OnnxRuntime\Shorokoo.WinGPU\Shorokoo.WinGPU.csproj" />
+  </ItemGroup>
+
+  <ItemGroup Condition="$([MSBuild]::IsOSPlatform('Linux')) AND '$(ShorokooGpuTests)' == 'true'">
+    <ProjectReference Include="..\..\src\Backend\OnnxRuntime\Shorokoo.LinuxGPU\Shorokoo.LinuxGPU.csproj" />
   </ItemGroup>
 
   <!--

@@ -21,4 +21,25 @@
   <ItemGroup>
     <ProjectReference Include="..\Shorokoo.OnnxRuntime\Shorokoo.OnnxRuntime.csproj" />
   </ItemGroup>
+
+  <!-- The CUDA build of Shorokoo's operators (native/shorokoo_adam_update.cu in
+       Shorokoo.OnnxRuntime), which a CUDA session registers to run each Adam or AdamW update as one
+       kernel, shipped beside ONNX Runtime's CUDA provider. A pack on Windows takes the library its
+       own build of Shorokoo.OnnxRuntime made (with a CUDA toolkit at hand; see -p:ShorokooCudaOps);
+       a pack on another platform takes it from win-x64/ under -p:ShorokooNativeAllocators=<folder>,
+       as Shorokoo.OnnxRuntime takes the other platform's allocator. The package is never packed
+       without it. -->
+  <PropertyGroup>
+    <TargetsForTfmSpecificContentInPackage>$(TargetsForTfmSpecificContentInPackage);IncludeShorokooCudaOperators</TargetsForTfmSpecificContentInPackage>
+    <ShorokooCudaOperators Condition="$([MSBuild]::IsOSPlatform('Windows'))">$(MSBuildThisFileDirectory)../Shorokoo.OnnxRuntime/obj/native/win-x64/shorokoo_ort_cuda_ops.dll</ShorokooCudaOperators>
+    <ShorokooCudaOperators Condition="!$([MSBuild]::IsOSPlatform('Windows')) and '$(ShorokooNativeAllocators)' != ''">$(ShorokooNativeAllocators)/win-x64/shorokoo_ort_cuda_ops.dll</ShorokooCudaOperators>
+  </PropertyGroup>
+
+  <Target Name="IncludeShorokooCudaOperators">
+    <Error Condition="'$(ShorokooCudaOperators)' == '' or !Exists('$(ShorokooCudaOperators)')"
+           Text="The Shorokoo.WinGPU package carries the CUDA build of Shorokoo's operators (shorokoo_ort_cuda_ops.dll), and it was not found ('$(ShorokooCudaOperators)'). On Windows, build with a CUDA 13 toolkit and -p:ShorokooCudaOps=ON; on another platform, build the native folder on Windows with cmake (-DSHOROKOO_CUDA_OPS=ON -DSHOROKOO_OUTPUT_DIR=&lt;folder&gt;/win-x64) and pack with -p:ShorokooNativeAllocators=&lt;folder&gt;." />
+    <ItemGroup>
+      <TfmSpecificPackageFile Include="$(ShorokooCudaOperators)" PackagePath="runtimes/win-x64/native/" />
+    </ItemGroup>
+  </Target>
 </Project>

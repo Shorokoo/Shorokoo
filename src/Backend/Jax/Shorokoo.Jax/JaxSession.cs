@@ -1,3 +1,4 @@
+using System.Runtime.ExceptionServices;
 using System.Security.Cryptography;
 using Python.Runtime;
 using Shorokoo.Core.Backends;
@@ -160,13 +161,15 @@ internal sealed class JaxSession : IShorokooSession
                         using var entry = new PyTuple([code, dims]);
                         inputs.Append(entry);
                     }
+                    var prepared = false;
                     try
                     {
                         PyCall.Invoke(runtime.Prepare, loaded, inputs, warned).Dispose();
+                        prepared = true;
                     }
                     finally
                     {
-                        warnings = PythonWarnings.Read(warned, JaxRuntime.Source);
+                        warnings = PythonWarnings.ReadAfter(warned, JaxRuntime.Source, callFailed: !prepared);
                     }
                 }
                 return new JaxSession(backend, runtime, model, placement, loaded, bindable);
@@ -327,7 +330,9 @@ internal sealed class JaxSession : IShorokooSession
     /// per output, the input whose consumed value it was written over -- on a card; on the CPU every
     /// output is a host array of its own, and it is empty. Each consumed value is released through
     /// the backend, exactly once, however the run ends: one the run donated is deleted by then,
-    /// which its release lets go of.
+    /// which its release lets go of. A release that throws stops none of the others; where the run
+    /// failed, its own exception is the one thrown, and otherwise the release's, the outputs
+    /// released.
     /// </summary>
     public IReadOnlyList<IShorokooTensorValue> RunConsuming(
         IReadOnlyDictionary<string, IShorokooTensorValue> inputs,
@@ -337,18 +342,32 @@ internal sealed class JaxSession : IShorokooSession
         out IReadOnlyList<string?> aliasedInputs)
     {
         ArgumentNullException.ThrowIfNull(consumed);
+        IReadOnlyList<IShorokooTensorValue> outputs;
         try
         {
-            return RunCore(inputs, consumed, outputNames, runSettings, out aliasedInputs);
+            outputs = RunCore(inputs, consumed, outputNames, runSettings, out aliasedInputs);
         }
-        finally
+        catch
         {
-            // Under one hold of the interpreter lock, which each release would otherwise take for
-            // itself.
-            if (consumed.Count > 0)
-                using (PythonRuntime.Gil())
-                    foreach (var value in consumed) _backend.Release(value);
+            // The run's own failure is the one reported.
+            Release(consumed);
+            throw;
         }
+        if (Release(consumed) is { } failure)
+        {
+            foreach (var output in outputs) output.Dispose();
+            ExceptionDispatchInfo.Throw(failure);
+        }
+        return outputs;
+    }
+
+    /// <summary>Releases every consumed value through the backend, under one hold of the interpreter
+    /// lock, which each release would otherwise take for itself; what failed, or null.</summary>
+    private Exception? Release(IReadOnlyCollection<IShorokooTensorValue> consumed)
+    {
+        if (consumed.Count == 0) return null;
+        using (PythonRuntime.Gil())
+            return ConsumedValues.ReleaseEach(consumed, _backend.Release);
     }
 
     private IReadOnlyList<IShorokooTensorValue> RunCore(
@@ -430,13 +449,16 @@ internal sealed class JaxSession : IShorokooSession
             using (PythonRuntime.Gil())
             {
                 using var warned = new PyList();
+                var ran = false;
                 try
                 {
-                    return InvokeWarning(feeds, wanted, owned, warned, out aliasedInputs);
+                    var outputs = InvokeWarning(feeds, wanted, owned, warned, out aliasedInputs);
+                    ran = true;
+                    return outputs;
                 }
                 finally
                 {
-                    warnings = PythonWarnings.Read(warned, JaxRuntime.Source);
+                    warnings = PythonWarnings.ReadAfter(warned, JaxRuntime.Source, callFailed: !ran);
                 }
             }
         }

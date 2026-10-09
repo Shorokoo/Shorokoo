@@ -703,6 +703,7 @@ public class PyTorchBackendCoverageTests
     public void TestEveryConsumedFeedIsReleasedExactlyOnceHoweverTheRunEnds()
     {
         using var session = Torch.CreateSession(Onnx("Neg", (int)ShorokooTensorElementType.Float), default, LogSettings.Default, DeviceMemorySettings.Default);
+        using var x = Torch.CreateTensor([1f, 2f], [2]);
         using var cancelled = new CancellationTokenSource();
         cancelled.Cancel();
 
@@ -711,6 +712,8 @@ public class PyTorchBackendCoverageTests
         Assert.Equal(1, ReleasesOf(feed => session.RunConsuming(new Dictionary<string, IShorokooTensorValue>(), [feed], ["y"], RunSettings.Default)));
         Assert.Equal(1, ReleasesOf(feed => session.RunConsuming(Feeds(feed), [feed], ["y"], new RunSettings { CancellationToken = cancelled.Token })));
         Assert.Equal(1, ReleasesOf(feed => session.RunConsuming(Feeds(feed), [feed], ["y"], RunSettings.Default, out _)));
+        Assert.Equal((1, typeof(IOException)), ReleasesPastAThrowingRelease((throwing, feed) => session.RunConsuming(Feeds(x), [throwing, feed], ["y"], RunSettings.Default)));
+        Assert.Equal((1, typeof(ArgumentException)), ReleasesPastAThrowingRelease((throwing, feed) => session.RunConsuming(Feeds(x), [throwing, feed], ["nope"], RunSettings.Default)));
     }
 
     [Fact]
@@ -1994,10 +1997,18 @@ public class PyTorchBackendCoverageTests
         return feed.Disposals;
     }
 
+    internal static (int Releases, Type? Thrown) ReleasesPastAThrowingRelease(Func<IShorokooTensorValue, IShorokooTensorValue, IReadOnlyList<IShorokooTensorValue>> run)
+    {
+        var feed = new CountingValue();
+        var thrown = Record.Exception(() => run(new CountingValue { Throws = true }, feed));
+        return (feed.Disposals, thrown?.GetType());
+    }
+
     private sealed class CountingValue : IShorokooTensorValue
     {
         private readonly float[] _data = [1f, 2f];
         public int Disposals;
+        public bool Throws;
         public ShorokooOnnxValueType ValueType => ShorokooOnnxValueType.Tensor;
         public ShorokooTensorElementType ElementType => ShorokooTensorElementType.Float;
         public long[] Shape => [2];
@@ -2007,7 +2018,11 @@ public class PyTorchBackendCoverageTests
         public int GetValueCount() => throw new NotSupportedException();
         public IShorokooTensorValue GetValue(int index) => throw new NotSupportedException();
         public ShorokooTensorElementType GetSequenceElementType() => throw new NotSupportedException();
-        public void Dispose() => Disposals++;
+        public void Dispose()
+        {
+            Disposals++;
+            if (Throws) throw new IOException("release");
+        }
     }
 
     private static NodeProto Op(string op, string inputs, string outputs) => ComputeContextLifetimeCoverageTests.Op(op, inputs, outputs);

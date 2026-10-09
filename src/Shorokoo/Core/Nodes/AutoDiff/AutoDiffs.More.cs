@@ -78,54 +78,46 @@ namespace Shorokoo.Core.Nodes.AutoDiff
             return [grad * (cdf + x * pdf)];
         }
 
-        // ===== Elu =====
+        // ===== Elu / Selu / Celu =====
+        //
+        // Below zero each output is an affine function of the exponential its derivative needs,
+        // so the rules read the forward output rather than exponentiating the input again: with
+        // a positive alpha (and gamma) the output is positive exactly where the input is, so the
+        // input need not even be kept for the backward pass. A non-positive parameter, where the
+        // output's sign no longer tells the branches apart, takes the mask from the input.
 
-        [AutoDiff(ELU)]
-        public static Variable?[] Elu<T>(Tensor<T> x, Tensor<T> grad, float? alpha) where T : IVarType
+        [AutoDiff(ELU, UsesOutputs = true)]
+        public static Variable?[] Elu<T>(Tensor<T> x, Tensor<T> y, Tensor<T> grad, float? alpha) where T : IVarType
         {
             // elu(x) = x if x > 0, alpha * (exp(x) - 1) if x <= 0
-            // elu'(x) = 1 if x > 0, alpha * exp(x) if x <= 0
+            // elu'(x) = 1 if x > 0, alpha * exp(x) = y + alpha if x <= 0
             var effectiveAlpha = alpha ?? 1.0f;
-            var zero = TypedConst(0.0f, x);
-            var one = TypedConst(1.0f, x);
-            var alphaConst = TypedConst(effectiveAlpha, x);
-            var mask = x > zero;
-            Tensor<T> eluGrad = OnnxOp.Where(mask, one, alphaConst * x.Exp());
-            return [grad * eluGrad];
+            var zero = TypedConst(0.0f, y);
+            var mask = effectiveAlpha > 0f ? y > zero : x > zero;
+            return [OnnxOp.Where(mask, grad, grad * (y + TypedConst(effectiveAlpha, y)))];
         }
 
-        // ===== Selu =====
-
-        [AutoDiff(SELU)]
-        public static Variable?[] Selu<T>(Tensor<T> x, Tensor<T> grad, float? alpha, float? gamma) where T : IVarType
+        [AutoDiff(SELU, UsesOutputs = true)]
+        public static Variable?[] Selu<T>(Tensor<T> x, Tensor<T> y, Tensor<T> grad, float? alpha, float? gamma) where T : IVarType
         {
             // selu(x) = gamma * (x if x > 0, alpha * (exp(x) - 1) if x <= 0)
-            // selu'(x) = gamma if x > 0, gamma * alpha * exp(x) if x <= 0
+            // selu'(x) = gamma if x > 0, gamma * alpha * exp(x) = y + gamma * alpha if x <= 0
             var effectiveAlpha = alpha ?? 1.67326319217681884765625f;
             var effectiveGamma = gamma ?? 1.0507010221481323242187f;
-            var zero = TypedConst(0.0f, x);
-            var one = TypedConst(1.0f, x);
-            var alphaConst = TypedConst(effectiveAlpha, x);
-            var gammaConst = TypedConst(effectiveGamma, x);
-            var mask = x > zero;
-            var seluGrad = gammaConst * OnnxOp.Where(mask, one, alphaConst * x.Exp());
-            return [grad * seluGrad];
+            var zero = TypedConst(0.0f, y);
+            var mask = effectiveAlpha > 0f && effectiveGamma > 0f ? y > zero : x > zero;
+            return [OnnxOp.Where(mask, grad * TypedConst(effectiveGamma, y), grad * (y + TypedConst(effectiveGamma * effectiveAlpha, y)))];
         }
 
-        // ===== Celu =====
-
-        [AutoDiff(CELU)]
-        public static Variable?[] Celu<T>(Tensor<T> x, Tensor<T> grad, float? alpha) where T : IVarType
+        [AutoDiff(CELU, UsesOutputs = true)]
+        public static Variable?[] Celu<T>(Tensor<T> x, Tensor<T> y, Tensor<T> grad, float? alpha) where T : IVarType
         {
             // celu(x) = max(0, x) + min(0, alpha * (exp(x/alpha) - 1))
-            // celu'(x) = 1 if x > 0, exp(x/alpha) if x <= 0
+            // celu'(x) = 1 if x > 0, exp(x/alpha) = y / alpha + 1 if x <= 0
             var effectiveAlpha = alpha ?? 1.0f;
-            var zero = TypedConst(0.0f, x);
-            var one = TypedConst(1.0f, x);
-            var alphaConst = TypedConst(effectiveAlpha, x);
-            var mask = x > zero;
-            Tensor<T> celuGrad = OnnxOp.Where(mask, one, (x / alphaConst).Exp());
-            return [grad * celuGrad];
+            var zero = TypedConst(0.0f, y);
+            var mask = effectiveAlpha > 0f ? y > zero : x > zero;
+            return [OnnxOp.Where(mask, grad, grad * (y / TypedConst(effectiveAlpha, y) + TypedConst(1.0f, y)))];
         }
 
         // ===== Flatten =====

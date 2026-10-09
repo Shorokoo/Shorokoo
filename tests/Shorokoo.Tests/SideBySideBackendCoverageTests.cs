@@ -33,6 +33,13 @@ public class SideBySideBackendCoverageTests
 {
     private static readonly string BackendRoot = Path.Combine(AppContext.BaseDirectory, "ort");
 
+    /// <summary>A copy of the native under <see cref="AltRuntimePath"/> in a folder of its own, so a
+    /// runtime of its own, which only <see cref="TestATracedRunLeavesTheUntracedRunsBesideItUndisturbed"/>
+    /// loads: its traced run is the first its runtime sees.</summary>
+    private static string TracedRuntimePath => Path.Combine(
+        BackendRoot, "traced",
+        RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "onnxruntime.dll" : "libonnxruntime.so");
+
     /// <summary>The native the isolated backend binds, deployed by the test project's
     /// ShorokooBackendNatives items.</summary>
     internal static string AltRuntimePath => Path.Combine(
@@ -119,9 +126,14 @@ public class SideBySideBackendCoverageTests
     [Fact]
     public void TestATracedRunLeavesTheUntracedRunsBesideItUndisturbed()
     {
-        // No other test traces on Alt, so this is the first traced run its runtime sees.
-        using var plain = new ComputeContext(Alt.Value);
-        using var traced = new ComputeContext(Alt.Value) { Diagnostics = new DiagnosticSettings { TraceNodePlacement = true } };
+        var runtime = IsolatedBackend.Load(new IsolatedBackendSpec
+        {
+            Name = "traced-runtime",
+            BackendAssembly = PlatformBackendAssembly(gpu: false),
+            NativeRuntimePath = TracedRuntimePath,
+        });
+        using var plain = new ComputeContext(runtime);
+        using var traced = new ComputeContext(runtime) { Diagnostics = new DiagnosticSettings { TraceNodePlacement = true } };
         var (graph, a, b, expected) = Model();
         var profiled = traced.Compile(graph);
         using var stop = new CancellationTokenSource();
@@ -130,10 +142,16 @@ public class SideBySideBackendCoverageTests
             var operand = ArenaProbeModels.MatMulOperand(512);
             do product.Execute(operand.Shared(), operand.Shared()); while (!stop.IsCancellationRequested);
         }, TaskCreationOptions.LongRunning)).ToArray();
-        Thread.Sleep(200);
-        Assert.Equal(expected, SideBySideModel.Floats(profiled.Execute(a, b)[0]));
-        stop.Cancel();
-        Task.WaitAll(running);
+        try
+        {
+            Thread.Sleep(200);
+            Assert.Equal(expected, SideBySideModel.Floats(profiled.Execute(a, b)[0]));
+        }
+        finally
+        {
+            stop.Cancel();
+            Task.WaitAll(running);
+        }
     }
 
     [Fact]

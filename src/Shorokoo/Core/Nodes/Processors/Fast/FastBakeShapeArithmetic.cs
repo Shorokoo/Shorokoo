@@ -27,8 +27,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// every axis of its input and no axes (<see cref="PadsOverEveryAxis"/>).</para>
     ///
     /// <para>Only an <c>int64</c> value is baked, and only one small enough for the interpreter to
-    /// hold (<see cref="AutoDiffCheckpointing.ShapeInferenceInterpreter.MaxSmallTensorElements"/>):
-    /// shape arithmetic is integer arithmetic, and the interpreter computes it exactly. Only a node
+    /// hold (<see cref="QuickExecutionEngine.DefaultMaxDataElements"/>): shape arithmetic is
+    /// integer arithmetic, which the interpreter computes exactly, and a value it computed through
+    /// a float it holds other than as the runtime does is not known at all. Only a node
     /// at the top level of the graph reads a baked value, and none that opens or closes a scope;
     /// a dropped node's result is passed on to the body nodes that read it, and one an output reads
     /// keeps the node, so an output never becomes an alias of another value.</para>

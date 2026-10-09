@@ -23,6 +23,12 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// branch's it knows, the shape a loop carries after the few iterations it walks — which a run
     /// can contradict.</para>
     ///
+    /// <para>So is every value computed from a float value the interpreter holds other than as
+    /// the runtime does: it keeps float data as <c>float32</c>, and does not round a
+    /// <c>float16</c>, <c>bfloat16</c> or <c>float64</c> value it computes to that type, nor
+    /// hold a <c>float64</c> constant at full precision. An integer computed through such a value
+    /// — a size cast to <c>float16</c> and back, say — can differ from the one a run computes.</para>
+    ///
     /// <para>Read off the graph before the pre-passes rewrite it: they keep each value they do not
     /// replace under its key, and a value they add is not known here.</para>
     /// </summary>
@@ -76,7 +82,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
         /// <summary>
         /// The values of <paramref name="graph"/> whose shape in <paramref name="values"/> the
-        /// interpreter estimated: each output of a scope it did not work out, and every value
+        /// interpreter estimated: each output of a scope it did not work out, each float value it
+        /// holds other than as the runtime does (<see cref="HeldInexactly"/>), and every value
         /// computed from one. An <c>If</c> is worked out where its condition's value is known
         /// and the branch that holds gives the output; a <c>Loop</c> where its trip count is
         /// known and each condition it has is too, so its walk ran to the loop's end. Any other
@@ -90,7 +97,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             var estimated = new HashSet<FastTensorKey>();
 
             bool Known(FastTensorKey? key, Func<RuntimeTensor, bool> hasValue)
-                => key is { IsEmpty: false } k && values.TryGetValue(k, out var v) && v is RuntimeTensor t && hasValue(t);
+                => key is { IsEmpty: false } k && !estimated.Contains(k) && values.TryGetValue(k, out var v) && v is RuntimeTensor t && hasValue(t);
             static bool IsBool(RuntimeTensor t) => t.BoolData is { Length: > 0 };
             static bool IsInt(RuntimeTensor t) => t.IntData is { Length: > 0 };
             bool AbsentOrBool(IReadOnlyList<FastTensorKey?> keys, int slot)
@@ -104,11 +111,14 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     foreach (var key in outputs) if (key is { } k) estimated.Add(k);
                     continue;
                 }
+                foreach (var key in outputs)
+                    if (key is { } k && values.TryGetValue(k, out var v) && v is RuntimeTensor t && HeldInexactly(t, node.OpCode == OpCodes.CONSTANT))
+                        estimated.Add(k);
                 if (!FastOpsetResolver.IsCloseOpCode(node.OpCode)) continue;
 
                 var open = node.GraphOpenNodeKey is { } openKey && nodeByKey.TryGetValue(openKey, out var o) ? o.Inputs : null;
-                if (node.OpCode == OpCodes.IF_CLOSE && open is [{ } condition, ..]
-                    && values.TryGetValue(condition, out var c) && c is RuntimeTensor { BoolData: { Length: > 0 } taken })
+                if (node.OpCode == OpCodes.IF_CLOSE && open is [{ } condition, ..] && Known(condition, IsBool)
+                    && values[condition] is RuntimeTensor { BoolData: { } taken })
                 {
                     var branch = node.FullInputs.TryGetValue(taken[0] ? OnnxOpAttributeNames.AttrThenBranch : OnnxOpAttributeNames.AttrElseBranch, out var b) ? b : [];
                     for (int i = 0; i < outputs.Count; i++)
@@ -124,5 +134,15 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             }
             return estimated;
         }
+
+        /// <summary>
+        /// Whether <paramref name="value"/> holds float data the interpreter may hold other than as
+        /// the runtime does: any <c>float64</c> data, which it narrows to <c>float32</c>, and any
+        /// other non-<c>float32</c> float data it computed, which it does not round to its type. A
+        /// narrower float <paramref name="constant"/> is held exactly.
+        /// </summary>
+        private static bool HeldInexactly(RuntimeTensor value, bool constant)
+            => value.FloatData is not null && value.DType != DType.Float32
+                && (value.DType == DType.Float64 || !constant);
     }
 }

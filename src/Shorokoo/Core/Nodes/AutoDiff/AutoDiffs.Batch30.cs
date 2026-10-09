@@ -305,9 +305,6 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         //   4. dWindow[n] = Σ_{b,m,c} g[b,m,n,c] · signal[b, m·S+n, c]   (window is real);
         //   5. dSignal = overlap-add of g·window: ScatterElements(Add) of the flattened
         //      frames onto a zeros[B, T, C] base at indices m·S + n along the time axis.
-        //
-        // (This replaced a zero stub that silently returned null gradients —
-        // a silently frozen parameter is the worst failure mode for training.)
 
         internal static Variable?[] STFTGradient(
             Variable?[] inputs, Variable?[] outputGrads, OnnxCSharpAttributes attributes)

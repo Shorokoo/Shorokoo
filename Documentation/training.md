@@ -436,6 +436,11 @@ It applies:
   reads it after its update, or when the pass declines to order the update. For a stack of `Linear`
   layers under AdamW every weight, bias and moment is written over.
 
+On JAX the consumed state is **donated** to XLA, which writes each updated field over a donated one
+of its shape wherever its own analysis allows, whatever the training backend; state the step only
+reads is copied in the run's memory first and the copy donated, so a checkpoint you hold is never written
+over ([jax-backend.md](jax-backend.md#runs)).
+
 On PyTorch the step goes further: the element-wise arithmetic leading to each new state value —
 AdamW's chain to a new moment, say — is written over the consumed state it reads last, so the
 optimizer's temporaries take no memory of their own either

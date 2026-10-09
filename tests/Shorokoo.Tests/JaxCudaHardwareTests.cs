@@ -163,6 +163,97 @@ public class JaxCudaHardwareTests
     }
 
     [JaxCudaFact]
+    public void TestARunOnTheCardWritesItsOutputOverTheConsumedInputItDonatesDeletingItAndLeavesALentInputWhole()
+    {
+        var graph = ComputeContextLifetimeCoverageTests.GraphOf("a:float[2] b:float[2]", "O:float[2]", ComputeContextLifetimeCoverageTests.Op("Sub", "a b", "O"));
+        using var session = Cuda.Value.CreateSession(PyTorchBackendCoverageTests.Serialize(graph), default, LogSettings.Default, DeviceMemorySettings.Default,
+            DiagnosticSettings.Default, [new OutputAlias("O", "a")]);
+        IShorokooTensorValue Card(params float[] values) => Cuda.Value.CreateTensorInBackendMemory(ShorokooTensorElementType.Float, [.. MemoryMarshal.AsBytes<float>(values)], [values.Length]);
+        string Host(IShorokooTensorValue value) => string.Join(",", MemoryMarshal.Cast<byte, float>(Cuda.Value.CopyTensorToHost(value)).ToArray());
+        var consumed = Card(5f, 7f);
+        using var lent = Card(5f, 7f);
+        using var b = Card(1f, 2f);
+        var scope = Watching(("consumed", consumed), ("lent", lent));
+
+        using var written = session.RunConsuming(new Dictionary<string, IShorokooTensorValue> { ["a"] = consumed, ["b"] = b }, [consumed], ["O"], RunSettings.Default, out var aliased)[0];
+        using var computed = session.RunConsuming(new Dictionary<string, IShorokooTensorValue> { ["a"] = lent, ["b"] = b }, [], ["O"], RunSettings.Default, out var notAliased)[0];
+
+        Assert.Equal(["a"], aliased);
+        Assert.Empty(notAliased);
+        Assert.Equal("4,5 4,5 5,7", $"{Host(written)} {Host(computed)} {Host(lent)}");
+        Assert.Equal("True False", Deleted(scope, "consumed", "lent"));
+    }
+
+    [JaxCudaFact]
+    public void TestTwoThreadsRunningOneCardSessionForOutputsItHasNotHandedOverBeforeBothFinish()
+    {
+        string[] outputs = [.. Enumerable.Range(0, 400).Select(i => $"y{i}")];
+        var graph = ComputeContextLifetimeCoverageTests.GraphOf("x:float[2]", string.Join(" ", outputs),
+            [.. outputs.Select(y => ComputeContextLifetimeCoverageTests.Op("Neg", "x", y))]);
+        using var session = Cuda.Value.CreateSession(PyTorchBackendCoverageTests.Serialize(graph), default, LogSettings.Default, DeviceMemorySettings.Default);
+        using var x = Cuda.Value.CreateTensorInBackendMemory(ShorokooTensorElementType.Float, [.. MemoryMarshal.AsBytes<float>([1f, 2f])], [2]);
+        void Runs(int thread)
+        {
+            for (int i = 0; i < 40; i++)
+                foreach (var y in session.Run(new Dictionary<string, IShorokooTensorValue> { ["x"] = x }, outputs[(2 * i + thread)..], RunSettings.Default)) y.Dispose();
+        }
+        var interval = SwitchInterval(1e-6);
+        try
+        {
+            Assert.True(Task.WaitAll([Task.Run(() => Runs(0)), Task.Run(() => Runs(1))], TimeSpan.FromSeconds(120)));
+        }
+        finally
+        {
+            SwitchInterval(interval);
+        }
+    }
+
+    private static double SwitchInterval(double seconds)
+    {
+        using (Shorokoo.PythonHost.PythonRuntime.Gil())
+        {
+            using var scope = Python.Runtime.Py.CreateScope();
+            scope.Exec($"import sys\nwas = sys.getswitchinterval()\nsys.setswitchinterval({seconds.ToString(System.Globalization.CultureInfo.InvariantCulture)})");
+            return scope.Get<double>("was");
+        }
+    }
+
+    [JaxCudaFact]
+    public void TestAResidentRunOnTheCardWritesTheStateItOwnsInPlaceCopiesTheStateItWasLentAndKeepsEveryHeldCheckpoint()
+    {
+        var donating = TrainingRigHelpers.JaxDonatingRun(Cuda.Value, null, aliasing: true);
+        var plain = TrainingRigHelpers.JaxDonatingRun(Cuda.Value, null, aliasing: false);
+        var native = TrainingRigHelpers.JaxDonatingRun(Cuda.Value, TrainingBackend.Native, aliasing: true);
+
+        Assert.Equal(plain.Trained, donating.Trained);
+        Assert.Equal(donating.Kept, donating.KeptAfter);
+        Assert.Equal(native.Kept, native.KeptAfter);
+        Assert.Equal(16L, donating.Aliased);
+        Assert.Equal(16L, native.Aliased);
+        Assert.Equal(0L, plain.Aliased);
+    }
+
+    private static Python.Runtime.PyModule Watching(params (string Name, IShorokooTensorValue Value)[] values)
+    {
+        using (Shorokoo.PythonHost.PythonRuntime.Gil())
+        {
+            var scope = Python.Runtime.Py.CreateScope();
+            foreach (var (name, value) in values) scope.Set(name, ((Shorokoo.Jax.JaxTensorValue)value).Value);
+            return scope;
+        }
+    }
+
+    private static string Deleted(Python.Runtime.PyModule scope, params string[] names)
+    {
+        using (Shorokoo.PythonHost.PythonRuntime.Gil())
+        using (scope)
+        {
+            scope.Exec($"deleted = ' '.join(str(a.is_deleted()) for a in [{string.Join(", ", names)}])");
+            return scope.Get<string>("deleted");
+        }
+    }
+
+    [JaxCudaFact]
     public void TestTheCardsDriverIsEnoughToProbeAndStartTheBackend()
     {
         Assert.Equal(BackendRejection.None, BackendPackage.Probe(typeof(JaxCudaBackend).Assembly.Location).Reason);

@@ -135,9 +135,9 @@ Limits of training on JAX, besides those of [the native path](#what-differs-on-t
   the step's session, at the first step, with a `JaxUnsupportedModelException` naming it (see the
   backend's [limitations](jax-backend.md#limitations)).
 - Only floating-point parameters (`Float32`, `Float16`, `BFloat16`, `Float64`) are differentiated.
-- Memory: what the backward pass needs of the forward pass is XLA's to keep or recompute. A step
-  writes its updated parameters into memory of its own; JAX arrays are never written in place, so the
-  rig's output aliasing binds nothing on JAX.
+- Memory: what the backward pass needs of the forward pass is XLA's to keep or recompute. The
+  step's consumed state is donated to XLA, which writes the updated parameters and moments over it
+  where it can, as on the default path ([Donation](jax-backend.md#runs)).
 
 ## The formats
 

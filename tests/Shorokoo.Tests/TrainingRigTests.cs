@@ -669,6 +669,29 @@ internal static class TrainingRigHelpers
         }
     }
 
+    internal static (float[] Trained, float[][] Kept, float[][] KeptAfter, long Donated, long Copied, long Aliased) JaxDonatingRun(
+        JaxBackend backend, TrainingBackend? training, bool aliasing)
+    {
+        static float[] Values(TrainingCheckpoint c) => [.. FlattenStruct(c.TrainableParams), .. FlattenStruct(c.OptimizerState)];
+        using var context = new ComputeContext(backend) { OutputAliasing = aliasing };
+        var rig = TrainingRig.FromScratch(ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph,
+            SampleOf(NativeParityCases<JaxCpuBackend>.Four), NativeParityCases<JaxCpuBackend>.AdamW, ParitySeed,
+            runtimeContext: context, trainingBackend: training);
+        void Step(ResidentTrainingRun run) => run.Step(NativeParityCases<JaxCpuBackend>.Four, NativeParityCases<JaxCpuBackend>.FourTargets);
+        var held = rig.CreateInitialCheckpoint();
+        var heldValues = Values(held);
+        using var run = rig.BeginResidentRun(held.Shared());
+        Step(run);
+        Step(run);
+        var published = run.StepToCheckpoint(NativeParityCases<JaxCpuBackend>.Four, NativeParityCases<JaxCpuBackend>.FourTargets);
+        var publishedValues = Values(published);
+        Step(run);
+        Step(run);
+        var trained = Values(run.StepToCheckpoint(NativeParityCases<JaxCpuBackend>.Four, NativeParityCases<JaxCpuBackend>.FourTargets));
+        return (trained, [heldValues, publishedValues], [Values(held), Values(published)], backend.DonatedInputs, backend.CopiedInputs,
+            context.AliasedOutputs);
+    }
+
     internal static byte[] ReadEntryBytesViaBcl(string path, string entryName)
     {
         using var zip = System.IO.Compression.ZipFile.OpenRead(path);
@@ -3652,6 +3675,18 @@ public class TrainingRigTrainingLoopCoverageTests
         Assert.All(tensors, t => Assert.True(t.IsDisposed));
         Assert.All(tensors, t => Assert.Throws<ObjectDisposedException>(() => t.CopyRawMemory()));
         TrainingRig.ReleaseCheckpointState(superseded);   // idempotent
+    }
+
+    [Fact]
+    public void TestAResidentRunOnJaxDonatesTheStateItOwnsCopiesTheStateItWasLentKeepsEveryHeldCheckpointAndTrainsAsWithoutDonation()
+    {
+        var donating = JaxDonatingRun(new JaxCpuBackend(), null, aliasing: true);
+        var plain = JaxDonatingRun(new JaxCpuBackend(), null, aliasing: false);
+
+        Assert.Equal(plain.Trained, donating.Trained);
+        Assert.Equal(donating.Kept, donating.KeptAfter);
+        Assert.Equal((16L, 8L, 0L), (donating.Donated, donating.Copied, donating.Aliased));
+        Assert.Equal((0L, 0L), (plain.Donated, plain.Copied));
     }
 
     /// <summary>A checkpoint the run published, and the one it was handed, outlive it: handing one
@@ -7598,7 +7633,7 @@ public class TrainingRigNativeTorchCoverageTests : NativeTrainingParity<TorchCpu
 public class TrainingRigNativeJaxCoverageTests : NativeTrainingParity<JaxCpuBackend>
 {
     [Fact]
-    public void TestANativeStepOnJaxBindsNoOutputIntoAConsumedParameterAndTrainsAlike()
+    public void TestANativeStepOnJaxWritesNoOutputIntoAConsumedParameterOnTheCpuAndTrainsAlike()
     {
         using var context = new ComputeContext(new JaxCpuBackend()) { OutputAliasing = true };
         var reference = TrainingRig.FromScratch(ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph, SampleOf(Four), AdamW, ParitySeed);
@@ -7610,6 +7645,18 @@ public class TrainingRigNativeJaxCoverageTests : NativeTrainingParity<JaxCpuBack
 
         AssertClose(reference.TrainStep(reference.TrainStep(start.Shared(), Four, FourTargets), Four, FourTargets), run.StepToCheckpoint(Four, FourTargets));
         Assert.Equal(0L, context.AliasedOutputs);
+    }
+
+    [Fact]
+    public void TestANativeResidentRunOnJaxDonatesTheStateItOwnsCopiesTheStateItWasLentKeepsEveryHeldCheckpointAndTrainsAsWithoutDonation()
+    {
+        var donating = JaxDonatingRun(new JaxCpuBackend(), TrainingBackend.Native, aliasing: true);
+        var plain = JaxDonatingRun(new JaxCpuBackend(), TrainingBackend.Native, aliasing: false);
+
+        Assert.Equal(plain.Trained, donating.Trained);
+        Assert.Equal(donating.Kept, donating.KeptAfter);
+        Assert.Equal((16L, 8L, 0L), (donating.Donated, donating.Copied, donating.Aliased));
+        Assert.Equal((0L, 0L), (plain.Donated, plain.Copied));
     }
 
     [Trait("Domain", "Training")]

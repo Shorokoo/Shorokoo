@@ -163,6 +163,67 @@ public class JaxCudaHardwareTests
     }
 
     [JaxCudaFact]
+    public void TestARunOnTheCardWritesItsOutputOverTheConsumedInputItDonatesDeletingItAndLeavesALentInputWhole()
+    {
+        var graph = ComputeContextLifetimeCoverageTests.GraphOf("a:float[2] b:float[2]", "O:float[2]", ComputeContextLifetimeCoverageTests.Op("Sub", "a b", "O"));
+        using var session = Cuda.Value.CreateSession(PyTorchBackendCoverageTests.Serialize(graph), default, LogSettings.Default, DeviceMemorySettings.Default,
+            DiagnosticSettings.Default, [new OutputAlias("O", "a")]);
+        IShorokooTensorValue Card(params float[] values) => Cuda.Value.CreateTensorInBackendMemory(ShorokooTensorElementType.Float, [.. MemoryMarshal.AsBytes<float>(values)], [values.Length]);
+        string Host(IShorokooTensorValue value) => string.Join(",", MemoryMarshal.Cast<byte, float>(Cuda.Value.CopyTensorToHost(value)).ToArray());
+        var consumed = Card(5f, 7f);
+        using var lent = Card(5f, 7f);
+        using var b = Card(1f, 2f);
+        var scope = Watching(("consumed", consumed), ("lent", lent));
+
+        using var written = session.RunConsuming(new Dictionary<string, IShorokooTensorValue> { ["a"] = consumed, ["b"] = b }, [consumed], ["O"], RunSettings.Default, out var aliased)[0];
+        using var computed = session.RunConsuming(new Dictionary<string, IShorokooTensorValue> { ["a"] = lent, ["b"] = b }, [], ["O"], RunSettings.Default, out var notAliased)[0];
+
+        Assert.Equal(["a"], aliased);
+        Assert.Empty(notAliased);
+        Assert.Equal("4,5 4,5 5,7", $"{Host(written)} {Host(computed)} {Host(lent)}");
+        Assert.Equal("True False", Deleted(scope, "consumed", "lent"));
+    }
+
+    [JaxCudaFact]
+    public void TestAResidentRunOnTheCardWritesTheStateItOwnsInPlaceCopiesTheStateItWasLentAndKeepsEveryHeldCheckpoint()
+    {
+        var donating = TrainingRigHelpers.JaxDonatingRun(Cuda.Value, null, aliasing: true);
+        var plain = TrainingRigHelpers.JaxDonatingRun(Cuda.Value, null, aliasing: false);
+        var native = TrainingRigHelpers.JaxDonatingRun(Cuda.Value, TrainingBackend.Native, aliasing: true);
+
+        Assert.Equal(plain.Trained, donating.Trained);
+        Assert.Equal(donating.Kept, donating.KeptAfter);
+        Assert.Equal(native.Kept, native.KeptAfter);
+        Assert.Equal(16L, donating.Aliased);
+        Assert.Equal(16L, native.Aliased);
+        Assert.Equal(0L, plain.Aliased);
+    }
+
+    /// <summary>A scope holding the arrays of <paramref name="values"/> under their names, which
+    /// outlive the values' own release, so a test can ask after the run what became of them.</summary>
+    private static Python.Runtime.PyModule Watching(params (string Name, IShorokooTensorValue Value)[] values)
+    {
+        using (Shorokoo.PythonHost.PythonRuntime.Gil())
+        {
+            var scope = Python.Runtime.Py.CreateScope();
+            foreach (var (name, value) in values) scope.Set(name, ((Shorokoo.Jax.JaxTensorValue)value).Value);
+            return scope;
+        }
+    }
+
+    /// <summary>Whether each array <paramref name="scope"/> holds under <paramref name="names"/> was
+    /// deleted, and lets go of the scope.</summary>
+    private static string Deleted(Python.Runtime.PyModule scope, params string[] names)
+    {
+        using (Shorokoo.PythonHost.PythonRuntime.Gil())
+        using (scope)
+        {
+            scope.Exec($"deleted = ' '.join(str(a.is_deleted()) for a in [{string.Join(", ", names)}])");
+            return scope.Get<string>("deleted");
+        }
+    }
+
+    [JaxCudaFact]
     public void TestTheCardsDriverIsEnoughToProbeAndStartTheBackend()
     {
         Assert.Equal(BackendRejection.None, BackendPackage.Probe(typeof(JaxCudaBackend).Assembly.Location).Reason);

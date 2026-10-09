@@ -312,7 +312,7 @@ public class JaxBackendCoverageTests
     }
 
     [Fact]
-    public void TestACpuSessionHasNoArenaFiguresBindsNoAliasLeavesItsOutputsInHostMemoryAndRunsEveryNodeOnTheHost()
+    public void TestACpuSessionHasNoArenaFiguresLeavesItsOutputsInHostMemoryAndRunsEveryNodeOnTheHost()
     {
         var graph = ComputeContextLifetimeCoverageTests.GraphOf("a:float[2] b:float[2]", "O:float[2]",
             ComputeContextLifetimeCoverageTests.Op("Sub", "a b", "t"), ComputeContextLifetimeCoverageTests.Op("Neg", "t", "O"));
@@ -326,10 +326,78 @@ public class JaxBackendCoverageTests
         Assert.True(kept.IsHostAccessible);
         Assert.Equal([-4f, -5f], kept.GetTensorDataAsSpan<float>().ToArray());
         Assert.Throws<ObjectDisposedException>(() => consumed.IsHostAccessible);
-        Assert.Empty(traced.BindableAliases);
+        Assert.Equal([new OutputAlias("O", "a")], traced.BindableAliases);
         Assert.Null(traced.ReadArenaStatistics());
         Assert.Equal(SessionOutputPlacement.Host, traced.OutputPlacement);
         Assert.Equal([("Sub", "cpu"), ("Neg", "cpu")], traced.ReadNodePlacement()!.Nodes.Select(n => (n.OpType, n.Provider)));
+    }
+
+    [Fact]
+    public void TestASessionWritesInPlaceOnlyThePairsNamingOneInputAndOneOutputOfAgreeingTypes()
+    {
+        IReadOnlyList<OutputAlias> Bindable(params OutputAlias[] pairs)
+        {
+            var graph = ComputeContextLifetimeCoverageTests.GraphOf("a:float[2] b:float[3] c:int64[3]", "O:float[2] P:float[3] Q:float[3]",
+                ComputeContextLifetimeCoverageTests.Op("Neg", "a", "O"), ComputeContextLifetimeCoverageTests.Op("Neg", "b", "P"), ComputeContextLifetimeCoverageTests.Op("Abs", "b", "Q"));
+            using var session = Jax.CreateSession(Serialize(graph), default, LogSettings.Default, DeviceMemorySettings.Default, DiagnosticSettings.Default, pairs);
+            return session.BindableAliases;
+        }
+
+        Assert.Equal([new OutputAlias("O", "a"), new OutputAlias("P", "b")], Bindable(new("O", "a"), new("P", "b")));
+        Assert.Equal([new OutputAlias("P", "b")], Bindable(new("O", "b"), new("Q", "c"), new("X", "a"), new("O", "x"), new("P", "b"), new("Q", "b")));
+        Assert.Equal([new OutputAlias("Q", "b")], Bindable(new("Q", "b"), new("P", "b")));
+        Assert.Empty(Bindable());
+    }
+
+    [Fact]
+    public void TestARunDonatesAConsumedInputOfItsPairsAsItIsAndOneItWasLentOrWasFedTwiceThroughACopy()
+    {
+        var backend = new JaxCpuBackend();
+        var graph = ComputeContextLifetimeCoverageTests.GraphOf("a:float[2] b:float[2]", "O:float[2]", ComputeContextLifetimeCoverageTests.Op("Sub", "a b", "O"));
+        using var session = backend.CreateSession(Serialize(graph), default, LogSettings.Default, DeviceMemorySettings.Default, DiagnosticSettings.Default, [new OutputAlias("O", "a")]);
+        using var lent = backend.CreateTensor([5f, 7f], [2]);
+        using var b = backend.CreateTensor([1f, 2f], [2]);
+        string Ran(IShorokooTensorValue a, IShorokooTensorValue bFed, IShorokooTensorValue[] consumed)
+        {
+            var (donated, copied) = (backend.DonatedInputs, backend.CopiedInputs);
+            using var o = session.RunConsuming(new Dictionary<string, IShorokooTensorValue> { ["a"] = a, ["b"] = bFed }, consumed, ["O"], RunSettings.Default, out var aliased)[0];
+            return $"{string.Join(",", o.GetTensorDataAsSpan<float>().ToArray())} {backend.DonatedInputs - donated} {backend.CopiedInputs - copied} {aliased.Count}";
+        }
+        var consumed = backend.CreateTensor([5f, 7f], [2]);
+        var twice = backend.CreateTensor([5f, 7f], [2]);
+
+        Assert.Equal("4,5 1 0 0", Ran(consumed, b, [consumed]));
+        Assert.Equal("4,5 0 1 0", Ran(lent, b, []));
+        Assert.Equal("0,0 0 1 0", Ran(twice, twice, [twice]));
+        Assert.Equal([5f, 7f], lent.GetTensorDataAsSpan<float>().ToArray());
+        Assert.Throws<ObjectDisposedException>(() => consumed.IsHostAccessible);
+    }
+
+    [Fact]
+    public void TestTheRuntimeDeletesAnArrayItDonatesAndNeverOneItWasLent()
+    {
+        Jax.Start();
+        using (PythonRuntime.Gil())
+        {
+            using var scope = Py.CreateScope();
+            scope.Exec("""
+                import jax
+                import numpy as np
+                from shorokoo_jax import runtime
+                model = runtime.load_model("def main(a, b):\n    return (a - b,)\n", "<donation>", [], "cpu", "HIGHEST", [0])
+                def ran(owned):
+                    a = jax.device_put(np.array([5, 7], np.float32))
+                    b = jax.device_put(np.array([1, 2], np.float32))
+                    _, values, _, _, donated, copied = runtime.run(model, [a, b], [0], owned)
+                    try:
+                        kept = np.asarray(a).tolist()
+                    except RuntimeError:
+                        kept = "deleted"
+                    return f"{values[0].tolist()} {kept} {donated} {copied} {b.is_deleted()}"
+                result = ran([0]) + " | " + ran([])
+                """);
+            Assert.Equal("[4.0, 5.0] deleted 1 0 False | [4.0, 5.0] [5.0, 7.0] 0 1 False", scope.Get<string>("result"));
+        }
     }
 
     [Fact]
@@ -353,7 +421,7 @@ public class JaxBackendCoverageTests
                 source = "from shorokoo_jax import ops_linalg\ndef main(a, b):\n    return (ops_linalg.matmul(a, b),)\n"
                 def compiled_at(precision):
                     model = runtime.load_model(source, f"<precision-{precision}>", [], "cpu", precision)
-                    text = model.program((((4, 4), np.dtype(np.float32)), ((4, 4), np.dtype(np.float32)))).as_text()
+                    text = model.program((((4, 4), np.dtype(np.float32)), ((4, 4), np.dtype(np.float32)))).compiled.as_text()
                     return ",".join(sorted(set(re.findall(r"operand_precision=\{(\w+)", text))))
                 result = f"{compiled_at('HIGHEST')} {compiled_at('HIGH')}"
                 """);

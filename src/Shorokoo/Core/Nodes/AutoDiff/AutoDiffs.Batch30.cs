@@ -219,6 +219,8 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         // reductions with the forward pass and runs inside the fusion of the chain it feeds, with
         // the one-hot a comparison in the same fusion, where reading the log-probabilities would
         // have them written out and the scatter would have the probabilities written out too.
+        // There the scale is always the per-sample one, which stays in that fusion: a scalar at the
+        // end of the product would be fused into the matrix product it feeds instead.
 
         internal static Variable?[] SoftmaxCrossEntropyLossGradient(
             Variable?[] inputs, Variable?[] outputGrads, OnnxCSharpAttributes attributes)
@@ -244,21 +246,19 @@ namespace Shorokoo.Core.Nodes.AutoDiff
 
             var floatType = scores.Type;
             var probabilities = inFusion ? OnnxOp.Softmax(scores, axis: 1) : OnnxOp.Exp(logProb ?? OnnxOp.LogSoftmax(scores, axis: 1));
-            Variable AddAtTargets(Variable values, Variable classIndex, Variable added) => inFusion
-                ? OnnxOp.Add(values, OnnxOp.Mul(OnnxOp.OneHot(classIndex, OnnxOp.Gather(OnnxOp.Shape(scores), Scalar(1L), axis: 0),
-                    OnnxOp.Cast(Vector(0.0f, 1.0f), saturate: null, to: floatType), axis: 1), OnnxOp.Unsqueeze(added, Vector(1L))))
-                : ScatterAddAtTargets(values, classIndex, added);
+            Variable OneHotOf(Variable classIndex) => OnnxOp.OneHot(classIndex, OnnxOp.Gather(OnnxOp.Shape(scores), Scalar(1L), axis: 0),
+                OnnxOp.Cast(Vector(0.0f, 1.0f), saturate: null, to: floatType), axis: 1);
 
             Variable? dScores = null;
             if (lossGrad is not null)
             {
                 var (classIndex, activeMask) = IgnoreIndexMask(labels, ignoreIndex, floatType);
-                if (weight is null && activeMask is null && reduction != "none")
+                if (!inFusion && weight is null && activeMask is null && reduction != "none")
                 {
                     var count = OnnxOp.Cast(OnnxOp.Size(labels), saturate: null, to: floatType);
                     var scale = reduction == "sum" ? lossGrad : OnnxOp.Div(lossGrad, count);
                     var minusOne = OnnxOp.Expand(OnnxOp.Cast(Scalar(-1.0f), saturate: null, to: floatType), OnnxOp.Shape(labels));
-                    dScores = OnnxOp.Mul(AddAtTargets(probabilities, classIndex, minusOne), scale);
+                    dScores = OnnxOp.Mul(ScatterAddAtTargets(probabilities, classIndex, minusOne), scale);
                 }
                 else
                 {
@@ -275,8 +275,9 @@ namespace Shorokoo.Core.Nodes.AutoDiff
                             OnnxOp.ReduceSum(weightPerSample, axes: null, keepdims: false, noopWithEmptyAxes: false)), OnnxOp.Shape(labels)),
                     };
                     var perSample = OnnxOp.Mul(weightPerSample, upstream);
-                    dScores = AddAtTargets(OnnxOp.Mul(probabilities, OnnxOp.Unsqueeze(perSample, Vector(1L))),
-                        classIndex, OnnxOp.Neg(perSample));
+                    dScores = inFusion
+                        ? OnnxOp.Mul(OnnxOp.Sub(probabilities, OneHotOf(classIndex)), OnnxOp.Unsqueeze(perSample, Vector(1L)))
+                        : ScatterAddAtTargets(OnnxOp.Mul(probabilities, OnnxOp.Unsqueeze(perSample, Vector(1L))), classIndex, OnnxOp.Neg(perSample));
                 }
             }
 

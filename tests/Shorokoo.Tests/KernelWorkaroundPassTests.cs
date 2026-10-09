@@ -522,6 +522,18 @@ public class KernelWorkaroundPassTests
     }
 
     [Fact]
+    public void TestAnIntegerOfAShapeComputedThroughAFloatCastIsComputedWithConcreteShapesAsWithout()
+    {
+        var a = InputTensor<float32>("a", rank: 1);
+        Variable Ones(Variable n, long less) => OnnxOp.Expand(Scalar(1f), OnnxOp.Reshape(OnnxOp.Sub(n, Scalar(less)), Vector(1L), false));
+        Variable Through(Variable n, DType via) => OnnxOp.Cast(OnnxOp.Cast(n, null, via), null, DType.Int64);
+        TensorData Zeros(long n) => TensorData(DType.Float32, [n], [.. Enumerable.Repeat((object)0f, (int)n)]);
+        Assert.True(AsComputedWithoutConcreteShapes(Graph(a, Ones(Through(OnnxOp.Size(a), DType.Float16), 2040L)), Zeros(2049)));
+        Assert.True(AsComputedWithoutConcreteShapes(Graph(a, Ones(Through(OnnxOp.Size(a), DType.BFloat16), 250L)), Zeros(257)));
+        Assert.True(AsComputedWithoutConcreteShapes(Graph(a, Ones(Through(OnnxOp.Add(OnnxOp.Size(a), Scalar(16777216L)), DType.Float64), 16777216L)), Zeros(1)));
+    }
+
+    [Fact]
     public void TestANoopReductionOverATensorOfOnesOfAnInputsShapeBuildsItsSessionWithConcreteShapes()
     {
         var a = InputTensor<float32>("a", rank: 2);

@@ -84,7 +84,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     for (int i = 0; i < 2; i++)
                     {
                         var key = (FastTensorKey)mul.Inputs[i]!;
-                        if (Absorbed(key)) { inner.Add(producer[key]); sides[i] = Collect(producer[key]); }
+                        // A side made of scalars alone, multiplied together first, is one scalar.
+                        if (Absorbed(key)) { inner.Add(producer[key]); sides[i] = Collect(producer[key]); scalarSide[i] = sides[i].Count == 0; }
                         else
                         {
                             factors.Add(key);
@@ -96,7 +97,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                         if (scalarSide[i]) appliedTo.Add(sides[1 - i]);
                     return [.. sides[0], .. sides[1]];
                 }
-                var all = Collect(root);
+                Collect(root);
                 var scalars = factors.Where(IsScalar).ToList();
                 var tensors = factors.Where(f => !IsScalar(f)).ToList();
                 if (scalars.Count < 2 || tensors.Count == 0) continue;

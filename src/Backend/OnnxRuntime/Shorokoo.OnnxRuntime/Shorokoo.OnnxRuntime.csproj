@@ -72,14 +72,15 @@
     <ShorokooCudaOps Condition="'$(ShorokooCudaOps)' == ''">AUTO</ShorokooCudaOps>
     <ShorokooCudaOpsFile Condition="$([MSBuild]::IsOSPlatform('Windows'))">shorokoo_ort_cuda_ops.dll</ShorokooCudaOpsFile>
     <ShorokooCudaOpsFile Condition="$([MSBuild]::IsOSPlatform('Linux'))">libshorokoo_ort_cuda_ops.so</ShorokooCudaOpsFile>
-    <!-- The settings the native build was configured with, an input of it, so that changing one
-         configures it again rather than leaving the last build's library in place. -->
+    <!-- The settings the native build was configured with, the folders naming a CUDA toolkit
+         among them, an input of it, so that changing one configures it again rather than leaving
+         the last build's library in place. -->
     <ShorokooNativeSettingsFile>$(ShorokooAllocatorBuildDir).settings</ShorokooNativeSettingsFile>
   </PropertyGroup>
 
   <Target Name="RecordShorokooNativeSettings" BeforeTargets="BuildShorokooAllocator" Condition="'$(ShorokooAllocatorRid)' != ''">
     <MakeDir Directories="$([System.IO.Path]::GetDirectoryName('$(ShorokooNativeSettingsFile)'))" />
-    <WriteLinesToFile File="$(ShorokooNativeSettingsFile)" Lines="ShorokooCudaOps=$(ShorokooCudaOps);ShorokooCudaHostCompiler=$(ShorokooCudaHostCompiler)"
+    <WriteLinesToFile File="$(ShorokooNativeSettingsFile)" Lines="ShorokooCudaOps=$(ShorokooCudaOps);ShorokooCudaHostCompiler=$(ShorokooCudaHostCompiler);CUDAToolkit_ROOT=$(CUDAToolkit_ROOT);CUDA_PATH=$(CUDA_PATH)"
                       Overwrite="true" WriteOnlyWhenDifferent="true" />
   </Target>
 

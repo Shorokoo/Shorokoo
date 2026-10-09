@@ -856,6 +856,16 @@ public class NNLibraryOptimizerTrainingCoverageTests
         => Assert.Equal(3, OptimizedSequenceHeadScalesOfLogits());
 
     [Fact]
+    public void TestScalesAppliedToASmallTensorStayOnItWhenTheyFold()
+    {
+        var rig = TrainingRig.FromScratch(NNScaledBeforeBroadcastModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            [TensorData([32L, 48L], new float[32 * 48])], 0.1f);
+        var step = rig.TrainingStepPureGraph.ToInternal();
+        var shapes = new ShapeInferenceInterpreter().Infer(step, rig.OptimizationInputs);
+        Assert.Equal(4, step.Nodes.Count(n => n.OpCode == OpCodes.MUL && shapes.GetTensorInfo(new FastTensorKey(n.Key, 0))?.ElementCount == 32 * 48));
+    }
+
+    [Fact]
     public void TestAScaleBetweenTwoProjectionsSettlesBesideOne()
     {
         var rig = TrainingRig.FromScratch(NNScaledBetweenProjectionsModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,

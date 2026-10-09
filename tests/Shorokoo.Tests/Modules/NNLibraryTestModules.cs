@@ -2574,6 +2574,20 @@ public partial class NNSoftCappedSequenceHeadModel
             * Scalar(1f / 15f)).Tanh() * Scalar(15f);
 }
 
+/// <summary>A fixed <c>[48]</c> gain scaled twice by the batch's size before it broadcasts over the
+/// batch's <c>[32, 48]</c> rows, then a bias: scales applied to a small tensor ahead of the product
+/// that makes it large.</summary>
+[Module]
+public partial class NNScaledBeforeBroadcastModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+    {
+        var n = (Tensor<float32>)OnnxOp.Cast(OnnxOp.Size(x), null, DType.Float32);
+        var gain = (Tensor<float32>)OnnxOp.Expand(Vector(0.5f), Vector(48L));
+        return x * (gain * n * n) + Normal.Init(Vector(48L));
+    }
+}
+
 /// <summary>A projection reshaped, scaled by a constant and projected again by a fixed matrix: a
 /// scale between two matrix products, beside both, whose product nothing but the second reads.</summary>
 [Module]

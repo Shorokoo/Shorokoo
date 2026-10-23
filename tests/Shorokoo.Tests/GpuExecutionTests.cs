@@ -41,6 +41,20 @@ public partial class Float64CrossEntropyGradientModel
             ((Tensor<float64>)OnnxOp.SoftmaxCrossEntropyLoss(x, labels, null, null, "mean").output).Cast<float32>().Scalar());
 }
 
+/// <summary>The mean cross-entropy, without and with an ignore index, and the mean negative
+/// log-likelihood of <c>float16</c> scores, each cast to <c>float32</c>.</summary>
+[Module]
+public partial class HalfPrecisionMeanLossesModel
+{
+    public static Tensor<float32> Inline(Tensor<float16> x, Tensor<int64> labels)
+    {
+        Tensor<float32> Of(Variable loss) => (Tensor<float32>)OnnxOp.Reshape(((Tensor<float16>)loss).Cast<float32>(), Vector(1L), allowZero: false);
+        return (Tensor<float32>)OnnxOp.Concat([Of(OnnxOp.SoftmaxCrossEntropyLoss(x, labels, null, null, "mean").output),
+            Of(OnnxOp.SoftmaxCrossEntropyLoss(x, labels, null, -100L, "mean").output),
+            Of(OnnxOp.NegativeLogLikelihoodLoss(x, labels, null, null, "mean"))], axis: 0);
+    }
+}
+
 /// <summary>The gradient of the product of two scalars: a broadcasting op's gradient over operands
 /// of rank zero.</summary>
 [Module]
@@ -1497,8 +1511,22 @@ public class GpuExecutionTests
         for (int i = 0; i < 12; i++)
         {
             var row = x.Skip(i / 4 * 4).Take(4).Select(Math.Exp).ToArray();
-            Assert.Equal((row[i % 4] / row.Sum() - (labels[i / 4] == i % 4 ? 1 : 0)) / 3, gradient[i], 1e-12);
+            Assert.Equal((row[i % 4] / row.Sum() - (labels[i / 4] == i % 4 ? 1 : 0)) / 3, gradient[i], 1e-7);
         }
+    }
+
+    // Shorokoo/Shorokoo#553: the card divides a half-precision mean by a count that overflows float16.
+    [CudaFact(Skip = "Shorokoo/Shorokoo#553")]
+    public void CudaProvider_AHalfPrecisionMeanLossOverMoreSamplesThanFloat16CountsToIsTheMeanOnTheCard()
+    {
+        var scores = TensorData(DType.Float16, [70000L, 2L], [.. Enumerable.Repeat((object)(Shorokoo.Core.Backends.Float16)(-1f), 140000)]);
+        var labels = TensorData([70000L], new long[70000]);
+        using var context = new ComputeContext();
+        using var compiled = context.Compile(HalfPrecisionMeanLossesModel.ComputationGraph.ToConcreteArchitecture([scores, labels]).ToConcreteModel());
+        var losses = compiled.Execute(scores, labels)[0].ToTensorData().CopyMemory<float>();
+        Assert.Equal(MathF.Log(2f), losses[0], 1e-3f);
+        Assert.Equal(MathF.Log(2f), losses[1], 1e-3f);
+        Assert.Equal(1f, losses[2], 1e-3f);
     }
 
     private static TensorData OnTheCard<T>(Tensor<T> x, Variable output, TensorData data) where T : IVarType

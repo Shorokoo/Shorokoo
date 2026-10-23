@@ -1032,7 +1032,7 @@ public class NNLibraryOptimizerTrainingCoverageTests
     [Fact]
     public void TestAnAdamWStepOnTheHostFusesItsUpdateWithNoDecayOrADecayFedEachStep()
     {
-        AssertFusedToTheBit(AdamWOptimizer.ComputationGraph, [0.01f, 0.8f, 0.9f, 1e-6f, 0f]);
+        Assert.Equal(new Dictionary<string, int> { ["AdamUpdate"] = 1 }, ResidentStepsOnHost(true, AdamWOptimizer.ComputationGraph, [0.01f, 0.8f, 0.9f, 1e-6f, 0f], null).TableSized);
         AssertFusedToTheBit(AdamWOptimizer.ComputationGraph,
             new AdamWOptimizerHyperparameters { WeightDecay = Hyperparameter.Runtime() }.InOptimizerOrder(), 0.1f);
     }

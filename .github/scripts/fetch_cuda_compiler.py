@@ -60,10 +60,22 @@ def sha256(path: str) -> str:
 
 
 def inside(root: str, relative: str) -> str:
-    target = os.path.realpath(os.path.join(root, relative))
-    if os.path.commonpath([target, os.path.realpath(root)]) != os.path.realpath(root):
+    """root/relative, where every folder on the way, links followed, lies under root."""
+    target = os.path.abspath(os.path.join(root, relative))
+    real_root = os.path.realpath(root)
+    if (os.path.commonpath([os.path.realpath(os.path.dirname(target)), real_root]) != real_root
+            or os.path.commonpath([target, os.path.abspath(root)]) != os.path.abspath(root)):
         raise SystemExit(f"An archive entry points outside {root}: {relative}")
     return target
+
+
+def replace(target: str) -> None:
+    """Makes way for an entry at target: whatever is there, a link included, is removed rather than
+    written through, so that unpacking into a folder that already holds the archive's links leaves
+    the files they point at alone."""
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    if os.path.lexists(target):
+        os.remove(target)
 
 
 def unpack(archive: str, root: str) -> None:
@@ -75,7 +87,7 @@ def unpack(archive: str, root: str) -> None:
                 if not relative or entry.is_dir():
                     continue
                 target = inside(root, relative)
-                os.makedirs(os.path.dirname(target), exist_ok=True)
+                replace(target)
                 with z.open(entry) as source, open(target, "wb") as out:
                     shutil.copyfileobj(source, out)
         return
@@ -85,18 +97,19 @@ def unpack(archive: str, root: str) -> None:
             if not relative or entry.isdir():
                 continue
             target = inside(root, relative)
-            os.makedirs(os.path.dirname(target), exist_ok=True)
             if entry.issym():
                 if os.path.isabs(entry.linkname):
                     raise SystemExit(f"An archive link points outside {root}: {entry.name}")
-                inside(os.path.dirname(target), entry.linkname)
-                if os.path.lexists(target):
-                    os.remove(target)
+                inside(root, os.path.join(os.path.dirname(relative), entry.linkname))
+                replace(target)
                 os.symlink(entry.linkname, target)
             elif entry.islnk():
                 linked = entry.linkname.split("/", 1)[1] if "/" in entry.linkname else ""
-                shutil.copy2(inside(root, linked), target)
+                source = os.path.realpath(inside(root, linked))
+                replace(target)
+                shutil.copy2(source, target)
             elif entry.isfile():
+                replace(target)
                 with t.extractfile(entry) as source, open(target, "wb") as out:
                     shutil.copyfileobj(source, out)
                 os.chmod(target, entry.mode & 0o755)

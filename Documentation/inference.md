@@ -408,6 +408,10 @@ catch (OperationCanceledException)
   any graph's last operator.
 - Stopping is best effort: a run that finishes first **succeeds** with valid outputs. The
   session is unaffected; its next run proceeds normally.
+- On a CUDA card, a stopped or failed run returns only once the card has finished the work
+  already queued on it — every session's on that card, not only this run's — because the memory
+  that work still reads is handed back as the call ends. Beside another session's long step on
+  the same card, a stop takes as long as that step.
 
 Only `CompiledGraph`'s run entry points take a `RunSettings` per call.
 `ComputeContext.Execute` / `Run` / `Eval`, and a training rig's `TrainStep`, `Train` and `Fit`,

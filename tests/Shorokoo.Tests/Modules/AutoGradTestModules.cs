@@ -1086,6 +1086,22 @@ namespace Shorokoo.Tests.Modules
             => AutoGradCheckHelpers.ElementwiseDirectionalDerivCheck(x, z => z.Celu(1.0f));
     }
 
+    /// <summary>Σ elu(x, α) for α = 0.5 and α = −0.5 (an output above zero on both sides of the
+    /// switch), Σ selu(x, α, γ) for (2, 0.5), (−1, 0.5) and (2, −0.5), and Σ celu(x, α) for α = 2
+    /// and α = −2, each checked element-wise.</summary>
+    [Module]
+    public partial class AutoGradExponentialActivationsParameterCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x)
+            => AutoGradCheckHelpers.ElementwiseDirectionalDerivCheck(x, z => (Tensor<float32>)OnnxOp.Elu(z, 0.5f))
+               & AutoGradCheckHelpers.ElementwiseDirectionalDerivCheck(x, z => (Tensor<float32>)OnnxOp.Elu(z, -0.5f))
+               & AutoGradCheckHelpers.ElementwiseDirectionalDerivCheck(x, z => (Tensor<float32>)OnnxOp.Selu(z, 2f, 0.5f))
+               & AutoGradCheckHelpers.ElementwiseDirectionalDerivCheck(x, z => (Tensor<float32>)OnnxOp.Selu(z, -1f, 0.5f))
+               & AutoGradCheckHelpers.ElementwiseDirectionalDerivCheck(x, z => (Tensor<float32>)OnnxOp.Selu(z, 2f, -0.5f))
+               & AutoGradCheckHelpers.ElementwiseDirectionalDerivCheck(x, z => (Tensor<float32>)OnnxOp.Celu(z, 2f))
+               & AutoGradCheckHelpers.ElementwiseDirectionalDerivCheck(x, z => (Tensor<float32>)OnnxOp.Celu(z, -2f));
+    }
+
     /// <summary>loss = hardSigmoid(x). Piecewise-linear; smooth in (-2.5, 2.5).</summary>
     [Module]
     public partial class AutoGradHardSigmoidCheck
@@ -3682,6 +3698,211 @@ namespace Shorokoo.Tests.Modules
             var grad = Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(a, loss);
             return grad.Abs() < Scalar(1e-3f);
         }
+    }
+
+    /// <summary>A float64 loss differentiated: the gradient of <c>mean(x²)</c> is <c>2x / n</c>, and
+    /// of a mean cross-entropy <c>(softmax(x) − onehot) / n</c>.</summary>
+    [Module]
+    public partial class AutoGradFloat64LossCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float64> x)
+        {
+            var labels = Vector(2L, 0L, 3L);
+            var n = ((Tensor<int64>)OnnxOp.Size(x)).Cast<float64>().Scalar();
+            var meanGrad = (Tensor<float64>)Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(x, (x * x).Reduce(ReduceKind.Mean, keepDims: false).Scalar());
+            var ceGrad = (Tensor<float64>)Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(x,
+                ((Tensor<float64>)OnnxOp.SoftmaxCrossEntropyLoss(x, labels, null, null, "mean").output).Scalar());
+            var expectedCe = ((Tensor<float64>)OnnxOp.Softmax(x, axis: 1)
+                - (Tensor<float64>)OnnxOp.Cast(OnnxOp.OneHot(labels, Scalar(4L), Vector(0f, 1f), axis: 1), null, DType.Float64)) / Scalar(3.0);
+            return ((meanGrad - x * Scalar(2.0) / n).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar() < Scalar(1e-12))
+                & ((ceGrad - expectedCe).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar() < Scalar(1e-12));
+        }
+    }
+
+    /// <summary>
+    /// The gradients of a cross-entropy and a negative log-likelihood over <c>float64</c> scores, each
+    /// taken through a <c>float32</c> loss: <c>(softmax(x) − onehot) / n</c> and <c>−onehot / n</c>.
+    /// </summary>
+    [Module]
+    public partial class AutoGradFloat64LossesThroughAFloat32LossCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float64> x)
+        {
+            var labels = Vector(2L, 0L, 3L);
+            var onehot = (Tensor<float64>)OnnxOp.Cast(OnnxOp.OneHot(labels, Scalar(4L), Vector(0f, 1f), axis: 1), null, DType.Float64);
+            Tensor<float64> Grad(Variable loss) => (Tensor<float64>)Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(x, ((Tensor<float64>)loss).Cast<float32>().Scalar());
+            Scalar<bit> Near(Tensor<float64> actual, Tensor<float64> expected)
+                => (actual - expected).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar() < Scalar(1e-7);
+            return Near(Grad(OnnxOp.SoftmaxCrossEntropyLoss(x, labels, null, null, "mean").output), ((Tensor<float64>)OnnxOp.Softmax(x, axis: 1) - onehot) / Scalar(3.0))
+                & Near(Grad(OnnxOp.NegativeLogLikelihoodLoss(x, labels, null, null, "mean")), onehot / Scalar(-3.0));
+        }
+    }
+
+    /// <summary><see cref="AutoGradFloat64LossCheck"/> over a <c>float16</c> loss.</summary>
+    [Module]
+    public partial class AutoGradFloat16LossCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float16> x) => HalfPrecisionLoss.Holds(x, x.Cast<float32>(),
+            ((Tensor<float16>)Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(x, (x * x).Reduce(ReduceKind.Mean, keepDims: false).Scalar())).Cast<float32>(),
+            ((Tensor<float16>)Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(x,
+                ((Tensor<float16>)OnnxOp.SoftmaxCrossEntropyLoss(x, Vector(2L, 0L, 3L), null, null, "mean").output).Scalar())).Cast<float32>());
+    }
+
+    internal static class HalfPrecisionLoss
+    {
+        public static Scalar<bit> Holds(Variable x, Tensor<float32> x32, Tensor<float32> meanGrad, Tensor<float32> ceGrad)
+        {
+            var n = ((Tensor<int64>)OnnxOp.Size(x)).Cast<float32>().Scalar();
+            var expectedCe = ((Tensor<float32>)OnnxOp.Softmax(x32, axis: 1)
+                - (Tensor<float32>)OnnxOp.OneHot(Vector(2L, 0L, 3L), Scalar(4L), Vector(0f, 1f), axis: 1)) / Scalar(3f);
+            return ((meanGrad - x32 * Scalar(2f) / n).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar() < Scalar(2e-2f))
+                & ((ceGrad - expectedCe).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar() < Scalar(2e-2f));
+        }
+    }
+
+    /// <summary>
+    /// A mean loss over a batch whose every label is ignored has a zero gradient, as PyTorch's has:
+    /// cross-entropy without and with a class weight, and the negative log-likelihood.
+    /// </summary>
+    [Module]
+    public partial class AutoGradLossOfAnAllIgnoredBatchCheck
+    {
+        public static Scalar<bit> Inline(Scalar<float32> a)
+        {
+            var scores = (Tensor<float32>)OnnxOp.Expand(a, Vector(2L, 3L)) * Vector(1f, 0f, -1f);
+            var labels = Vector(1L, 1L);
+            Scalar<bit> Zero(Scalar<float32> loss) => Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(a, loss).Abs() < Scalar(1e-6f);
+            return Zero(((Tensor<float32>)OnnxOp.SoftmaxCrossEntropyLoss(scores, labels, null, 1L, "mean").output).Scalar())
+                & Zero(((Tensor<float32>)OnnxOp.SoftmaxCrossEntropyLoss(scores, labels, Vector(1f, 2f, 3f), 1L, "mean").output).Scalar())
+                & Zero(((Tensor<float32>)OnnxOp.NegativeLogLikelihoodLoss(scores, labels, null, 1L, "mean")).Scalar());
+        }
+    }
+
+    /// <summary>
+    /// The cross-entropy gradient of <c>[3, 4]</c> scores at labels <c>(l, 0, 3)</c> with a negative
+    /// <c>l</c> is <c>softmax(x) − onehot(l, 0, 3)</c>: the label counts from the end, as the loss
+    /// reads it, and no other sample's row moves.
+    /// </summary>
+    [Module]
+    public partial class AutoGradCrossEntropyLossAtANegativeLabelCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x)
+        {
+            var p = (Tensor<float32>)OnnxOp.Softmax(x, axis: 1);
+            Scalar<bit> Holds(long first)
+            {
+                var labels = Vector(first, 0L, 3L);
+                var grad = (Tensor<float32>)Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(x,
+                    ((Tensor<float32>)OnnxOp.SoftmaxCrossEntropyLoss(x, labels, null, null, "sum").output).Scalar());
+                var expected = p - (Tensor<float32>)OnnxOp.OneHot(labels, Scalar(4L), Vector(0f, 1f), axis: 1);
+                return (grad - expected).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar() < Scalar(1e-5f);
+            }
+            return Holds(-1L) & Holds(-4L);
+        }
+    }
+
+    /// <summary>
+    /// A half-precision mean loss over more samples than <c>float16</c> counts to (65504) still has
+    /// its gradient: over <c>[70000, 2]</c> zero scores at label 0 the cross-entropy's, without and
+    /// with an ignore index, sums to <c>softmax − 1 = −1/2</c> down the label's column, and the
+    /// negative log-likelihood's to −1.
+    /// </summary>
+    [Module]
+    public partial class AutoGradHalfPrecisionMeanLossOverManySamplesCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x)
+        {
+            var scores = x.Cast<float16>();
+            var labels = (Tensor<int64>)OnnxOp.Cast(OnnxOp.ReduceSum(x, Vector(1L), keepdims: false, noopWithEmptyAxes: false), null, DType.Int64);
+            Scalar<bit> Near(Variable loss, float expected) => ((((Tensor<float32>)Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(x,
+                ((Tensor<float16>)loss).Cast<float32>().Scalar())) * Vector(1f, 0f)).Reduce(ReduceKind.Sum, keepDims: false).Scalar() - Scalar(expected)).Abs() < Scalar(1e-2f);
+            return Near(OnnxOp.SoftmaxCrossEntropyLoss(scores, labels, null, null, "mean").output, -0.5f)
+                & Near(OnnxOp.SoftmaxCrossEntropyLoss(scores, labels, null, -100L, "mean").output, -0.5f)
+                & Near(OnnxOp.NegativeLogLikelihoodLoss(scores, labels, null, null, "mean"), -1f);
+        }
+    }
+
+    /// <summary><see cref="SoftmaxCrossEntropyClosedForms"/> over <c>[3, 4]</c> scores.</summary>
+    [Module]
+    public partial class AutoGradSoftmaxCrossEntropyLossClosedFormCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x)
+            => SoftmaxCrossEntropyClosedForms.Hold(x, Vector(2L, 0L, 3L));
+    }
+
+    /// <summary><see cref="SoftmaxCrossEntropyClosedForms"/> over <c>[2, 4, 3]</c> scores.</summary>
+    [Module]
+    public partial class AutoGradSoftmaxCrossEntropyLossRank3ClosedFormCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x)
+            => SoftmaxCrossEntropyClosedForms.Hold(x, (Tensor<int64>)OnnxOp.Reshape(Vector(2L, 0L, 3L, 1L, 0L, 2L), Vector(2L, 3L), allowZero: false));
+    }
+
+    /// <summary>
+    /// SoftmaxCrossEntropyLoss gradients over non-uniform <c>[N, 4, ...]</c> scores against their
+    /// closed forms, element for element: <c>(softmax(x) − onehot(t)) · w[t] · upstream</c> under
+    /// every reduction, with a class weight, an ignored label (0) or both, with the log-probabilities
+    /// read as well, and through a <c>tanh(x / 15) · 15</c> soft cap.
+    /// </summary>
+    internal static class SoftmaxCrossEntropyClosedForms
+    {
+        public static Scalar<bit> Hold(Tensor<float32> x, Tensor<int64> labels)
+        {
+            var p = (Tensor<float32>)OnnxOp.Softmax(x, axis: 1);
+            var onehot = (Tensor<float32>)OnnxOp.OneHot(labels, Scalar(4L), Vector(0f, 1f), axis: 1);
+            var n = ((Tensor<int64>)OnnxOp.Size(labels)).Cast<float32>().Scalar();
+            var weight = Vector(0.5f, 1f, 1.5f, 2f);
+            var classWeight = (Tensor<float32>)OnnxOp.Gather(weight, labels, axis: 0);
+            var active = (Tensor<float32>)OnnxOp.Cast(OnnxOp.Not(OnnxOp.Equal(labels, Scalar(0L))), null, DType.Float32);
+            var activeWeight = classWeight * active;
+            var sampleScale = (Tensor<float32>)OnnxOp.Reshape(OnnxOp.Range(Scalar(1f), n + Scalar(1f), Scalar(1f)), OnnxOp.Shape(labels), allowZero: false);
+            var m = (Tensor<float32>)OnnxOp.Reshape(OnnxOp.Range(Scalar(-1f),
+                ((Tensor<int64>)OnnxOp.Size(x)).Cast<float32>().Scalar() * Scalar(0.25f) - Scalar(1f), Scalar(0.25f)), OnnxOp.Shape(x), allowZero: false);
+            var capped = (x * Scalar(1f / 15f)).Tanh() * Scalar(15f);
+            var cappedP = (Tensor<float32>)OnnxOp.Softmax(capped, axis: 1);
+
+            return Near(Grad(x, xs => Loss(xs, labels, null, null, "mean")), (p - onehot) / n)
+                & Near(Grad(x, xs => Loss(xs, labels, null, null, "sum")), p - onehot)
+                & Near(Grad(x, xs => (Sce(xs, labels, null, null, "none").Loss * sampleScale).Reduce(ReduceKind.Sum, keepDims: false).Scalar()),
+                    (p - onehot) * Rows(sampleScale))
+                & Near(Grad(x, xs => Loss(xs, labels, weight, 0L, "mean")),
+                    (p - onehot) * Rows(activeWeight) / activeWeight.Reduce(ReduceKind.Sum, keepDims: false).Scalar())
+                & Near(Grad(x, xs => Loss(xs, labels, weight, 0L, "sum")), (p - onehot) * Rows(activeWeight))
+                & Near(Grad(x, xs => Loss(xs, labels, null, 0L, "mean")),
+                    (p - onehot) * Rows(active) / active.Reduce(ReduceKind.Sum, keepDims: false).Scalar())
+                & Near(Grad(x, xs => Loss(xs, labels, weight, null, "mean")),
+                    (p - onehot) * Rows(classWeight) / classWeight.Reduce(ReduceKind.Sum, keepDims: false).Scalar())
+                & Near(Grad(x, xs => (Sce(xs, labels, weight, 0L, "none").Loss * sampleScale).Reduce(ReduceKind.Sum, keepDims: false).Scalar()),
+                    (p - onehot) * Rows(activeWeight * sampleScale))
+                & Near(Grad(x, xs => LossAndLogProbs(xs, labels, m)),
+                    (p - onehot) / n + m - p * m.Reduce(ReduceKind.Sum, axes: Vector(1L), keepDims: true))
+                & Near(Grad(x, xs => Loss((xs * Scalar(1f / 15f)).Tanh() * Scalar(15f), labels, null, null, "mean")),
+                    (cappedP - onehot) / n * (Scalar(1f) - (capped / Scalar(15f)) * (capped / Scalar(15f))));
+        }
+
+        private static (Tensor<float32> Loss, Tensor<float32> LogProbs) Sce(
+            Tensor<float32> x, Tensor<int64> labels, Tensor<float32>? weight, long? ignore, string reduction)
+        {
+            var (loss, logProbs) = OnnxOp.SoftmaxCrossEntropyLoss(x, labels, weight, ignore, reduction);
+            return ((Tensor<float32>)loss, (Tensor<float32>)logProbs!);
+        }
+
+        private static Scalar<float32> Loss(Tensor<float32> x, Tensor<int64> labels, Tensor<float32>? weight, long? ignore, string reduction)
+            => Sce(x, labels, weight, ignore, reduction).Loss.Scalar();
+
+        private static Scalar<float32> LossAndLogProbs(Tensor<float32> x, Tensor<int64> labels, Tensor<float32> m)
+        {
+            var (loss, logProbs) = Sce(x, labels, null, null, "mean");
+            return loss.Scalar() + (logProbs * m).Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+        }
+
+        private static Tensor<float32> Rows(Tensor<float32> perSample) => (Tensor<float32>)OnnxOp.Unsqueeze(perSample, Vector(1L));
+
+        private static Tensor<float32> Grad(Tensor<float32> x, Func<Tensor<float32>, Scalar<float32>> loss)
+            => (Tensor<float32>)Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(x, loss(x));
+
+        private static Scalar<bit> Near(Tensor<float32> actual, Tensor<float32> expected)
+            => (actual - expected).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar() < Scalar(1e-5f);
     }
 
     // ===================================================================

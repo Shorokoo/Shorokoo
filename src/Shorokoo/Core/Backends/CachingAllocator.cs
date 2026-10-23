@@ -80,8 +80,19 @@ namespace Shorokoo.Core.Backends;
 /// host memory outside a run — goes to the device's own account (<see cref="Placements"/>).</para>
 ///
 /// <para><b>The card's streams.</b> A session's kernels run on a stream of its own, so a block a run
-/// lets go of may still be read by work queued before it. Such a block is reused by that run alone
-/// until it ends — on the same stream, so in order — and only then by anything else.</para>
+/// lets go of may still be read or written by work queued before it. Such a block is reused by that
+/// run alone until it ends, and within it only by a request made on the stream it was taken on, which
+/// orders its new work after the old; only after the run ends is it reused by anything else. ONNX
+/// Runtime names the stream a request is made on (<see cref="AllocateOnStreamEntry"/>), and makes
+/// some without one, an output it copies in rather than computes among them, which it fills by a copy
+/// no stream orders after the run's kernels. A request without a stream, and a block taken without
+/// one, are therefore never matched within a run.</para>
+///
+/// <para>That a request on a block's stream orders after everything that used the block rests on
+/// every kernel of a run that reads or writes it running on that one stream: a run has a single
+/// compute stream on the card, as ONNX Runtime's CUDA provider gives a session that executes
+/// sequentially (<c>ExecutionMode.ORT_SEQUENTIAL</c>, which every session is built with). Nothing
+/// here checks that a run uses one stream; a session executing on several would break it.</para>
 ///
 /// <para><b>Refusing.</b> A request this cannot serve — one an account's limit has no room for, or
 /// one the device has no memory for — is answered with null and the reason, and the native side
@@ -170,6 +181,9 @@ internal sealed unsafe class CachingAllocator
         internal Account Account;
         internal long Call;
         internal Source Source;
+        // The stream the block was taken on, for a request that named one: the only stream a block
+        // the run lets go of may be handed back to before the run ends. Zero for none.
+        internal IntPtr Stream;
         internal bool HandedOver;
         internal List<(long Start, long End)>? Released;
         internal bool FirstGone;
@@ -291,6 +305,11 @@ internal sealed unsafe class CachingAllocator
     /// answering the block or null with the reason written down.</summary>
     internal static IntPtr AllocateEntry => (IntPtr)(delegate* unmanaged<IntPtr, nuint, byte*, int, IntPtr>)&AllocCallback;
 
+    /// <summary>Where the native allocator asks for a block on a stream:
+    /// <c>(state, size, stream, reason, capacity)</c>, answering as <see cref="AllocateEntry"/> does.
+    /// The stream is ONNX Runtime's, named by its address; it is only ever compared.</summary>
+    internal static IntPtr AllocateOnStreamEntry => (IntPtr)(delegate* unmanaged<IntPtr, nuint, IntPtr, byte*, int, IntPtr>)&AllocOnStreamCallback;
+
     /// <summary>Where the native allocator hands a block back: <c>(state, block)</c>.</summary>
     internal static IntPtr FreeEntry => (IntPtr)(delegate* unmanaged<IntPtr, IntPtr, void>)&FreeCallback;
 
@@ -350,18 +369,23 @@ internal sealed unsafe class CachingAllocator
     private static IntPtr AllocCallback(IntPtr state, nuint size, byte* reason, int capacity)
         => AllocateOrRefuse(state, size, reason is null || capacity <= 0 ? default : new Span<byte>(reason, capacity));
 
+    /// <summary><see cref="AllocCallback"/> for a request made on <paramref name="stream"/>.</summary>
+    [UnmanagedCallersOnly]
+    private static IntPtr AllocOnStreamCallback(IntPtr state, nuint size, IntPtr stream, byte* reason, int capacity)
+        => AllocateOrRefuse(state, size, reason is null || capacity <= 0 ? default : new Span<byte>(reason, capacity), stream);
+
     /// <summary>What <see cref="AllocCallback"/> answers: a block of <paramref name="size"/> bytes from
     /// the allocator <paramref name="state"/> names, or null with the reason written into
     /// <paramref name="reason"/>. Nothing escapes it: wording a failure can fail too — the memory a
     /// message takes may be the very memory there is none of, or the failure may not say what it
     /// is — and then a reason fixed in advance is written, with nothing to allocate.</summary>
-    internal static IntPtr AllocateOrRefuse(IntPtr state, nuint size, Span<byte> reason)
+    internal static IntPtr AllocateOrRefuse(IntPtr state, nuint size, Span<byte> reason, IntPtr stream = default)
     {
         try
         {
             try
             {
-                var block = Of(state).Allocate(size > long.MaxValue ? long.MaxValue : (long)size, out var refusal);
+                var block = Of(state).Allocate(size > long.MaxValue ? long.MaxValue : (long)size, out var refusal, stream);
                 if (block != IntPtr.Zero) return block;
                 Write(refusal ?? $"Failed to allocate {size} bytes.", reason);
             }
@@ -456,7 +480,7 @@ internal sealed unsafe class CachingAllocator
     /// failure ONNX Runtime raises: it says the allocation failed and names the memory — the CUDA
     /// allocator on a card, a bad allocation on the host.</para>
     /// </summary>
-    internal IntPtr Allocate(long bytes, out string? refusal)
+    internal IntPtr Allocate(long bytes, out string? refusal, IntPtr stream = default)
     {
         refusal = null;
         if (bytes <= 0) return IntPtr.Zero;
@@ -488,10 +512,10 @@ internal sealed unsafe class CachingAllocator
             using (_gate.Hold())
             {
                 if (account == Placements) BeginPlacementsCall();
-                if (scope is not null && scope.TakeHeld(account, size, out var held, out var call))
-                    return Hand(held, size, bytes, account, source, call);
+                if (scope is not null && scope.TakeHeld(account, size, stream, out var held, out var call))
+                    return Hand(held, size, bytes, account, source, call, stream);
                 if (account.TakeKept(size, out held, out call))
-                    return Hand(held, size, bytes, account, source, call);
+                    return Hand(held, size, bytes, account, source, call, stream);
                 if (account.LimitUnderLock is { } limit && account.Charged + account.KeptBytes + size > limit)
                 {
                     // Under a budget what the account keeps goes back first, as much as makes room;
@@ -540,7 +564,7 @@ internal sealed unsafe class CachingAllocator
                     else
                     {
                         account.Blocks++;
-                        Hand(carved, size, bytes, account, source, counted);
+                        Hand(carved, size, bytes, account, source, counted, stream);
                         // On the host what is over the account's mark goes back at once; on a card as
                         // the call charging the account ends (Scope.End), where one does.
                         if (!OnCard || scope is null || !scope.Charges(account))
@@ -573,7 +597,7 @@ internal sealed unsafe class CachingAllocator
         using (_gate.Hold())
         {
             account.Blocks++;
-            return Hand(own, size, bytes, account, Source.Own, call: -1);
+            return Hand(own, size, bytes, account, Source.Own, call: -1, stream);
         }
     }
 
@@ -662,9 +686,9 @@ internal sealed unsafe class CachingAllocator
     /// call it was last counted in).</summary>
     /// <exception cref="InvalidOperationException">A block is out at that address already: the two
     /// could not be told apart as they are let go of.</exception>
-    private IntPtr Hand(IntPtr block, long size, long requested, Account account, Source source, long call)
+    private IntPtr Hand(IntPtr block, long size, long requested, Account account, Source source, long call, IntPtr stream)
     {
-        if (!_blocks.Add(block, new Block { Size = size, Requested = requested, Account = account, Source = source, Call = account.CallNumber }))
+        if (!_blocks.Add(block, new Block { Size = size, Requested = requested, Account = account, Source = source, Call = account.CallNumber, Stream = stream }))
             throw new InvalidOperationException($"Shorokoo's allocator was about to hand out the block at 0x{block:x} {Where} while a block it handed out there is still in use.");
         Observer?.Invoke(new Event(true, OnCard, block, requested, size, Fresh: call < 0));
         if (call != account.CallNumber)
@@ -714,7 +738,7 @@ internal sealed unsafe class CachingAllocator
             if (!account.Closed)
             {
                 if (OnCard && scope is not null && scope.Charges(account))
-                    scope.Hold(account, pointer, block.Size, block.Source, block.Call);
+                    scope.Hold(account, pointer, block.Size, block.Source, block.Call, block.Stream);
                 else if (!OnCard && !account.KeepsLargeBlocks && block.Source == Source.Arena && block.Size >= LargeBlock)
                 {
                     // A large host tensor made outside a run -- a checkpoint's, a batch's -- goes back
@@ -940,14 +964,40 @@ internal sealed unsafe class CachingAllocator
 
     /// <summary>Waits for the work the card has in hand, as handing back memory some of that work may
     /// still read must.</summary>
-    /// <exception cref="InvalidOperationException">The card could not be waited for: nothing is handed
-    /// back that its work may still read.</exception>
+    /// <exception cref="InvalidOperationException">The card could not be waited for. A caller that
+    /// lets this stand hands back nothing that the card's work may still read;
+    /// <see cref="AwaitUnfinishedCall"/> does not let it stand.</exception>
     private void AwaitCard()
     {
         if (_backing is { } backing ? backing.AwaitDevice() : CudaRuntime.Synchronize(_device)) return;
         throw new InvalidOperationException(
             $"Shorokoo's allocator could not wait for CUDA device {_device} to finish the work it has in hand, "
             + "so it hands back none of the memory that work may still read.");
+    }
+
+    /// <summary>
+    /// Waits for the work the card has in hand as a call that did not run to its end ends
+    /// (<see cref="Scope.End"/>). A card that cannot be waited for is in an error no later work on it
+    /// survives, and the failure that ended the call is the one worth reporting, so that is not
+    /// thrown over it — and the call's memory is then kept or handed back as any call's is, without
+    /// the wait: on a card in that error no queued work runs on to read it.
+    ///
+    /// <para>It waits for the whole card, the work every other session has queued on it included,
+    /// so a call cancelled or failed beside another session's long run ends only once that run's
+    /// queued work is done. No one stream is known to carry all of the call's work: some of its
+    /// blocks are asked for on no stream, and the stream ONNX Runtime names on the others is its
+    /// own, released or handed to another run as the call returns. A call that completes waits for
+    /// nothing here.</para>
+    /// </summary>
+    private void AwaitUnfinishedCall()
+    {
+        try
+        {
+            AwaitCard();
+        }
+        catch (InvalidOperationException)
+        {
+        }
     }
 
     /// <summary>Whether this allocator's lock is taken, by any thread.</summary>
@@ -1431,6 +1481,10 @@ internal sealed unsafe class CachingAllocator
     /// <summary>The disposable <see cref="Charge"/> answers.</summary>
     internal readonly struct ChargeScope(Scope scope) : IDisposable
     {
+        /// <summary>Says the call did not run to its end: it failed or was stopped, so the work it
+        /// queued on a card may still be running as it ends (<see cref="Scope.End"/>).</summary>
+        internal void Unfinished() => scope.Unfinished = true;
+
         public void Dispose()
         {
             t_scope = scope.Outer;
@@ -1444,6 +1498,9 @@ internal sealed unsafe class CachingAllocator
         internal Scope? Outer { get; } = outer;
 
         private HeldBlocks? _held;
+
+        /// <summary>Whether the call did not run to its end (<see cref="ChargeScope.Unfinished"/>).</summary>
+        internal bool Unfinished;
 
         // The bytes of the blocks it holds.
         private long _holding;
@@ -1461,14 +1518,14 @@ internal sealed unsafe class CachingAllocator
 
         /// <summary>Holds <paramref name="block"/>, which this call let go of, for its own reuse.
         /// Under the allocator's lock.</summary>
-        internal void Hold(Account account, IntPtr block, long size, Source source, long call)
+        internal void Hold(Account account, IntPtr block, long size, Source source, long call, IntPtr stream)
         {
             if (_held is null)
             {
                 _held = account.SpareHeld ?? new HeldBlocks();
                 account.SpareHeld = null;
             }
-            _held.Push(size, block, source, call);
+            _held.Push(size, block, source, call, stream);
             account.Held += size;
             _holding += size;
         }
@@ -1488,11 +1545,12 @@ internal sealed unsafe class CachingAllocator
             return blocks;
         }
 
-        /// <summary>A block of <paramref name="size"/> this call let go of, if it holds one. Under the
+        /// <summary>A block of <paramref name="size"/> this call let go of on <paramref name="stream"/>,
+        /// if it holds one: none for a request on no stream. Under the
         /// allocator's lock.</summary>
-        internal bool TakeHeld(Account account, long size, out IntPtr block, out long call)
+        internal bool TakeHeld(Account account, long size, IntPtr stream, out IntPtr block, out long call)
         {
-            if (account == card && _held is not null && _held.Pop(size, out block, out call))
+            if (account == card && _held is not null && _held.Pop(size, stream, out block, out call))
             {
                 account.Held -= size;
                 _holding -= size;
@@ -1505,9 +1563,16 @@ internal sealed unsafe class CachingAllocator
 
         /// <summary>The call is over, its stream done with what it held: kept, or back to the device
         /// where the account has closed meanwhile; and each account sheds what it holds beyond the
-        /// most one of its calls has used.</summary>
+        /// most one of its calls has used.
+        ///
+        /// <para>A run that completes has drained its stream as it returns, and a call that did not
+        /// run to its end has not: ONNX Runtime lets go of a failed or stopped run's memory without
+        /// waiting for the kernels it queued, which go on reading and writing it. So the card is
+        /// waited for first, or what the call held would be handed to other work, and shed from the
+        /// card, under kernels still running.</para></summary>
         internal void End()
         {
+            if (card is not null && Unfinished) card.Allocator.AwaitUnfinishedCall();
             if (card is not null) EndOn(card);
             if (host is not null) EndOn(host);
         }
@@ -1546,15 +1611,21 @@ internal sealed unsafe class CachingAllocator
     /// <summary>
     /// The blocks a call on a card let go of, held for its own reuse until it ends: those of up to a
     /// mebibyte by their class's index, larger ones by size, each class's newest on top; and the
-    /// classes holding any, so the call's end visits those alone. An account keeps one for its next
-    /// call, so a call holds blocks without allocating.
+    /// classes holding any, so the call's end visits those alone. Each remembers the stream it was
+    /// taken on, the only stream it goes back to before the call ends. An account keeps one for its
+    /// next call, so a call holds blocks without allocating.
+    ///
+    /// <para>A request looks through its class's pile from the newest block down for one on its
+    /// stream, so a pile holding many blocks of other streams costs it a scan of them. A block let go
+    /// of on no stream is never taken again within the call, so such blocks pile up until it ends:
+    /// every one a run lets go of on no stream stays held for the rest of that run.</para>
     /// </summary>
     internal sealed class HeldBlocks
     {
         private sealed class Pile(long size)
         {
             internal readonly long Size = size;
-            internal (IntPtr Block, Source Source, long Call)[] Items = new (IntPtr, Source, long)[4];
+            internal (IntPtr Block, Source Source, long Call, IntPtr Stream)[] Items = new (IntPtr, Source, long, IntPtr)[4];
             internal int Count;
             internal bool Listed;
         }
@@ -1574,7 +1645,7 @@ internal sealed unsafe class CachingAllocator
             return make ? _large[size] = new Pile(size) : null;
         }
 
-        internal void Push(long size, IntPtr block, Source source, long call)
+        internal void Push(long size, IntPtr block, Source source, long call, IntPtr stream)
         {
             var pile = PileOf(size, make: true)!;
             if (!pile.Listed)
@@ -1583,16 +1654,22 @@ internal sealed unsafe class CachingAllocator
                 _listed.Add(pile);
             }
             if (pile.Count == pile.Items.Length) Array.Resize(ref pile.Items, pile.Count * 2);
-            pile.Items[pile.Count++] = (block, source, call);
+            pile.Items[pile.Count++] = (block, source, call, stream);
         }
 
-        internal bool Pop(long size, out IntPtr block, out long call)
+        /// <summary>The newest block of <paramref name="size"/>'s class taken on
+        /// <paramref name="stream"/>, taken out; none for a request on no stream.</summary>
+        internal bool Pop(long size, IntPtr stream, out IntPtr block, out long call)
         {
-            if (PileOf(size, make: false) is { Count: > 0 } pile)
-            {
-                (block, _, call) = pile.Items[--pile.Count];
-                return true;
-            }
+            if (stream != IntPtr.Zero && PileOf(size, make: false) is { Count: > 0 } pile)
+                for (var i = pile.Count - 1; i >= 0; i--)
+                {
+                    if (pile.Items[i].Stream != stream) continue;
+                    (block, _, call, _) = pile.Items[i];
+                    Array.Copy(pile.Items, i + 1, pile.Items, i, pile.Count - i - 1);
+                    pile.Items[--pile.Count] = default;
+                    return true;
+                }
             block = IntPtr.Zero;
             call = -1;
             return false;
@@ -1606,7 +1683,7 @@ internal sealed unsafe class CachingAllocator
                 var pile = _listed[^1];
                 if (pile.Count > 0)
                 {
-                    (block, source, call) = pile.Items[--pile.Count];
+                    (block, source, call, _) = pile.Items[--pile.Count];
                     size = pile.Size;
                     return true;
                 }

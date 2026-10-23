@@ -58,8 +58,16 @@ internal sealed class OrtSession : IShorokooSession
     private OrtMemoryInfo? _ownedPinnedMemoryInfo;
 
     // The folder ORT writes this session's profile into, or null when it was not built to record
-    // one -- which is the default. Deleted with the session.
+    // one -- which is the default. Deleted with the session, and claimed until then, so that the
+    // sweep of what ended processes left (OrtPlacements.SweepStale) takes it only once no live
+    // session holds it: a folder the session could not delete -- its profile file still open as a
+    // finalizer runs, or a process that ended without finalizing it -- is reclaimed that way.
     private readonly string? _profileDirectory;
+    private FileStream? _profileClaim;
+
+    /// <summary>The folder ONNX Runtime writes this session's profile into, or null when it was not
+    /// built to record one.</summary>
+    internal string? ProfileDirectory => _profileDirectory;
 
     /// <summary>The views of supplied initializers this session was built over (see
     /// <c>OrtBackend.Supply</c>), which ONNX Runtime requires to outlive it: released after it.</summary>
@@ -74,6 +82,19 @@ internal sealed class OrtSession : IShorokooSession
     /// nothing. Set once, as the backend builds the session.</summary>
     internal OrtPlacements? Placements { get; set; }
 
+    /// <summary>The route ONNX Runtime names this session's logger by: what it logs goes to the
+    /// settings the session was built with, as does what a run logs whose
+    /// <see cref="RunSettings.Log"/> is the same. A session placing another's values logs through
+    /// that one's.</summary>
+    internal required RuntimeLogRoutes.Route Log { get; init; }
+
+    // Whether this session closes Log when it is disposed: the session a backend built, and not one
+    // it places values through.
+    private bool _ownsLogRoute;
+
+    /// <summary>Makes this session the one that closes <see cref="Log"/>.</summary>
+    internal void OwnLogRoute() => _ownsLogRoute = true;
+
     void IShorokooSession.StopPlacing()
     {
         Placements?.Dispose();
@@ -82,6 +103,7 @@ internal sealed class OrtSession : IShorokooSession
 
     private readonly object _profileGate = new();
     private NodePlacement? _nodePlacement;
+    private InvalidOperationException? _unreadTrace;
     private bool _profilingEnded;
 
     // The outputs this session may write into the memory of the input each is paired with, on a run
@@ -133,6 +155,8 @@ internal sealed class OrtSession : IShorokooSession
         // the device an info names, and allocates it there from the session's allocator for it.
         _cardMemory = cudaDeviceId is { } device ? CudaMemoryInfo(device) : null;
         _pinnedAllocator = new Lazy<OrtAllocator?>(CreatePinnedAllocator);
+        // Last, so that a constructor that throws leaves the folder unclaimed for the caller to delete.
+        if (profileDirectory is not null) _profileClaim = OrtPlacements.ClaimFolder(profileDirectory);
     }
 
     /// <summary>
@@ -487,11 +511,16 @@ internal sealed class OrtSession : IShorokooSession
     {
         var abortToken = runSettings.CancellationToken;
         using var runOptions = new RunOptions();
+        using var runLog = RouteRun(runOptions, runSettings.Log);
+        using var inProgress = Log.Enter(runSettings.Log);
         using var abort = AbortWhenCancelled(runOptions, abortToken);
         using var charge = CachingAllocator.Charge(_hostAccount, _cardAccount);
+        var finished = false;
         try
         {
-            return run(runOptions);
+            var result = run(runOptions);
+            finished = true;
+            return result;
         }
         catch (OnnxRuntimeException cause) when (WasStopped(cause, abortToken))
         {
@@ -499,8 +528,37 @@ internal sealed class OrtSession : IShorokooSession
         }
         finally
         {
+            // A run that fails or is stopped returns without draining the card's stream, so the
+            // memory it let go of waits for the card before anything else may have it.
+            if (!finished) charge.Unfinished();
             GC.KeepAlive(feeds);
         }
+    }
+
+    /// <summary>
+    /// Sets <paramref name="runOptions"/> to log where <paramref name="log"/> says: through the
+    /// session's own logger where they are the settings it was built with, and otherwise through a
+    /// logger of the run's own, named by a route the caller closes when the run is over — ONNX
+    /// Runtime names a run's logger by the session's id and the run's tag, so what the run logs
+    /// reaches this run's settings and no other run's, of this session or another, however many run
+    /// at once, on whichever thread. What ONNX Runtime logs during the run through the session's
+    /// logger instead — most of what it says about a run, an output of another shape than the model
+    /// states included — reaches the run's settings through the run being in progress on the
+    /// calling thread (<see cref="RuntimeLogRoutes.Route.Enter(LogSettings)"/>), from the level the
+    /// session's logger was built at (<see cref="OrtBackend.LoggerSeverity"/>).
+    /// </summary>
+    private RuntimeLogRoutes.Route? RouteRun(RunOptions runOptions, LogSettings log)
+    {
+        ArgumentNullException.ThrowIfNull(log);
+        if (log.Equals(Log.Log))
+        {
+            runOptions.LogSeverityLevel = (OrtLoggingLevel)OrtBackend.LoggerSeverity(Log.Log);
+            return null;
+        }
+        var route = RuntimeLogRoutes.Open(log);
+        runOptions.LogId = route.Id;
+        runOptions.LogSeverityLevel = (OrtLoggingLevel)OrtBackend.LoggerSeverity(log);
+        return route;
     }
 
     /// <summary>A run of a session whose outputs all stay in host memory, writing nothing into what
@@ -791,6 +849,10 @@ internal sealed class OrtSession : IShorokooSession
     /// Shorokoo's allocator (<see cref="OrtBackend.SessionsUseOrtArena"/>).</summary>
     internal bool OnOrtArena { get; init; }
 
+    /// <summary>Whether this session runs its operators on the process's thread pools rather than
+    /// pools of its own (<see cref="OrtBackend.SessionsShareThreadPools"/>).</summary>
+    internal bool OnSharedThreadPools { get; init; }
+
     /// <summary>The figures of the arena ONNX Runtime made for this session: the card's for a CUDA
     /// session, the host's otherwise.</summary>
     private ArenaStatistics? ReadOrtArenaStatistics()
@@ -830,18 +892,34 @@ internal sealed class OrtSession : IShorokooSession
     /// this call, later runs are not in it, and the answer is kept so a second call gets the same
     /// one rather than asking a session that is no longer recording.</para>
     /// </summary>
+    /// <exception cref="InvalidOperationException">The trace was recorded and cannot be read: ending
+    /// the profiling failed, or the profile it wrote cannot be read. The inner exception is the
+    /// cause, and a second call throws the same failure.</exception>
     public NodePlacement? ReadNodePlacement()
     {
         if (_profileDirectory is null) return null;
         lock (_profileGate)
         {
-            if (_profilingEnded) return _nodePlacement;
-            _profilingEnded = true;
-            try
+            if (!_profilingEnded)
             {
-                _nodePlacement = OrtProfile.Read(_session.EndProfiling());
+                _profilingEnded = true;
+                string? profile = null;
+                try
+                {
+                    profile = _session.EndProfiling();
+                    _nodePlacement = OrtProfile.Read(profile);
+                }
+                catch (Exception cause)
+                {
+                    _unreadTrace = new InvalidOperationException(
+                        (profile is null
+                            ? "ONNX Runtime could not end the profiling of this session, so the node placement it traced cannot be read: "
+                            : $"The node placement this session traced cannot be read from its profile '{profile}': ")
+                        + cause.Message,
+                        cause);
+                }
             }
-            catch (Exception) { _nodePlacement = null; }
+            if (_unreadTrace is { } unread) throw unread;
             return _nodePlacement;
         }
     }
@@ -911,6 +989,8 @@ internal sealed class OrtSession : IShorokooSession
         }
         Placements?.Dispose();
         _session.Dispose();
+        // After the session, which may log as it is released.
+        if (_ownsLogRoute) Log.Dispose();
         foreach (var weight in SharedWeights) weight.Dispose();
         // After the session, whose release lets go of its weights through them.
         _accounts?.Close();
@@ -938,6 +1018,8 @@ internal sealed class OrtSession : IShorokooSession
     private void DeleteProfileDirectory()
     {
         if (_profileDirectory is null) return;
+        try { _profileClaim?.Dispose(); } catch (Exception) { }
+        _profileClaim = null;
         try { Directory.Delete(_profileDirectory, recursive: true); }
         // A temp folder that will not delete is not worth failing a disposal over; the platform
         // reclaims it, and there is nothing a caller could do here.

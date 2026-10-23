@@ -627,6 +627,8 @@ namespace Shorokoo.Runtime
         /// trace of its own, which covers the runs from then on.</para>
         /// </summary>
         /// <exception cref="ObjectDisposedException">This graph's session has been released.</exception>
+        /// <exception cref="InvalidOperationException">The trace was recorded and the backend cannot
+        /// read it; the inner exception is the cause, and a second read throws the same.</exception>
         public NodePlacement? ReadNodePlacement()
         {
             lock (_sessionGate)
@@ -2472,7 +2474,8 @@ namespace Shorokoo.Runtime
         }
 
         /// <summary>A session of <paramref name="backend"/> over <paramref name="modelData"/>, built
-        /// with <paramref name="deviceMemory"/>, with what this context records about its sessions,
+        /// with <paramref name="deviceMemory"/>, logging to this context's <see cref="RunSettings"/>' log
+        /// settings, with what this context records about its sessions,
         /// in its precision, and with the outputs the lowering proved it may write into consumed
         /// inputs' memory — placing its runs' values in that memory where <paramref name="placing"/>
         /// and this context place (<see cref="ValuePlacement"/>), and otherwise built without what
@@ -2489,7 +2492,7 @@ namespace Shorokoo.Runtime
             IShorokooSession session;
             using (SessionPlacing.Suppress(off || !placing))
                 session = backend.CreateSession(
-                    modelData, optimization, ShorokooLogSeverity.Fatal, deviceMemory, Diagnostics,
+                    modelData, optimization, RunSettings.Log, deviceMemory, Diagnostics,
                     outputAliases ?? [], intraOpThreads, supplied ?? [], Precision);
             if (off) session.StopPlacing();
             else if (!placing) session.StopPlanningPlacements();

@@ -112,7 +112,7 @@ public class PyTorchCudaHardwareTests
     }
 
     private static IShorokooSession TensorFloat32Session()
-        => Cuda.Value.CreateSession(NegModel(), default, default, DeviceMemorySettings.Default, DiagnosticSettings.Default, [], 0, [], SideBySideModel.AllowingTensorFloat32);
+        => Cuda.Value.CreateSession(NegModel(), default, LogSettings.Default, DeviceMemorySettings.Default, DiagnosticSettings.Default, [], 0, [], SideBySideModel.AllowingTensorFloat32);
 
     private static void NegRun(IShorokooSession session, CancellationToken token)
     {
@@ -123,7 +123,7 @@ public class PyTorchCudaHardwareTests
     [TorchCudaFact]
     public void TestEveryOutputStaysOnTheCardAndAnInputInHostMemoryIsRefused()
     {
-        using var session = Cuda.Value.CreateSession(NegModel(), default, default, DeviceMemorySettings.Default);
+        using var session = Cuda.Value.CreateSession(NegModel(), default, LogSettings.Default, DeviceMemorySettings.Default);
         using var x = Cuda.Value.CreateTensorInBackendMemory(ShorokooTensorElementType.Float, [.. MemoryMarshal.AsBytes<float>([1f, -2f])], [2]);
         using var onHost = Cuda.Value.CreateTensor([1f, -2f], [2]);
         using var y = session.Run(new Dictionary<string, IShorokooTensorValue> { ["x"] = x }, ["y"], RunSettings.Default)[0];
@@ -145,9 +145,9 @@ public class PyTorchCudaHardwareTests
     public void TestTheSessionReadsTheCardsAllocatorAndALimitCapsWhatItsRunsMayAllocate()
     {
         const long mebibyte = 1L << 20;
-        using var free = Cuda.Value.CreateSession(NegModel(), default, default, DeviceMemorySettings.Default);
-        using var tight = Cuda.Value.CreateSession(NegModel(), default, default, new DeviceMemorySettings { LimitBytes = mebibyte });
-        using var roomy = Cuda.Value.CreateSession(NegModel(), default, default, new DeviceMemorySettings { LimitBytes = 64 * mebibyte });
+        using var free = Cuda.Value.CreateSession(NegModel(), default, LogSettings.Default, DeviceMemorySettings.Default);
+        using var tight = Cuda.Value.CreateSession(NegModel(), default, LogSettings.Default, new DeviceMemorySettings { LimitBytes = mebibyte });
+        using var roomy = Cuda.Value.CreateSession(NegModel(), default, LogSettings.Default, new DeviceMemorySettings { LimitBytes = 64 * mebibyte });
         PyTorchBackendCoverageTests.ReleaseWhatEarlierTestsLeft();
         var before = free.ReadArenaStatistics()!.Value;
         using var x = Cuda.Value.CreateUninitializedTensorInBackendMemory(ShorokooTensorElementType.Float, [4 * mebibyte]);
@@ -174,7 +174,7 @@ public class PyTorchCudaHardwareTests
         var smalls = Enumerable.Range(0, 4096).Select(_ => Cuda.Value.CreateUninitializedTensorInBackendMemory(ShorokooTensorElementType.Float, [128])).ToList();
         foreach (var small in smalls.SkipLast(1)) small.Dispose();
         using var kept = smalls[^1];
-        using var session = Cuda.Value.CreateSession(NegModel(), default, default, new DeviceMemorySettings { LimitBytes = 17 * mebibyte });
+        using var session = Cuda.Value.CreateSession(NegModel(), default, LogSettings.Default, new DeviceMemorySettings { LimitBytes = 17 * mebibyte });
         using var x = Cuda.Value.CreateUninitializedTensorInBackendMemory(ShorokooTensorElementType.Float, [4 * mebibyte]);
         using var y = session.Run(new Dictionary<string, IShorokooTensorValue> { ["x"] = x }, ["y"], RunSettings.Default)[0];
 
@@ -184,8 +184,8 @@ public class PyTorchCudaHardwareTests
     [TorchCudaFact]
     public void TestARunWithoutALimitIsNotHeldToTheLimitOfAnotherSessionsRunOnTheCard()
     {
-        using var capped = Cuda.Value.CreateSession(NegModel(), default, default, new DeviceMemorySettings { LimitBytes = 1L << 20 });
-        using var free = Cuda.Value.CreateSession(NegModel(), default, default, DeviceMemorySettings.Default);
+        using var capped = Cuda.Value.CreateSession(NegModel(), default, LogSettings.Default, new DeviceMemorySettings { LimitBytes = 1L << 20 });
+        using var free = Cuda.Value.CreateSession(NegModel(), default, LogSettings.Default, DeviceMemorySettings.Default);
         using var small = Cuda.Value.CreateUninitializedTensorInBackendMemory(ShorokooTensorElementType.Float, [1024]);
         using var large = Cuda.Value.CreateUninitializedTensorInBackendMemory(ShorokooTensorElementType.Float, [16L << 20]);
         var until = DateTime.UtcNow + TimeSpan.FromSeconds(2);
@@ -206,7 +206,7 @@ public class PyTorchCudaHardwareTests
     {
         using var session = Cuda.Value.CreateSession(PyTorchBackendCoverageTests.Serialize(
             ComputeContextLifetimeCoverageTests.GraphOf("x", "y", Op("Neg", "x", "n"), Op("Neg", "n", "m"), Op("Add", "n m", "y"))),
-            default, default, DeviceMemorySettings.Default);
+            default, LogSettings.Default, DeviceMemorySettings.Default);
         using var x = Cuda.Value.CreateUninitializedTensorInBackendMemory(ShorokooTensorElementType.Float, [4L << 20]);
         var feeds = new Dictionary<string, IShorokooTensorValue> { ["x"] = x };
         ArenaStatistics After(bool shrink)
@@ -226,8 +226,8 @@ public class PyTorchCudaHardwareTests
     {
         var sub = PyTorchBackendCoverageTests.Serialize(ComputeContextLifetimeCoverageTests.GraphOf("a:float[4] b:float[4]", "O:float[4]", Op("Sub", "a b", "O")));
         var matmul = PyTorchBackendCoverageTests.Serialize(ComputeContextLifetimeCoverageTests.GraphOf("a:float[2,2] b:float[2,2]", "O:float[2,2]", Op("MatMul", "b a", "O")));
-        using var session = Cuda.Value.CreateSession(sub, default, default, DeviceMemorySettings.Default, DiagnosticSettings.Default, [new OutputAlias("O", "a")]);
-        using var product = Cuda.Value.CreateSession(matmul, default, default, DeviceMemorySettings.Default, DiagnosticSettings.Default, [new OutputAlias("O", "a")]);
+        using var session = Cuda.Value.CreateSession(sub, default, LogSettings.Default, DeviceMemorySettings.Default, DiagnosticSettings.Default, [new OutputAlias("O", "a")]);
+        using var product = Cuda.Value.CreateSession(matmul, default, LogSettings.Default, DeviceMemorySettings.Default, DiagnosticSettings.Default, [new OutputAlias("O", "a")]);
         byte[] Bytes(params float[] values) => [.. MemoryMarshal.AsBytes<float>(values)];
         IShorokooTensorValue OnCard(long[] shape, params float[] values) => Cuda.Value.CreateTensorInBackendMemory(ShorokooTensorElementType.Float, Bytes(values), shape);
         long Address(IShorokooTensorValue value)
@@ -323,7 +323,7 @@ public class PyTorchCudaHardwareTests
         var dims = string.Join(",", shape);
         var graph = ComputeContextLifetimeCoverageTests.WithInts(ComputeContextLifetimeCoverageTests.GraphOf($"x:float[{dims}]", "y",
             ComputeContextLifetimeCoverageTests.Op("ReduceSum", "x axes", "y")), "axes", axes);
-        using var session = Cuda.Value.CreateSession(PyTorchBackendCoverageTests.Serialize(graph), default, default, DeviceMemorySettings.Default);
+        using var session = Cuda.Value.CreateSession(PyTorchBackendCoverageTests.Serialize(graph), default, LogSettings.Default, DeviceMemorySettings.Default);
         using var x = Cuda.Value.CreateTensorInBackendMemory(ShorokooTensorElementType.Float,
             [.. MemoryMarshal.AsBytes<float>(Enumerable.Repeat(0.5f, (int)shape.Aggregate(1L, (a, d) => a * d)).ToArray())], shape);
         var feeds = new Dictionary<string, IShorokooTensorValue> { ["x"] = x };
@@ -352,7 +352,7 @@ public class PyTorchCudaHardwareTests
         var graph = ComputeContextLifetimeCoverageTests.WithInts(ComputeContextLifetimeCoverageTests.GraphOf(
             $"x:{(type == ShorokooTensorElementType.Float16 ? "float16" : "bfloat16")}[1024,1]", "y",
             ComputeContextLifetimeCoverageTests.Op("ReduceSum", "x axes", "y")), "axes", 0);
-        using var session = Cuda.Value.CreateSession(PyTorchBackendCoverageTests.Serialize(graph), default, default, DeviceMemorySettings.Default);
+        using var session = Cuda.Value.CreateSession(PyTorchBackendCoverageTests.Serialize(graph), default, LogSettings.Default, DeviceMemorySettings.Default);
         using var x = Cuda.Value.CreateTensorInBackendMemory(type, [.. values.SelectMany(Bytes)], [1024, 1]);
         using var y = session.Run(new Dictionary<string, IShorokooTensorValue> { ["x"] = x }, ["y"], RunSettings.Default)[0];
         var bits = BitConverter.ToUInt16(Cuda.Value.CopyTensorToHost(y), 0);
@@ -392,7 +392,7 @@ public class PyTorchCudaHardwareTests
         const long Half = CountedPastTwoGibibytes / 2;
         var graph = ComputeContextLifetimeCoverageTests.GraphOf($"x:int32[{Half}] h", "y",
             ComputeContextLifetimeCoverageTests.Op("Add", "x h", "u"), ComputeContextLifetimeCoverageTests.Op("Concat", "x u", "y", attribute: ("axis", 0)));
-        using var session = backend.CreateSession(PyTorchBackendCoverageTests.Serialize(graph), default, default, DeviceMemorySettings.Default);
+        using var session = backend.CreateSession(PyTorchBackendCoverageTests.Serialize(graph), default, LogSettings.Default, DeviceMemorySettings.Default);
         IShorokooTensorValue y;
         using (var x = backend.CreateTensorInBackendMemory(ShorokooTensorElementType.Int32, Counting(Half), [Half]))
         using (var h = backend.CreateTensorInBackendMemory(ShorokooTensorElementType.Int32, BitConverter.GetBytes((int)Half), []))
@@ -485,7 +485,7 @@ public class PyTorchCudaHardwareTests
     private static long ChainPeak(string inputs, params NodeProto[] nodes)
     {
         var graph = ComputeContextLifetimeCoverageTests.GraphOf(inputs, "d", nodes);
-        using var session = Cuda.Value.CreateSession(PyTorchBackendCoverageTests.Serialize(graph), default, default, DeviceMemorySettings.Default);
+        using var session = Cuda.Value.CreateSession(PyTorchBackendCoverageTests.Serialize(graph), default, LogSettings.Default, DeviceMemorySettings.Default);
         var feeds = new Dictionary<string, IShorokooTensorValue>();
         foreach (var input in graph.Inputs)
         {
@@ -515,7 +515,7 @@ public class PyTorchCudaHardwareTests
     public void TestARunOnTheCardIsStoppedWhenItsTokenIsCancelledAndItsNodesAreTracedOnTheCard()
     {
         using var session = Cuda.Value.CreateSession(PyTorchBackendCoverageTests.Serialize(PyTorchBackendCoverageTests.CountingLoop()),
-            default, default, DeviceMemorySettings.Default, new DiagnosticSettings { TraceNodePlacement = true });
+            default, LogSettings.Default, DeviceMemorySettings.Default, new DiagnosticSettings { TraceNodePlacement = true });
         using var m = Cuda.Value.CreateTensorInBackendMemory(ShorokooTensorElementType.Int64, [.. MemoryMarshal.AsBytes<long>([10_000_000L])], []);
         using var v = Cuda.Value.CreateTensorInBackendMemory(ShorokooTensorElementType.Float, [.. MemoryMarshal.AsBytes<float>([0f])], []);
         using var later = new CancellationTokenSource(TimeSpan.FromMilliseconds(300));

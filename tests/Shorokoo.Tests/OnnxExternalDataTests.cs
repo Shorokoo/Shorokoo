@@ -409,8 +409,8 @@ public class OnnxExternalDataTests
         Action[] routes =
         [
             () => Shorokoo.Core.Backends.OutputAliasProof.Prove(bytes, []),
-            () => new Shorokoo.PyTorch.Cpu.TorchCpuBackend().CreateSession(bytes, default, default, Shorokoo.Core.Backends.DeviceMemorySettings.Default).Dispose(),
-            () => new Shorokoo.Jax.Cpu.JaxCpuBackend().CreateSession(bytes, default, default, Shorokoo.Core.Backends.DeviceMemorySettings.Default).Dispose(),
+            () => new Shorokoo.PyTorch.Cpu.TorchCpuBackend().CreateSession(bytes, default, Shorokoo.Core.Backends.LogSettings.Default, Shorokoo.Core.Backends.DeviceMemorySettings.Default).Dispose(),
+            () => new Shorokoo.Jax.Cpu.JaxCpuBackend().CreateSession(bytes, default, Shorokoo.Core.Backends.LogSettings.Default, Shorokoo.Core.Backends.DeviceMemorySettings.Default).Dispose(),
         ];
         foreach (var route in routes)
         {

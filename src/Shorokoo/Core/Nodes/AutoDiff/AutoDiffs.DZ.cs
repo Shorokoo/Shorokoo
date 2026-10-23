@@ -50,8 +50,8 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         public static Variable?[] Sub<T>(Tensor<T> a, Tensor<T> b, Tensor<T> grad) where T : IVarType
         {
             // d(a - b)/da = 1, d(a - b)/db = -1
-            var aGrad = ReverseBroadcast(grad, a.DShape);
-            var bGrad = ReverseBroadcast(-grad, b.DShape);
+            var aGrad = ReverseBroadcastAgainst(grad, a, b);
+            var bGrad = ReverseBroadcastAgainst(-grad, b, a);
 
             return [aGrad, bGrad];
         }
@@ -60,8 +60,8 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         public static Variable?[] Div<T>(Tensor<T> a, Tensor<T> b, Tensor<T> grad) where T : IVarType
         {
             // d(a/b)/da = 1/b, d(a/b)/db = -a/b^2
-            var aGrad = ReverseBroadcast(grad / b, a.DShape);
-            var bGrad = ReverseBroadcast(-(grad * a) / (b * b), b.DShape);
+            var aGrad = ReverseBroadcastAgainst(grad / b, a, b);
+            var bGrad = ReverseBroadcastAgainst(-(grad * a) / (b * b), b, a);
 
             return [aGrad, bGrad];
         }

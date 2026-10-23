@@ -1,4 +1,5 @@
 using static Shorokoo.Tests.AutoGradOpsRunners;
+using Shorokoo.Core.Backends;
 using Shorokoo.PyTorch.Cpu;
 using Shorokoo.Runtime;
 
@@ -87,6 +88,7 @@ public class AutoGradElementwiseOpsCoverageTests
         RunTensor<AutoGradEluCheck>([2L], 2f, -1f);
         RunTensor<AutoGradSeluCheck>([2L], 2f, -1f);
         RunTensor<AutoGradCeluCheck>([2L], 2f, -1f);
+        RunTensor<AutoGradExponentialActivationsParameterCheck>([4L], 2f, -1f, 0.5f, -0.25f);
         Run<AutoGradSigmoidExpChainCheck>(0f);
         Run<AutoGradLeakyReluExpChainCheck>(0f);
         Run<AutoGradHardSigmoidCheck>(0.5f);
@@ -178,6 +180,25 @@ public class AutoGradElementwiseOpsCoverageTests
         Run<AutoGradMinTensorInputsCheck>(7f, 2f);
     }
 
+    // Shorokoo/Shorokoo#551: the backward pass is seeded with a float32 one whatever the loss's type.
+    [Fact(Skip = "Shorokoo/Shorokoo#551: a loss's gradient is seeded as float32 whatever the loss's type")]
+    public void TestAutoGradOfAFloat64OrFloat16Loss()
+    {
+        float[] x = [0.5f, -1f, 2f, 0.25f, 1.5f, 3f, -2f, 0f, -0.75f, 1f, 2.5f, -1.5f];
+        Assert.True(AutoTest.AdvancedTestGraph<AutoGradFloat64LossCheck>([], [TensorData(DType.Float64, [3L, 4L], [.. x.Select(v => (object)(double)v)])]));
+        Assert.True(AutoTest.AdvancedTestGraph<AutoGradFloat16LossCheck>([], [TensorData(DType.Float16, [3L, 4L], [.. x.Select(v => (object)(Float16)v)])]));
+    }
+
+    [Fact]
+    public void TestAutoGradLossGradientsAtTheEdgesOfTheirInputs()
+    {
+        Run<AutoGradLossOfAnAllIgnoredBatchCheck>(0.5f);
+        RunTensor<AutoGradCrossEntropyLossAtANegativeLabelCheck>([3L, 4L], 0.5f, -1f, 2f, 0.25f, 1.5f, 3f, -2f, 0f, -0.75f, 1f, 2.5f, -1.5f);
+        RunTensor<AutoGradHalfPrecisionMeanLossOverManySamplesCheck>([70000L, 2L], new float[140000]);
+        Assert.True(AutoTest.AdvancedTestGraph<AutoGradFloat64LossesThroughAFloat32LossCheck>(
+            [], [TensorData(DType.Float64, [3L, 4L], 0.5, -1.0, 2.0, 0.25, 1.5, 3.0, -2.0, 0.0, -0.75, 1.0, 2.5, -1.5)]));
+    }
+
     [Fact]
     public void TestAutoGradLossGradients()
     {
@@ -192,6 +213,9 @@ public class AutoGradElementwiseOpsCoverageTests
         Run<AutoGradSoftmaxCrossEntropyLossMeanCheck>(2f);
         Run<AutoGradSoftmaxCrossEntropyLossNoneCheck>(2f);
         Run<AutoGradSoftmaxCrossEntropyLossWeightIgnoreCheck>(2f);
+        RunTensor<AutoGradSoftmaxCrossEntropyLossClosedFormCheck>([3L, 4L], 0.5f, -1f, 2f, 0.25f, 1.5f, 3f, -2f, 0f, -0.75f, 1f, 2.5f, -1.5f);
+        RunTensor<AutoGradSoftmaxCrossEntropyLossRank3ClosedFormCheck>([2L, 4L, 3L], 0.5f, -1f, 2f, 0.25f, 1.5f, 3f, -2f, 0f, -0.75f, 1f,
+            2.5f, -1.5f, 1f, -0.5f, 0.75f, 2f, -3f, 0.5f, 1.25f, -1f, 0f, 0.5f, -2.5f, 1.5f);
     }
 }
 

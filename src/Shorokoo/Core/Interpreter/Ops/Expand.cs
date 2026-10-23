@@ -23,7 +23,8 @@ internal sealed class ExpandOp : QuickOp
         if (inputs.Length <= 1 || inputs[1]?.IntData is not { } shapeVals)
             return [RuntimeTensorFactory.Create(dtype, null)];
         var target = new Shape(shapeVals.ToArray());
-        var result = ShapeHelpers.Broadcast(x?.Shape, target) ?? target;
+        if (ShapeHelpers.Broadcast(x?.Shape, target) is not { } result)
+            return [RuntimeTensorFactory.Create(dtype, null)];
         var rt = RuntimeTensorFactory.Create(dtype, result);
 
         if (x?.Shape is null || !RuntimeTensorFactory.ShouldStoreData(result, maxDataElements))

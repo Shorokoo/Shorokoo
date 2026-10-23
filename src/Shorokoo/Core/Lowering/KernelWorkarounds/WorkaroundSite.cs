@@ -31,6 +31,7 @@ internal sealed class WorkaroundSite
     private readonly SortedDictionary<int, ConstantRead> constantsRead = [];
     private readonly bool shapesAreConcrete;
     private readonly bool inLoopBody;
+    private readonly IReadOnlyDictionary<FastTensorKey, Shape>? shapes;
 
     private WorkaroundSite(
         FastNode node,
@@ -42,11 +43,13 @@ internal sealed class WorkaroundSite
         IReadOnlyDictionary<FastTensorKey, FastNode> producers,
         IReadOnlySet<FastTensorKey> read,
         bool shapesAreConcrete,
-        bool inLoopBody)
+        bool inLoopBody,
+        IReadOnlyDictionary<FastTensorKey, Shape>? shapes)
     {
         this.outsideBody = outsideBody;
         this.shapesAreConcrete = shapesAreConcrete && !inLoopBody;
         this.inLoopBody = inLoopBody;
+        this.shapes = shapes;
         this.node = node;
         this.inputKeys = inputKeys;
         this.outputKeys = outputKeys;
@@ -62,7 +65,8 @@ internal sealed class WorkaroundSite
     /// <paramref name="shapesAreConcrete"/> says whether the model is built with every graph
     /// input's dimensions stated, <paramref name="inLoopBody"/> is <see cref="IsInLoopBody"/>, and
     /// <paramref name="outsideBody"/> tells, of an input, <see cref="IsFromOutsideBody"/>; without
-    /// it, no input is.
+    /// it, no input is. <paramref name="shapes"/> are the values whose dimensions follow from the
+    /// graph inputs' (<see cref="ShapeOf"/>).
     /// </summary>
     internal static WorkaroundSite? TryCreate(
         FastNode node,
@@ -71,7 +75,8 @@ internal sealed class WorkaroundSite
         IReadOnlySet<FastTensorKey> read,
         bool shapesAreConcrete = false,
         bool inLoopBody = false,
-        Func<FastTensorKey, bool>? outsideBody = null)
+        Func<FastTensorKey, bool>? outsideBody = null,
+        IReadOnlyDictionary<FastTensorKey, Shape>? shapes = null)
     {
         FastTensorKey?[] inputKeys = [.. node.Inputs.Select(k => k is { IsEmpty: false } ? k : null)];
         FastTensorKey?[] outputKeys = [.. node.Outputs.Select(k => k is { IsEmpty: false } ? k : null)];
@@ -92,7 +97,7 @@ internal sealed class WorkaroundSite
                 outputs[i] = (info.DType, info.Rank);
 
         bool[] outside = [.. inputKeys.Select(k => k is { } key && outsideBody is not null && outsideBody(key))];
-        return new WorkaroundSite(node, inputKeys, outputKeys, inputs, outputs, outside, producers, read, shapesAreConcrete, inLoopBody);
+        return new WorkaroundSite(node, inputKeys, outputKeys, inputs, outputs, outside, producers, read, shapesAreConcrete, inLoopBody, shapes);
     }
 
     /// <summary>
@@ -113,6 +118,18 @@ internal sealed class WorkaroundSite
     /// made again on every iteration: <see cref="ShapesAreConcrete"/> is false there.
     /// </summary>
     public bool IsInLoopBody => inLoopBody;
+
+    /// <summary>
+    /// The dimensions of input slot <paramref name="slot"/> where <see cref="ShapesAreConcrete"/>
+    /// and they follow from the dimensions the graph's inputs are stated with — the dimensions
+    /// every run of the session sees there; null otherwise, for an absent slot and for a shape
+    /// computed from the data alike. Answered only for a workaround that says it asks
+    /// (<see cref="KernelWorkaround.ReadsShapes"/>), and only of <see cref="KernelWorkaround.Applies"/>:
+    /// a replacement is reused without regard to it.
+    /// </summary>
+    public Shape? ShapeOf(int slot)
+        => shapesAreConcrete && slot < inputKeys.Length && inputKeys[slot] is { } key
+           && shapes is not null && shapes.TryGetValue(key, out var shape) ? shape : null;
 
     /// <summary>The operator's op code.</summary>
     public string OpCode => node.OpCode;

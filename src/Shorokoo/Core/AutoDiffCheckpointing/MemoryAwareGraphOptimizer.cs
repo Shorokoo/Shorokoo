@@ -34,7 +34,9 @@ public class GraphOptimizationResult
 
     /// <summary>
     /// Shape information covering <see cref="OptimizedGraph"/>, including every tensor
-    /// rematerialization minted; <see cref="Evaluation"/> was computed against it.
+    /// rematerialization minted; <see cref="Evaluation"/> was computed against it, or, where a
+    /// training rig's pass rewrote its step with the step's shape arithmetic baked, against that
+    /// rewrite's.
     /// </summary>
     internal ShapeInferenceResult ShapeInfo { get; init; } = null!;
 

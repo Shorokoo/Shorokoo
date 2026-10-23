@@ -1,9 +1,11 @@
+using System.Collections.Concurrent;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
 using Microsoft.ML.OnnxRuntime;
 using Shorokoo.Core.Factory;
+using Shorokoo.Core.Factory.IR;
 using Shorokoo.Core.Factory.OpsFactories;
 using Shorokoo.Core.Interpreter;
 using Shorokoo.Core.Backends;
@@ -662,14 +664,47 @@ public class CoreUtilsCoverageTests
     }
 
     [Fact]
-    public void TestAttributesPastTwoGibibytesLeftToTheCollectorMakeItCollect()
-        => Utils.OwnProcess.Run(typeof(CoreUtilsCoverageTests), nameof(AttributesPastTwoGibibytesLeftToTheCollectorMakeItCollect));
-
-    internal static void AttributesPastTwoGibibytesLeftToTheCollectorMakeItCollect()
+    public void TestAHeldTensorWeighsOnTheCollectorOnceUntilTheLastAttributeOverItIsCollected()
     {
-        var collections = GC.CollectionCount(2);
-        for (int i = 0; i < 8; i++) AttributePastTwoGibibytes();
-        Assert.True(GC.CollectionCount(2) - collections >= 3);
+        const long Bytes = (1L << 31) + 8;
+        ConcurrentQueue<long> told = new();
+        TensorAttribute.PressureObserver = told.Enqueue;
+        try
+        {
+            var (attributes, native) = TwoAttributesOverOneHeldTensor();
+            Collected();
+            Assert.Equal([Bytes], told);
+            Assert.True(native.IsAlive);
+            attributes[0] = null;
+            Collected();
+            Assert.Equal([Bytes], told);
+            Assert.True(native.IsAlive);
+            attributes[1] = null;
+            Collected();
+            Assert.Equal([Bytes, -Bytes], told);
+            Assert.False(native.IsAlive);
+        }
+        finally
+        {
+            TensorAttribute.PressureObserver = null;
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static (TensorAttribute?[] Attributes, WeakReference Native) TwoAttributesOverOneHeldTensor()
+    {
+        var (attribute, value) = AttributePastTwoGibibytes();
+        return ([attribute, attribute.WithDType(DType.Int8)], new WeakReference(((OrtTensorValue)value).Inner, trackResurrection: true));
+    }
+
+    private static void Collected()
+    {
+        for (int i = 0; i < 3; i++)
+        {
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+        }
+        GC.Collect();
     }
 
     // Keeps what the first write hands it, and stops the writer there.
@@ -760,7 +795,7 @@ public class CoreUtilsCoverageTests
 
         public IShorokooSession CreateSession(
             ReadOnlyMemory<byte> modelBytes, ShorokooGraphOptimization graphOptimization,
-            ShorokooLogSeverity logSeverity, DeviceMemorySettings deviceMemory)
+            LogSettings log, DeviceMemorySettings deviceMemory)
             => throw new NotSupportedException();
 
         public IShorokooTensorValue CreateTensor<T>(T[] data, long[] shape) where T : unmanaged
@@ -953,13 +988,13 @@ public class CoreUtilsCoverageTests
         var budget = new DeviceMemorySettings { LimitBytes = 8L << 30 };
         var tensorFloat32 = new PrecisionSettings { AllowTensorFloat32 = true };
 
-        using (probe.CreateSession(model.ToArray(), ShorokooGraphOptimization.EnableAll, ShorokooLogSeverity.Fatal, budget)) { }
-        using (probe.CreateSession(model.ToArray(), ShorokooGraphOptimization.EnableAll, ShorokooLogSeverity.Fatal, budget,
+        using (probe.CreateSession(model.ToArray(), ShorokooGraphOptimization.EnableAll, LogSettings.None, budget)) { }
+        using (probe.CreateSession(model.ToArray(), ShorokooGraphOptimization.EnableAll, LogSettings.None, budget,
             DiagnosticSettings.Default, [], 0, [], tensorFloat32)) { }
         Assert.Equal([(budget, PrecisionSettings.Default), (budget, tensorFloat32)], seen);
 
         Assert.Throws<ArgumentNullException>(() => probe.CreateSession(
-            model.ToArray(), ShorokooGraphOptimization.EnableAll, ShorokooLogSeverity.Fatal, null!));
+            model.ToArray(), ShorokooGraphOptimization.EnableAll, LogSettings.None, null!));
     }
 
     [Fact]
@@ -1195,6 +1230,215 @@ public class CoreUtilsCoverageTests
         Assert.Equal(BitConverter.SingleToInt32Bits(7f), Marshal.ReadInt32(OrtTensorAddress.Read(value)!.Value, 8));
     }
 
+    internal static byte[] LoggingModel(string output)
+    {
+        TypeProto Floats(TensorShapeProto.Dimension dim)
+        {
+            var tensor = new TypeProto.Tensor { ElemType = 1, Shape = new TensorShapeProto() };
+            tensor.Shape.Dims.Add(dim);
+            return new TypeProto { TensorType = tensor };
+        }
+        var graph = new GraphProto();
+        graph.Inputs.Add(new ValueInfoProto { Name = "x", Type = Floats(new TensorShapeProto.Dimension { DimParam = "N" }) });
+        graph.Outputs.Add(new ValueInfoProto { Name = output, Type = Floats(new TensorShapeProto.Dimension { DimValue = 3 }) });
+        graph.Nodes.Add(ComputeContextLifetimeCoverageTests.Op("Relu", "x", output));
+        graph.Initializers.Add(new TensorProto { Name = "unused", data_type = 1, Dims = [1], FloatDatas = [1f] });
+        return ComputeContextLifetimeCoverageTests.ModelOf(graph);
+    }
+
+    internal static LogSettings Into(ConcurrentQueue<RuntimeLogMessage> sink, ShorokooLogSeverity severity)
+        => new() { MinimumSeverity = severity, Sink = sink.Enqueue };
+
+    internal static void RunLogging(IShorokooBackend backend, IShorokooSession session, RunSettings settings)
+    {
+        using var x = backend.CreateTensorInBackendMemory(ShorokooTensorElementType.Float, [.. MemoryMarshal.AsBytes<float>([1f, -1f])], [2]);
+        foreach (var output in session.Run(new Dictionary<string, IShorokooTensorValue> { ["x"] = x }, session.OutputNames, settings))
+            output.Dispose();
+    }
+
+    internal static (RuntimeLogMessage[] Built, RuntimeLogMessage[] Ran) Logged(
+        IShorokooBackend backend, LogSettings built, Func<ConcurrentQueue<RuntimeLogMessage>, LogSettings>? ran)
+    {
+        ConcurrentQueue<RuntimeLogMessage> onBuild = [], onRun = [];
+        var log = built.Sink is null ? built : built with { Sink = onBuild.Enqueue };
+        using (var session = backend.CreateSession(LoggingModel("y"), ShorokooGraphOptimization.EnableAll, log, DeviceMemorySettings.Default))
+            RunLogging(backend, session, new RunSettings { Log = ran?.Invoke(onRun) ?? log });
+        return ([.. onBuild], [.. onRun]);
+    }
+
+    private static bool Unused(RuntimeLogMessage m) => m.Text.Contains("'unused'");
+    private static bool Misshapen(RuntimeLogMessage m) => m.Text.Contains("actual shape");
+
+    [Fact]
+    public void TestARuntimesMessagesReachTheLogSettingsOfTheSessionOrRunTheyCameFromAtTheirSeverity()
+    {
+        var backend = DefaultBackend.Instance;
+        var info = new LogSettings { MinimumSeverity = ShorokooLogSeverity.Info };
+        Assert.True(OrtEnvironment.LogsThroughRoutes);
+        Assert.Equal(LogSettings.WriteToStandardError, LogSettings.Default.Sink);
+        Assert.Equal(ShorokooLogSeverity.Warning, LogSettings.Default.MinimumSeverity);
+        Assert.Null(LogSettings.None.Sink);
+        Assert.Same(LogSettings.Default, RunSettings.Default.Log);
+        Assert.Throws<ArgumentOutOfRangeException>(() => new LogSettings { MinimumSeverity = (ShorokooLogSeverity)5 });
+        Assert.Throws<ArgumentNullException>(() => new RunSettings { Log = null! });
+        Assert.Equal(
+            [ShorokooLogSeverity.Verbose, ShorokooLogSeverity.Info, ShorokooLogSeverity.Warning, ShorokooLogSeverity.Error, ShorokooLogSeverity.Fatal],
+            [.. Enum.GetValues<ShorokooLogSeverity>().Take(4).Select(s => OrtBackend.LoggerSeverity(new LogSettings { MinimumSeverity = s })),
+                OrtBackend.LoggerSeverity(info with { Sink = null })]);
+
+        var (built, ran) = Logged(backend, info, sink => Into(sink, ShorokooLogSeverity.Warning));
+        var unused = Assert.Single(built, Unused);
+        Assert.Equal(ShorokooLogSeverity.Warning, unused.Severity);
+        Assert.Equal("ONNX Runtime", unused.Source);
+        Assert.Equal($"[ONNX Runtime Warning] {unused.Location}: {unused.Text}", unused.ToString());
+        Assert.DoesNotContain('\u001b', unused.ToString());
+        Assert.DoesNotContain(built, Misshapen);
+        Assert.True(Misshapen(Assert.Single(ran)));
+
+        (built, ran) = Logged(backend, info, null);
+        Assert.Single(built, Misshapen);
+        (built, ran) = Logged(backend, info, sink => Into(sink, ShorokooLogSeverity.Error));
+        Assert.Empty(ran);
+        (built, ran) = Logged(backend, info, _ => LogSettings.None);
+        Assert.DoesNotContain(built, Misshapen);
+        (built, ran) = Logged(backend, new LogSettings(), sink => Into(sink, ShorokooLogSeverity.Warning));
+        Assert.True(Unused(Assert.Single(built)));
+        Assert.True(Misshapen(Assert.Single(ran)));
+    }
+
+    internal static byte[] NoisyModel()
+    {
+        TypeProto Tensor(int type, long? dim)
+        {
+            var tensor = new TypeProto.Tensor { ElemType = type, Shape = new TensorShapeProto() };
+            tensor.Shape.Dims.Add(dim is { } d ? new TensorShapeProto.Dimension { DimValue = d } : new TensorShapeProto.Dimension { DimParam = "N" });
+            return new TypeProto { TensorType = tensor };
+        }
+        var graph = new GraphProto();
+        graph.Inputs.Add(new ValueInfoProto { Name = "x", Type = Tensor(1, null) });
+        graph.Inputs.Add(new ValueInfoProto { Name = "i", Type = Tensor(7, 1) });
+        graph.Inputs.Add(new ValueInfoProto { Name = "w", Type = Tensor(1, 1) });
+        graph.Outputs.Add(new ValueInfoProto { Name = "y", Type = Tensor(1, 1) });
+        graph.Nodes.Add(ComputeContextLifetimeCoverageTests.Op("Add", "x w", "s"));
+        graph.Nodes.Add(ComputeContextLifetimeCoverageTests.Op("Gather", "s i", "y"));
+        graph.Initializers.Add(new TensorProto { Name = "w", data_type = 1, Dims = [1], FloatDatas = [1f] });
+        return ComputeContextLifetimeCoverageTests.ModelOf(graph);
+    }
+
+    private static (RuntimeLogMessage[] Logged, string Failure) Noisy(ShorokooLogSeverity severity)
+    {
+        var backend = DefaultBackend.Instance;
+        ConcurrentQueue<RuntimeLogMessage> sink = [];
+        using var session = backend.CreateSession(NoisyModel(), ShorokooGraphOptimization.EnableAll, Into(sink, severity), DeviceMemorySettings.Default);
+        using var x = backend.CreateTensorInBackendMemory(ShorokooTensorElementType.Float, [.. MemoryMarshal.AsBytes<float>([1f, 2f])], [2]);
+        using var i = backend.CreateTensorInBackendMemory(ShorokooTensorElementType.Int64, [.. MemoryMarshal.AsBytes<long>([5L])], [1]);
+        var failure = Assert.ThrowsAny<Exception>(() => session.Run(
+            new Dictionary<string, IShorokooTensorValue> { ["x"] = x, ["i"] = i }, session.OutputNames, new RunSettings { Log = Into(sink, severity) }));
+        return ([.. sink], failure.Message);
+    }
+
+    private static bool Overridable(RuntimeLogMessage m) => m.Text.Contains("Initializer w appears in graph inputs");
+    private static bool Failing(string text) => text.Contains("Non-zero status code returned while running Gather node");
+
+    [Fact]
+    public void TestOnnxRuntimesMessagesNoUserCanActOnReachASinkAsVerboseAndTheFailureStillRaisesThem()
+    {
+        var (atWarning, failed) = Noisy(ShorokooLogSeverity.Warning);
+        var (atVerbose, _) = Noisy(ShorokooLogSeverity.Verbose);
+        Assert.Empty(atWarning);
+        Assert.True(Failing(failed));
+        Assert.Equal(ShorokooLogSeverity.Verbose, Assert.Single(atVerbose, Overridable).Severity);
+        Assert.Equal(ShorokooLogSeverity.Verbose, Assert.Single(atVerbose, m => Failing(m.Text)).Severity);
+    }
+
+    [Fact]
+    public void TestOnlyTheOnnxRuntimeMessagesListedAsNoUserCanActOnAreDeliveredAsVerbose()
+    {
+        const ShorokooLogSeverity W = ShorokooLogSeverity.Warning, V = ShorokooLogSeverity.Verbose;
+        (ShorokooLogSeverity Logged, string Location, string Text, ShorokooLogSeverity Delivered)[] cases =
+        [
+            (W, "inference_session.cc:3040 onnxruntime::InferenceSession::Initialize", "Serializing optimized model with Graph Optimization level greater than ORT_ENABLE_EXTENDED and the NchwcTransformer enabled.", V),
+            (W, "session_state.cc:1397 onnxruntime::VerifyEachNodeIsAssignedToAnEp", "Some nodes were not assigned to the preferred execution providers which may or may not have an negative impact on performance.", V),
+            (W, "session_state.cc:1399 onnxruntime::VerifyEachNodeIsAssignedToAnEp", "Rerunning with verbose output on a non-minimal build will show node assignments.", V),
+            (W, "transformer_memcpy.cc:111 onnxruntime::MemcpyTransformer::ApplyImpl", "87 Memcpy nodes are added to the graph main_graph for CUDAExecutionProvider.", V),
+            (W, "constant_folding.cc:608 onnxruntime::ConstantFolding::ApplyImpl", "Failure during constant folding of ScatterElements node 'N5': indices element out of data bounds", V),
+            (W, "constant_folding.cc:581 onnxruntime::ConstantFolding::ApplyImpl", "Could not find a CPU kernel and hence can't constant fold CastLike node 'N105'", V),
+            (W, "graph.cc:124 onnxruntime::MergeShapeInfo", "Error merging shape info for output. 'N53_T0' source:{2,3,1} target:{2,3,0}. Falling back to lenient merge.", V),
+            (W, "graph.cc:1430 onnxruntime::Graph::Graph", "Initializer N3_T0 appears in graph inputs and will not be treated as constant value/weight.", V),
+            (ShorokooLogSeverity.Error, "sequential_executor.cc:671 onnxruntime::ExecuteKernel", "Non-zero status code returned while running Gather node.", V),
+            (W, "inference_session.cc:3040 Initialize", "Serializing optimized model with Graph Optimization level greater than ORT_ENABLE_EXTENDED and the NchwcTransformer enabled.", V),
+            (W, "session_state.cc:1397 VerifyEachNodeIsAssignedToAnEp", "Some nodes were not assigned to the preferred execution providers which may or may not have an negative impact on performance.", V),
+            (W, "transformer_memcpy.cc:111 ApplyImpl", "87 Memcpy nodes are added to the graph main_graph for CUDAExecutionProvider.", V),
+            (W, "constant_folding.cc:608 ApplyImpl", "Failure during constant folding of ScatterElements node 'N5': indices element out of data bounds", V),
+            (W, "graph.cc:124 MergeShapeInfo", "Error merging shape info for output. 'N53_T0' source:{2,3,1} target:{2,3,0}. Falling back to lenient merge.", V),
+            (W, "graph.cc:1430 Graph", "Initializer N3_T0 appears in graph inputs and will not be treated as constant value/weight.", V),
+            (ShorokooLogSeverity.Error, "sequential_executor.cc:671 ExecuteKernel", "Non-zero status code returned while running Gather node.", V),
+            (W, "graph.cc:124 ShapeInfo", "Error merging shape info for output.", W),
+            (W, "graph.cc:124 Other::MergeShapeInfo", "Error merging shape info for output.", W),
+            (W, "inference_session.cc:3040 Graph", "Initializer N3_T0 appears in graph inputs and will not be treated as constant value/weight.", W),
+            (W, "graph.cc:5607 onnxruntime::Graph::CleanUnusedInitializersAndNodeArgs", "Removing initializer 'w'. It is not used by any node and should be removed from the model.", W),
+            (W, "graph.cc:124 onnxruntime::MergeShapeInfo", "Some other message.", W),
+            (W, "graph.cc:124 onnxruntime::SomeOtherFunction", "Error merging shape info for output.", W),
+            (ShorokooLogSeverity.Error, "execution_frame.cc:900 onnxruntime::ExecutionFrame::VerifyOutputSizes", "Non-zero status code returned while running Gather node.", ShorokooLogSeverity.Error),
+            (W, "", "Memcpy nodes are added to the graph", W),
+        ];
+        Assert.Equal([.. cases.Select(c => c.Delivered)], cases.Select(c => OrtLogTriage.Of(c.Logged, c.Location, c.Text)));
+    }
+
+    [Fact]
+    public void TestConcurrentRunsEachDeliverTheirOwnMessagesAndCloseTheirRoutes()
+    {
+        var backend = DefaultBackend.Instance;
+        string[] outputs = ["first", "second"];
+        ConcurrentQueue<RuntimeLogMessage> onBuild = [];
+        ConcurrentQueue<RuntimeLogMessage>[] sinks = [new(), new()];
+        var sessions = outputs.Select(o => backend.CreateSession(
+            LoggingModel(o), ShorokooGraphOptimization.EnableAll, Into(onBuild, ShorokooLogSeverity.Info), DeviceMemorySettings.Default)).ToArray();
+        var route = ((OrtSession)sessions[0]).Log;
+        Parallel.For(0, 40, i => RunLogging(backend, sessions[i % 2], new RunSettings { Log = Into(sinks[i % 2], ShorokooLogSeverity.Warning) }));
+        Assert.True(RuntimeLogRoutes.IsOpen(route.Id));
+        foreach (var session in sessions) session.Dispose();
+
+        Assert.False(RuntimeLogRoutes.IsOpen(route.Id));
+        Assert.DoesNotContain(onBuild, Misshapen);
+        for (int i = 0; i < 2; i++)
+        {
+            Assert.Equal(20, sinks[i].Count);
+            Assert.All(sinks[i], m => Assert.Contains($"output {outputs[i]}", m.Text));
+        }
+        using (var verbose = RuntimeLogRoutes.Open(new LogSettings { MinimumSeverity = ShorokooLogSeverity.Verbose }))
+        {
+            Assert.Equal(ShorokooLogSeverity.Verbose, RuntimeLogRoutes.Floor);
+            Assert.Equal(OrtLoggingLevel.ORT_LOGGING_LEVEL_VERBOSE, OrtEnv.Instance().EnvLogLevel);
+            Assert.Same(verbose.Log, RuntimeLogRoutes.Resolve(verbose.Id));
+            Assert.Same(verbose.Log, RuntimeLogRoutes.Resolve($"unknown:{verbose.Id}"));
+            Assert.Same(verbose.Log, RuntimeLogRoutes.Resolve($"{verbose.Id}:unknown"));
+            Assert.Same(LogSettings.Default, RuntimeLogRoutes.Resolve("unknown"));
+            using (verbose.Enter())
+                Assert.Same(verbose.Log, RuntimeLogRoutes.Resolve("unknown"));
+            using (verbose.Enter(LogSettings.None))
+                Assert.Equal([LogSettings.None, LogSettings.None], [RuntimeLogRoutes.Resolve(verbose.Id), RuntimeLogRoutes.Resolve("unknown")]);
+            Assert.Same(LogSettings.Default, RuntimeLogRoutes.Resolve("unknown"));
+        }
+    }
+
+    [Fact]
+    public void TestAContextsLogSettingsReachItsSessionsAndRunsUnlessARunNamesItsOwn()
+    {
+        var recording = new SessionCountingBackend(DefaultBackend.Instance);
+        LogSettings onContext = new() { MinimumSeverity = ShorokooLogSeverity.Error }, onRun = new() { MinimumSeverity = ShorokooLogSeverity.Info };
+        using var context = new ComputeContext(recording) { RunSettings = new RunSettings { Log = onContext } };
+        var x = InputVector<float32>("x");
+        float[] values = [1f, 2f];
+        var input = TensorData([2L], values);
+        using var compiled = context.Compile(new InternalComputationGraph([x], [x + x]));
+        compiled.Execute(input.Shared());
+        compiled.Execute([input.Shared()], context.RunSettings with { Log = onRun });
+
+        Assert.All(recording.Built, log => Assert.Same(onContext, log));
+        Assert.Equal([onContext, onRun], recording.Ran);
+    }
+
     /// <summary>
     /// Shorokoo's allocator is registered with ONNX Runtime's environment through reflection as well
     /// — the C API's <c>RegisterAllocator</c>, which the managed surface has no call for, the native
@@ -1401,6 +1645,35 @@ public class CoreUtilsCoverageTests
         Assert.Equal((2 * G, 3, 0), TheCardIsWaitedForOutsideTheAllocatorsLockAndOnlyForWhatTheAskingCallLetGoOf());
         Assert.True(ReleasingWhatACardKeepsAnswersTheBytesItsMemoryShrankBy());
         Assert.Equal((0L, 4 * G, 4 * G), MemoryTheSystemWouldNotTakeBackStaysCountedAsCommitted());
+        Assert.Equal((false, false, true), ABlockACallLetGoOfGoesBackWithinItOnlyToARequestOnTheStreamItWasTakenOn());
+        Assert.Equal((1, 0), (WaitsForTheCardAsACallEnds(unfinished: true), WaitsForTheCardAsACallEnds(unfinished: false)));
+    }
+
+    private static int WaitsForTheCardAsACallEnds(bool unfinished)
+    {
+        var card = new FakeCard();
+        var account = card.Allocator.Open("probe");
+        using (var charge = CachingAllocator.Charge(null, account))
+        {
+            card.Allocator.Free(card.Allocator.Allocate(FakeCard.GranuleBytes, out _, stream: 1));
+            if (unfinished) charge.Unfinished();
+        }
+        return card.Waits;
+    }
+
+    private static (bool, bool, bool) ABlockACallLetGoOfGoesBackWithinItOnlyToARequestOnTheStreamItWasTakenOn()
+    {
+        const long G = FakeCard.GranuleBytes;
+        var card = new FakeCard();
+        var account = card.Allocator.Open("probe");
+        using (CachingAllocator.Charge(null, account))
+        {
+            var block = card.Allocator.Allocate(G, out _, stream: 1);
+            card.Allocator.Free(block);
+            return (card.Allocator.Allocate(G, out _) == block,
+                card.Allocator.Allocate(G, out _, stream: 2) == block,
+                card.Allocator.Allocate(G, out _, stream: 1) == block);
+        }
     }
 
     private static (long, bool, long) ABlockHandsBackItsFirstGranulesMemoryButKeepsItsAddressUntilItGoes()
@@ -1894,6 +2167,19 @@ public class CoreUtilsCoverageTests
     }
 
     [Fact]
+    public void TestATracedSessionKeepsThreadPoolsOfItsOwn()
+    {
+        using var plain = new ComputeContext();
+        using var traced = new ComputeContext { Diagnostics = new DiagnosticSettings { TraceNodePlacement = true } };
+        var untraced = Doubling(plain);
+        var profiled = Doubling(traced);
+        untraced.Execute(ThreeFloats());
+        profiled.Execute(ThreeFloats());
+        Assert.Equal(OrtEnvironment.SharedThreadPools, ((OrtSession)untraced.Session).OnSharedThreadPools);
+        Assert.False(((OrtSession)profiled.Session).OnSharedThreadPools);
+    }
+
+    [Fact]
     public void TestADeterministicContextBuildsAndRunsItsSessionsAndComputesWhatAnyOtherDoes()
     {
         using var deterministic = new ComputeContext { Diagnostics = new DiagnosticSettings { DeterministicCompute = true } };
@@ -1933,6 +2219,32 @@ public class CoreUtilsCoverageTests
         Assert.Empty(new NodePlacement([]).Providers);
         Assert.Throws<ArgumentNullException>(() => new NodePlacement(null!));
         Assert.Throws<ArgumentNullException>(() => placement.NodesOn(null!));
+    }
+
+    [Fact]
+    public void TestAProfileThatCannotBeReadFailsWithItsCause()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"profile-{Guid.NewGuid():N}.json");
+        Exception? Reading(string? text)
+        {
+            if (text is not null) File.WriteAllText(path, text);
+            try { return Record.Exception(() => OrtProfile.Read(path)); }
+            finally { File.Delete(path); }
+        }
+        Assert.IsType<FileNotFoundException>(Reading(null));
+        Assert.IsAssignableFrom<System.Text.Json.JsonException>(Reading("[{"));
+        Assert.IsType<InvalidDataException>(Reading("{}"));
+        Assert.Null(Reading("[]"));
+
+        using var traced = new ComputeContext { Diagnostics = new DiagnosticSettings { TraceNodePlacement = true } };
+        var compiled = Doubling(traced);
+        compiled.Execute(ThreeFloats());
+        var profile = Assert.Single(Directory.GetFiles(((OrtSession)compiled.Session).ProfileDirectory!, "*.json"));
+        InvalidOperationException unread;
+        using (new FileStream(profile, FileMode.Open, FileAccess.ReadWrite, OperatingSystem.IsWindows() ? FileShare.ReadWrite : FileShare.None))
+            unread = Assert.Throws<InvalidOperationException>(() => compiled.ReadNodePlacement());
+        Assert.IsType<IOException>(unread.InnerException);
+        Assert.Same(unread, Assert.Throws<InvalidOperationException>(() => compiled.ReadNodePlacement()));
     }
 
     /// <summary>
@@ -2013,7 +2325,7 @@ public class CoreUtilsCoverageTests
         var context = StripCommentsAndStrings(File.ReadAllText(
             Path.Combine(ProductSourceRoot(), "Shorokoo", "Core", "ComputeContext.cs")));
         Assert.Matches(@"BuildSession\s*\(\s*backend\s*,\s*modelData\s*,\s*optimization\s*,\s*deviceMemory\s*[,)]", context);
-        Assert.Matches(@"backend\.CreateSession\s*\(\s*modelData\s*,\s*optimization\s*,\s*ShorokooLogSeverity\.Fatal\s*,\s*deviceMemory\s*,", context);
+        Assert.Matches(@"backend\.CreateSession\s*\(\s*modelData\s*,\s*optimization\s*,\s*RunSettings\.Log\s*,\s*deviceMemory\s*,", context);
         Assert.Matches(@"TryLimitDeviceMemory\s*\(\s*room\s*\)", context);
 
         var session = Source("Shorokoo.OnnxRuntime", "OrtSession.cs");

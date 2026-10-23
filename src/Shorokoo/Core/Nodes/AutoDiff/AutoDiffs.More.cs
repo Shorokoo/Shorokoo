@@ -78,54 +78,46 @@ namespace Shorokoo.Core.Nodes.AutoDiff
             return [grad * (cdf + x * pdf)];
         }
 
-        // ===== Elu =====
+        // ===== Elu / Selu / Celu =====
+        //
+        // Below zero each output is an affine function of the exponential its derivative needs,
+        // so the rules read the forward output rather than exponentiating the input again: with
+        // a positive alpha (and gamma) the output is positive exactly where the input is, so the
+        // input need not even be kept for the backward pass. A non-positive parameter, where the
+        // output's sign does not tell the branches apart, takes the mask from the input.
 
-        [AutoDiff(ELU)]
-        public static Variable?[] Elu<T>(Tensor<T> x, Tensor<T> grad, float? alpha) where T : IVarType
+        [AutoDiff(ELU, UsesOutputs = true)]
+        public static Variable?[] Elu<T>(Tensor<T> x, Tensor<T> y, Tensor<T> grad, float? alpha) where T : IVarType
         {
             // elu(x) = x if x > 0, alpha * (exp(x) - 1) if x <= 0
-            // elu'(x) = 1 if x > 0, alpha * exp(x) if x <= 0
+            // elu'(x) = 1 if x > 0, alpha * exp(x) = y + alpha if x <= 0
             var effectiveAlpha = alpha ?? 1.0f;
-            var zero = TypedConst(0.0f, x);
-            var one = TypedConst(1.0f, x);
-            var alphaConst = TypedConst(effectiveAlpha, x);
-            var mask = x > zero;
-            Tensor<T> eluGrad = OnnxOp.Where(mask, one, alphaConst * x.Exp());
-            return [grad * eluGrad];
+            var zero = TypedConst(0.0f, y);
+            var mask = effectiveAlpha > 0f ? y > zero : x > zero;
+            return [OnnxOp.Where(mask, grad, grad * (y + TypedConst(effectiveAlpha, y)))];
         }
 
-        // ===== Selu =====
-
-        [AutoDiff(SELU)]
-        public static Variable?[] Selu<T>(Tensor<T> x, Tensor<T> grad, float? alpha, float? gamma) where T : IVarType
+        [AutoDiff(SELU, UsesOutputs = true)]
+        public static Variable?[] Selu<T>(Tensor<T> x, Tensor<T> y, Tensor<T> grad, float? alpha, float? gamma) where T : IVarType
         {
             // selu(x) = gamma * (x if x > 0, alpha * (exp(x) - 1) if x <= 0)
-            // selu'(x) = gamma if x > 0, gamma * alpha * exp(x) if x <= 0
+            // selu'(x) = gamma if x > 0, gamma * alpha * exp(x) = y + gamma * alpha if x <= 0
             var effectiveAlpha = alpha ?? 1.67326319217681884765625f;
             var effectiveGamma = gamma ?? 1.0507010221481323242187f;
-            var zero = TypedConst(0.0f, x);
-            var one = TypedConst(1.0f, x);
-            var alphaConst = TypedConst(effectiveAlpha, x);
-            var gammaConst = TypedConst(effectiveGamma, x);
-            var mask = x > zero;
-            var seluGrad = gammaConst * OnnxOp.Where(mask, one, alphaConst * x.Exp());
-            return [grad * seluGrad];
+            var zero = TypedConst(0.0f, y);
+            var mask = effectiveAlpha > 0f && effectiveGamma > 0f ? y > zero : x > zero;
+            return [OnnxOp.Where(mask, grad * TypedConst(effectiveGamma, y), grad * (y + TypedConst(effectiveGamma * effectiveAlpha, y)))];
         }
 
-        // ===== Celu =====
-
-        [AutoDiff(CELU)]
-        public static Variable?[] Celu<T>(Tensor<T> x, Tensor<T> grad, float? alpha) where T : IVarType
+        [AutoDiff(CELU, UsesOutputs = true)]
+        public static Variable?[] Celu<T>(Tensor<T> x, Tensor<T> y, Tensor<T> grad, float? alpha) where T : IVarType
         {
             // celu(x) = max(0, x) + min(0, alpha * (exp(x/alpha) - 1))
-            // celu'(x) = 1 if x > 0, exp(x/alpha) if x <= 0
+            // celu'(x) = 1 if x > 0, exp(x/alpha) = y / alpha + 1 if x <= 0
             var effectiveAlpha = alpha ?? 1.0f;
-            var zero = TypedConst(0.0f, x);
-            var one = TypedConst(1.0f, x);
-            var alphaConst = TypedConst(effectiveAlpha, x);
-            var mask = x > zero;
-            Tensor<T> celuGrad = OnnxOp.Where(mask, one, (x / alphaConst).Exp());
-            return [grad * celuGrad];
+            var zero = TypedConst(0.0f, y);
+            var mask = effectiveAlpha > 0f ? y > zero : x > zero;
+            return [OnnxOp.Where(mask, grad, grad * (y / TypedConst(effectiveAlpha, y) + TypedConst(1.0f, y)))];
         }
 
         // ===== Flatten =====
@@ -410,13 +402,15 @@ namespace Shorokoo.Core.Nodes.AutoDiff
 
                 // `data` is typically a table of which a step reads a few rows, so everything
                 // here but the last op is sized by the M index positions, not by the table.
-                // Each row read is given one slot: the number of one of the positions that read
-                // it. Where several do, which one ScatterND keeps is unspecified and does not
-                // matter — every position then reads that row's one slot back — and a plain
-                // ScatterND is what every execution provider runs on int64 (CUDA reduces only
-                // float types). Negative and non-negative spellings of a row share its slot,
-                // since ScatterND and Gather both resolve them. The rows no position reads keep
-                // -1, which Gather resolves to the last slot, M, which nothing is summed into.
+                // Each row read is given one slot: the number of the last position that reads
+                // it, a ScatterElements reducing by max over the positions onto -1. Several
+                // positions reading one row is the normal case, and a reduction is what makes
+                // writing them all to one element well defined, on every execution provider and
+                // for int64 (CUDA's ScatterND reduces only float types; its ScatterElements
+                // reduces int64 too). Negative and non-negative spellings of a row share its
+                // slot, since ScatterElements and Gather both resolve them. The rows no position
+                // reads keep -1, which Gather resolves to the last slot, M, which nothing is
+                // summed into.
                 // grad's rows are summed into their row's slot in position order, onto zero —
                 // exactly the sums a ScatterND-Add into a zeroed table makes — and one Gather by
                 // slot then writes the table-shaped gradient in a single pass, rather than
@@ -424,7 +418,8 @@ namespace Shorokoo.Core.Nodes.AutoDiff
                 Tensor<int64> positions = OnnxOp.Range(
                     Scalar(0L), OnnxOp.Squeeze(positionCount, Vector(0L)), Scalar(1L));                 // [M]
                 Tensor<int64> unread = OnnxOp.Expand(Scalar(-1L), OnnxOp.Shape(data, start: 0, end: 1)); // [V]
-                Tensor<int64> slotOfRow = OnnxOp.ScatterND(unread, scatterIndices, positions);            // [V]
+                Tensor<int64> slotOfRow = OnnxOp.ScatterElements(
+                    unread, flatIndices, positions, axis: 0, reduction: ScatterNDReduction.Max);            // [V]
                 Tensor<int64> slotOfPosition = OnnxOp.Gather(slotOfRow, flatIndices, axis: 0);           // [M]
                 Tensor<int64> slotsShape = OnnxOp.Concat([positionCount + Vector(1L), tailShape], axis: 0);
                 Tensor<T1> slots = OnnxOp.ScatterND(
@@ -763,9 +758,9 @@ namespace Shorokoo.Core.Nodes.AutoDiff
             Tensor<T> xHatFlat = OnnxOp.Reshape(xHat, xShape, allowZero: false);
 
             // Build broadcast shape [1, C, 1, 1, ...] for scale/bias
-            Tensor<int64> onesShape = OnnxOp.Expand(Scalar(1L), xRank);
-            Tensor<int64> scatterIdx = OnnxOp.Reshape(Vector(1L), Vector(1L, 1L), allowZero: false);
-            Tensor<int64> broadcastShape = OnnxOp.ScatterND(onesShape, scatterIdx, cVec);
+            Tensor<int64> rank = xRank;
+            Tensor<int64> broadcastShape = OnnxOp.Concat(
+                [Vector(1L), cVec, OnnxOp.Expand(Scalar(1L), rank - Vector(2L))], axis: 0);
             Tensor<T> scaleBC = OnnxOp.Reshape(scale, broadcastShape, allowZero: false);
 
             // Build reduce axes for dscale/dbias: [0, 2, 3, ..., rank-1] (all except channel dim 1)

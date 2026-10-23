@@ -25,7 +25,8 @@ namespace Shorokoo.Core.Backends;
 /// interface will attribute memory on, or a machine that has none of them, reads <c>null</c>
 /// rather than throwing. That includes a process NVML does not list under its own id, as in a
 /// container with its own process-id namespace: an absent entry cannot be told from one this
-/// process does not have, and a reading of zero would be a guess.</para>
+/// process does not have, and a reading of zero would be a guess. It includes WSL too, which has
+/// no DXGI and whose NVML lists no process on the card.</para>
 /// </summary>
 internal static unsafe class ProcessDeviceMemory
 {

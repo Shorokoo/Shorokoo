@@ -50,9 +50,11 @@ public partial class RigScalingDistinct12
     public static Tensor<float32> Inline(Tensor<float32> x)
     {
         var acc = x;
+#pragma warning disable MSG007 // twelve separate parameters of twelve shapes are the shape under test
         for (long i = 0; i < 12; i++)
             acc *= NormalDist.Init(Vector(4096L + i, 384L), Scalar(0f), Scalar(0.02f))
                      .Reduce(ReduceKind.Mean, null, keepDims: false).Scalar();
+#pragma warning restore MSG007
         return acc;
     }
 }
@@ -62,9 +64,11 @@ internal static class RigScalingStack
     internal static Tensor<float32> Chain(Tensor<float32> x, int layers)
     {
         var acc = x;
+#pragma warning disable MSG007 // separate trace-order parameters are the shape under test
         for (int i = 0; i < layers; i++)
             acc *= NormalDist.Init(Vector(384L, 384L), Scalar(0f), Scalar(0.02f))
                      .Reduce(ReduceKind.Mean, null, keepDims: false).Scalar();
+#pragma warning restore MSG007
         return acc;
     }
 }

@@ -15,8 +15,10 @@ import collections
 import contextlib
 import contextvars
 import ctypes
+import itertools
 import linecache
 import os
+import sys
 import threading
 import warnings
 
@@ -314,15 +316,51 @@ _CODE_KEPT = 64
 _PROGRAMS_KEPT = 16
 
 
+# Copies of device arrays, made by one program per signature of the arrays it is handed: an
+# input a program donates, which the run was only lent, is handed to it as one of these, so the
+# program writes over the copy and the lent array stays whole.
+_copies = jax.jit(lambda arrays: [jnp.copy(a) for a in arrays])
+
+# The token the next (program, outputs wanted) pair gets: see Model.run. Never reused, so a token
+# the .NET side cached the description of names that pair alone.
+_tokens = itertools.count()
+
+
+class _Program:
+    """A compiled program and, per tuple of output indices runs of it hand over, the token naming
+    that pair."""
+
+    __slots__ = ("compiled", "tokens")
+
+    def __init__(self, compiled):
+        self.compiled = compiled
+        self.tokens = {}
+
+    def token(self, wanted):
+        token = self.tokens.get(wanted)
+        if token is None:
+            token = self.tokens[wanted] = next(_tokens)
+        return token
+
+
 class Model:
     """A translated model loaded for one session: its `main`, its constants, and the XLA programs
-    compiled from it so far, one per signature of the shapes and element types of its inputs."""
+    compiled from it so far, one per signature of the shapes and element types of its inputs.
 
-    def __init__(self, main, constants, device, precision):
+    Every program donates the inputs at the positions `donated` to XLA (jax.jit's donate_argnums),
+    which may then write an output over one of them rather than into memory of its own. A run donates
+    the array it was handed at such a position only where the .NET side says the run owns it -- a
+    value the run consumed, fed once -- and otherwise hands the program a copy of it, which the
+    program may write over: a donated array is deleted by the run, so an array the run was only
+    lent is never donated."""
+
+    def __init__(self, main, constants, device, precision, donated=()):
         self._main = main
         self._constants = constants
         self.device = device
         self.precision = precision
+        self.on_device = device.platform != "cpu"
+        self.donated = tuple(sorted(set(int(i) for i in donated)))
         self._large = [i for i, c in enumerate(constants) if np.size(c) > _LARGEST_LITERAL]
         self._large_values = [jax.device_put(constants[i], device) for i in self._large]
         self._programs = collections.OrderedDict()
@@ -356,7 +394,9 @@ class Model:
             specs = [jax.ShapeDtypeStruct(shape, dtype, sharding=sharding) for shape, dtype in signature]
             key = jax.ShapeDtypeStruct((2,), np.uint32, sharding=sharding)
             large = [jax.ShapeDtypeStruct(v.shape, v.dtype, sharding=sharding) for v in self._large_values]
-            program = jax.jit(self._entry).lower(key, large, *specs).compile()
+            # The inputs follow the key and the large constants among the program's arguments.
+            donate = tuple(2 + i for i in self.donated)
+            program = _Program(jax.jit(self._entry, donate_argnums=donate).lower(key, large, *specs).compile())
             self._programs[signature] = program
             while len(self._programs) > _PROGRAMS_KEPT:
                 self._programs.popitem(last=False)
@@ -368,17 +408,42 @@ class Model:
         compiled is refused when its session is made."""
         self.program(tuple((tuple(shape), jax_dtype(code)) for code, shape in inputs))
 
-    def __call__(self, args):
-        signature = tuple((tuple(a.shape), np.dtype(a.dtype)) for a in args)
+    def run(self, args, wanted, owned):
+        """Runs the program for `args`' signature and returns (program, outputs, aliased, donated,
+        copied): the program run; every output, still being computed on a device; per output in
+        `wanted`, the position of the input whose array it was written over, or -1 -- an input the
+        run donated as it was handed, never a copy; and how many inputs were donated as handed and
+        how many through a copy. `owned` holds the donated positions whose array the run owns."""
+        signature = tuple((a.shape, np.dtype(a.dtype)) for a in args)
         program = self.program(signature)
-        moved = [jax.device_put(a, self.device) for a in args]
-        return program(_fresh_key(), self._large_values, *moved)
+        if not self.on_device:
+            args = [jax.device_put(a, self.device) for a in args]
+        donated = copied = 0
+        given = None
+        if self.donated:
+            args = list(args)
+            lent = [i for i in self.donated if i not in owned]
+            if lent:
+                for i, copy in zip(lent, _copies([args[i] for i in lent])):
+                    args[i] = copy
+                copied = len(lent)
+            donated = len(self.donated) - copied
+            if self.on_device and donated:
+                # Read before the run, which deletes what it donates. An array of no elements has no
+                # buffer -- every one is at address 0 -- so none is written over.
+                given = {args[i].unsafe_buffer_pointer(): i for i in self.donated if i in owned and args[i].nbytes}
+        outputs = program.compiled(_fresh_key(), self._large_values, *args)
+        aliased = None
+        if given:
+            aliased = [given.get(outputs[k].unsafe_buffer_pointer(), -1) if outputs[k].nbytes else -1 for k in wanted]
+        return program, outputs, aliased, donated, copied
 
 
-def load_model(source, filename, constants, device_name, precision="HIGHEST"):
+def load_model(source, filename, constants, device_name, precision="HIGHEST", donated=()):
     """The model a translation's source defines, with `constants` bound as `_C`, on `device_name`,
-    its products and convolutions compiled at `precision` (a jax.lax.Precision name). The source's
-    compiled Python code is cached by `filename`, which names the source's hash."""
+    its products and convolutions compiled at `precision` (a jax.lax.Precision name), donating the
+    inputs at the positions `donated` (see Model). The source's compiled Python code is cached by
+    `filename`, which names the source's hash."""
     code = _code.get(filename)
     if code is None:
         code = compile(source, filename, "exec")
@@ -392,34 +457,61 @@ def load_model(source, filename, constants, device_name, precision="HIGHEST"):
     constants = list(constants)
     namespace = {"__name__": "shorokoo_model", "_C": constants}
     exec(code, namespace)
-    return Model(namespace["main"], constants, device_of(device_name), jax.lax.Precision[precision])
+    return Model(namespace["main"], constants, device_of(device_name), jax.lax.Precision[precision], donated)
 
 
-def prepare(model, inputs, severity=None):
-    token = _warning_severity.set(severity)
-    try:
+def prepare(model, inputs, warned=None):
+    with _collecting_warnings(warned):
         model.prepare(inputs)
-    finally:
-        _warning_severity.reset(token)
 
 
-def run(model, args, wanted, severity=None):
+def run(model, args, wanted, owned=(), warned=None):
     """Runs a model and hands over the outputs at indices `wanted`, each where the .NET side reads
     the model's inputs and leaves its outputs: in the device's memory on a card, and a host value of
-    its own on the CPU. Returns (value, description) per output. Every output is ready when this
-    returns: nothing the run reads or writes is still in flight."""
-    token = _warning_severity.set(severity)
-    try:
-        outputs = model(args)
-    finally:
-        _warning_severity.reset(token)
-    on_device = model.device.platform != "cpu"
-    results = []
-    for index in wanted:
-        value = outputs[index]
-        value = jax.block_until_ready(value) if on_device else host_copy(value)
-        results.append((value, describe(value)))
-    return results
+    its own on the CPU. `owned` holds the positions of the inputs the model donates (Model) whose
+    arrays the run owns, and may donate as they are.
+
+    Returns (token, values, descriptions, aliased, donated, copied): the outputs; on the CPU their
+    descriptions (describe), and on a device None, with `token` naming the program and the outputs
+    wanted, whose descriptions are the same every run -- -1 on the CPU; per output, the position of
+    the input it was written over, or -1, or None where none was; and how many donated inputs were
+    donated as they were handed and how many through a copy.
+
+    On the CPU every output is ready when this returns: nothing the run reads or writes is still in
+    flight, so the .NET side may read and write host memory the run read. On a device the run may
+    still be computing: its outputs are JAX's arrays, which JAX reads only once they are computed,
+    and what it reads and donates JAX holds until it has -- so the .NET side, which reaches device
+    memory only through JAX, can go on while the device computes."""
+    with _collecting_warnings(warned):
+        program, outputs, aliased, donated, copied = model.run(args, wanted, frozenset(owned))
+    if model.on_device:
+        return (program.token(tuple(wanted)), _handed_over(outputs, wanted, aliased), None, aliased,
+                donated, copied)
+    # Every output, wanted or not: the run reads host memory the .NET side may write once this
+    # returns.
+    jax.block_until_ready(outputs)
+    values = [host_copy(outputs[index]) for index in wanted]
+    return -1, values, [describe(value) for value in values], aliased, donated, copied
+
+
+def _handed_over(outputs, wanted, aliased):
+    """The device arrays a run hands over, one per index in `wanted`: an output wanted more than once
+    is handed over as it is the first time and as a copy of its own every other, so that no two
+    values hold one array, which a later run donating either would delete under the other. A copy
+    was written over no input, and `aliased` says so."""
+    values = [outputs[index] for index in wanted]
+    seen = set()
+    repeats = []
+    for k, index in enumerate(wanted):
+        if index in seen:
+            repeats.append(k)
+        seen.add(index)
+    if repeats:
+        for k, copy in zip(repeats, _copies([values[k] for k in repeats])):
+            values[k] = copy
+            if aliased is not None:
+                aliased[k] = -1
+    return tuple(values)
 
 
 def jax_version():
@@ -510,20 +602,92 @@ def _fresh_key():
 
 # ---- warnings ---------------------------------------------------------------------------------
 
-WARNING = 2
-_warning_severity = contextvars.ContextVar("shorokoo_jax_warning_severity", default=None)
+_warnings_collected = contextvars.ContextVar("shorokoo_jax_warnings_collected", default=None)
 _show_warning = warnings.showwarning
 
+# How many calls are collecting warnings, and the records Python made of the places their warnings
+# were shown from, which they hold until the last of them ends (see _collect_jax_warning).
+_collecting_lock = threading.Lock()
+_collecting_calls = 0
+_held_records = {}
 
-def _show_warning_at_jax_severity(message, category, filename, lineno, file=None, line=None):
-    """Shows a warning unless the run that raised it asked only for errors: the session's log
-    severity, read per run, since the interpreter's warning filters are the whole process's. It
-    hands on to whatever showed warnings before, another backend's filter included."""
-    severity = _warning_severity.get()
-    if severity is not None and severity > WARNING:
+
+@contextlib.contextmanager
+def _collecting_warnings(warned):
+    """Collects the warnings the call this thread makes inside it raises into the list `warned`."""
+    global _collecting_calls
+    token = _warnings_collected.set(warned)
+    with _collecting_lock:
+        _collecting_calls += 1
+        if _collecting_calls > 1:
+            _forget_held_records()
+    try:
+        yield
+    finally:
+        with _collecting_lock:
+            _collecting_calls -= 1
+            if _collecting_calls == 0:
+                _forget_held_records()
+        _warnings_collected.reset(token)
+
+
+def _forget_held_records():
+    for registry, key in _held_records.values():
+        registry.pop(key, None)
+    _held_records.clear()
+
+
+def _collect_jax_warning(message, category, filename, lineno, file=None, line=None):
+    """Appends a warning a call raises to the list the .NET side handed that call, as (category,
+    message, location), rather than showing it: the .NET side delivers it to the call's own log
+    settings. The interpreter's warning machinery is the whole process's, so the list is read per
+    call. A warning raised outside a call goes on to whatever showed warnings when this hook was
+    installed, another backend's hook included.
+
+    Under the default filter action a warning reaches each call that raises it, once. Python shows
+    such a warning once per place in the whole process, keeping a record that it did (_shown_record).
+    While one call collects, the record stays, so Python itself skips the call's repeats there, and
+    it is taken back once the call ends, so the next call collects it too. While several calls
+    overlap, each record is taken back as soon as it is made, so that every one of them collects
+    the warning, once."""
+    collected = _warnings_collected.get()
+    if collected is None:
+        _show_warning(message, category, filename, lineno, file, line)
         return
-    _show_warning(message, category, filename, lineno, file, line)
+    entry = (getattr(category, "__name__", str(category)), str(message), f"{filename}:{lineno}")
+    record = _shown_record(message, category, filename, lineno)
+    if record is not None:
+        with _collecting_lock:
+            if _collecting_calls > 1:
+                record[0].pop(record[1], None)
+                if entry in collected:
+                    return
+            else:
+                _held_records[(id(record[0]), record[1])] = record
+    collected.append(entry)
 
 
-if getattr(warnings.showwarning, "__name__", "") != "_show_warning_at_jax_severity":
-    warnings.showwarning = _show_warning_at_jax_severity
+def _shown_record(message, category, filename, lineno):
+    """The record Python made, as it showed this warning, that it was shown from its place -- its
+    (registry, key) -- or None where it made none, as for a warning the filters always show. The
+    registry is the `__warningregistry__` of the module whose frame raised it -- the one on this
+    thread's stack running `filename` at `lineno` -- or of `sys` for a warning raised with none."""
+    key = (str(message), category, lineno)
+    first = None
+    frame = sys._getframe(1)
+    while frame is not None:
+        registry = frame.f_globals.get("__warningregistry__")
+        if isinstance(registry, dict) and key in registry:
+            if frame.f_code.co_filename == filename and frame.f_lineno == lineno:
+                return registry, key
+            if first is None:
+                first = registry
+        frame = frame.f_back
+    registry = sys.__dict__.get("__warningregistry__")
+    if isinstance(registry, dict) and key in registry:
+        return registry, key
+    return None if first is None else (first, key)
+
+
+if getattr(warnings.showwarning, "__name__", "") != "_collect_jax_warning":
+    warnings.showwarning = _collect_jax_warning

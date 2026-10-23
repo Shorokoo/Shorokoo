@@ -1087,7 +1087,8 @@ namespace Shorokoo.Tests.Modules
     }
 
     /// <summary>Σ elu(x, α) for α = 0.5 and α = −0.5 (an output above zero on both sides of the
-    /// switch), Σ selu(x, 2, 0.5) and Σ celu(x, 2), each checked element-wise.</summary>
+    /// switch), Σ selu(x, α, γ) for (2, 0.5), (−1, 0.5) and (2, −0.5), and Σ celu(x, α) for α = 2
+    /// and α = −2, each checked element-wise.</summary>
     [Module]
     public partial class AutoGradExponentialActivationsParameterCheck
     {
@@ -1095,7 +1096,10 @@ namespace Shorokoo.Tests.Modules
             => AutoGradCheckHelpers.ElementwiseDirectionalDerivCheck(x, z => (Tensor<float32>)OnnxOp.Elu(z, 0.5f))
                & AutoGradCheckHelpers.ElementwiseDirectionalDerivCheck(x, z => (Tensor<float32>)OnnxOp.Elu(z, -0.5f))
                & AutoGradCheckHelpers.ElementwiseDirectionalDerivCheck(x, z => (Tensor<float32>)OnnxOp.Selu(z, 2f, 0.5f))
-               & AutoGradCheckHelpers.ElementwiseDirectionalDerivCheck(x, z => (Tensor<float32>)OnnxOp.Celu(z, 2f));
+               & AutoGradCheckHelpers.ElementwiseDirectionalDerivCheck(x, z => (Tensor<float32>)OnnxOp.Selu(z, -1f, 0.5f))
+               & AutoGradCheckHelpers.ElementwiseDirectionalDerivCheck(x, z => (Tensor<float32>)OnnxOp.Selu(z, 2f, -0.5f))
+               & AutoGradCheckHelpers.ElementwiseDirectionalDerivCheck(x, z => (Tensor<float32>)OnnxOp.Celu(z, 2f))
+               & AutoGradCheckHelpers.ElementwiseDirectionalDerivCheck(x, z => (Tensor<float32>)OnnxOp.Celu(z, -2f));
     }
 
     /// <summary>loss = hardSigmoid(x). Piecewise-linear; smooth in (-2.5, 2.5).</summary>
@@ -3837,7 +3841,7 @@ namespace Shorokoo.Tests.Modules
     /// <summary>
     /// SoftmaxCrossEntropyLoss gradients over non-uniform <c>[N, 4, ...]</c> scores against their
     /// closed forms, element for element: <c>(softmax(x) − onehot(t)) · w[t] · upstream</c> under
-    /// every reduction, with a class weight and an ignored label (0), with the log-probabilities
+    /// every reduction, with a class weight, an ignored label (0) or both, with the log-probabilities
     /// read as well, and through a <c>tanh(x / 15) · 15</c> soft cap.
     /// </summary>
     internal static class SoftmaxCrossEntropyClosedForms
@@ -3848,8 +3852,9 @@ namespace Shorokoo.Tests.Modules
             var onehot = (Tensor<float32>)OnnxOp.OneHot(labels, Scalar(4L), Vector(0f, 1f), axis: 1);
             var n = ((Tensor<int64>)OnnxOp.Size(labels)).Cast<float32>().Scalar();
             var weight = Vector(0.5f, 1f, 1.5f, 2f);
-            var activeWeight = (Tensor<float32>)OnnxOp.Gather(weight, labels, axis: 0)
-                * (Tensor<float32>)OnnxOp.Cast(OnnxOp.Not(OnnxOp.Equal(labels, Scalar(0L))), null, DType.Float32);
+            var classWeight = (Tensor<float32>)OnnxOp.Gather(weight, labels, axis: 0);
+            var active = (Tensor<float32>)OnnxOp.Cast(OnnxOp.Not(OnnxOp.Equal(labels, Scalar(0L))), null, DType.Float32);
+            var activeWeight = classWeight * active;
             var sampleScale = (Tensor<float32>)OnnxOp.Reshape(OnnxOp.Range(Scalar(1f), n + Scalar(1f), Scalar(1f)), OnnxOp.Shape(labels), allowZero: false);
             var m = (Tensor<float32>)OnnxOp.Reshape(OnnxOp.Range(Scalar(-1f),
                 ((Tensor<int64>)OnnxOp.Size(x)).Cast<float32>().Scalar() * Scalar(0.25f) - Scalar(1f), Scalar(0.25f)), OnnxOp.Shape(x), allowZero: false);
@@ -3863,6 +3868,12 @@ namespace Shorokoo.Tests.Modules
                 & Near(Grad(x, xs => Loss(xs, labels, weight, 0L, "mean")),
                     (p - onehot) * Rows(activeWeight) / activeWeight.Reduce(ReduceKind.Sum, keepDims: false).Scalar())
                 & Near(Grad(x, xs => Loss(xs, labels, weight, 0L, "sum")), (p - onehot) * Rows(activeWeight))
+                & Near(Grad(x, xs => Loss(xs, labels, null, 0L, "mean")),
+                    (p - onehot) * Rows(active) / active.Reduce(ReduceKind.Sum, keepDims: false).Scalar())
+                & Near(Grad(x, xs => Loss(xs, labels, weight, null, "mean")),
+                    (p - onehot) * Rows(classWeight) / classWeight.Reduce(ReduceKind.Sum, keepDims: false).Scalar())
+                & Near(Grad(x, xs => (Sce(xs, labels, weight, 0L, "none").Loss * sampleScale).Reduce(ReduceKind.Sum, keepDims: false).Scalar()),
+                    (p - onehot) * Rows(activeWeight * sampleScale))
                 & Near(Grad(x, xs => LossAndLogProbs(xs, labels, m)),
                     (p - onehot) / n + m - p * m.Reduce(ReduceKind.Sum, axes: Vector(1L), keepDims: true))
                 & Near(Grad(x, xs => Loss((xs * Scalar(1f / 15f)).Tanh() * Scalar(15f), labels, null, null, "mean")),

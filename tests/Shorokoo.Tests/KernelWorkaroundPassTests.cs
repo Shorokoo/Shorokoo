@@ -361,6 +361,37 @@ public class KernelWorkaroundPassTests
     }
 
     [Fact]
+    public void TestASessionModelKeepsAConstantReadOnlyInsideALoopBodyOrALoopNestedInOne()
+    {
+        var x = InputTensor<uint32>("x", rank: 1);
+        var data = TensorData(DType.UInt32, [2L], 1u, 2u);
+        static int ReadOnlyWithin(ModelProto model)
+        {
+            var read = model.Graph.Nodes.SelectMany(n => n.Inputs).Concat(model.Graph.Outputs.Select(o => o.Name)).ToHashSet();
+            return model.Graph.Nodes.Count(n => n.OpType == CONSTANT && !read.Contains(n.Outputs[0]));
+        }
+        uint[] Ran(InternalComputationGraph g)
+        {
+            Assert.True(ReadOnlyWithin(Session(g, null)) > 0);
+            return System.Runtime.InteropServices.MemoryMarshal.Cast<byte, uint>(Run(g, Session(g, null), [data]).Single()).ToArray();
+        }
+        var seven = Scalar(7u);
+        var carried = x;
+        foreach (var ctx in LoopAPI.Iterate(OnnxOp.Size(x)))
+            carried = carried * seven;
+        Assert.Equal([49u, 98u], Ran(new([x], [carried])));
+        var nested = x;
+        foreach (var outer in LoopAPI.Iterate(OnnxOp.Size(x)))
+        {
+            var inner = nested;
+            foreach (var ctx in LoopAPI.Iterate(OnnxOp.Size(x)))
+                inner = inner * seven;
+            nested = inner;
+        }
+        Assert.Equal([2401u, 4802u], Ran(new([x], [nested])));
+    }
+
+    [Fact]
     public void TestANoopReductionComputesItsGroupsOnOnnxRuntimeWithConcreteShapes()
     {
         var x = TensorData(DType.Float32, [2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f);
@@ -541,6 +572,38 @@ public class KernelWorkaroundPassTests
         Assert.True(AsComputedWithoutConcreteShapes(Graph(a, Ones(Through(OnnxOp.Size(a), DType.Float16), 2040L)), Zeros(2049)));
         Assert.True(AsComputedWithoutConcreteShapes(Graph(a, Ones(Through(OnnxOp.Size(a), DType.BFloat16), 250L)), Zeros(257)));
         Assert.True(AsComputedWithoutConcreteShapes(Graph(a, Ones(Through(OnnxOp.Add(OnnxOp.Size(a), Scalar(16777216L)), DType.Float64), 16777216L)), Zeros(1)));
+        Variable Plus(Variable n, DType of, object constant) => OnnxOp.Add(n, OnnxOp.Cast(OnnxOp.Constant(TensorData(of, [], constant).MoveToAttribute()), null, DType.Int64));
+        Assert.True(AsComputedWithoutConcreteShapes(Graph(a, Ones(Plus(OnnxOp.Size(a), DType.Float64, 16777217.0), 16777217L)), Zeros(1)));
+        Assert.True(AsComputedWithoutConcreteShapes(Graph(a, Ones(Plus(OnnxOp.Size(a), DType.Float16, (Float16)2049f), 2048L)), Zeros(3)));
+    }
+
+    [Fact]
+    public void TestAPadOfComputedPadsAndAxesPadsOverEveryAxisWithConcreteShapes()
+    {
+        var a = InputTensor<float32>("a", rank: 2);
+        var axes = OnnxOp.Reshape(OnnxOp.Sub(OnnxOp.Size(OnnxOp.Shape(a)), Scalar(1L)), Vector(1L), false);
+        var pads = OnnxOp.Concat([OnnxOp.Slice(OnnxOp.Shape(a), Vector(0L), Vector(1L)), Vector(0L)], 0L);
+        var g = Graph(a, OnnxOp.Pad(a, pads, Scalar(9f), axes));
+        var data = TensorData(DType.Float32, [2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f);
+        Assert.True(AsComputedWithoutConcreteShapes(g, data));
+        var pad = AllNodes(FastOnnxModelBuilder.BuildInternalOnnxModel(g, prepForOnnx: true, inputDims: [[2L, 3L]], workarounds: KernelWorkaroundRegistry.OnnxRuntime)).Single(n => n.OpType == PAD);
+        Assert.True(pad.Inputs.Count < 4 || pad.Inputs[3] == "");
+    }
+
+    [Fact]
+    public void TestAGraphBakedForOneShapeIsRestoredToOneForEveryShape()
+    {
+        var a = InputTensor<float32>("a", rank: 2);
+        var noop = OnnxOp.ReduceSum(a, OnnxOp.Slice(OnnxOp.Shape(a), Vector(0L), Vector(0L)), keepdims: true, noopWithEmptyAxes: true);
+        var axes = OnnxOp.Reshape(OnnxOp.Sub(OnnxOp.Size(OnnxOp.Shape(a)), Scalar(1L)), Vector(1L), false);
+        var padded = OnnxOp.Pad(noop, OnnxOp.Concat([OnnxOp.Slice(OnnxOp.Shape(a), Vector(0L), Vector(1L)), Vector(0L)], 0L), Scalar(9f), axes);
+        var g = Graph(a, OnnxOp.Reshape(padded, OnnxOp.Concat([Vector(-1L), OnnxOp.Shape(padded, start: 1L)], 0L), false));
+        var view = g.Clone();
+        var restored = FastBakeShapeArithmetic.Reversibly(view, ConcreteValues.At(view, [[2L, 3L]])!)!.Restore(view)!;
+        TensorData Data(long rows) => TensorData(DType.Float32, [rows, 3L], [.. Enumerable.Range(0, (int)rows * 3).Select(i => (object)(float)i)]);
+        Assert.Equal(Run(g, Session(g, null), [Data(2)]), Run(restored, Session(restored, null), [Data(2)]));
+        Assert.Equal(Run(g, Session(g, null), [Data(4)]), Run(restored, Session(restored, null), [Data(4)]));
+        Assert.Contains(restored.Nodes, n => n.OpCode == REDUCE_SUM);
     }
 
     [Fact]

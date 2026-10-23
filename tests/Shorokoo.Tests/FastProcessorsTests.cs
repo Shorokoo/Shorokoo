@@ -38,6 +38,71 @@ public class FastProcessorsCoverageTests
         Assert.Equal(1, MulsLeftAfterDroppingOnes<float32>(-1f));
     }
 
+    private static readonly TensorData Six = TensorData(DType.Float32, [2L, 3L], 0.5f, -1f, 2f, 0.25f, 1.5f, -3f);
+
+    private static float[][] Outputs(InternalComputationGraph g, TensorData x)
+    {
+        using var context = new Shorokoo.Runtime.ComputeContext();
+        return [.. context.Execute(g.Clone(), x.Shared()).Select(o => o.ToTensorData().CopyMemory<float>())];
+    }
+
+    private static int MulsAfterFolding(Func<Tensor<float32>, Variable[]> build)
+    {
+        var x = InputTensor<float32>("x", rank: 2);
+        var g = new InternalComputationGraph([x], [.. build(x)]);
+        var before = Outputs(g, Six);
+        FastFoldScalarFactors.Process(g);
+        Assert.Equal(before, Outputs(g, Six));
+        return g.Nodes.Count(n => n.OpCode == Shorokoo.Core.Nodes.NodeDefinitions.OpCodes.MUL);
+    }
+
+    [Fact]
+    public void TestAProductsScalarFactorsFoldOnlyOverMulsNothingElseReads()
+    {
+        Assert.Equal(1, MulsAfterFolding(x => [x * Scalar(2f) * Scalar(3f)]));
+        Assert.Equal(1, MulsAfterFolding(x => [x * Scalar(2f) * Scalar(0.5f)]));
+        Assert.Equal(2, MulsAfterFolding(x => [x * x.Reduce(ReduceKind.Sum, keepDims: false).Scalar() * Scalar(3f)]));
+        Assert.Equal(2, MulsAfterFolding(x => { var t = x * Scalar(2f); return [t * Scalar(3f) + t]; }));
+        Assert.Equal(2, MulsAfterFolding(x => { var t = x * Scalar(2f); return [t * Scalar(3f), t]; }));
+        Assert.Equal(1, MulsAfterFolding(x => [((x.Cast<float64>() * Scalar(2.0)) * Scalar(3.0)).Cast<float32>()]));
+    }
+
+    [Fact]
+    public void TestProductScalarFactorsAtTheEndsOfTheRangeFoldToTheirProduct()
+    {
+        var x = InputTensor<float32>("x", rank: 2);
+        var g = new InternalComputationGraph([x], [x * Scalar(1e20f) * Scalar(1e20f)]);
+        FastFoldScalarFactors.Process(g);
+        Assert.Equal([float.PositiveInfinity], g.Nodes.Where(n => n.OpCode == Shorokoo.Core.Nodes.NodeDefinitions.OpCodes.CONSTANT)
+            .Select(n => n.Attributes.GetAttributeVal(Shorokoo.Core.Nodes.NodeDefinitions.OnnxOpAttributeNames.AttrValue)!.Elements<float>()[0]));
+    }
+
+    private static string ScaledAfterMoving(Func<Tensor<float32>, Tensor<float32>, Variable[]> build)
+    {
+        var (x, w) = (InputTensor<float32>("x", rank: 2), InputTensor<float32>("w", rank: 2));
+        var g = new InternalComputationGraph([x, w], [.. build(x, w)]);
+        FastScaleBesideMatMul.Process(g);
+        var producer = g.Nodes.SelectMany(n => n.Outputs.OfType<FastTensorKey>().Select(o => (o, n))).ToDictionary(p => p.o, p => p.n);
+        var mul = g.Nodes.Single(n => n.OpCode == Shorokoo.Core.Nodes.NodeDefinitions.OpCodes.MUL);
+        var reads = mul.Inputs.OfType<FastTensorKey>().Select(k => producer[k].OpCode is var c && c == InternalOpCodes.MODEL_TENSOR_INPUT ? "input" : c).Single(c => c != Shorokoo.Core.Nodes.NodeDefinitions.OpCodes.CONSTANT);
+        var readBy = g.Nodes.First(n => n.Inputs.Contains(mul.Outputs[0])).OpCode;
+        return $"{reads}>{readBy}";
+    }
+
+    [Fact]
+    public void TestAScaleMovesAcrossAReshapeToAMatMulOnlyWhereNothingElseReadsWhatItCrosses()
+    {
+        var shape = Vector(3L, 2L);
+        Variable Doubled(Variable v) => OnnxOp.Mul(v, Scalar(2f));
+        Assert.Equal("MatMul>Reshape", ScaledAfterMoving((x, w) => [Doubled(OnnxOp.Reshape(OnnxOp.MatMul(x, w), shape, false))]));
+        Assert.Equal("Reshape>Add", ScaledAfterMoving((x, w) => { var r = OnnxOp.Reshape(OnnxOp.MatMul(x, w), shape, false); return [OnnxOp.Add(Doubled(r), r)]; }));
+        Assert.Equal("Reshape>#GraphOutput#", ScaledAfterMoving((x, w) => { var m = OnnxOp.MatMul(x, w); return [Doubled(OnnxOp.Reshape(m, shape, false)), m]; }));
+        Assert.Equal("Reshape>#GraphOutput#", ScaledAfterMoving((x, w) => [Doubled(OnnxOp.Reshape(OnnxOp.Gemm(x, w), shape, false))]));
+        Assert.Equal("Reshape>MatMul", ScaledAfterMoving((x, w) => [OnnxOp.MatMul(OnnxOp.Reshape(Doubled(x), shape, false), w)]));
+        Assert.Equal("Reshape>MatMul", ScaledAfterMoving((x, w) => [OnnxOp.MatMul(OnnxOp.Reshape(OnnxOp.Reshape(Doubled(x), Vector(6L), false), shape, true), w)]));
+        Assert.Equal("input>Reshape", ScaledAfterMoving((x, w) => { var s = Doubled(x); return [OnnxOp.MatMul(OnnxOp.Reshape(s, shape, false), w), OnnxOp.Reshape(s, Vector(6L), false)]; }));
+    }
+
     /// <summary>Only a pruned parameter's shape is ever observed, so concretizing one must not
     /// cost its whole tensor in host memory: the gap between pruning a small bias and a large one
     /// stays far below the tensor itself.</summary>

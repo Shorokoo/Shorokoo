@@ -814,6 +814,8 @@ public class NNLibraryOptimizerTrainingCoverageTests
         Assert.Equal(0, CrossEntropyStepOps(NNGatheredTableProjectionModel.ComputationGraph, OpCodes.ONE_HOT));
         Assert.Equal(0, CrossEntropyStepOps(NNSoftCappedTableProjectionModel.ComputationGraph, OpCodes.SOFTMAX));
         Assert.Equal(0, CrossEntropyStepOps(NNSoftCappedTableProjectionModel.ComputationGraph, OpCodes.ONE_HOT));
+        Assert.Equal(0, CrossEntropyStepOps(NNGatheredTableProjectionModel.ComputationGraph, OpCodes.LOG_SOFTMAX));
+        Assert.Equal(0, CrossEntropyStepOps(NNSoftCappedTableProjectionModel.ComputationGraph, OpCodes.LOG_SOFTMAX));
     }
 
     [Fact]

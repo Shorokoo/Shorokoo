@@ -32,6 +32,22 @@ internal static class PythonWarnings
         return messages;
     }
 
+    /// <summary>What <paramref name="collected"/> holds, read as the call it was handed ends. Where
+    /// the call failed (<paramref name="callFailed"/>), a failure reading it is dropped, and with it
+    /// the warnings, so that the call's own exception is the one reported.</summary>
+    public static RuntimeLogMessage[] ReadAfter(PyList collected, string source, bool callFailed)
+    {
+        if (!callFailed) return Read(collected, source);
+        try
+        {
+            return Read(collected, source);
+        }
+        catch (Exception unreadable) when (unreadable is not OutOfMemoryException)
+        {
+            return [];
+        }
+    }
+
     /// <summary>Delivers <paramref name="messages"/> to <paramref name="log"/>, outside the
     /// interpreter lock, so that a sink that calls into Python itself waits for nothing.</summary>
     public static void Deliver(LogSettings log, RuntimeLogMessage[] messages)

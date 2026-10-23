@@ -168,8 +168,6 @@ public class JaxCudaHardwareTests
         var graph = ComputeContextLifetimeCoverageTests.GraphOf("a:float[2] b:float[2]", "O:float[2]", ComputeContextLifetimeCoverageTests.Op("Sub", "a b", "O"));
         using var session = Cuda.Value.CreateSession(PyTorchBackendCoverageTests.Serialize(graph), default, LogSettings.Default, DeviceMemorySettings.Default,
             DiagnosticSettings.Default, [new OutputAlias("O", "a")]);
-        IShorokooTensorValue Card(params float[] values) => Cuda.Value.CreateTensorInBackendMemory(ShorokooTensorElementType.Float, [.. MemoryMarshal.AsBytes<float>(values)], [values.Length]);
-        string Host(IShorokooTensorValue value) => string.Join(",", MemoryMarshal.Cast<byte, float>(Cuda.Value.CopyTensorToHost(value)).ToArray());
         var consumed = Card(5f, 7f);
         using var lent = Card(5f, 7f);
         using var b = Card(1f, 2f);
@@ -183,6 +181,61 @@ public class JaxCudaHardwareTests
         Assert.Equal("4,5 4,5 5,7", $"{Host(written)} {Host(computed)} {Host(lent)}");
         Assert.Equal("True False", Deleted(scope, "consumed", "lent"));
     }
+
+    [JaxCudaFact]
+    public void TestConsumedInputsOfNoElementsOnTheCardAreNeverReportedWrittenOver()
+    {
+        var graph = ComputeContextLifetimeCoverageTests.GraphOf("a:float[0] b:float[0] c:float[0]", "O:float[0] P:float[0] Q:float[0]",
+            ComputeContextLifetimeCoverageTests.Op("Neg", "a", "O"), ComputeContextLifetimeCoverageTests.Op("Neg", "b", "P"), ComputeContextLifetimeCoverageTests.Op("Neg", "c", "Q"));
+        using var session = Cuda.Value.CreateSession(PyTorchBackendCoverageTests.Serialize(graph), default, LogSettings.Default, DeviceMemorySettings.Default,
+            DiagnosticSettings.Default, [new OutputAlias("O", "a"), new OutputAlias("P", "b")]);
+        var a = Card();
+        var b = Card();
+        using var c = Card();
+
+        var outputs = session.RunConsuming(new Dictionary<string, IShorokooTensorValue> { ["a"] = a, ["b"] = b, ["c"] = c }, [a, b], ["O", "P", "Q"], RunSettings.Default, out var aliased);
+        foreach (var output in outputs) output.Dispose();
+
+        Assert.Empty(aliased);
+    }
+
+    [JaxCudaFact]
+    public void TestAnOutputHandedOverTwiceOnTheCardOutlivesARunDonatingOneOfItsHandovers()
+    {
+        var graph = ComputeContextLifetimeCoverageTests.GraphOf("a:float[2] b:float[2]", "O:float[2]", ComputeContextLifetimeCoverageTests.Op("Sub", "a b", "O"));
+        using var session = Cuda.Value.CreateSession(PyTorchBackendCoverageTests.Serialize(graph), default, LogSettings.Default, DeviceMemorySettings.Default,
+            DiagnosticSettings.Default, [new OutputAlias("O", "a")]);
+        using var a = Card(5f, 7f);
+        using var b = Card(1f, 2f);
+        var twice = session.Run(new Dictionary<string, IShorokooTensorValue> { ["a"] = a, ["b"] = b }, ["O", "O"], RunSettings.Default);
+        using var kept = twice[1];
+
+        using var written = session.RunConsuming(new Dictionary<string, IShorokooTensorValue> { ["a"] = twice[0], ["b"] = b }, [twice[0]], ["O"], RunSettings.Default)[0];
+
+        Assert.Equal("3,3 4,5", $"{Host(written)} {Host(kept)}");
+    }
+
+    [JaxCudaFact]
+    public void TestAFailureJaxRaisesMovingACardTensorToOrFromTheHostIsReportedByTheBackend()
+    {
+        var count = StagedReadBack.StagingBytes / 4 + 1;
+        using var small = Card(1f, 2f);
+        using var large = Card(new float[count]);
+        var scope = Watching(("small", small), ("large", large));
+        using (Shorokoo.PythonHost.PythonRuntime.Gil())
+        using (scope)
+            scope.Exec("small.delete(); large.delete()");
+
+        Assert.StartsWith($"{Cuda.Value.Description} ", Assert.Throws<InvalidOperationException>(() => Cuda.Value.CopyTensorToHost(small)).Message);
+        Assert.StartsWith($"{Cuda.Value.Description} ", Assert.Throws<InvalidOperationException>(() => Cuda.Value.TryCopyTensorRangeToHost(large, 0, new byte[16])).Message);
+        Assert.StartsWith($"{Cuda.Value.Description} ", Assert.Throws<InvalidOperationException>(() => Cuda.Value.TryCopyHostToTensorRange(large, 0, new byte[16])).Message);
+    }
+
+    private static IShorokooTensorValue Card(params float[] values)
+        => Cuda.Value.CreateTensorInBackendMemory(ShorokooTensorElementType.Float, [.. MemoryMarshal.AsBytes<float>(values)], [values.Length]);
+
+    private static string Host(IShorokooTensorValue value)
+        => string.Join(",", MemoryMarshal.Cast<byte, float>(Cuda.Value.CopyTensorToHost(value)).ToArray());
 
     [JaxCudaFact]
     public void TestTwoThreadsRunningOneCardSessionForOutputsItHasNotHandedOverBeforeBothFinish()

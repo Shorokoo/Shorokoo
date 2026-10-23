@@ -31,8 +31,9 @@ namespace Shorokoo.OnnxRuntime;
 ///   v' = beta2 * v + (c2 * g) * g
 ///   p' = p [* decay] - m' / (sqrt(v') + eps) * step
 /// </code>
-/// <para>Each intermediate value is read by the chain alone; <c>m'</c> and <c>v'</c> may be read
-/// elsewhere too, as the step's state outputs are. Anything else is left as written.</para>
+/// <para>Each intermediate value is read by the chain alone, by no subgraph either; <c>m'</c> and
+/// <c>v'</c> may be read elsewhere too, as the step's state outputs are. Anything else is left as
+/// written.</para>
 ///
 /// <para><b>Where.</b> Only in a training step's session
 /// (<see cref="Core.Backends.ShorokooGraphOptimization.TrainingStep"/>), of a backend that runs
@@ -56,9 +57,6 @@ internal static class OrtFusedUpdates
             model.OpsetImports.Add(new OperatorSetIdProto { Domain = Domain, Version = 1 });
         return true;
     }
-
-    /// <summary>Whether <paramref name="node"/> is a fused update.</summary>
-    internal static bool IsAdamUpdate(NodeProto node) => node.Domain == Domain && node.OpType == AdamUpdate;
 
     /// <summary>Rewrites <paramref name="graph"/>'s updates in place; whether it rewrote any.</summary>
     private static bool Fuse(GraphProto graph)
@@ -135,7 +133,14 @@ internal static class OrtFusedUpdates
                 var node = graph.Nodes[n];
                 foreach (var output in node.Outputs)
                     if (output.Length > 0) _producer[output] = n;
-                foreach (var input in node.Inputs)
+                // A subgraph reads the outer values it names as its node does its inputs.
+                var captured = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var attribute in node.Attributes)
+                {
+                    if (attribute.G is { } subgraph) OutputAliasProof.GraphIndex.ReferencedFrom(subgraph, captured);
+                    foreach (var each in attribute.Graphs) OutputAliasProof.GraphIndex.ReferencedFrom(each, captured);
+                }
+                foreach (var input in node.Inputs.Concat(captured))
                 {
                     if (input.Length == 0) continue;
                     if (!_consumers.TryGetValue(input, out var readers)) _consumers[input] = readers = [];

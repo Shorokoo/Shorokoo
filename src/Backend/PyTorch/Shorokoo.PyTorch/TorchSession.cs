@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Runtime.ExceptionServices;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using Python.Runtime;
@@ -301,7 +302,9 @@ internal sealed class TorchSession : IShorokooSession
     /// lease on, beside every other output of the run standing on it.</para>
     ///
     /// <para>The consumed values are released as the run returns. An output written into one is a
-    /// value of its own holding a reference to the same tensor, so it outlives the release.</para>
+    /// value of its own holding a reference to the same tensor, so it outlives the release. A release
+    /// that throws stops none of the others; where the run failed, its own exception is the one
+    /// thrown, and otherwise the release's, the outputs released.</para>
     /// </summary>
     public IReadOnlyList<IShorokooTensorValue> RunConsuming(
         IReadOnlyDictionary<string, IShorokooTensorValue> inputs,
@@ -311,14 +314,23 @@ internal sealed class TorchSession : IShorokooSession
         out IReadOnlyList<string?> aliasedInputs)
     {
         ArgumentNullException.ThrowIfNull(consumed);
+        IReadOnlyList<IShorokooTensorValue> outputs;
         try
         {
-            return RunCore(inputs, consumed, outputNames, runSettings, out aliasedInputs);
+            outputs = RunCore(inputs, consumed, outputNames, runSettings, out aliasedInputs);
         }
-        finally
+        catch
         {
-            foreach (var value in consumed) _backend.Release(value);
+            // The run's own failure is the one reported.
+            ConsumedValues.ReleaseEach(consumed, _backend.Release);
+            throw;
         }
+        if (ConsumedValues.ReleaseEach(consumed, _backend.Release) is { } failure)
+        {
+            foreach (var output in outputs) output.Dispose();
+            ExceptionDispatchInfo.Throw(failure);
+        }
+        return outputs;
     }
 
     private IReadOnlyList<IShorokooTensorValue> RunCore(
@@ -478,13 +490,16 @@ internal sealed class TorchSession : IShorokooSession
             using (PythonRuntime.Gil())
             {
                 using var warned = new PyList();
+                var ran = false;
                 try
                 {
-                    return InvokeWarning(feeds, wanted, outputNames, targets, placing, writable, stop, warned, runSettings, out aliasedInputs);
+                    var outputs = InvokeWarning(feeds, wanted, outputNames, targets, placing, writable, stop, warned, runSettings, out aliasedInputs);
+                    ran = true;
+                    return outputs;
                 }
                 finally
                 {
-                    warnings = PythonWarnings.Read(warned, TorchRuntime.Source);
+                    warnings = PythonWarnings.ReadAfter(warned, TorchRuntime.Source, callFailed: !ran);
                 }
             }
         }

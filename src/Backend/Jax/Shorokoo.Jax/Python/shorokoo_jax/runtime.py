@@ -429,12 +429,13 @@ class Model:
                 copied = len(lent)
             donated = len(self.donated) - copied
             if self.on_device and donated:
-                # Read before the run, which deletes what it donates.
-                given = {args[i].unsafe_buffer_pointer(): i for i in self.donated if i in owned}
+                # Read before the run, which deletes what it donates. An array of no elements has no
+                # buffer -- every one is at address 0 -- so none is written over.
+                given = {args[i].unsafe_buffer_pointer(): i for i in self.donated if i in owned and args[i].nbytes}
         outputs = program.compiled(_fresh_key(), self._large_values, *args)
         aliased = None
         if given:
-            aliased = [given.get(outputs[k].unsafe_buffer_pointer(), -1) for k in wanted]
+            aliased = [given.get(outputs[k].unsafe_buffer_pointer(), -1) if outputs[k].nbytes else -1 for k in wanted]
         return program, outputs, aliased, donated, copied
 
 
@@ -460,11 +461,8 @@ def load_model(source, filename, constants, device_name, precision="HIGHEST", do
 
 
 def prepare(model, inputs, warned=None):
-    token = _warnings_collected.set(warned)
-    try:
+    with _collecting_warnings(warned):
         model.prepare(inputs)
-    finally:
-        _warnings_collected.reset(token)
 
 
 def run(model, args, wanted, owned=(), warned=None):
@@ -484,19 +482,36 @@ def run(model, args, wanted, owned=(), warned=None):
     still be computing: its outputs are JAX's arrays, which JAX reads only once they are computed,
     and what it reads and donates JAX holds until it has -- so the .NET side, which reaches device
     memory only through JAX, can go on while the device computes."""
-    token = _warnings_collected.set(warned)
-    try:
+    with _collecting_warnings(warned):
         program, outputs, aliased, donated, copied = model.run(args, wanted, frozenset(owned))
-    finally:
-        _warnings_collected.reset(token)
     if model.on_device:
-        return (program.token(tuple(wanted)), tuple(outputs[index] for index in wanted), None, aliased,
+        return (program.token(tuple(wanted)), _handed_over(outputs, wanted, aliased), None, aliased,
                 donated, copied)
     # Every output, wanted or not: the run reads host memory the .NET side may write once this
     # returns.
     jax.block_until_ready(outputs)
     values = [host_copy(outputs[index]) for index in wanted]
     return -1, values, [describe(value) for value in values], aliased, donated, copied
+
+
+def _handed_over(outputs, wanted, aliased):
+    """The device arrays a run hands over, one per index in `wanted`: an output wanted more than once
+    is handed over as it is the first time and as a copy of its own every other, so that no two
+    values hold one array, which a later run donating either would delete under the other. A copy
+    was written over no input, and `aliased` says so."""
+    values = [outputs[index] for index in wanted]
+    seen = set()
+    repeats = []
+    for k, index in enumerate(wanted):
+        if index in seen:
+            repeats.append(k)
+        seen.add(index)
+    if repeats:
+        for k, copy in zip(repeats, _copies([values[k] for k in repeats])):
+            values[k] = copy
+            if aliased is not None:
+                aliased[k] = -1
+    return tuple(values)
 
 
 def jax_version():
@@ -590,43 +605,88 @@ def _fresh_key():
 _warnings_collected = contextvars.ContextVar("shorokoo_jax_warnings_collected", default=None)
 _show_warning = warnings.showwarning
 
+# How many calls are collecting warnings, and the records Python made of the places their warnings
+# were shown from, which they hold until the last of them ends (see _collect_jax_warning).
+_collecting_lock = threading.Lock()
+_collecting_calls = 0
+_held_records = {}
+
+
+@contextlib.contextmanager
+def _collecting_warnings(warned):
+    """Collects the warnings the call this thread makes inside it raises into the list `warned`."""
+    global _collecting_calls
+    token = _warnings_collected.set(warned)
+    with _collecting_lock:
+        _collecting_calls += 1
+        if _collecting_calls > 1:
+            _forget_held_records()
+    try:
+        yield
+    finally:
+        with _collecting_lock:
+            _collecting_calls -= 1
+            if _collecting_calls == 0:
+                _forget_held_records()
+        _warnings_collected.reset(token)
+
+
+def _forget_held_records():
+    for registry, key in _held_records.values():
+        registry.pop(key, None)
+    _held_records.clear()
+
 
 def _collect_jax_warning(message, category, filename, lineno, file=None, line=None):
     """Appends a warning a call raises to the list the .NET side handed that call, as (category,
     message, location), rather than showing it: the .NET side delivers it to the call's own log
     settings. The interpreter's warning machinery is the whole process's, so the list is read per
     call. A warning raised outside a call goes on to whatever showed warnings when this hook was
-    installed, another backend's hook included. A warning the filters show once per place reaches
-    each call that raises it, once."""
+    installed, another backend's hook included.
+
+    Under the default filter action a warning reaches each call that raises it, once. Python shows
+    such a warning once per place in the whole process, keeping a record that it did (_shown_record).
+    While one call collects, the record stays, so Python itself skips the call's repeats there, and
+    it is taken back once the call ends, so the next call collects it too. While several calls
+    overlap, each record is taken back as soon as it is made, so that every one of them collects
+    the warning, once."""
     collected = _warnings_collected.get()
     if collected is None:
         _show_warning(message, category, filename, lineno, file, line)
         return
     entry = (getattr(category, "__name__", str(category)), str(message), f"{filename}:{lineno}")
-    if _forget_jax_shown(message, category, lineno) and entry in collected:
-        return
+    record = _shown_record(message, category, filename, lineno)
+    if record is not None:
+        with _collecting_lock:
+            if _collecting_calls > 1:
+                record[0].pop(record[1], None)
+                if entry in collected:
+                    return
+            else:
+                _held_records[(id(record[0]), record[1])] = record
     collected.append(entry)
 
 
-def _forget_jax_shown(message, category, lineno):
-    """Takes back the record Python made, as it showed this warning, that it was shown from its
-    place -- under the default filter action, a warning is shown once per place in the whole
-    process -- so that the next call raising it there collects it too. The record is in the
-    `__warningregistry__` of the module the warning is attributed to, whose frame is on this
-    thread's stack, or of `sys` for a warning raised with none. True where there was one: a place
-    whose warnings the filters show once is collected once per call."""
+def _shown_record(message, category, filename, lineno):
+    """The record Python made, as it showed this warning, that it was shown from its place -- its
+    (registry, key) -- or None where it made none, as for a warning the filters always show. The
+    registry is the `__warningregistry__` of the module whose frame raised it -- the one on this
+    thread's stack running `filename` at `lineno` -- or of `sys` for a warning raised with none."""
     key = (str(message), category, lineno)
-    found = False
+    first = None
     frame = sys._getframe(1)
     while frame is not None:
         registry = frame.f_globals.get("__warningregistry__")
-        if isinstance(registry, dict) and registry.pop(key, None) is not None:
-            found = True
+        if isinstance(registry, dict) and key in registry:
+            if frame.f_code.co_filename == filename and frame.f_lineno == lineno:
+                return registry, key
+            if first is None:
+                first = registry
         frame = frame.f_back
     registry = sys.__dict__.get("__warningregistry__")
-    if isinstance(registry, dict) and registry.pop(key, None) is not None:
-        found = True
-    return found
+    if isinstance(registry, dict) and key in registry:
+        return registry, key
+    return None if first is None else (first, key)
 
 
 if getattr(warnings.showwarning, "__name__", "") != "_collect_jax_warning":

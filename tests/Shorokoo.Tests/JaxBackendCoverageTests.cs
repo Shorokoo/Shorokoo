@@ -79,6 +79,17 @@ public class JaxBackendCoverageTests
     }
 
     [Fact]
+    public void TestAConsumedValueWhoseReleaseThrowsStopsNoOtherReleaseAndNeverHidesTheRunsOwnFailure()
+    {
+        using var session = Jax.CreateSession(PyTorchBackendCoverageTests.Onnx("Neg", (int)ShorokooTensorElementType.Float), default, LogSettings.Default, DeviceMemorySettings.Default);
+        using var x = Jax.CreateTensor([1f, 2f], [2]);
+        var feeds = new Dictionary<string, IShorokooTensorValue> { ["x0"] = x };
+
+        Assert.Equal((1, typeof(IOException)), ReleasesPastAThrowingRelease((throwing, feed) => session.RunConsuming(feeds, [throwing, feed], ["y"], RunSettings.Default)));
+        Assert.Equal((1, typeof(ArgumentException)), ReleasesPastAThrowingRelease((throwing, feed) => session.RunConsuming(feeds, [throwing, feed], ["nope"], RunSettings.Default)));
+    }
+
+    [Fact]
     public void TestEveryJaxElementTypeRoundTripsThroughATensorAndASession()
     {
         foreach (var type in EveryTorchType)

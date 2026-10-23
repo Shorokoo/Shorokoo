@@ -159,8 +159,7 @@ Nothing writes into a JAX array in place but XLA itself, over an input a run **d
 | **`TraceNodePlacement`** | every node on `cpu` | every node on `cuda:N` |
 | **`DeterministicCompute`** | not applied | not applied: XLA's kernels run as they otherwise would |
 | **`Precision.AllowTensorFloat32`** | no effect: `float32` in full precision | off by default: every product and convolution is compiled at `Precision.HIGHEST`; on, at `Precision.HIGH`: XLA computes products in TensorFloat-32, and each convolution in TensorFloat-32 or in full precision, whichever kernel its autotuner finds faster when it compiles the program |
-| **Log severity** | Python warnings a run raises are shown at `Warning` and below, not above | same |
-| **When a run returns** | once the program has run | once the program is dispatched: the card may still be computing, and JAX reads an output only once it is computed, so the host's next work overlaps the card's. A failure of the computation itself then surfaces where an output is next read, not in the run |
+| **When a run returns** | once the program has run | once the program is dispatched: the card may still be computing, and JAX reads an output only once it is computed, so the host's next work overlaps the card's. A failure of the computation itself then surfaces where an output is next read, not in the run, as an `InvalidOperationException` naming the backend |
 
 **Donation.** A session donates to XLA the inputs of the output aliases it is built with — for a
 training rig's step, each state field (weight, optimizer moment, step counter) the rig proves may be
@@ -171,8 +170,9 @@ a resident run handed out or began from `.Shared()` — is copied in the run's m
 copy donated, so it is never written over or deleted. XLA orders the program so that nothing reads a
 donated input after it is written over, and computes an output it cannot write over its input into
 memory of its own, so results are the same with or without donation. On a card a resident run thus
-holds its state once rather than twice; on the CPU every input and output crosses into and out of
-JAX by copy anyway, so donation only spares JAX's own buffers.
+holds its state once rather than twice; on the CPU JAX reads an input in host memory in place where
+it can, and every output is handed back as a host copy of its own, so donation only spares JAX's own
+buffers.
 
 Floating-point products and convolutions run in the operands' full precision unless the context
 allows TensorFloat-32 ([Precision](gpu-backends.md#precision-gpu-backends)): the precision is compiled

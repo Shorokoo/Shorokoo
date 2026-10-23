@@ -159,7 +159,6 @@ Nothing writes into a JAX array in place but XLA itself, over an input a run **d
 | **`TraceNodePlacement`** | every node on `cpu` | every node on `cuda:N` |
 | **`DeterministicCompute`** | not applied | not applied: XLA's kernels run as they otherwise would |
 | **`Precision.AllowTensorFloat32`** | no effect: `float32` in full precision | off by default: every product and convolution is compiled at `Precision.HIGHEST`; on, at `Precision.HIGH`: XLA computes products in TensorFloat-32, and each convolution in TensorFloat-32 or in full precision, whichever kernel its autotuner finds faster when it compiles the program |
-| **Log severity** | Python warnings a run raises are shown at `Warning` and below, not above | same |
 | **When a run returns** | once the program has run | once the program is dispatched: the card may still be computing, and JAX reads an output only once it is computed, so the host's next work overlaps the card's. A failure of the computation itself then surfaces where an output is next read, not in the run |
 
 **Donation.** A session donates to XLA the inputs of the output aliases it is built with — for a

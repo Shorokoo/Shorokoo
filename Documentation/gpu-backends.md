@@ -273,15 +273,16 @@ Console.WriteLine($"the card at its peak {DeviceMemory.PeakUsedBytes / (1024 * 1
   driving a display), where `nvidia-smi` prints `[N/A]` for it, and from NVML everywhere else. It
   is `null` where neither answers for the card: where DXGI does not, and NVML is not installed,
   gives no per-process figure, or does not see this process's id, as in a container with its own
-  process-id namespace. The two figures of one reading are taken one after the other, so while
+  process-id namespace. That includes WSL, where there is no DXGI and NVML lists no process on
+  the card. The two figures of one reading are taken one after the other, so while
   this process allocates on another thread its share can momentarily read above the card's.
 - The peaks are the largest of your own `Sample()` calls; nothing samples on its own. A
   sample cost about a microsecond on an RTX 4090 under WDDM, and NVML's process list about 120
   microseconds, so one per step is cheap — and, unlike an external poller
   such as `nvidia-smi`, cannot miss the step.
 - The peaks are 0 until a sample folds into them, and `PeakProcessBytes` stays 0 while no sampled
-  reading carried a process figure — in a container with its own process-id namespace, say, where
-  neither DXGI nor NVML gives one. A 0 therefore means "no figure" as well as "nothing sampled".
+  reading carried a process figure — under WSL, say, or in a container with its own process-id
+  namespace, where neither DXGI nor NVML gives one. A 0 therefore means "no figure" as well as "nothing sampled".
 - With no CUDA runtime, `Read()` and `Sample()` return `null` and the peaks stay 0, so the calls
   can stay in CPU code.
 - The first reading initializes this process's CUDA context (a few hundred MiB) if none exists;

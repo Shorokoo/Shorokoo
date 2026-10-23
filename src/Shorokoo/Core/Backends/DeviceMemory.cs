@@ -13,7 +13,7 @@ namespace Shorokoo.Core.Backends;
 /// weights and optimizer state, every session's arena, the CUDA context and its libraries'
 /// workspaces — and nothing any other process has. It is the figure Task Manager shows per process
 /// on Windows, and <c>nvidia-smi</c> lists per process wherever it can. <c>null</c> where the driver will not
-/// attribute device memory to a process — see <see cref="DeviceMemory"/>.</param>
+/// attribute device memory to a process, as under WSL — see <see cref="DeviceMemory"/>.</param>
 public readonly record struct DeviceMemoryReading(long UsedBytes, long FreeBytes, long TotalBytes, long? ProcessBytes);
 
 /// <summary>
@@ -35,7 +35,8 @@ public readonly record struct DeviceMemoryReading(long UsedBytes, long FreeBytes
 /// <para>The process figure is <c>null</c> where neither answers for the card: where DXGI does
 /// not, and NVML is not installed, gives no figure for a process — as it does for a WDDM card —
 /// or does not list this process under its own id, as in a container with its own process-id
-/// namespace. The two figures of a reading are read one after the other, so while this process
+/// namespace. Under WSL neither answers: there is no DXGI, and NVML lists no process on the card.
+/// The two figures of a reading are read one after the other, so while this process
 /// allocates or frees on another thread, a reading can put its share a little above or below
 /// what the card held at the same instant.</para>
 ///

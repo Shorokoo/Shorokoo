@@ -42,10 +42,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         public static void Process(InternalComputationGraph graph)
         {
             // Each round moves a scale across one reshape; a scale behind a chain of them moves
-            // once per round.
-            bool any = false;
-            while (Round(graph)) any = true;
-            if (any) FastProcessorHelper.RemoveUnreachableNodes(graph);
+            // once per round. What a round left unread goes before the next, which would see it as
+            // a reader that ends in no matrix product.
+            while (Round(graph)) FastProcessorHelper.RemoveUnreachableNodes(graph);
         }
 
         private static bool Round(InternalComputationGraph graph)
@@ -79,7 +78,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             List<FastNode> ReadersOf(FastTensorKey key) => readers.TryGetValue(key, out var list) ? list : [];
             // What reads a value's data: a Shape or Size reads only its shape, which no move changes.
             IEnumerable<FastNode> DataReadersOf(FastTensorKey key) => ReadersOf(key).Where(r => r.OpCode is not (OpCodes.SHAPE or OpCodes.SIZE));
-            bool IsMatMul(FastNode node) => node.OpCode is OpCodes.MATMUL or OpCodes.GEMM;
+            // ONNX Runtime folds a scale into a MatMul (as a FusedMatMul's alpha), not into a Gemm.
+            bool IsMatMul(FastNode node) => node.OpCode == OpCodes.MATMUL;
             bool IsReshapeOf(FastNode node, FastTensorKey data) => node.OpCode == OpCodes.RESHAPE && topLevel.Contains(node)
                 && node.Inputs.Count == 2 && node.Inputs[0] == data && node.Inputs[1] != data;
             // Whether everything a value flows into, through reshapes, is a matrix product.

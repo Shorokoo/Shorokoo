@@ -30,7 +30,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// <summary>
         /// The scalars by construction, and those of them that are static: computed from constants
         /// and the sizes of values alone, so a session built at concrete dimensions holds each as a
-        /// constant.
+        /// constant wherever those dimensions fix the sizes. A size of a value whose shape follows
+        /// its data (a <c>NonZero</c>'s, say) is taken as static too, which the nodes alone cannot
+        /// tell apart: a scale computed from one and moved across several reshapes
+        /// (<see cref="FastScaleBesideMatMul"/>) costs a pass per reshape, and its value is the same.
         /// </summary>
         public static (HashSet<FastTensorKey> Scalars, HashSet<FastTensorKey> Static) FindWithStatic(InternalComputationGraph graph)
         {

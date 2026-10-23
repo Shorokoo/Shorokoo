@@ -504,6 +504,12 @@ a per-call override, so all share one set of compiled sessions (one per input sh
 derivations keep both. The rig's `TrainingBackend`, also never persisted, decides who computes the
 gradient — see [training-backends.md](training-backends.md).
 
+The training step is built for the runtime context's backend: where two forms of a gradient are
+equal in value, the build takes the one that backend runs faster — on JAX a softmax recomputed
+inside the fusion of the chain it feeds, on ONNX Runtime a scale moved beside the matrix product
+that folds it in. Left `null`, the runtime context is `ComputeContext.Default`, and the step is
+built for its backend.
+
 Each context carries its backend, its `DeviceMemory` (a device-memory budget), its `Precision`
 (`float32` in full precision unless it allows TensorFloat-32 on a card — see
 [Precision](gpu-backends.md#precision-gpu-backends)) and `RunSettings` — see [Device memory](gpu-backends.md#device-memory-gpu-backends). So a rig can

@@ -2507,7 +2507,7 @@ namespace Shorokoo
             // TrainingStepPureGraph property.
             _trainingStepWorkGraph = LowerGraph(
                 fastTraining, MergeContext, progress, lowerAutoGrad: TrainingBackend.LowersAutoGrad,
-                runtimeBackend: _runtimeContext?.ResolvedBackend);
+                runtimeBackend: RuntimeContext.ResolvedBackend);
 
             UpdatedParamFieldCount = TrainableParamStructDef.Fields.Length;
             UpdatedStateFieldCount = ModelStateDef.Fields.Length;
@@ -2804,8 +2804,9 @@ namespace Shorokoo
         /// expansion, and the step keeps its one <c>AUTO_GRAD</c> node for the backend to run.</param>
         /// <param name="runtimeBackend">The backend of the rig's runtime context, which runs the step:
         /// whether it fuses elementwise operators and whether it folds a scale into a matrix product
-        /// decide the shape of a gradient where two are equal in value. Without one, the shapes are
-        /// those that suit ONNX Runtime.</param>
+        /// decide the shape of a gradient where two are equal in value. The rig passes its runtime
+        /// context's, which is <see cref="ComputeContext.Default"/>'s where it was given none, resolved
+        /// when the step is built. Without one, the shapes are those that suit ONNX Runtime.</param>
         private static InternalComputationGraph LowerGraph(
             InternalComputationGraph fast, ComputeContext mergeContext, BuildProgressReporter? progress = null,
             bool lowerAutoGrad = true, IShorokooBackend? runtimeBackend = null)

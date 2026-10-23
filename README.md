@@ -163,6 +163,8 @@ first, so a newer Visual Studio beside an older one is no obstacle.
   it; `AUTO`, the default, builds it where it can.
 - `-p:ShorokooCudaHostCompiler=<path>` names the compiler `nvcc` uses: the folder
   holding `cl.exe`, or the path of `g++`.
+- `-p:CUDAToolkit_ROOT=<folder>` names the CUDA toolkit, as the environment variable
+  of that name does, ahead of the one `nvcc` on the `PATH` or `CUDA_PATH` names.
 
 The Shorokoo.WinGPU and Shorokoo.LinuxGPU packages carry the library, built.
 

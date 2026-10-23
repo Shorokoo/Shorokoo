@@ -33,10 +33,17 @@
   <PropertyGroup>
     <TargetsForTfmSpecificContentInPackage>$(TargetsForTfmSpecificContentInPackage);IncludeShorokooCudaOperators</TargetsForTfmSpecificContentInPackage>
     <ShorokooCudaOperators Condition="'$(ShorokooNativeAllocators)' != ''">$(ShorokooNativeAllocators)/linux-x64/libshorokoo_ort_cuda_ops.so</ShorokooCudaOperators>
-    <ShorokooCudaOperators Condition="'$(ShorokooNativeAllocators)' == '' and $([MSBuild]::IsOSPlatform('Linux'))">$(MSBuildThisFileDirectory)../Shorokoo.OnnxRuntime/obj/native/linux-x64/libshorokoo_ort_cuda_ops.so</ShorokooCudaOperators>
   </PropertyGroup>
 
   <Target Name="IncludeShorokooCudaOperators">
+    <MSBuild Condition="'$(ShorokooNativeAllocators)' == '' and $([MSBuild]::IsOSPlatform('Linux'))"
+             Projects="../Shorokoo.OnnxRuntime/Shorokoo.OnnxRuntime.csproj" Targets="GetShorokooNativeOutputDirectory"
+             RemoveProperties="TargetFramework;RuntimeIdentifier">
+      <Output TaskParameter="TargetOutputs" PropertyName="_ShorokooNativeOutputDirectory" />
+    </MSBuild>
+    <PropertyGroup>
+      <ShorokooCudaOperators Condition="'$(_ShorokooNativeOutputDirectory)' != ''">$(_ShorokooNativeOutputDirectory)/libshorokoo_ort_cuda_ops.so</ShorokooCudaOperators>
+    </PropertyGroup>
     <Error Condition="'$(ShorokooCudaOperators)' == '' or !Exists('$(ShorokooCudaOperators)')"
            Text="The Shorokoo.LinuxGPU package carries the CUDA build of Shorokoo's operators (libshorokoo_ort_cuda_ops.so), and it was not found ('$(ShorokooCudaOperators)'). On Linux, build with a CUDA 13 toolkit and -p:ShorokooCudaOps=ON; on another platform, build the native folder on Linux with cmake (-DSHOROKOO_CUDA_OPS=ON -DSHOROKOO_OUTPUT_DIR=&lt;folder&gt;/linux-x64) and pack with -p:ShorokooNativeAllocators=&lt;folder&gt;." />
     <ItemGroup>

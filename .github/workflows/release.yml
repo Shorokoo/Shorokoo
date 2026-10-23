@@ -6,6 +6,11 @@
 # via Trusted Publishing (OIDC), pushes the tag, and creates a GitHub Release.
 # There is NO push trigger: nothing publishes unless you launch this workflow.
 #
+# With dry-run set, a run builds the native libraries, tests and packs exactly as
+# a release does, keeps the packages as the run's "packages" artifact, and stops
+# there: the publish job, the only one that can publish, push a tag or create a
+# release, never starts.
+#
 # The nuget.org Trusted Publishing policy is bound to this file by name
 # (release.yml) -> keep the filename stable.
 
@@ -18,16 +23,25 @@ on:
         description: "SemVer version to release, e.g. 0.1.0-preview.1 (no leading v)"
         required: true
         type: string
+      dry-run:
+        description: "Build, test and pack only; publish nothing, push no tag, create no release"
+        required: false
+        type: boolean
+        default: false
 
+# Read-only for every job; the publish job alone is granted what publishing takes.
 permissions:
-  id-token: write       # OIDC token for NuGet Trusted Publishing
-  contents: write       # push the tag + create the GitHub Release
-  packages: write       # mirror the packages to GitHub Packages
+  contents: read
 
 env:
   # The CUDA release whose nvcc and static runtime build the CUDA operators library: one of the
   # major version ONNX Runtime's GPU packages are built against (13), the release they are built with.
+  # .github/scripts/fetch_cuda_compiler.py records the SHA-256 of each of its archives.
   SHOROKOO_CUDA_RELEASE: "13.0.3"
+  # The Microsoft.ML.OnnxRuntime package Shorokoo.OnnxRuntime references, whose C API header the
+  # Linux CUDA operators library is compiled against, and the SHA-256 of its .nupkg.
+  SHOROKOO_ORT_VERSION: "1.30.0"
+  SHOROKOO_ORT_NUPKG_SHA256: "30df119bd9164eaa187666d93147448fdd4a9a1a3caf83f1505daf7af2d1c5d2"
 
 jobs:
   # Shorokoo.OnnxRuntime carries a native library of its own, the allocator and operators it hands
@@ -39,6 +53,7 @@ jobs:
   native-windows:
     # Visual Studio 2022's MSVC, which every CUDA 13 release's nvcc supports as its host compiler.
     runs-on: windows-2025
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -47,7 +62,7 @@ jobs:
           dotnet-version: 10.0.x
 
       # nvcc, the CUDA headers and the static CUDA runtime alone, from NVIDIA's redistributable
-      # archives, each checked against the SHA-256 the release's manifest gives it.
+      # archives, each checked against the SHA-256 the script records for it.
       - name: Fetch the CUDA compiler
         run: python .github/scripts/fetch_cuda_compiler.py "$env:SHOROKOO_CUDA_RELEASE" "$env:RUNNER_TEMP/cuda"
 
@@ -78,7 +93,10 @@ jobs:
   # and a library linked on a newer system asks for symbol versions only that system has.
   native-linux-cuda:
     runs-on: ubuntu-latest
-    container: quay.io/pypa/manylinux_2_28_x86_64
+    timeout-minutes: 45
+    # quay.io/pypa/manylinux_2_28_x86_64:2026.10.03-1, by digest, so that the image cannot change
+    # under the tag.
+    container: quay.io/pypa/manylinux_2_28_x86_64@sha256:39df0042d5cc900b085aa25a0659368b42a0006c54c474299b785b44c1b4ff82
     steps:
       - uses: actions/checkout@v4
 
@@ -86,12 +104,17 @@ jobs:
         run: /opt/python/cp312-cp312/bin/python .github/scripts/fetch_cuda_compiler.py "$SHOROKOO_CUDA_RELEASE" "$RUNNER_TEMP/cuda"
 
       # ONNX Runtime's C API header, from the Microsoft.ML.OnnxRuntime package of the version
-      # Shorokoo.OnnxRuntime references.
+      # Shorokoo.OnnxRuntime references, checked against the SHA-256 recorded above for it.
       - name: Fetch ONNX Runtime's C API header
         run: |
           set -euo pipefail
           version=$(grep -oP '<PackageReference Include="Microsoft.ML.OnnxRuntime" Version="\K[^"]+' src/Backend/OnnxRuntime/Shorokoo.OnnxRuntime/Shorokoo.OnnxRuntime.csproj)
-          curl -fsSL -o "$RUNNER_TEMP/ort.nupkg" "https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime/$version/microsoft.ml.onnxruntime.$version.nupkg"
+          if [ "$version" != "$SHOROKOO_ORT_VERSION" ]; then
+            echo "::error::Shorokoo.OnnxRuntime references Microsoft.ML.OnnxRuntime $version, and this workflow records the SHA-256 of $SHOROKOO_ORT_VERSION: update SHOROKOO_ORT_VERSION and SHOROKOO_ORT_NUPKG_SHA256"
+            exit 1
+          fi
+          curl -fsSL --connect-timeout 30 --max-time 600 --retry 3 -o "$RUNNER_TEMP/ort.nupkg" "https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime/$version/microsoft.ml.onnxruntime.$version.nupkg"
+          echo "$SHOROKOO_ORT_NUPKG_SHA256  $RUNNER_TEMP/ort.nupkg" | sha256sum -c -
           /opt/python/cp312-cp312/bin/python -c "import sys, zipfile; z = zipfile.ZipFile(sys.argv[1]); z.extractall(sys.argv[2], [n for n in z.namelist() if n.startswith('build/native/include/')])" "$RUNNER_TEMP/ort.nupkg" "$RUNNER_TEMP/ort"
 
       - name: Build the CUDA operators library (linux-x64)
@@ -106,9 +129,12 @@ jobs:
           path: artifacts/native/linux-x64/libshorokoo_ort_cuda_ops.so
           if-no-files-found: error
 
-  publish:
+  # Builds, tests and packs, publishing nothing: the packages are handed to the publish job, or
+  # kept as the run's artifact by a dry run.
+  pack:
     needs: [native-windows, native-linux-cuda]
     runs-on: ubuntu-latest
+    timeout-minutes: 240
     steps:
       - uses: actions/checkout@v4
         with:
@@ -119,8 +145,8 @@ jobs:
           dotnet-version: 10.0.x
 
       # Tag locally so MinVer stamps <version> into the packages. The tag is
-      # pushed only after a successful publish (below), so a failed run leaves no
-      # tag behind.
+      # pushed by the publish job only after a successful publish, so a failed
+      # run leaves no tag behind.
       - name: Create tag (local)
         run: |
           git config user.name  "github-actions[bot]"
@@ -153,12 +179,22 @@ jobs:
       # library needs.
       - name: Check the Linux native libraries ask no more of Linux than ONNX Runtime does
         run: |
-          ort=$(ls ~/.nuget/packages/microsoft.ml.onnxruntime/*/runtimes/linux-x64/native/libonnxruntime.so | head -1)
-          newest() { objdump -T "$1" | grep -oE "\($2_[0-9.]+\)" | tr -d '()' | sort -V | tail -1; }
+          set -euo pipefail
+          ort=~/.nuget/packages/microsoft.ml.onnxruntime/$SHOROKOO_ORT_VERSION/runtimes/linux-x64/native/libonnxruntime.so
+          # A library's dynamic symbols, into a file; a library that is missing or that objdump
+          # cannot read fails the step.
+          symbols() {
+            [ -f "$1" ] || { echo "::error::$1 is missing"; exit 1; }
+            objdump -T "$1" > "$2"
+          }
+          # The newest version of a symbol family the symbols ask for; none where they ask for none.
+          newest() { { grep -oE "\($2_[0-9.]+\)" "$1" || true; } | tr -d '()' | sort -V | tail -1; }
+          symbols "$ort" "$RUNNER_TEMP/theirs.txt"
           for lib in src/Backend/OnnxRuntime/Shorokoo.OnnxRuntime/obj/native/linux-x64/libshorokoo_ort_allocator.so \
                      artifacts/native/linux-x64/libshorokoo_ort_cuda_ops.so; do
+            symbols "$lib" "$RUNNER_TEMP/mine.txt"
             for family in GLIBC GLIBCXX CXXABI GCC; do
-              mine=$(newest "$lib" "$family"); theirs=$(newest "$ort" "$family")
+              mine=$(newest "$RUNNER_TEMP/mine.txt" "$family"); theirs=$(newest "$RUNNER_TEMP/theirs.txt" "$family")
               [ -z "$mine" ] && continue
               if [ -z "$theirs" ] || [ "$(printf '%s\n%s\n' "$mine" "$theirs" | sort -V | tail -1)" != "$theirs" ]; then
                 echo "::error::$lib needs $mine, and ONNX Runtime needs no newer than ${theirs:-none of $family}"
@@ -214,6 +250,34 @@ jobs:
           dotnet pack Shorokoo.sln -c Release -o artifacts/nupkgs
           -p:ShorokooNativeAllocators=${{ github.workspace }}/artifacts/native
 
+      - uses: actions/upload-artifact@v4
+        with:
+          name: packages
+          path: artifacts/nupkgs
+          if-no-files-found: error
+
+  # The only job that publishes, and the only one granted more than reading the repository.
+  publish:
+    needs: pack
+    if: ${{ !inputs.dry-run }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      id-token: write       # OIDC token for NuGet Trusted Publishing
+      contents: write       # push the tag + create the GitHub Release
+      packages: write       # mirror the packages to GitHub Packages
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: packages
+          path: artifacts/nupkgs
+
       # OIDC -> short-lived nuget.org API key (~1h). No stored API key.
       - name: NuGet login (Trusted Publishing)
         id: login
@@ -250,7 +314,7 @@ jobs:
             url="https://api.nuget.org/v3-flatcontainer/$idLower/index.json"
             ok=""
             for attempt in $(seq 1 30); do
-              if curl -fsSL "$url" | grep -qF "\"$version\""; then ok=1; break; fi
+              if curl -fsSL --connect-timeout 30 --max-time 60 "$url" | grep -qF "\"$version\""; then ok=1; break; fi
               echo "$id $version not indexed yet (attempt $attempt/30); retrying in 30s"
               sleep 30
             done
@@ -261,7 +325,11 @@ jobs:
       # The packages are verified live on the canonical feed: tag now, so no
       # later (best-effort) step can leave a published version untagged again.
       - name: Push tag
-        run: git push origin "v${{ inputs.version }}"
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "v${{ inputs.version }}"
+          git push origin "v${{ inputs.version }}"
 
       # Mirror to GitHub Packages so the packages also show in the repo's sidebar.
       # Uses the built-in GITHUB_TOKEN (no secret needed). --no-symbols because

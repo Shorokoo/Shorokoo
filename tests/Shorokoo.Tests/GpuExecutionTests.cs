@@ -1507,6 +1507,26 @@ public class GpuExecutionTests
         }
     }
 
+    [CudaFact]
+    public void CudaProvider_Float64SoftmaxAndLogSoftmaxOnTheCardAreAccurateToFloat32PrecisionNotFloat64()
+    {
+        double[] x = [0.5, -1.0, 2.0, 0.25, 1.5, 3.0, -2.0, 0.0, -0.75, 1.0, 2.5, -1.5];
+        double[] exact = [.. x.Select((v, i) => v - Math.Log(x.Skip(i / 4 * 4).Take(4).Select(Math.Exp).Sum()))];
+        var f = InputTensor<float64>("x", rank: 2);
+        using var context = new ComputeContext { Diagnostics = new DiagnosticSettings { TraceNodePlacement = true } };
+        double[] OnTheCard(Variable output, string op)
+        {
+            using var compiled = context.Compile(new InternalComputationGraph([f], [output]), [[3L, 4L]], trainingStep: false);
+            var y = compiled.Execute(TensorData(DType.Float64, [3L, 4L], [.. x.Select(v => (object)v)]).Shared())[0].ToTensorData().CopyMemory<double>();
+            Assert.Equal([(op, "CUDAExecutionProvider")], compiled.ReadNodePlacement()!.Nodes.Select(n => (n.OpType, n.Provider)));
+            return y;
+        }
+        double softmaxError = OnTheCard(OnnxOp.Softmax(f, axis: 1), "Softmax").Select((v, i) => Math.Abs(v / Math.Exp(exact[i]) - 1)).Max();
+        double logSoftmaxError = OnTheCard(OnnxOp.LogSoftmax(f, axis: 1), "LogSoftmax").Select((v, i) => Math.Abs(v - exact[i])).Max();
+        Assert.InRange(softmaxError, 1e-12, 1e-7);
+        Assert.InRange(logSoftmaxError, 1e-12, 1e-7);
+    }
+
     // Shorokoo/Shorokoo#553: the card divides a half-precision mean by a count that overflows float16.
     [CudaFact(Skip = "Shorokoo/Shorokoo#553")]
     public void CudaProvider_AHalfPrecisionMeanLossOverMoreSamplesThanFloat16CountsToIsTheMeanOnTheCard()

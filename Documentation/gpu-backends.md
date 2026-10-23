@@ -127,6 +127,13 @@ were within their run-to-run noise.
   whichever kernel it timed fastest, which may be either.
 - **Only `float32` changes.** Products of `Float16`, `BFloat16` and `Double` operands compute as
   they do either way.
+- **ONNX Runtime's CUDA `Softmax` and `LogSoftmax` over `Double` are accurate to about `float32`'s
+  precision, not `Double`'s.** On an RTX 4090 a `Softmax` lands within about 1e-7 of the exact
+  value relative to it (about 1e-8 absolute), and a `LogSoftmax` within about 5e-8 absolute, where
+  the host's land within 1e-12. Whatever is computed through them inherits that error: the gradient
+  of a `SoftmaxCrossEntropyLoss` over `Double` scores, for one, is within 1e-7 of its closed form on
+  the card. This is accepted as ONNX Runtime's behaviour; compute a `Double` softmax on the host
+  where its last digits matter.
 - **PyTorch's switches are the whole process's.** A run on a card sets them from its own session as
   it starts, so a session's precision does not depend on what ran before it, nor on code of your own
   that sets them. Runs of sessions that set them differently do not overlap: while a run that allows

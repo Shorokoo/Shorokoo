@@ -1465,8 +1465,7 @@ public class GpuExecutionTests
             TensorData([1L, 1L, 1L, 5L], [0f, 1f, 2f, 3f, 4f])).CopyMemory<float>());
     }
 
-    // Shorokoo/Shorokoo#540: the CUDA Optional kernel refuses to copy a buffer onto itself.
-    [CudaFact(Skip = "Shorokoo/Shorokoo#540")]
+    [CudaFact]
     public void CudaProvider_AnOptionalOfAComputedTensorRunsOnTheCard()
     {
         var x = InputTensor<float32>("x", rank: 1);

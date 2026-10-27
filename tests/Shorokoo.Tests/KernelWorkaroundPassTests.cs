@@ -343,6 +343,23 @@ public class KernelWorkaroundPassTests
     }
 
     [Fact]
+    public void TestTheCudaSetReadsATensorStraightBackOutOfItsOptionalWithoutTheOptional()
+    {
+        var x = InputTensor<float32>("x", rank: 1);
+        var xs = TensorData(DType.Float32, [3L], 1f, -2f, 4f);
+        Variable Opt(Variable v) => OnnxOp.Optional(v, DataStructure.Tensor, DType.Float32);
+        var roundTrip = Graph(x, OnnxOp.Mul(OnnxOp.OptionalGetElement(Opt(OnnxOp.Add(x, x))), x));
+        var both = new InternalComputationGraph([x], [OnnxOp.OptionalGetElement(Opt(OnnxOp.Neg(x))), OnnxOp.OptionalHasElement(Opt(OnnxOp.Neg(x)))]);
+        var kept = new InternalComputationGraph([x], [OnnxOp.OptionalGetElement(Opt(OnnxOp.Neg(x))), Opt(OnnxOp.Neg(x))]);
+        Assert.True(OptionalWrittenOut(roundTrip, xs));
+        Assert.True(OptionalWrittenOut(both, xs));
+        Assert.True(OptionalWrittenOut(Graph(x, OnnxOp.OptionalHasElement(Opt(x))), xs));
+        Assert.Single(AllNodes(Session(kept, KernelWorkaroundRegistry.OnnxRuntimeCuda)), n => n.OpType == OPTIONAL);
+        Assert.Contains(AllNodes(Session(roundTrip, KernelWorkaroundRegistry.OnnxRuntime)), n => n.OpType == OPTIONAL);
+        Assert.Empty(AllNodes(Session(roundTrip, null)).Where(n => n.OpType is ADD or MUL).SelectMany(n => n.Outputs).Except(Values(Session(roundTrip, CudaOptionalSet))));
+    }
+
+    [Fact]
     public void TestTheCudaSetKeepsOnTheHostTheFormsTheProviderHasNoKernelForAndNothingElse()
     {
         var f = InputTensor<float32>("f", rank: 2);
@@ -891,6 +908,16 @@ public class KernelWorkaroundPassTests
     {
         ModelProto Built(KernelWorkaroundSet set) => FastOnnxModelBuilder.BuildInternalOnnxModel(g, prepForOnnx: true, inputDims: dims.Length == 0 ? null : dims, workarounds: set);
         return Bytes(Built(KernelWorkaroundRegistry.OnnxRuntime)).SequenceEqual(Bytes(Built(KernelWorkaroundRegistry.OnnxRuntimeCuda)));
+    }
+
+    private static readonly KernelWorkaroundSet CudaOptionalSet = new("cuda-optional",
+        [.. KernelWorkaroundRegistry.CudaWorkarounds.Where(w => w.LooksThrough is not null)]);
+
+    private static bool OptionalWrittenOut(InternalComputationGraph g, params TensorData[] x)
+    {
+        var rewritten = Session(g, KernelWorkaroundRegistry.OnnxRuntimeCuda);
+        return !AllNodes(rewritten).Any(n => n.OpType is OPTIONAL or OPTIONAL_GET_ELEMENT or OPTIONAL_HAS_ELEMENT)
+            && ShapedRun(g, Session(g, KernelWorkaroundRegistry.OnnxRuntime), x).SequenceEqual(ShapedRun(g, rewritten, x));
     }
 
     private static string[] HostKept(InternalComputationGraph g)

@@ -41,6 +41,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// <see cref="KernelWorkaround.KeepsOnHost">keeps it on the host</see> stays as it stands and
     /// is marked <see cref="FastNode.RunsOnHost"/>; nothing is spliced for it.</para>
     ///
+    /// <para><b>Looked through.</b> A workaround that looks through a producer
+    /// (<see cref="KernelWorkaround.LooksThrough"/>) is offered a call as a call over that
+    /// producer's input; once its walk is done, each producer nothing reads any more is dropped, its
+    /// number left unused like a dropped call's.</para>
+    ///
     /// <para><b>Names.</b> What the pass did is returned as <see cref="Splices"/>, which says how
     /// <see cref="FastUseUniqueNames"/> numbers the graph: the spliced nodes, and the nodes the
     /// later pre-passes add only for them, last; and, where a call was dropped, the number it had
@@ -97,6 +102,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 var plans = new Dictionary<string, List<CachedPlan>>(StringComparer.Ordinal);
                 var rewired = new Dictionary<FastTensorKey, FastTensorKey>();
                 var newNodes = new List<FastNode>(graph.Nodes.Count);
+                // The producers a call was looked at through, which the call no longer reads.
+                var lookedThrough = new HashSet<FastNode>();
                 // The last node kept so far that is numbered in place, which a dropped call's
                 // number is left unused after.
                 FastNodeKey? numbered = null;
@@ -115,8 +122,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     else if (FastOpsetResolver.IsCloseOpCode(node.OpCode) && scopes.TryPop(out var closed) && closed)
                         loops--;
 
-                    if (!workaround.OpCodes.Contains(node.OpCode)
-                        || WorkaroundSite.TryCreate(node, tensorInfo, producers, read, shapesAreConcrete, inLoopBody: loops > 0, outsideBody: outsideBody?.Invoke(node), shapes: workaround.ReadsShapes ? shapes : null) is not { } site
+                    var looked = workaround.OpCodes.Contains(node.OpCode) ? LookedAt(workaround, node, producers) : null;
+                    if (looked is null
+                        || WorkaroundSite.TryCreate(looked, tensorInfo, producers, read, shapesAreConcrete, inLoopBody: loops > 0, outsideBody: outsideBody?.Invoke(node), shapes: workaround.ReadsShapes ? shapes : null) is not { } site
                         || !Applies(workaround, site, node))
                     {
                         newNodes.Add(node);
@@ -130,6 +138,12 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                         newNodes.Add(node);
                         if (!minted.Contains(node.Key)) numbered = node.Key;
                         continue;
+                    }
+
+                    if (!ReferenceEquals(looked, node))
+                    {
+                        lookedThrough.Add(producers[node.Inputs[0]!.Value]);
+                        node.FullInputs = looked.FullInputs;
                     }
 
                     var plan = PlanFor(workaround, site, node, plans);
@@ -164,6 +178,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                                     group[i] = to;
 
                 graph.Nodes = newNodes;
+                if (lookedThrough.Count > 0) DropUnread(graph, lookedThrough, minted, gaps, ref leadingGap, tensorInfo);
 
                 Debug.Assert(graph.TryValidateLinearOrder(out var orderError),
                     "graph.IsLinearOrderValid(): " + orderError);
@@ -307,6 +322,62 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             || node.OpCode == OpCodes.CAST && node.Inputs is [{ } input, ..] && node.Outputs is [{ } output, ..]
                && tensorInfo.TryGetValue(input, out var from) && tensorInfo.TryGetValue(output, out var to)
                && from.DType != DType.Invalid && from.DType.IsSameElementTypeAs(to.DType);
+
+        /// <summary>
+        /// The call <paramref name="workaround"/> looks at for <paramref name="node"/>: the node
+        /// itself, or for a workaround that looks through a producer
+        /// (<see cref="KernelWorkaround.LooksThrough"/>), a copy reading that producer's first input
+        /// in place of its own first input — null where no such producer gives that input.
+        /// </summary>
+        private static FastNode? LookedAt(KernelWorkaround workaround, FastNode node, IReadOnlyDictionary<FastTensorKey, FastNode> producers)
+        {
+            if (workaround.LooksThrough is not { } through) return node;
+            if (!node.FullInputs.TryGetValue(string.Empty, out var own) || own is not [{ } input, ..]
+                || !producers.TryGetValue(input, out var producer) || producer.OpCode != through
+                || producer.Inputs is not [{ IsEmpty: false } inner, ..])
+                return null;
+            var inputs = node.FullInputs.ToDictionary(g => g.Key, g => new List<FastTensorKey?>(g.Value));
+            inputs[string.Empty][0] = inner;
+            return new FastNode
+            {
+                Key = node.Key,
+                OpCode = node.OpCode,
+                Attributes = node.Attributes,
+                FriendlyName = node.FriendlyName,
+                FullInputs = inputs,
+                FullOutputs = node.FullOutputs,
+            };
+        }
+
+        /// <summary>
+        /// Drops each of <paramref name="candidates"/> nothing in <paramref name="graph"/> reads any
+        /// more, leaving its number unused where it stood, as a dropped call's is.
+        /// </summary>
+        private static void DropUnread(InternalComputationGraph graph, HashSet<FastNode> candidates, HashSet<FastNodeKey> minted,
+            Dictionary<FastNodeKey, int> gaps, ref int leadingGap, Dictionary<FastTensorKey, FastTensorInfo> tensorInfo)
+        {
+            var read = ReadKeys(graph);
+            var dropped = candidates.Where(p => !p.Outputs.Any(o => o is { } key && read.Contains(key))).ToHashSet();
+            if (dropped.Count == 0) return;
+            List<FastNode> kept = new(graph.Nodes.Count);
+            FastNodeKey? numbered = null;
+            foreach (var node in graph.Nodes)
+            {
+                if (!dropped.Contains(node))
+                {
+                    kept.Add(node);
+                    if (!minted.Contains(node.Key) && !InternalOpCodes.IsGraphOutputOp(node.OpCode)) numbered = node.Key;
+                    continue;
+                }
+                foreach (var output in node.Outputs)
+                    if (output is { } key) tensorInfo.Remove(key);
+                if (minted.Contains(node.Key)) continue;
+                var unused = 1 + (gaps.Remove(node.Key, out var own) ? own : 0);
+                if (numbered is { } before) gaps[before] = gaps.GetValueOrDefault(before) + unused;
+                else leadingGap += unused;
+            }
+            graph.Nodes = kept;
+        }
 
         private static bool Applies(KernelWorkaround workaround, WorkaroundSite site, FastNode node)
         {

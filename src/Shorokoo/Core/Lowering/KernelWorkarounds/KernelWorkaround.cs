@@ -62,6 +62,14 @@ internal abstract class KernelWorkaround
     /// </summary>
     public virtual bool KeepsOnHost => false;
 
+    /// <summary>
+    /// The op code of a producer this workaround looks through, or null. Where it is set, the pass
+    /// offers the workaround only a call whose first input that producer gives, and offers it as a
+    /// call over the producer's own first input: the site describes that value in slot 0, and the
+    /// replacement reads it there. A producer nothing reads once the walk is done is dropped.
+    /// </summary>
+    public virtual string? LooksThrough => null;
+
     /// <summary>The name this workaround is known by in a plan cache key and a message.</summary>
     public virtual string Name => GetType().FullName ?? GetType().Name;
 }

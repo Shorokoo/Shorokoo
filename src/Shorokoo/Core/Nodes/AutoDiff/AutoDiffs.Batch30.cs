@@ -149,7 +149,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
             }
             else // "mean"
             {
-                upstream = OnnxOp.Expand(MeanScale(grad, weightPerSample, floatType), OnnxOp.Shape(target));
+                upstream = OnnxOp.Expand(MeanScale(grad, weightPerSample, activeMask, target, floatType), OnnxOp.Shape(target));
             }
 
             // Per-sample scalar gradient contribution: -weight[target] * upstream
@@ -171,16 +171,20 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         }
 
         // lossGrad / Σ weightPerSample, the factor a "mean" reduction scales each sample's gradient
-        // by; zero where every sample is ignored and the weights sum to zero, as PyTorch has it,
-        // rather than the NaN of 0 · (1 / 0). A half-precision sum is taken in float32, as float16
-        // counts only to 65504.
-        private static Variable MeanScale(Variable lossGrad, Variable weightPerSample, DType floatType)
+        // by. Where no sample is active -- every one ignored, or none at all -- it is zero, as
+        // PyTorch has it, rather than the NaN of 0 · (1 / 0); where some are and their weights sum
+        // to zero, it divides by that zero, as PyTorch's does. A half-precision sum is taken in
+        // float32, as float16 counts only to 65504.
+        private static Variable MeanScale(Variable lossGrad, Variable weightPerSample, Variable? activeMask, Variable labels, DType floatType)
         {
             var wide = floatType == DType.Float16 || floatType == DType.BFloat16 ? DType.Float32 : floatType;
             Variable Widened(Variable v) => wide == floatType ? v : OnnxOp.Cast(v, saturate: null, to: wide);
             var total = OnnxOp.ReduceSum(Widened(weightPerSample), axes: null, keepdims: false, noopWithEmptyAxes: false);
+            var active = activeMask is null
+                ? OnnxOp.Cast(OnnxOp.Size(labels), saturate: null, to: wide)
+                : OnnxOp.ReduceSum(Widened(activeMask), axes: null, keepdims: false, noopWithEmptyAxes: false);
             var zero = OnnxOp.Cast(Scalar(0.0f), saturate: null, to: wide);
-            var scale = OnnxOp.Where(OnnxOp.Equal(total, zero), zero, OnnxOp.Div(Widened(lossGrad), total));
+            var scale = OnnxOp.Where(OnnxOp.Equal(active, zero), zero, OnnxOp.Div(Widened(lossGrad), total));
             return wide == floatType ? scale : OnnxOp.Cast(scale, saturate: null, to: floatType);
         }
 
@@ -295,7 +299,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
                     {
                         "none" => lossGrad,
                         "sum" => OnnxOp.Expand(lossGrad, OnnxOp.Shape(labels)),
-                        _ => OnnxOp.Expand(MeanScale(lossGrad, weightPerSample, floatType), OnnxOp.Shape(labels)),
+                        _ => OnnxOp.Expand(MeanScale(lossGrad, weightPerSample, activeMask, labels, floatType), OnnxOp.Shape(labels)),
                     };
                     var perSample = OnnxOp.Mul(weightPerSample, upstream);
                     dScores = scatters

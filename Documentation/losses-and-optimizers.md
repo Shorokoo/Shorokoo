@@ -71,11 +71,19 @@ Knobs are **build-time C# arguments** on two extra methods:
 - **`ignoreIndex`** (CE, NLL): a target equal to it adds nothing to the loss or the gradient, and
   `Mean` divides by the targets that are not ignored, as PyTorch does: by their count, or with
   `weight` by the sum of their classes' weights. The sentinel is any `int64`, a negative one such
-  as PyTorch's `-100` included, in evaluation and training alike.
+  as PyTorch's `-100` included, in evaluation and training alike. A `Mean` over a batch whose
+  every target is ignored has a zero gradient, as PyTorch's has; one whose targets are not all
+  ignored but whose classes' weights sum to zero divides by that zero, and its gradient is
+  non-finite, as PyTorch's is.
 - **Target range** (CE, NLL): every other target must lie in `[0, C-1]` for `C` classes. A
   target outside it is the backend's to handle: ONNX Runtime's CPU kernel raises its own error for
   one of `C` or above and reads a negative `t` as class `C + t`, and its CUDA kernel does not check
   and can count one of `C` or above as a zero loss ([#501](https://github.com/Shorokoo/Shorokoo/issues/501)).
+- **Half precision on CUDA** (CE, NLL over `float16` scores): ONNX Runtime's CUDA kernel divides a
+  `Mean` by the count of targets (or the sum of their weights) in `float16`, which counts only to
+  65504, so over more targets than that the loss comes out as `0` (CE) or `NaN` (NLL); the host
+  computes it, and the gradient is right on both
+  ([#553](https://github.com/Shorokoo/Shorokoo/issues/553)).
 - **SmoothL1 ↔ Huber**: `SmoothL1(e; β) = HuberLoss(δ = β) / β`. Huber's `delta` is a
   live, schedulable `[Hyper]`; SmoothL1's `beta` is baked.
 - **PoissonNLL**: the Keras `Poisson` form is

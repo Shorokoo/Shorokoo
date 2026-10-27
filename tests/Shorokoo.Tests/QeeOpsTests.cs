@@ -744,6 +744,23 @@ public class QeeIntegerWidthTests
             TensorData([2L, 2L], [1f, 2f, 3f, 4f]).Shared())[0].ToTensorData().CopyMemory<float>();
     }
 
+    [Fact]
+    public void TestAFloat16OrBFloat16ScatterElementsWithAReductionComputesOnOnnxRuntime()
+    {
+        Assert.Equal([1f, 2.5f, 8f, 4f], ScatteredElementsOnOnnxRuntime(DType.Float16, ScatterNDReduction.Add));
+        Assert.Equal([1f, 1f, 15f, 4f], ScatteredElementsOnOnnxRuntime(DType.BFloat16, ScatterNDReduction.Mul));
+        Assert.Equal([1f, 0.5f, 3f, 4f], ScatteredElementsOnOnnxRuntime(DType.BFloat16, ScatterNDReduction.Min));
+    }
+
+    private static float[] ScatteredElementsOnOnnxRuntime(DType dtype, ScatterNDReduction reduction)
+    {
+        var f = InputTensor<float32>(defaultName: "f", rank: 2);
+        var scattered = OnnxOp.ScatterElements(OnnxOp.Cast(f, null, dtype), Vector(1L, 0L).Reshape(Vector(1L, 2L)), OnnxOp.Cast(Vector(5f, 0.5f).Reshape(Vector(1L, 2L)), null, dtype), 0, reduction);
+        using var context = new ComputeContext();
+        return context.Execute(new InternalComputationGraph([f], [OnnxOp.Cast(scattered, null, DType.Float32)]),
+            TensorData([2L, 2L], [1f, 2f, 3f, 4f]).Shared())[0].ToTensorData().CopyMemory<float>();
+    }
+
     // The widths ONNX's Mean type constraint rejects, so there is no backend to compare against —
     // the declared-width rule is what keeps them self-consistent. Sums overflow every width here.
     [Fact]

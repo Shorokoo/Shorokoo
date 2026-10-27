@@ -1490,6 +1490,23 @@ public class GpuExecutionTests
     }
 
     [CudaFact]
+    public void CudaProvider_ALinearResizeOverTheLeadingAxesOfARankFourTensorComputesWhatTheHostDoes()
+    {
+        var x = InputTensor<float32>("x", rank: 4);
+        var data = TensorData([1L, 3L, 4L, 5L], [.. Enumerable.Range(0, 60).Select(i => (float)i)]);
+        var resized = OnnxOp.Resize(x, roi: null, scales: Vector(1f, 2f, 2f, 1f), sizes: null, antialias: null, axes: null,
+            coordinateTransformationMode: null, cubicCoeffA: null, excludeOutside: null, extrapolationValue: null,
+            keepAspectRatioPolicy: null, mode: ResizeMode.Linear, nearestMode: null);
+        using var host = new ComputeContext(new HostOrtBackend());
+        var expected = host.Execute(new InternalComputationGraph([x], [resized]), data.Shared())[0].ToTensorData().CopyMemory<float>();
+        var actual = OnTheCard(x, resized, data).CopyMemory<float>();
+        Assert.Equal(expected.Length, actual.Length);
+        Assert.All(expected.Zip(actual), p => Assert.Equal(p.First, p.Second, 1e-4f));
+    }
+
+    private sealed class HostOrtBackend : OrtBackend;
+
+    [CudaFact]
     public void CudaProvider_TheCrossEntropyGradientOfFloat64ScoresRunsOnTheCard()
     {
         double[] x = [0.5, -1.0, 2.0, 0.25, 1.5, 3.0, -2.0, 0.0, -0.75, 1.0, 2.5, -1.5];

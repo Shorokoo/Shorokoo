@@ -65,6 +65,15 @@ namespace Shorokoo.Core.Graph
         public string? FriendlyName { get; set; }
 
         /// <summary>
+        /// Whether the session the node's model is built for runs this call on the host: set by a
+        /// kernel workaround that keeps a call there
+        /// (<see cref="Shorokoo.Core.Lowering.KernelWorkarounds.KernelWorkaround.KeepsOnHost"/>), on the
+        /// session's own copy of the graph only. The node goes out under a name ending in
+        /// <see cref="Shorokoo.Core.Backends.KernelWorkaroundSets.HostNodeNameSuffix"/>.
+        /// </summary>
+        internal bool RunsOnHost { get; set; }
+
+        /// <summary>
         /// Original stack trace captured when the node was first built, if any.
         /// </summary>
         public string? StackTrace

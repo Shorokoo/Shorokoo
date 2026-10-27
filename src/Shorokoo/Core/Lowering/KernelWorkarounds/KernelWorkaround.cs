@@ -53,6 +53,15 @@ internal abstract class KernelWorkaround
     /// </summary>
     public virtual bool ReadsShapes => false;
 
+    /// <summary>
+    /// Whether this workaround keeps each call it applies to on the host rather than rewriting it:
+    /// the pass leaves the call as it stands, never asks <see cref="Rewrite"/>, and marks the call
+    /// so the session runs it on the host (<see cref="Shorokoo.Core.Graph.FastNode.RunsOnHost"/>),
+    /// where the runtime's host kernel computes it as the spec does. For a call a runtime places on
+    /// a device whose kernel then fails it.
+    /// </summary>
+    public virtual bool KeepsOnHost => false;
+
     /// <summary>The name this workaround is known by in a plan cache key and a message.</summary>
     public virtual string Name => GetType().FullName ?? GetType().Name;
 }

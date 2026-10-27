@@ -45,8 +45,11 @@ namespace Shorokoo.Core.Factory
         public static string TensorName(FastTensorKey? key)
             => (key is null || key.Value.IsEmpty) ? string.Empty : key.Value.ToString();
 
-        /// <summary>The ONNX node name for a <see cref="FastNode"/> — its key's string form.</summary>
-        public static string NodeName(FastNode node) => node.Key.ToString();
+        /// <summary>The name of <paramref name="node"/>'s ONNX node: its key, and for a call the session
+        /// runs on the host (<see cref="FastNode.RunsOnHost"/>), the key followed by
+        /// <see cref="Shorokoo.Core.Backends.KernelWorkaroundSets.HostNodeNameSuffix"/>.</summary>
+        public static string NodeName(FastNode node)
+            => node.RunsOnHost ? node.Key + Shorokoo.Core.Backends.KernelWorkaroundSets.HostNodeNameSuffix : node.Key.ToString();
 
         // ------------------------- boundary protos -------------------------
 

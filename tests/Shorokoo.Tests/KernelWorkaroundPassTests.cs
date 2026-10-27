@@ -320,6 +320,27 @@ public class KernelWorkaroundPassTests
     }
 
     [Fact]
+    public void TestTheCudaSetKeepsOnTheHostTheFormsTheProviderHasNoKernelForAndNothingElse()
+    {
+        var f = InputTensor<float32>("f", rank: 2);
+        var d = InputTensor<float64>("d", rank: 2);
+        var (rows, blocks) = (Vector(0L, 1L, 0L, 1L).Reshape(Vector(2L, 2L)), Vector(0.5f, 1f, 0.25f, 2f).Reshape(Vector(2L, 2L)));
+        var (doubles, floats) = (TensorData(DType.Float64, [2L, 2L], 1d, 2d, 3d, 4d), TensorData(DType.Float32, [2L, 4L], 0.625f, -1.3f, 2.2f, 40f, -0.1f, 3.75f, -50f, 0.875f));
+        var sbytes = Vector((sbyte)1, (sbyte)1, (sbyte)4, (sbyte)1, (sbyte)-1, (sbyte)-1, (sbyte)-1, (sbyte)-1).Reshape(Vector(2L, 4L));
+        Assert.True(KeptOnHost(Graph(d, OnnxOp.ScatterND(d, rows, Vector(2d, 3d), ScatterNDReduction.Add)), SCATTER_ND, doubles));
+        Assert.True(KeptOnHost(Graph(d, OnnxOp.ScatterND(d, rows, Vector(2d, 3d), ScatterNDReduction.Max)), SCATTER_ND, doubles));
+        Assert.True(KeptOnHost(Graph(f, OnnxOp.Cast(OnnxOp.QuantizeLinear(f, blocks, Vector((sbyte)0, (sbyte)0, (sbyte)0, (sbyte)0).Reshape(Vector(2L, 2L)), axis: 1, blockSize: 2), null, DType.Int32)), QUANTIZE_LINEAR, floats));
+        Assert.True(KeptOnHost(Graph(f, OnnxOp.Add(f, OnnxOp.DequantizeLinear(sbytes, blocks, null, axis: 1, blockSize: 2))), DEQUANTIZE_LINEAR, floats));
+        Assert.Empty(HostKept(Graph(d, OnnxOp.ScatterND(d, rows, Vector(2d, 3d), null))));
+        Assert.Empty(HostKept(Graph(f, OnnxOp.ScatterND(f, rows, Vector(2f, 3f), ScatterNDReduction.Add))));
+        Assert.Empty(HostKept(Graph(f, OnnxOp.QuantizeLinear(f, Scalar(0.5f), Scalar((sbyte)0)))));
+        Assert.Empty(HostKept(Graph(f, OnnxOp.QuantizeLinear(f, blocks, null, axis: 1, blockSize: 2, outputDatatype: DType.Int4))));
+        Assert.Empty(HostKept(Graph(f, OnnxOp.Add(f, OnnxOp.DequantizeLinear(sbytes, Vector(0.5f, 2f), null, axis: 0)))));
+        Assert.DoesNotContain(AllNodes(Session(Graph(d, OnnxOp.ScatterND(d, rows, Vector(2d, 3d), ScatterNDReduction.Add)), KernelWorkaroundRegistry.OnnxRuntime)),
+            n => n.Name.Contains(KernelWorkaroundSets.HostNodeNameSuffix, StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void TestTheCudaSetComputesWhatTheCallsItRewritesCompute()
     {
         var u = InputTensor<uint32>("u", rank: 1);
@@ -833,6 +854,14 @@ public class KernelWorkaroundPassTests
             && !AllNodes(rewritten).Any(n => n.OpType.StartsWith("Reduce", StringComparison.Ordinal) && n.Attributes.Any(a => a.Name == "keepdims" && a.I == 0))
             && ShapedRun(g, Session(g, KernelWorkaroundRegistry.OnnxRuntime), x).SequenceEqual(ShapedRun(g, rewritten, x));
     }
+
+    private static string[] HostKept(InternalComputationGraph g)
+        => [.. AllNodes(Session(g, KernelWorkaroundRegistry.OnnxRuntimeCuda))
+            .Where(n => n.Name.EndsWith(KernelWorkaroundSets.HostNodeNameSuffix, StringComparison.Ordinal)).Select(n => n.OpType)];
+
+    private static bool KeptOnHost(InternalComputationGraph g, string opType, params TensorData[] x)
+        => HostKept(g).SequenceEqual([opType])
+           && ShapedRun(g, Session(g, KernelWorkaroundRegistry.OnnxRuntime), x).SequenceEqual(ShapedRun(g, Session(g, KernelWorkaroundRegistry.OnnxRuntimeCuda), x));
 
     private sealed class OrtHostBackend : Shorokoo.OnnxRuntime.OrtBackend;
 

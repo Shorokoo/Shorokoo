@@ -1474,8 +1474,7 @@ public class GpuExecutionTests
             TensorData([3L], [1f, 2f, 3f])).CopyMemory<float>());
     }
 
-    // Shorokoo/Shorokoo#541: the CUDA provider takes these nodes and then fails them.
-    [CudaFact(Skip = "Shorokoo/Shorokoo#541")]
+    [CudaFact]
     public void CudaProvider_AnOperatorTheCardHasNoKernelForItsTypeOrFormRunsOnTheCard()
     {
         var f = InputTensor<float32>("f", rank: 2);
@@ -1486,6 +1485,8 @@ public class GpuExecutionTests
         Assert.Equal([0.5f, 0.5f, 4f, 1f, -0.25f, -0.25f, -2f, -2f], OnTheCard(f, OnnxOp.DequantizeLinear(Vector((sbyte)1, (sbyte)1, (sbyte)4, (sbyte)1, (sbyte)-1, (sbyte)-1, (sbyte)-1, (sbyte)-1).Reshape(Vector(2L, 4L)),
             blocks, null, axis: 1, blockSize: 2), data).CopyMemory<float>());
         Assert.Equal([0d, 5d, 0d, 0d], OnTheCard(f, OnnxOp.ScatterND(OnnxOp.Cast(OnnxOp.Mul(f, Scalar(0f)), null, DType.Float64), Vector(0L, 1L).Reshape(Vector(1L, 2L)), Vector(5d), null),
+            TensorData([2L, 2L], [1f, 2f, 3f, 4f])).CopyMemory<double>());
+        Assert.Equal([1d, 7d, 3d, 4d], OnTheCard(f, OnnxOp.ScatterND(OnnxOp.Cast(f, null, DType.Float64), Vector(0L, 1L, 0L, 1L).Reshape(Vector(2L, 2L)), Vector(2d, 3d), ScatterNDReduction.Add),
             TensorData([2L, 2L], [1f, 2f, 3f, 4f])).CopyMemory<double>());
     }
 

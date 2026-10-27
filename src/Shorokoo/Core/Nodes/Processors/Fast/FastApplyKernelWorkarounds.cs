@@ -37,6 +37,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// call, the call is dropped, and every reference to one of its outputs is rewired to the
     /// replacement's.</para>
     ///
+    /// <para><b>Kept on the host.</b> A call of a workaround that
+    /// <see cref="KernelWorkaround.KeepsOnHost">keeps it on the host</see> stays as it stands and
+    /// is marked <see cref="FastNode.RunsOnHost"/>; nothing is spliced for it.</para>
+    ///
     /// <para><b>Names.</b> What the pass did is returned as <see cref="Splices"/>, which says how
     /// <see cref="FastUseUniqueNames"/> numbers the graph: the spliced nodes, and the nodes the
     /// later pre-passes add only for them, last; and, where a call was dropped, the number it had
@@ -117,6 +121,14 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     {
                         newNodes.Add(node);
                         if (!minted.Contains(node.Key) && !InternalOpCodes.IsGraphOutputOp(node.OpCode)) numbered = node.Key;
+                        continue;
+                    }
+
+                    if (workaround.KeepsOnHost)
+                    {
+                        node.RunsOnHost = true;
+                        newNodes.Add(node);
+                        if (!minted.Contains(node.Key)) numbered = node.Key;
                         continue;
                     }
 

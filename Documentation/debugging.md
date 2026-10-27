@@ -207,7 +207,8 @@ that meets one gets ONNX Runtime's result:
 
 A CUDA session of the ONNX Runtime backend is built with `KernelWorkaroundSets.OnnxRuntimeCuda`:
 every rewrite of the table above, in its order, then these, for what the CUDA execution provider
-alone does otherwise:
+alone does otherwise. The `Resize` row takes the place of the cubic `tf_crop_and_resize` row
+above, whose calls it covers, so a call is regrouped once:
 
 | Operator | Scenario the CUDA provider gets wrong | Rewrite | Issue |
 |---|---|---|---|

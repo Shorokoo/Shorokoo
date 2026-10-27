@@ -408,6 +408,21 @@ public class KernelWorkaroundPassTests
     }
 
     [Fact]
+    public void TestTheCudaSetRegroupsAResizeOnceAndDecidesItsRouteFromStatedDimensions()
+    {
+        var y = InputTensor<float32>("y", rank: 4);
+        var data = TensorData(DType.Float32, [1L, 3L, 4L, 5L], [.. Enumerable.Range(0, 60).Select(i => (float)(i % 7))]);
+        var computed = OnnxOp.Add(Vector(1f, 2f, 2f, 1f), OnnxOp.Mul(OnnxOp.Cast(OnnxOp.Shape(y), null, DType.Float32), Scalar(0f)));
+        InternalComputationGraph Crop(Variable scales) => Graph(y, OnnxOp.Resize(y, Vector(0f, 0.1f, 0f, 0f, 1f, 0.9f, 1f, 1f), scales,
+            null, null, null, CoordinateTransformationMode.Tf_crop_and_resize, null, null, -1f, null, ResizeMode.Cubic, null));
+        InternalComputationGraph Sized(Variable sizes) => Graph(y, OnnxOp.Resize(y, null, null, sizes, null, null, null, null, null, null, null, ResizeMode.Linear, null));
+        Assert.True(CudaAsOnnxRuntime(Crop(Vector(1f, 2f, 2f, 1f))));
+        Assert.True(CudaAsOnnxRuntime(Crop(computed)));
+        Assert.True(CudaAsOnnxRuntime(Sized(OnnxOp.Concat([OnnxOp.Shape(y, end: 2), Vector(8L, 10L)], 0L)), [1L, 3L, 4L, 5L]));
+        Assert.True(StatedRegroupedOnCuda(Sized(OnnxOp.Concat([OnnxOp.Shape(y, end: 1), Vector(6L, 8L), OnnxOp.Shape(y, start: 3)], 0L)), data));
+    }
+
+    [Fact]
     public void TestTheCudaSetComputesWhatTheCallsItRewritesCompute()
     {
         var u = InputTensor<uint32>("u", rank: 1);
@@ -944,6 +959,13 @@ public class KernelWorkaroundPassTests
     private static bool RegroupedOnCuda(InternalComputationGraph g, params TensorData[] x)
         => CudaTransposes(g) > 0
            && ShapedRun(g, Session(g, KernelWorkaroundRegistry.OnnxRuntime), x).SequenceEqual(ShapedRun(g, Session(g, KernelWorkaroundRegistry.OnnxRuntimeCuda), x));
+
+    private static bool StatedRegroupedOnCuda(InternalComputationGraph g, TensorData x)
+    {
+        var built = FastOnnxModelBuilder.BuildInternalOnnxModel(g, prepForOnnx: true, inputDims: [x.Shape.Dims], workarounds: KernelWorkaroundRegistry.OnnxRuntimeCuda);
+        return Ifs(built) == 0 && AllNodes(built).Any(n => n.OpType == TRANSPOSE)
+           && ShapedRun(g, Session(g, KernelWorkaroundRegistry.OnnxRuntime), [x]).SequenceEqual(ShapedRun(g, built, [x]));
+    }
 
     private static readonly KernelWorkaroundSet CudaOptionalSet = new("cuda-optional",
         [.. KernelWorkaroundRegistry.CudaWorkarounds.Where(w => w.LooksThrough is not null)]);

@@ -632,7 +632,8 @@ internal sealed class PlacementProof
                 else if (node.OpType == "Concat" && ConcatPart(node, slot, outShape) is { } part && inBytes == outBytes)
                     identical = written.Offset + part * outBytes == start;
             }
-            else if (IsFusedSum(node, slot, written.Value) && _shapes.TryGetValue(name, out var summed) && outShape is not null)
+            else if ((IsFusedSum(node, slot, written.Value) || IsFusedUpdate(node, slot, written.Value))
+                     && _shapes.TryGetValue(name, out var summed) && outShape is not null)
                 identical = PlacementShapes.ElementBytes(summed.ElementType) == outBytes && outBytes > 0
                             && summed.Shape.SequenceEqual(outShape.Shape) && written.Offset == start;
             yield return (start, end, identical);
@@ -650,6 +651,17 @@ internal sealed class PlacementProof
     private static bool IsFusedSum(NodeProto node, int slot, string value)
         => node.Domain == "com.microsoft" && node.OpType is "SkipLayerNormalization" or "SkipSimplifiedLayerNormalization"
            && slot is 0 or 1 && node.Outputs.Count > 3 && node.Outputs[3] == value;
+
+    /// <summary>
+    /// Whether <paramref name="value"/> is output <paramref name="slot"/> of Shorokoo's fused optimizer
+    /// update, the <c>AdamUpdate</c> of the <c>ai.shorokoo</c> domain: the parameter or a moment it
+    /// updates, which it may write over its input <paramref name="slot"/>. Its kernels, on the host and
+    /// on the card, read each element of every input before writing that element of any output, and
+    /// read none again (see <see cref="OutputAliasProof"/>).
+    /// </summary>
+    private static bool IsFusedUpdate(NodeProto node, int slot, string value)
+        => node.Domain == "ai.shorokoo" && node.OpType == "AdamUpdate" && slot is 0 or 1 or 2
+           && node.Outputs.Count == 3 && node.Outputs[slot] == value;
 
     /// <summary>Whether <paramref name="node"/> writes its output element for element as it reads
     /// its input <paramref name="slot"/>, in the same order: a view operator that keeps every
@@ -931,7 +943,8 @@ internal sealed class PlacementProof
         var outShape = _shapes[value];
         var size = PlacementShapes.ElementBytes(inShape.ElementType);
         if (size != PlacementShapes.ElementBytes(outShape.ElementType)) return null;
-        if (IsFusedSum(writer, slot, value)) return inShape.Shape.SequenceEqual(outShape.Shape) ? start : null;
+        if (IsFusedSum(writer, slot, value) || IsFusedUpdate(writer, slot, value))
+            return inShape.Shape.SequenceEqual(outShape.Shape) ? start : null;
         if (!OutputAliasProof.IsStandard(writer)) return null;
         if ((InPlaceUnary.Contains(writer.OpType) && slot == 0) || (writer.OpType == "Clip" && slot == 0)
             || (InPlaceBinary.Contains(writer.OpType) && writer.Inputs.Count == 2))

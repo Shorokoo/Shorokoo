@@ -63,4 +63,24 @@ public sealed record RunSettings
     /// no boundary to stop at and cannot be stopped at all.</para>
     /// </summary>
     public CancellationToken CancellationToken { get; init; }
+
+    private readonly LogSettings _log = LogSettings.Default;
+
+    /// <summary>
+    /// Where the messages the backend's runtime emits during this run go, and from which severity
+    /// on: <see cref="LogSettings.Default"/> — warnings and above, as plain lines on the standard
+    /// error stream — unless set otherwise, and <see cref="LogSettings.None"/> to drop them all.
+    ///
+    /// <para>On a context it is also what the sessions it compiles are built under: a runtime's
+    /// messages about a model it is handed — a kernel it warns about, an initializer nothing reads —
+    /// go to the settings of the context that compiles it. A run of a compiled graph given settings
+    /// of its own sends what the run emits there, and nothing of another run's, even of the same
+    /// session at the same time. See <see cref="LogSettings"/>.</para>
+    /// </summary>
+    /// <exception cref="ArgumentNullException">A null settings object.</exception>
+    public LogSettings Log
+    {
+        get => _log;
+        init => _log = value ?? throw new ArgumentNullException(nameof(value));
+    }
 }

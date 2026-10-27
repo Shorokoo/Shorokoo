@@ -155,8 +155,8 @@ public abstract class TorchBackend : IShorokooBackend
     /// run, rather than on its first run.</summary>
     /// <param name="modelBytes">The serialized ONNX model.</param>
     /// <param name="graphOptimization">Unused: torch runs the graph as translated.</param>
-    /// <param name="logSeverity">The least severity at which a warning the session's runs raise
-    /// in Python is shown; above <see cref="ShorokooLogSeverity.Warning"/> they are not.</param>
+    /// <param name="log">Unused: a run's Python warnings go to its own
+    /// <see cref="RunSettings.Log"/>, and loading the model only defines its functions.</param>
     /// <param name="deviceMemory">On CUDA, the limit each run's allocations get
     /// (<see cref="DeviceMemorySettings.LimitBytes"/>); ignored on the CPU.</param>
     /// <exception cref="TorchUnsupportedModelException">The model uses something this backend
@@ -164,9 +164,9 @@ public abstract class TorchBackend : IShorokooBackend
     public IShorokooSession CreateSession(
         ReadOnlyMemory<byte> modelBytes,
         ShorokooGraphOptimization graphOptimization,
-        ShorokooLogSeverity logSeverity,
+        LogSettings log,
         DeviceMemorySettings deviceMemory)
-        => TorchSession.Create(this, modelBytes, logSeverity, deviceMemory, DiagnosticSettings.Default, [], PrecisionSettings.Default);
+        => TorchSession.Create(this, modelBytes, log, deviceMemory, DiagnosticSettings.Default, [], PrecisionSettings.Default);
 
     /// <summary>The same session, recording which device ran each node where
     /// <paramref name="diagnostics"/> asks (<see cref="DiagnosticSettings.TraceNodePlacement"/>):
@@ -174,10 +174,10 @@ public abstract class TorchBackend : IShorokooBackend
     public IShorokooSession CreateSession(
         ReadOnlyMemory<byte> modelBytes,
         ShorokooGraphOptimization graphOptimization,
-        ShorokooLogSeverity logSeverity,
+        LogSettings log,
         DeviceMemorySettings deviceMemory,
         DiagnosticSettings diagnostics)
-        => TorchSession.Create(this, modelBytes, logSeverity, deviceMemory, diagnostics, [], PrecisionSettings.Default);
+        => TorchSession.Create(this, modelBytes, log, deviceMemory, diagnostics, [], PrecisionSettings.Default);
 
     /// <summary>
     /// The same session, writing the outputs <paramref name="outputAliases"/> names into the memory
@@ -188,13 +188,13 @@ public abstract class TorchBackend : IShorokooBackend
     public IShorokooSession CreateSession(
         ReadOnlyMemory<byte> modelBytes,
         ShorokooGraphOptimization graphOptimization,
-        ShorokooLogSeverity logSeverity,
+        LogSettings log,
         DeviceMemorySettings deviceMemory,
         DiagnosticSettings diagnostics,
         IReadOnlyList<OutputAlias> outputAliases)
     {
         ArgumentNullException.ThrowIfNull(outputAliases);
-        return TorchSession.Create(this, modelBytes, logSeverity, deviceMemory, diagnostics, outputAliases, PrecisionSettings.Default);
+        return TorchSession.Create(this, modelBytes, log, deviceMemory, diagnostics, outputAliases, PrecisionSettings.Default);
     }
 
     /// <summary>
@@ -211,7 +211,7 @@ public abstract class TorchBackend : IShorokooBackend
     public IShorokooSession CreateSession(
         ReadOnlyMemory<byte> modelBytes,
         ShorokooGraphOptimization graphOptimization,
-        ShorokooLogSeverity logSeverity,
+        LogSettings log,
         DeviceMemorySettings deviceMemory,
         DiagnosticSettings diagnostics,
         IReadOnlyList<OutputAlias> outputAliases,
@@ -225,7 +225,7 @@ public abstract class TorchBackend : IShorokooBackend
         if (suppliedInitializers.Count > 0)
             throw new NotSupportedException(
                 $"{Description} cannot take a model's initializers as values it already holds.");
-        return TorchSession.Create(this, modelBytes, logSeverity, deviceMemory, diagnostics, outputAliases, precision);
+        return TorchSession.Create(this, modelBytes, log, deviceMemory, diagnostics, outputAliases, precision);
     }
 
     public IShorokooTensorValue CreateTensor<T>(T[] data, long[] shape) where T : unmanaged

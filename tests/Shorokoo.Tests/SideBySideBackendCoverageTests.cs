@@ -33,6 +33,13 @@ public class SideBySideBackendCoverageTests
 {
     private static readonly string BackendRoot = Path.Combine(AppContext.BaseDirectory, "ort");
 
+    /// <summary>A copy of the native under <see cref="AltRuntimePath"/> in a folder of its own, so a
+    /// runtime of its own, which only <see cref="TestATracedRunLeavesTheUntracedRunsBesideItUndisturbed"/>
+    /// loads: its traced run is the first its runtime sees.</summary>
+    private static string TracedRuntimePath => Path.Combine(
+        BackendRoot, "traced",
+        RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "onnxruntime.dll" : "libonnxruntime.so");
+
     /// <summary>The native the isolated backend binds, deployed by the test project's
     /// ShorokooBackendNatives items.</summary>
     internal static string AltRuntimePath => Path.Combine(
@@ -114,6 +121,37 @@ public class SideBySideBackendCoverageTests
 
         Assert.Same(DefaultBackend.Instance, DefaultBackend.Current);
         Assert.Equal(DefaultBackend.Describe(), ComputeContext.Default.Backend);
+    }
+
+    [Fact]
+    public void TestATracedRunLeavesTheUntracedRunsBesideItUndisturbed()
+    {
+        var runtime = IsolatedBackend.Load(new IsolatedBackendSpec
+        {
+            Name = "traced-runtime",
+            BackendAssembly = PlatformBackendAssembly(gpu: false),
+            NativeRuntimePath = TracedRuntimePath,
+        });
+        using var plain = new ComputeContext(runtime);
+        using var traced = new ComputeContext(runtime) { Diagnostics = new DiagnosticSettings { TraceNodePlacement = true } };
+        var (graph, a, b, expected) = Model();
+        var profiled = traced.Compile(graph);
+        using var stop = new CancellationTokenSource();
+        var running = Enumerable.Range(0, 4).Select(_ => ArenaProbeModels.MatMul(plain)).Select(product => Task.Factory.StartNew(() =>
+        {
+            var operand = ArenaProbeModels.MatMulOperand(512);
+            do product.Execute(operand.Shared(), operand.Shared()); while (!stop.IsCancellationRequested);
+        }, TaskCreationOptions.LongRunning)).ToArray();
+        try
+        {
+            Thread.Sleep(200);
+            Assert.Equal(expected, SideBySideModel.Floats(profiled.Execute(a, b)[0]));
+        }
+        finally
+        {
+            stop.Cancel();
+            Task.WaitAll(running);
+        }
     }
 
     [Fact]
@@ -218,6 +256,16 @@ public class SideBySideBackendCoverageTests
         var instance = ortEnv.GetMethod("Instance", Any, [])!.Invoke(null, null);
         var providers = ortEnv.GetMethod("GetAvailableProviders", Any, [])!;
         return (string[])providers.Invoke(providers.IsStatic ? null : instance, null)!;
+    }
+
+    [Fact]
+    public void TestAnIsolatedRuntimesMessagesReachTheLogSettingsOfTheSessionOrRunTheyCameFrom()
+    {
+        var info = new LogSettings { MinimumSeverity = ShorokooLogSeverity.Info };
+        var (built, ran) = CoreUtilsCoverageTests.Logged(Alt.Value, info, sink => CoreUtilsCoverageTests.Into(sink, ShorokooLogSeverity.Warning));
+        Assert.Single(built, m => m.Text.Contains("'unused'"));
+        Assert.Contains("actual shape", Assert.Single(ran).Text);
+        Assert.Empty(CoreUtilsCoverageTests.Logged(Alt.Value, info, sink => CoreUtilsCoverageTests.Into(sink, ShorokooLogSeverity.Error)).Ran);
     }
 
     [Fact]
@@ -361,11 +409,11 @@ public class SideBySideBackendCoverageTests
 
         public IShorokooSession CreateSession(
             ReadOnlyMemory<byte> modelBytes, ShorokooGraphOptimization graphOptimization,
-            ShorokooLogSeverity logSeverity, DeviceMemorySettings deviceMemory)
+            LogSettings log, DeviceMemorySettings deviceMemory)
         {
             Sessions.Add(graphOptimization);
             return new RecordingSession(
-                inner.CreateSession(modelBytes, graphOptimization, logSeverity, deviceMemory), Fed);
+                inner.CreateSession(modelBytes, graphOptimization, log, deviceMemory), Fed);
         }
 
         public IShorokooTensorValue CreateTensor<T>(T[] data, long[] shape) where T : unmanaged

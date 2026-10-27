@@ -669,6 +669,29 @@ internal static class TrainingRigHelpers
         }
     }
 
+    internal static (float[] Trained, float[][] Kept, float[][] KeptAfter, long Donated, long Copied, long Aliased) JaxDonatingRun(
+        JaxBackend backend, TrainingBackend? training, bool aliasing)
+    {
+        static float[] Values(TrainingCheckpoint c) => [.. FlattenStruct(c.TrainableParams), .. FlattenStruct(c.OptimizerState)];
+        using var context = new ComputeContext(backend) { OutputAliasing = aliasing };
+        var rig = TrainingRig.FromScratch(ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph,
+            SampleOf(NativeParityCases<JaxCpuBackend>.Four), NativeParityCases<JaxCpuBackend>.AdamW, ParitySeed,
+            runtimeContext: context, trainingBackend: training);
+        void Step(ResidentTrainingRun run) => run.Step(NativeParityCases<JaxCpuBackend>.Four, NativeParityCases<JaxCpuBackend>.FourTargets);
+        var held = rig.CreateInitialCheckpoint();
+        var heldValues = Values(held);
+        using var run = rig.BeginResidentRun(held.Shared());
+        Step(run);
+        Step(run);
+        var published = run.StepToCheckpoint(NativeParityCases<JaxCpuBackend>.Four, NativeParityCases<JaxCpuBackend>.FourTargets);
+        var publishedValues = Values(published);
+        Step(run);
+        Step(run);
+        var trained = Values(run.StepToCheckpoint(NativeParityCases<JaxCpuBackend>.Four, NativeParityCases<JaxCpuBackend>.FourTargets));
+        return (trained, [heldValues, publishedValues], [Values(held), Values(published)], backend.DonatedInputs, backend.CopiedInputs,
+            context.AliasedOutputs);
+    }
+
     internal static byte[] ReadEntryBytesViaBcl(string path, string entryName)
     {
         using var zip = System.IO.Compression.ZipFile.OpenRead(path);
@@ -3098,6 +3121,38 @@ public class TrainingRigTrainingLoopCoverageTests
         Assert.True(rig.HasGenericTrainStepSession);
     }
 
+    [Fact]
+    public void TestAStepThePassRewroteBakedAtItsShapesTrainsAsHandedAtEveryOtherShapeCoverage()
+    {
+        var sample = TensorData([8L, 256L], NNLibraryTrainingFixtures.Ramp(8 * 256, 0.001f, -0.5f));
+        var rig = TrainingRig.FromScratch(Benchmarks.MemoryPassMlp.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            [sample], new SGDOptimizerHyperparameters { LearningRate = 0.01f });
+        var handed = rig.PreOptimizationGraph.ToInternal();
+        Assert.NotEqual("Baseline", rig.OptimizationResult.StrategyName);
+        Assert.True(rig.OptimizationResult.AllStrategies[0].Graph.Nodes.Count < handed.Nodes.Count);
+
+        var ckpt = rig.CreateInitialCheckpoint();
+        var reference = ComputeContext.Default.Compile(handed, inputDims: null, trainingStep: true);
+        var generic = ComputeContext.Default.Compile(rig.TrainingStepPureGraph.ToInternal(), inputDims: null, trainingStep: true);
+        float[] Outputs(CompiledGraph step, TensorDataStruct input, TensorDataStruct target) =>
+            [.. step.Execute(ComputeContext.ExpandStructInputs(
+                [ckpt.TrainableParams.Shared(), ckpt.ModelState.Shared(), ckpt.OptimizerState.Shared(), input.Shared(), target.Shared()]))
+                .SelectMany(o => o.ToTensorData<float32>().CopyMemory<float>())];
+        foreach (var n in (long[])[1, 3])
+        {
+            var input = rig.InputDef.FromOrderedData(TensorData([n, 256L], NNLibraryTrainingFixtures.Ramp(n * 256, 0.002f, -0.3f)));
+            var target = rig.TargetDef.FromOrderedData(TensorData([n, 64L], NNLibraryTrainingFixtures.Ramp(n * 64, 0.01f, 0f)));
+            var expected = Outputs(reference, input, target);
+            var stepped = rig.TrainStep(ckpt.Shared(), input.Shared(), target.Shared());
+            float[] trained = [.. rig.TrainableParamStructDef.Fields.SelectMany(f => ((TensorData)stepped.TrainableParams.Fields[f.Name]).As<float32>().CopyMemory<float>()), stepped.Loss!.Value];
+            foreach (var actual in (float[][])[trained, Outputs(generic, input, target)])
+            {
+                Assert.Equal(expected.Length, actual.Length);
+                foreach (var (x, y) in expected.Zip(actual)) AssertClose(x, y, 1e-4f);
+            }
+        }
+    }
+
     private static int OrtOptimizedNodeCount(ModelProto model, string opType)
     {
         var bytes = new MemoryStream();
@@ -3620,6 +3675,18 @@ public class TrainingRigTrainingLoopCoverageTests
         Assert.All(tensors, t => Assert.True(t.IsDisposed));
         Assert.All(tensors, t => Assert.Throws<ObjectDisposedException>(() => t.CopyRawMemory()));
         TrainingRig.ReleaseCheckpointState(superseded);   // idempotent
+    }
+
+    [Fact]
+    public void TestAResidentRunOnJaxDonatesTheStateItOwnsCopiesTheStateItWasLentKeepsEveryHeldCheckpointAndTrainsAsWithoutDonation()
+    {
+        var donating = JaxDonatingRun(new JaxCpuBackend(), null, aliasing: true);
+        var plain = JaxDonatingRun(new JaxCpuBackend(), null, aliasing: false);
+
+        Assert.Equal(plain.Trained, donating.Trained);
+        Assert.Equal(donating.Kept, donating.KeptAfter);
+        Assert.Equal((16L, 8L, 0L), (donating.Donated, donating.Copied, donating.Aliased));
+        Assert.Equal((0L, 0L), (plain.Donated, plain.Copied));
     }
 
     /// <summary>A checkpoint the run published, and the one it was handed, outlive it: handing one
@@ -4392,6 +4459,40 @@ public class TrainingRigCheckpointCoverageTests
         var taken = run.TakeCheckpoint();
         run.Step(input.Shared(), target.Shared());
         Assert.Equal(Bytes(handed) + Bytes(taken), rig.SupersededStateBytesPending);
+    }
+
+    [Fact]
+    public void TestAResidentRunReleasesADroppedCheckpointAtTheStepThatMovesOnFromIt()
+    {
+        var rig = ShapeRig(ParamOrderAModel.ComputationGraph);
+        var input = rig.InputDef.FromOrderedData(TensorData([4L], [1f, 2f, 3f, 4f]));
+        var target = rig.TargetDef.FromOrderedData(TensorData([4L], [1f, 2f, 3f, 4f]));
+        var batch = new DataBatch(input.Shared(), target.Shared(), new DataLoaderPosition(0, 0));
+        rig.SetReclaimBudgetForTests(1);
+        using var run = rig.BeginResidentRun();
+        run.Step(input.Shared(), target.Shared());
+
+        Assert.DoesNotContain(Dropped(run, r => r.StepToCheckpoint(input.Shared(), target.Shared()), r => r.Step(input.Shared(), target.Shared())), w => w.IsAlive);
+        Assert.DoesNotContain(Dropped(run, r => r.TakeCheckpoint(), r => r.Step(input.Shared(), target.Shared())), w => w.IsAlive);
+        Assert.DoesNotContain(Dropped(run, r => r.StepToCheckpoint(input.Shared(), target.Shared()), r => r.StepToCheckpoint(input.Shared(), target.Shared())), w => w.IsAlive);
+        Assert.DoesNotContain(Dropped(run, r => r.StepToCheckpoint(batch), r => r.Step(batch)), w => w.IsAlive);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static WeakReference[] Dropped(
+        ResidentTrainingRun run, Func<ResidentTrainingRun, TrainingCheckpoint> handOut, Action<ResidentTrainingRun> next)
+    {
+        var weak = HandOut(run, handOut);
+        next(run);
+        return weak;
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static WeakReference[] HandOut(ResidentTrainingRun run, Func<ResidentTrainingRun, TrainingCheckpoint> handOut)
+    {
+        var c = handOut(run);
+        return [new(c), .. ((TensorDataStruct[])[c.TrainableParams, c.ModelState, c.OptimizerState])
+            .SelectMany(s => s.Fields.Values.OfType<TensorData>()).Select(t => new WeakReference(t))];
     }
 
     /// <summary>A caller that keeps no checkpoint, and one that keeps a single older checkpoint,
@@ -5536,6 +5637,34 @@ public class TrainingRigSkptCheckpointCoverageTests
     }
 
     [Fact]
+    public void TestARigBlockRecordingAMalformedRunModelAnswerIsRefusedCoverage()
+    {
+        var (_, trained, _, _) = BuildTrainedAdamWRig(steps: 1);
+        var path = TempPath("skpt_answers") + ".skpt";
+        bool Refused(string question, long? peak)
+        {
+            Persistence.SaveTrainingCheckpointToSkpt(trained, path);
+            RewriteSkptManifest(path, n => n["training"]!["rig"]!["runModelAnswers"] = new System.Text.Json.Nodes.JsonObject { [question] = peak });
+            return Record.Exception(() => TrainingRig.Load(path)) is InvalidDataException;
+        }
+        try
+        {
+            Assert.Equal<bool>([false, false, true, true, true, true], [
+                Refused(new string('a', 64), 5),
+                Refused(new string('0', 64), null),
+                Refused(new string('A', 64), 5),
+                Refused(new string('a', 63), 5),
+                Refused(new string('g', 64), 5),
+                Refused(new string('1', 64), -1),
+            ]);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
     public void TestSkptCheckpointRoundTripResumeModelStateAndInspectCoverage()
     {
         var (rigA, ckpt, inBatch, outBatch) = BuildTrainedAdamWRig(steps: 2);
@@ -6426,6 +6555,21 @@ public class TrainingRigHyperparameterDTypeCoverageTests
     }
 
     [Fact]
+    public void TestAppliedScheduledHyperparameterIsTheScheduledValueOnEveryStepCoverage()
+    {
+        var (_, input, target) = ScalarMultiplyBatches();
+        var rig = MixedRig(new MixedDTypeHyperOptimizerHyperparameters { LearningRate = Schedules.Constant(0.1f) });
+        var ckpt = rig.CreateInitialCheckpoint();
+        var applied = new float[300];
+        for (int i = 0; i < applied.Length; i++)
+        {
+            ckpt = rig.TrainStep(ckpt, input.Shared(), target.Shared());
+            applied[i] = ckpt.AppliedHyperparameters!["learningRate"].ToSingle();
+        }
+        Assert.Equal(Enumerable.Repeat(0.1f, applied.Length), applied);
+    }
+
+    [Fact]
     public void TestHyperparameterDTypeConversionsAndRejectionsCoverage()
     {
         var runtimeRig = MixedRig(new MixedDTypeHyperOptimizerHyperparameters
@@ -7068,23 +7212,23 @@ public class TrainingRigTrainingBackendCoverageTests
 
         public IShorokooSession CreateSession(
             ReadOnlyMemory<byte> modelBytes, ShorokooGraphOptimization graphOptimization,
-            ShorokooLogSeverity logSeverity, DeviceMemorySettings deviceMemory)
-            => inner.CreateSession(modelBytes, graphOptimization, logSeverity, deviceMemory);
+            LogSettings log, DeviceMemorySettings deviceMemory)
+            => inner.CreateSession(modelBytes, graphOptimization, log, deviceMemory);
 
         public IShorokooSession CreateSession(
             ReadOnlyMemory<byte> modelBytes, ShorokooGraphOptimization graphOptimization,
-            ShorokooLogSeverity logSeverity, DeviceMemorySettings deviceMemory, DiagnosticSettings diagnostics)
-            => inner.CreateSession(modelBytes, graphOptimization, logSeverity, deviceMemory, diagnostics);
+            LogSettings log, DeviceMemorySettings deviceMemory, DiagnosticSettings diagnostics)
+            => inner.CreateSession(modelBytes, graphOptimization, log, deviceMemory, diagnostics);
 
         public IShorokooSession CreateSession(
             ReadOnlyMemory<byte> modelBytes, ShorokooGraphOptimization graphOptimization,
-            ShorokooLogSeverity logSeverity, DeviceMemorySettings deviceMemory, DiagnosticSettings diagnostics,
+            LogSettings log, DeviceMemorySettings deviceMemory, DiagnosticSettings diagnostics,
             IReadOnlyList<OutputAlias> outputAliases)
         {
             var model = ProtoBuf.Serializer.Deserialize<ModelProto>(modelBytes);
             if (model.OpsetImports.All(o => o.Domain != "ai.shorokoo.training"))
                 return inner.CreateSession(
-                    modelBytes, graphOptimization, logSeverity, deviceMemory, diagnostics, outputAliases);
+                    modelBytes, graphOptimization, log, deviceMemory, diagnostics, outputAliases);
             Handed.Add((model, outputAliases));
             throw new NotSupportedException();
         }
@@ -7489,7 +7633,7 @@ public class TrainingRigNativeTorchCoverageTests : NativeTrainingParity<TorchCpu
 public class TrainingRigNativeJaxCoverageTests : NativeTrainingParity<JaxCpuBackend>
 {
     [Fact]
-    public void TestANativeStepOnJaxBindsNoOutputIntoAConsumedParameterAndTrainsAlike()
+    public void TestANativeStepOnJaxWritesNoOutputIntoAConsumedParameterOnTheCpuAndTrainsAlike()
     {
         using var context = new ComputeContext(new JaxCpuBackend()) { OutputAliasing = true };
         var reference = TrainingRig.FromScratch(ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph, SampleOf(Four), AdamW, ParitySeed);
@@ -7501,6 +7645,18 @@ public class TrainingRigNativeJaxCoverageTests : NativeTrainingParity<JaxCpuBack
 
         AssertClose(reference.TrainStep(reference.TrainStep(start.Shared(), Four, FourTargets), Four, FourTargets), run.StepToCheckpoint(Four, FourTargets));
         Assert.Equal(0L, context.AliasedOutputs);
+    }
+
+    [Fact]
+    public void TestANativeResidentRunOnJaxDonatesTheStateItOwnsCopiesTheStateItWasLentKeepsEveryHeldCheckpointAndTrainsAsWithoutDonation()
+    {
+        var donating = JaxDonatingRun(new JaxCpuBackend(), TrainingBackend.Native, aliasing: true);
+        var plain = JaxDonatingRun(new JaxCpuBackend(), TrainingBackend.Native, aliasing: false);
+
+        Assert.Equal(plain.Trained, donating.Trained);
+        Assert.Equal(donating.Kept, donating.KeptAfter);
+        Assert.Equal((16L, 8L, 0L), (donating.Donated, donating.Copied, donating.Aliased));
+        Assert.Equal((0L, 0L), (plain.Donated, plain.Copied));
     }
 
     [Trait("Domain", "Training")]

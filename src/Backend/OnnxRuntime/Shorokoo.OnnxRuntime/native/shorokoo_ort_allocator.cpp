@@ -43,13 +43,15 @@ struct OrtAllocator {
     void* (*Shrink)(OrtAllocator* self);
 };
 
-// The version announced: the fields up to Shrink, of which only Alloc, Free and Info are filled
-// in. ONNX Runtime calls an optional entry point only where it is not null.
+// The version announced: the fields up to Shrink, of which Alloc, Free, Info and AllocOnStream are
+// filled in. ONNX Runtime calls an optional entry point only where it is not null.
 constexpr uint32_t AnnouncedVersion = 25;
 
 // The managed allocator's entry points. Allocate answers a block, or null with the reason written
-// into `reason` (NUL-terminated, at most `capacity` bytes); neither ever unwinds.
+// into `reason` (NUL-terminated, at most `capacity` bytes); AllocateOnStream does the same for a
+// request ONNX Runtime makes on one of its streams, which it names. None ever unwinds.
 using ManagedAllocate = void* (*)(void* state, size_t size, char* reason, int32_t capacity);
+using ManagedAllocateOnStream = void* (*)(void* state, size_t size, void* stream, char* reason, int32_t capacity);
 using ManagedFree = void (*)(void* state, void* block);
 
 // What ONNX Runtime holds: the OrtAllocator first, so the pointer it is handed back is this.
@@ -57,6 +59,7 @@ struct Allocator {
     OrtAllocator ort;
     void* state;
     ManagedAllocate allocate;
+    ManagedAllocateOnStream allocateOnStream;
     ManagedFree free;
     const OrtMemoryInfo* info;
 };
@@ -65,14 +68,28 @@ struct Allocator {
 // memory beyond the exception's own.
 constexpr int32_t ReasonCapacity = 1024;
 
+// The block, or the refusal the managed side worded, thrown as ONNX Runtime's own allocators throw.
+void* Answer(void* block, size_t size, char* reason) {
+    if (block != nullptr || size == 0) return block;
+    reason[ReasonCapacity - 1] = '\0';
+    throw std::runtime_error(reason[0] != '\0' ? reason : "Failed to allocate: Shorokoo's allocator refused the request.");
+}
+
 void* Alloc(OrtAllocator* self, size_t size) {
     auto* allocator = reinterpret_cast<Allocator*>(self);
     char reason[ReasonCapacity];
     reason[0] = '\0';
-    void* block = allocator->allocate(allocator->state, size, reason, ReasonCapacity);
-    if (block != nullptr || size == 0) return block;
-    reason[ReasonCapacity - 1] = '\0';
-    throw std::runtime_error(reason[0] != '\0' ? reason : "Failed to allocate: Shorokoo's allocator refused the request.");
+    return Answer(allocator->allocate(allocator->state, size, reason, ReasonCapacity), size, reason);
+}
+
+// A request on one of ONNX Runtime's streams. Implementing it is what makes ONNX Runtime name the
+// stream: otherwise it asks through Alloc, and the managed side cannot tell a request whose work the
+// stream orders from one ONNX Runtime fills off every stream.
+void* AllocOnStream(OrtAllocator* self, size_t size, void* stream) {
+    auto* allocator = reinterpret_cast<Allocator*>(self);
+    char reason[ReasonCapacity];
+    reason[0] = '\0';
+    return Answer(allocator->allocateOnStream(allocator->state, size, stream, reason, ReasonCapacity), size, reason);
 }
 
 void Free(OrtAllocator* self, void* block) {
@@ -91,15 +108,18 @@ const OrtMemoryInfo* Info(const OrtAllocator* self) {
 // for it. It lives for the life of the process: an allocator registered with ONNX Runtime's
 // environment cannot be taken back while anything it made is alive.
 SHOROKOO_EXPORT void* shorokoo_ort_allocator_create(
-    void* state, ManagedAllocate allocate, ManagedFree free, const void* info) {
+    void* state, ManagedAllocate allocate, ManagedAllocateOnStream allocateOnStream, ManagedFree free,
+    const void* info) {
     auto* allocator = new (std::nothrow) Allocator{};
     if (allocator == nullptr) return nullptr;
     allocator->ort.version = AnnouncedVersion;
     allocator->ort.Alloc = &Alloc;
     allocator->ort.Free = &Free;
+    allocator->ort.AllocOnStream = &AllocOnStream;
     allocator->ort.Info = &Info;
     allocator->state = state;
     allocator->allocate = allocate;
+    allocator->allocateOnStream = allocateOnStream;
     allocator->free = free;
     allocator->info = static_cast<const OrtMemoryInfo*>(info);
     return &allocator->ort;

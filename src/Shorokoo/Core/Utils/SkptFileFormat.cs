@@ -304,6 +304,14 @@ namespace Shorokoo.Core.Utils
         [JsonPropertyName("rng")]
         public SkptRngConfigInfo? Rng { get; set; }
 
+        /// <summary>The answers the backend's model of a run gave the rig's memory-aware pass — each
+        /// the peak it told, or null where it could not — keyed by the SHA-256 of the question, which
+        /// names the model asked about and the build of the backend asked. A rig loaded on the same
+        /// build of the same backend takes them in place of asking; one loaded elsewhere asks anew.
+        /// <c>null</c> when the pass asked nothing.</summary>
+        [JsonPropertyName("runModelAnswers")]
+        public Dictionary<string, long?>? RunModelAnswers { get; set; }
+
         /// <summary>Round-trips fields this reader does not interpret, unchanged.</summary>
         [JsonExtensionData]
         public Dictionary<string, JsonElement>? AdditionalFields { get; set; }

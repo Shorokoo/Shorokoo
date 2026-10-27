@@ -127,6 +127,13 @@ were within their run-to-run noise.
   whichever kernel it timed fastest, which may be either.
 - **Only `float32` changes.** Products of `Float16`, `BFloat16` and `Double` operands compute as
   they do either way.
+- **ONNX Runtime's CUDA `Softmax` and `LogSoftmax` over `Double` are accurate to about `float32`'s
+  precision, not `Double`'s.** On an RTX 4090 a `Softmax` lands within about 1e-7 of the exact
+  value relative to it (about 1e-8 absolute), and a `LogSoftmax` within about 5e-8 absolute, where
+  the host's land within 1e-12. Whatever is computed through them inherits that error: the gradient
+  of a `SoftmaxCrossEntropyLoss` over `Double` scores, for one, is within 1e-7 of its closed form on
+  the card. This is accepted as ONNX Runtime's behaviour; compute a `Double` softmax on the host
+  where its last digits matter.
 - **PyTorch's switches are the whole process's.** A run on a card sets them from its own session as
   it starts, so a session's precision does not depend on what ran before it, nor on code of your own
   that sets them. Runs of sessions that set them differently do not overlap: while a run that allows
@@ -273,15 +280,16 @@ Console.WriteLine($"the card at its peak {DeviceMemory.PeakUsedBytes / (1024 * 1
   driving a display), where `nvidia-smi` prints `[N/A]` for it, and from NVML everywhere else. It
   is `null` where neither answers for the card: where DXGI does not, and NVML is not installed,
   gives no per-process figure, or does not see this process's id, as in a container with its own
-  process-id namespace. The two figures of one reading are taken one after the other, so while
+  process-id namespace. That includes WSL, where there is no DXGI and NVML lists no process on
+  the card. The two figures of one reading are taken one after the other, so while
   this process allocates on another thread its share can momentarily read above the card's.
 - The peaks are the largest of your own `Sample()` calls; nothing samples on its own. A
   sample cost about a microsecond on an RTX 4090 under WDDM, and NVML's process list about 120
   microseconds, so one per step is cheap — and, unlike an external poller
   such as `nvidia-smi`, cannot miss the step.
 - The peaks are 0 until a sample folds into them, and `PeakProcessBytes` stays 0 while no sampled
-  reading carried a process figure — in a container with its own process-id namespace, say, where
-  neither DXGI nor NVML gives one. A 0 therefore means "no figure" as well as "nothing sampled".
+  reading carried a process figure — under WSL, say, or in a container with its own process-id
+  namespace, where neither DXGI nor NVML gives one. A 0 therefore means "no figure" as well as "nothing sampled".
 - With no CUDA runtime, `Read()` and `Sample()` return `null` and the peaks stay 0, so the calls
   can stay in CPU code.
 - The first reading initializes this process's CUDA context (a few hundred MiB) if none exists;
@@ -465,7 +473,11 @@ foreach (var run in stats.RecentRuns.TakeLast(5))
 
 ## Did part of my GPU graph run on the host?
 
-A CUDA session leaves operators the provider cannot run to the host. Two signals:
+A CUDA session leaves operators the provider cannot run to the host: among them the bitwise
+operators of every random draw (`Dropout`, a random initializer), which the CUDA provider has no
+kernels for, so a draw is computed on the host and copied to the card. ONNX Runtime's own notice
+that it added such copies arrives as a `Verbose` message ([Log messages](backends-and-devices.md#log-messages)), once
+per session built; ask for placement instead. Two signals:
 
 ```csharp
 switch (compiled.OutputPlacement)
@@ -506,7 +518,8 @@ if (compiled.ReadNodePlacement() is { } placement)
 
 `Providers` lists each provider that ran anything, busiest first; more than one on a GPU session
 *is* fallback. **Reading the trace stops the recording**: later runs are not included, and a
-second read returns the same trace. `Nodes` is in execution order; inserted `MemcpyToHost` /
+second read returns the same trace. A trace that was recorded but cannot be read throws an
+`InvalidOperationException` whose inner exception is the cause. `Nodes` is in execution order; inserted `MemcpyToHost` /
 `MemcpyFromHost` nodes get indices above all original nodes, so treat
 `NodeExecution.NodeIndex` as a name, not an order.
 

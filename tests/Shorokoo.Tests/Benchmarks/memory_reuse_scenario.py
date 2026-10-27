@@ -339,7 +339,7 @@ def run_jax():
         constants.append(np.frombuffer(data, dtype=jrt.jax_dtype(constant["code"])).reshape(tuple(constant["shape"])).copy())
     model = jrt.load_model(config["jax_source"], "<memory-reuse-scenario>", constants, "cpu")
     signature = (((2 * N, M), np.dtype(np.float32)), ((2 * N, M), np.dtype(np.float32)))
-    program = model.program(signature)
+    program = model.program(signature).compiled
     analyse("shorokoo-translation", program, lambda A, B: program(jrt._fresh_key(), model._large_values, A, B), False)
     sharding = SingleDeviceSharding(cpu)
     key = jax.ShapeDtypeStruct((2,), np.uint32, sharding=sharding)

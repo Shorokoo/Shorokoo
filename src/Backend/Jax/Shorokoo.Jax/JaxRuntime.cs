@@ -1,4 +1,5 @@
 using Python.Runtime;
+using Shorokoo.Core.Backends;
 using Shorokoo.PythonHost;
 
 namespace Shorokoo.Jax;
@@ -72,6 +73,10 @@ internal sealed class JaxRuntime
     /// <summary>The name of the Python exception an operator raises where a model needs a number
     /// its inputs' values decide.</summary>
     public const string DataDependentShape = "DataDependentShape";
+
+    /// <summary>What a warning a session's build or run raises names as its source
+    /// (<see cref="RuntimeLogMessage.Source"/>).</summary>
+    public const string Source = "JAX";
 
     /// <summary>
     /// JAX in this process, started over the environment <paramref name="lockFile"/> and

@@ -2446,6 +2446,20 @@ public partial class NNCrossEntropyIgnore999Loss
 }
 
 [Module]
+public partial class NNCrossEntropySmoothedIgnore999Loss
+{
+    public static Scalar<float32> Inline(Tensor<float32> predictions, Tensor<int64> targets)
+        => CrossEntropyLoss.Reduced(predictions, targets, ignoreIndex: 999L, labelSmoothing: 0.1f);
+}
+
+[Module]
+public partial class NNCrossEntropyWeightedIgnoreMinus100Loss
+{
+    public static Scalar<float32> Inline(Tensor<float32> predictions, Tensor<int64> targets)
+        => CrossEntropyLoss.Reduced(predictions, targets, weight: Tensor([5L], 2f, 1f, 0.5f, 3f, 1f), ignoreIndex: -100L);
+}
+
+[Module]
 public partial class NNNllIgnoreMinus100Loss
 {
     public static Scalar<float32> Inline(Tensor<float32> predictions, Tensor<int64> targets)
@@ -2501,6 +2515,36 @@ public partial class NNGatheredBiasModel
         => Normal.Init(Vector(64L)).Gather(tokens);
 }
 
+/// <summary>A batch of rows through eight <c>[4, 4]</c> weights in turn, each product a batch of
+/// matrices times a matrix: a stack of linear layers.</summary>
+[Module]
+public partial class NNChainedBatchedProjectionModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+    {
+        for (int layer = 0; layer < 8; layer++)
+            x = x.MatMul(Normal.Init(Vector(4L, 4L)).Named($"w{layer}"));
+        return x;
+    }
+}
+
+/// <summary>A residual stack of biased linear layers under a rotary embedding: each layer's bias
+/// is broadcast over the batch's rows, each residual sum and gate adds or multiplies two operands of
+/// one shape, and the rotation slices the last axis in halves.</summary>
+[Module]
+public partial class NNResidualBiasedProjectionModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+    {
+        for (int layer = 0; layer < 2; layer++)
+        {
+            var h = x.MatMul(Normal.Init(Vector(4L, 4L)).Named($"w{layer}")) + Normal.Init(Vector(4L)).Named($"b{layer}");
+            x = x + Shorokoo.Modules.Layers.Attention.ApplyRoPE(h) * x;
+        }
+        return x;
+    }
+}
+
 /// <summary><see cref="NNGatheredTableModel"/> projected by a <c>[4, 48]</c> weight: the shape of
 /// an embedding feeding a linear layer.</summary>
 [Module]
@@ -2508,6 +2552,115 @@ public partial class NNGatheredTableProjectionModel
 {
     public static Tensor<float32> Inline(Tensor<int64> tokens)
         => Normal.Init(Vector(64L, 4L)).Gather(tokens).MatMul(Normal.Init(Vector(4L, 48L)));
+}
+
+/// <summary><see cref="NNGatheredTableProjectionModel"/>'s logits soft-capped at 15 as
+/// <c>tanh(logits / 15) · 15</c>: the head of a language model that bounds its logits.</summary>
+[Module]
+public partial class NNSoftCappedTableProjectionModel
+{
+    public static Tensor<float32> Inline(Tensor<int64> tokens)
+        => (Normal.Init(Vector(64L, 4L)).Gather(tokens).MatMul(Normal.Init(Vector(4L, 48L))) * Scalar(1f / 15f)).Tanh() * Scalar(15f);
+}
+
+/// <summary><see cref="NNSoftCappedTableProjectionModel"/> over a <c>[batch, length]</c> grid of
+/// tokens, its logits reshaped to <c>[tokens, 48]</c> between the projection and the soft cap: a
+/// language model's head.</summary>
+[Module]
+public partial class NNSoftCappedSequenceHeadModel
+{
+    public static Tensor<float32> Inline(Tensor<int64> tokens)
+        => (Normal.Init(Vector(64L, 4L)).Gather(tokens).MatMul(Normal.Init(Vector(4L, 48L))).Reshape([Scalar(-1L), Scalar(48L)])
+            * Scalar(1f / 15f)).Tanh() * Scalar(15f);
+}
+
+/// <summary>A fixed <c>[48]</c> gain scaled twice by the batch's element count before it broadcasts
+/// over the batch's <c>[32, 48]</c> rows, then a bias: scales applied to a small tensor ahead of the
+/// product that makes it large.</summary>
+[Module]
+public partial class NNScaledBeforeBroadcastModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+    {
+        var n = (Tensor<float32>)OnnxOp.Cast(OnnxOp.Size(x), null, DType.Float32);
+        var gain = (Tensor<float32>)OnnxOp.Expand(Vector(0.5f), Vector(48L));
+        return x * (gain * n * n) + Normal.Init(Vector(48L));
+    }
+}
+
+/// <summary><see cref="NNScaledBeforeBroadcastModel"/> with the two scales multiplied together
+/// before they meet the gain.</summary>
+[Module]
+public partial class NNScalesMultipliedBeforeBroadcastModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+    {
+        var n = (Tensor<float32>)OnnxOp.Cast(OnnxOp.Size(x), null, DType.Float32);
+        var gain = (Tensor<float32>)OnnxOp.Expand(Vector(0.5f), Vector(48L));
+        return x * (n * n * gain) + Normal.Init(Vector(48L));
+    }
+}
+
+/// <summary>A projection reshaped, scaled by a constant and projected again by a fixed matrix: a
+/// scale between two matrix products, beside both, whose product nothing but the second reads.</summary>
+[Module]
+public partial class NNScaledBetweenProjectionsModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+        => (x.MatMul(Normal.Init(Vector(4L, 6L))).Reshape([Scalar(-1L), Scalar(6L)]) * Scalar(0.5f))
+            .MatMul((Tensor<float32>)OnnxOp.Reshape(Vector(1f, -1f, 2f, 0.5f, 3f, -2f, 1.5f, 0f, -1f, 2.5f, 1f, -0.5f, 0.25f, 2f, -3f, 1f, 0.75f, -1.25f),
+                Vector(6L, 3L), allowZero: false));
+}
+
+/// <summary>A batch of rows projected by a <c>[3, 5]</c> weight, then through <c>Elu</c>, <c>Selu</c>
+/// and <c>Celu</c>, summed: the exponential activations, each differentiated once.</summary>
+[Module]
+public partial class NNExponentialActivationsModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+    {
+        var h = x.MatMul(Normal.Init(Vector(3L, 5L)));
+        return (Tensor<float32>)OnnxOp.Elu(h, 0.5f) + (Tensor<float32>)OnnxOp.Selu(h) + (Tensor<float32>)OnnxOp.Celu(h, 2f);
+    }
+}
+
+/// <summary><see cref="NNGatheredTableProjectionModel"/> over an <c>[8256, 4]</c> table: more
+/// elements than one task of the fused update takes, and a part task at its end.</summary>
+[Module]
+public partial class NNWideGatheredTableProjectionModel
+{
+    public static Tensor<float32> Inline(Tensor<int64> tokens)
+        => Normal.Init(Vector(8256L, 4L)).Gather(tokens).MatMul(Normal.Init(Vector(4L, 48L)));
+}
+
+/// <summary>ONNX's own <c>InstanceNormalization</c> of <c>[N, 2, 3]</c> input scaled by a trainable
+/// <c>[2, 1]</c> factor, under a trainable per-channel scale and bias.</summary>
+[Module]
+public partial class NNInstanceNormalizationOpModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+        => (Tensor<float32>)OnnxOp.InstanceNormalization(
+            x * Normal.Init(Vector(2L, 1L)), Normal.Init(Vector(2L)), Normal.Init(Vector(2L)), 1e-5f);
+}
+
+/// <summary>ONNX's own two-group <c>GroupNormalization</c> of <c>[N, 2, 3]</c> input scaled by a trainable
+/// <c>[2, 1]</c> factor, under a trainable per-channel scale and bias.</summary>
+[Module]
+public partial class NNGroupNormalizationOpModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+        => (Tensor<float32>)OnnxOp.GroupNormalization(
+            x * Normal.Init(Vector(2L, 1L)), Normal.Init(Vector(2L)), Normal.Init(Vector(2L)), 1e-5f, 2L);
+}
+
+/// <summary>ONNX's own inference-mode <c>BatchNormalization</c> of <c>[N, 2, ...]</c> input under a
+/// trainable per-channel scale and bias.</summary>
+[Module]
+public partial class NNBatchNormalizationOpModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+        => (Tensor<float32>)OnnxOp.BatchNormalization(x, Normal.Init(Vector(2L)), Normal.Init(Vector(2L)),
+            Vector(0.5f, -0.5f), Vector(2f, 0.5f), 1e-5f, null, null);
 }
 
 /// <summary>Tiny conv net: Conv2d(2, k3, s1, p1) → ReLU → GlobalAvgPool → [N, 2] logits.</summary>

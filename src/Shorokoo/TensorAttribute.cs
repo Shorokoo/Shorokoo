@@ -69,14 +69,48 @@ namespace Shorokoo
         {
             private readonly long _bytes;
 
+            // The observer of the thread that reported the pressure, which the finalizer thread
+            // that withdraws it has no slot for.
+            private readonly Action<long>? _observer = PressureObserver;
+
             internal HeldMemoryPressure(long bytes)
             {
                 _bytes = bytes;
-                GC.AddMemoryPressure(bytes);
+                Report(bytes);
             }
 
-            ~HeldMemoryPressure() => GC.RemoveMemoryPressure(_bytes);
+            ~HeldMemoryPressure() => Report(-_bytes);
+
+            /// <summary>Tells the collector of <paramref name="change"/> bytes of pressure, added
+            /// where positive and withdrawn where negative, and the observer with it: one call for
+            /// both, so that what the observer is told is what the collector was.</summary>
+            private void Report(long change)
+            {
+                if (change > 0) GC.AddMemoryPressure(change);
+                else GC.RemoveMemoryPressure(-change);
+                try
+                {
+                    _observer?.Invoke(change);
+                }
+                catch (Exception)
+                {
+                    // The observer must not throw: it is told of a withdrawal on the finalizer
+                    // thread, where an exception would end the process.
+                }
+            }
         }
+
+        /// <summary>
+        /// Test hook: told the bytes of each pressure reported for a held tensor
+        /// (<see cref="HeldMemoryPressure"/>) as it is reported, and the same bytes negated as it is
+        /// withdrawn. It must not throw, and an exception it throws is dropped: it is told of a
+        /// withdrawal on the finalizer thread. Thread-scoped: a pressure keeps the hook of the thread that reported it, and
+        /// tells that hook of its withdrawal from the finalizer thread, so a hook installed by one
+        /// parallel test sees its own attributes and no other thread's. Still reset it in a
+        /// <c>finally</c>.
+        /// </summary>
+        [ThreadStatic]
+        internal static Action<long>? PressureObserver;
 
         /// <summary>The attribute's shape.</summary>
         public Shape Shape { get; }

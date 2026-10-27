@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Runtime.ExceptionServices;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using Python.Runtime;
@@ -45,7 +46,6 @@ internal sealed class TorchSession : IShorokooSession
     private readonly string[] _outputNames;
     private readonly ShorokooTensorElementType[] _outputSequenceTypes;
     private readonly Dictionary<string, int> _outputIndex;
-    private readonly ShorokooLogSeverity _logSeverity;
     private readonly long? _limitBytes;
     private readonly bool _tensorFloat32;
     private readonly NodePlacement? _nodePlacement;
@@ -77,7 +77,7 @@ internal sealed class TorchSession : IShorokooSession
     internal static Action<TorchSession>? HoldingPrecision;
 
     private TorchSession(
-        TorchBackend backend, TorchRuntime runtime, TranslatedModel model, ShorokooLogSeverity logSeverity,
+        TorchBackend backend, TorchRuntime runtime, TranslatedModel model,
         long? limitBytes, bool tensorFloat32, NodePlacement? nodePlacement, SessionOutputPlacement outputPlacement,
         PyObject main, PyObject constants, PyObject constantStorages, PyObject constantIds,
         ModelProto proto, int modelBytes, IReadOnlyList<OutputAlias> outputAliases)
@@ -89,7 +89,6 @@ internal sealed class TorchSession : IShorokooSession
         _outputSequenceTypes = model.OutputSequenceElementTypes;
         _outputIndex = new Dictionary<string, int>(StringComparer.Ordinal);
         for (int i = 0; i < _outputNames.Length; i++) _outputIndex.TryAdd(_outputNames[i], i);
-        _logSeverity = logSeverity;
         _limitBytes = limitBytes;
         _tensorFloat32 = tensorFloat32;
         _nodePlacement = nodePlacement;
@@ -120,10 +119,11 @@ internal sealed class TorchSession : IShorokooSession
 
     /// <summary>Translates <paramref name="modelBytes"/> and loads it.</summary>
     public static TorchSession Create(
-        TorchBackend backend, ReadOnlyMemory<byte> modelBytes, ShorokooLogSeverity logSeverity,
+        TorchBackend backend, ReadOnlyMemory<byte> modelBytes, LogSettings log,
         DeviceMemorySettings deviceMemory, DiagnosticSettings diagnostics, IReadOnlyList<OutputAlias> outputAliases,
         PrecisionSettings precision)
     {
+        ArgumentNullException.ThrowIfNull(log);
         ArgumentNullException.ThrowIfNull(deviceMemory);
         ArgumentNullException.ThrowIfNull(diagnostics);
         ArgumentNullException.ThrowIfNull(outputAliases);
@@ -152,7 +152,7 @@ internal sealed class TorchSession : IShorokooSession
                     constants.Append(value);
                 }
                 var main = PyCall.Invoke(runtime.LoadModel, model.Source, $"<shorokoo-model-{hash}>", constants);
-                return new TorchSession(backend, runtime, model, logSeverity,
+                return new TorchSession(backend, runtime, model,
                     backend.OnCuda ? deviceMemory.LimitBytes : null, TensorFloat32(backend, precision),
                     placement, OutputPlacementOf(proto.Graph!, backend.OnCuda),
                     main, constants, runtime.ConstantStorages.Invoke(constants), runtime.ConstantIds.Invoke(constants),
@@ -302,7 +302,9 @@ internal sealed class TorchSession : IShorokooSession
     /// lease on, beside every other output of the run standing on it.</para>
     ///
     /// <para>The consumed values are released as the run returns. An output written into one is a
-    /// value of its own holding a reference to the same tensor, so it outlives the release.</para>
+    /// value of its own holding a reference to the same tensor, so it outlives the release. A release
+    /// that throws stops none of the others; where the run failed, its own exception is the one
+    /// thrown, and otherwise the release's, the outputs released.</para>
     /// </summary>
     public IReadOnlyList<IShorokooTensorValue> RunConsuming(
         IReadOnlyDictionary<string, IShorokooTensorValue> inputs,
@@ -312,14 +314,23 @@ internal sealed class TorchSession : IShorokooSession
         out IReadOnlyList<string?> aliasedInputs)
     {
         ArgumentNullException.ThrowIfNull(consumed);
+        IReadOnlyList<IShorokooTensorValue> outputs;
         try
         {
-            return RunCore(inputs, consumed, outputNames, runSettings, out aliasedInputs);
+            outputs = RunCore(inputs, consumed, outputNames, runSettings, out aliasedInputs);
         }
-        finally
+        catch
         {
-            foreach (var value in consumed) _backend.Release(value);
+            // The run's own failure is the one reported.
+            ConsumedValues.ReleaseEach(consumed, _backend.Release);
+            throw;
         }
+        if (ConsumedValues.ReleaseEach(consumed, _backend.Release) is { } failure)
+        {
+            foreach (var output in outputs) output.Dispose();
+            ExceptionDispatchInfo.Throw(failure);
+        }
+        return outputs;
     }
 
     private IReadOnlyList<IShorokooTensorValue> RunCore(
@@ -466,9 +477,51 @@ internal sealed class TorchSession : IShorokooSession
         return targets;
     }
 
+    /// <summary>The run, with the Python warnings it raised delivered to
+    /// <paramref name="runSettings"/>' <see cref="RunSettings.Log"/> once it is over, however it
+    /// ended (see <see cref="PythonWarnings"/>).</summary>
     private IReadOnlyList<IShorokooTensorValue> Invoke(
         TorchTensorValue[] feeds, int[] wanted, IReadOnlyList<string> outputNames,
         int[] targets, TorchPlacements.Entry? placing, int[] writable, IntPtr stop, RunSettings runSettings, out IReadOnlyList<string?> aliasedInputs)
+    {
+        RuntimeLogMessage[] warnings = [];
+        try
+        {
+            using (PythonRuntime.Gil())
+            {
+                using var warned = new PyList();
+                IReadOnlyList<IShorokooTensorValue> outputs;
+                try
+                {
+                    outputs = InvokeWarning(feeds, wanted, outputNames, targets, placing, writable, stop, warned, runSettings, out aliasedInputs);
+                }
+                catch
+                {
+                    warnings = PythonWarnings.ReadAfter(warned, TorchRuntime.Source, callFailed: true);
+                    throw;
+                }
+                try
+                {
+                    warnings = PythonWarnings.ReadAfter(warned, TorchRuntime.Source, callFailed: false);
+                }
+                catch
+                {
+                    foreach (var output in outputs) output.Dispose();
+                    throw;
+                }
+                return outputs;
+            }
+        }
+        finally
+        {
+            PythonWarnings.Deliver(runSettings.Log, warnings);
+        }
+    }
+
+    private IReadOnlyList<IShorokooTensorValue> InvokeWarning(
+        TorchTensorValue[] feeds, int[] wanted, IReadOnlyList<string> outputNames,
+        int[] targets, TorchPlacements.Entry? placing, int[] writable, IntPtr stop, PyList warned, RunSettings runSettings,
+        out IReadOnlyList<string?> aliasedInputs)
     {
         aliasedInputs = [];
         using (PythonRuntime.Gil())
@@ -495,7 +548,7 @@ internal sealed class TorchSession : IShorokooSession
                 foreach (var index in writable) PyCall.Append(writes, index);
                 results = PyCall.Invoke(_runtime.Run,
                     placing?.Main ?? _main, args, wantedList, _backend.DeviceName, _constantStorages, _constantIds,
-                    stop.ToInt64(), (int)_logSeverity, aliases, _limitBytes ?? -1L, runSettings.ShrinkArenaAfterRun,
+                    stop.ToInt64(), warned, aliases, _limitBytes ?? -1L, runSettings.ShrinkArenaAfterRun,
                     _tensorFloat32, placing?.Slots ?? noPlacements, writes);
             }
             catch (PythonException ex) when (ex.Type.Name == TorchRuntime.RunStopped && runSettings.CancellationToken.IsCancellationRequested)

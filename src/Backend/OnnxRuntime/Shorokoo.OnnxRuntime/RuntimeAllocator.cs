@@ -52,7 +52,8 @@ internal sealed class RuntimeAllocator
         Shared = device == Host ? CachingAllocator.ForHost() : CachingAllocator.ForCard(device);
         _info = InfoFor(device);
         var native = NativeAllocator.Create(
-            Shared.State, CachingAllocator.AllocateEntry, CachingAllocator.FreeEntry, OrtEnvironment.PointerOf(_info));
+            Shared.State, CachingAllocator.AllocateEntry, CachingAllocator.AllocateOnStreamEntry, CachingAllocator.FreeEntry,
+            OrtEnvironment.PointerOf(_info));
         Shared.HandTo(OrtEnvironment.EnvironmentHandle(), () => OrtEnvironment.Register(native));
         Managed = OrtEnvironment.Wrap(native);
     }

@@ -52,15 +52,33 @@ public sealed class JaxTensorValue : IShorokooTensorValue
     /// <summary>Wraps <paramref name="value"/> by a description <c>runtime.describe</c> already made
     /// of it. Called holding the interpreter lock.</summary>
     internal static JaxTensorValue Wrap(PyObject value, PyObject description)
+        => Wrap(value, Description.Of(description));
+
+    /// <summary>What a value is, as <c>runtime.describe</c> reads it: element type, shape, whether
+    /// it is in host memory, the address and size of its buffer, and its device (-1 on the host). A
+    /// value on a device has no address the host can use, which is 0.</summary>
+    internal readonly record struct Description(
+        ShorokooTensorElementType ElementType, long[] Shape, bool IsHost, IntPtr Address, long ByteCount, int Device)
     {
-        var code = Item<int>(description, 1);
-        using var dims = description[2];
-        var shape = new long[(int)dims.Length()];
-        for (int i = 0; i < shape.Length; i++) shape[i] = Item<long>(dims, i);
-        return new JaxTensorValue(value, (ShorokooTensorElementType)code, shape,
-            Item<bool>(description, 3), new IntPtr(Item<long>(description, 4)), Item<long>(description, 5),
-            Item<int>(description, 6));
+        /// <summary>The description <c>runtime.describe</c> made. Called holding the interpreter
+        /// lock.</summary>
+        internal static Description Of(PyObject description)
+        {
+            using var dims = description[2];
+            var shape = new long[(int)dims.Length()];
+            for (int i = 0; i < shape.Length; i++) shape[i] = Item<long>(dims, i);
+            return new Description((ShorokooTensorElementType)Item<int>(description, 1), shape,
+                Item<bool>(description, 3), new IntPtr(Item<long>(description, 4)), Item<long>(description, 5),
+                Item<int>(description, 6));
+        }
     }
+
+    /// <summary>Wraps <paramref name="value"/>, taking over the reference, as what
+    /// <paramref name="description"/> says it is -- one read of an earlier value just like it, the
+    /// shape of which is shared and never written. Called holding the interpreter lock.</summary>
+    internal static JaxTensorValue Wrap(PyObject value, Description description)
+        => new(value, description.ElementType, description.Shape, description.IsHost, description.Address,
+            description.ByteCount, description.Device);
 
     private static T Item<T>(PyObject sequence, int index)
     {

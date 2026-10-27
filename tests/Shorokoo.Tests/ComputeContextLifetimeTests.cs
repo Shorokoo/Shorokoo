@@ -197,7 +197,7 @@ public class ComputeContextLifetimeCoverageTests
         Assert.Equal("Shorokoo.HostMemory", ComputeContext.Host.Backend.Name);
 
         var session = Assert.Throws<NotSupportedException>(() => backend.CreateSession(
-            default, ShorokooGraphOptimization.EnableAll, ShorokooLogSeverity.Fatal,
+            default, ShorokooGraphOptimization.EnableAll, LogSettings.None,
             DeviceMemorySettings.Default));
         Assert.Contains("Shorokoo.LinuxCPU", session.Message);
 
@@ -785,6 +785,140 @@ public class ComputeContextLifetimeCoverageTests
         Assert.False(Proves(GraphOf("a b", "O", Op("Sub", "a b", "O", domain: "custom"))));
     }
 
+    [Fact]
+    public void TestAWrittenGraphProvesAFusedUpdateWritingItsParameterAndMomentsEachOverTheInputItReadsInThatPlace()
+    {
+        static GraphProto Updating(string inputs) => GraphOf("p m v g k", "P M V",
+            Op("AdamUpdate", inputs + " k k k k k k", "P M V", domain: "ai.shorokoo"));
+        bool ProvesInto(GraphProto graph, string output, string input) => OutputAliasProof.Prove(graph, [new OutputAlias(output, input)]).Count == 1;
+        Assert.True(ProvesInto(Updating("p m v g"), "P", "p"));
+        Assert.True(ProvesInto(Updating("p m v g"), "M", "m"));
+        Assert.True(ProvesInto(Updating("p m v g"), "V", "v"));
+        Assert.False(ProvesInto(Updating("p m v g"), "P", "m"));
+        Assert.False(ProvesInto(Updating("p m v p"), "P", "p"));
+        Assert.False(ProvesInto(Updating("p m v g"), "P", "g"));
+        Assert.False(ProvesInto(GraphOf("p m v g k", "P M V", Op("AdamUpdate", "p m v g k k k k k k", "P M V", domain: "custom")), "P", "p"));
+    }
+
+    [Fact]
+    public void TestAFusedUpdatesParameterAndMomentsArePlacedEachOverTheInputItReadsInThatPlace()
+    {
+        static GraphProto Updating(string inputs, string domain = "ai.shorokoo") => GraphOf("p:float[128] m:float[128] v:float[128] g:float[128] k:float[1]", "P M V",
+            Op("AdamUpdate", inputs + " k k k k k k", "P M V", domain: domain));
+        Assert.True(Places(Updating("p m v g"), "p m v", At("P", "p", 0), At("M", "m", 0), At("V", "v", 0)));
+        Assert.True(Places(Updating("p m v g"), "p", At("P", "p", 0)));
+        Assert.False(Places(Updating("p m v g"), "m", At("P", "m", 0)));
+        Assert.False(Places(Updating("p m v g"), "g", At("P", "g", 0)));
+        Assert.False(Places(Updating("p m v p"), "p", At("P", "p", 0)));
+        Assert.False(Places(Updating("p m v g", "custom"), "p", At("P", "p", 0)));
+        Assert.Equal(3, PlacementsOver(Updating("p m v g"), "p m v").Plan(smallest: 256, idleOutputBytes: 0).Count);
+    }
+
+    private static bool FusesAdam(string g, params NodeProto[] gradient)
+        => Shorokoo.OnnxRuntime.OrtFusedUpdates.Fuse(new ModelProto { Graph = GraphOf(
+            $"p:float[2,3] m:float[2,3] v:float[2,3] {g} b1:float[1] c1:float[1] b2:float[1] c2:float[1] e:float[1] k:float[1]", "P M V",
+            [.. gradient, Op("Mul", "b1 m", "ma"), Op("Mul", "c1 g", "gc"), Op("Add", "ma gc", "M"),
+            Op("Mul", "b2 v", "vb"), Op("Mul", "c2 g", "cg"), Op("Mul", "cg g", "gg"), Op("Add", "vb gg", "V"),
+            Op("Sqrt", "V", "r"), Op("Add", "r e", "d"), Op("Div", "M d", "q"), Op("Mul", "q k", "u"), Op("Sub", "p u", "P")]) });
+
+    [Fact]
+    public void TestAnAdamChainIsFusedOnlyWhereItsGradientIsOfItsParametersShape()
+    {
+        Assert.True(FusesAdam("g:float[2,3]"));
+        Assert.True(FusesAdam("h:float[2,3]", Op("Relu", "h", "g")));
+        Assert.False(FusesAdam("h:float[1,3]", Op("Relu", "h", "g")));
+        Assert.False(FusesAdam("g:float[1,3]"));
+        Assert.False(FusesAdam("g:float[3]"));
+        Assert.False(FusesAdam("g:double[2,3]"));
+        Assert.False(FusesAdam("g"));
+    }
+
+    private const string AdamChain = "p:float[2,3] m:float[2,3] v:float[2,3] g:float[2,3] b1:float[1] c1:float[1] b2:float[1] c2:float[1] e:float[1] k:float[1] c:bool[1]"
+        + " | P M V | ma=Mul(b1,m) gc=Mul(c1,g) M=Add(ma,gc) vb=Mul(b2,v) cg=Mul(c2,g) gg=Mul(cg,g) V=Add(vb,gg) r=Sqrt(V) d=Add(r,e) q=Div(M,d) u=Mul(q,k) P=Sub(p,u)";
+
+    /// <summary><see cref="AdamChain"/> with each (old, new) pair of <paramref name="edits"/>
+    /// replaced in turn; a node is <c>out=Op(a,b)</c>, <c>out=If(c){x}</c> for an <c>If</c> whose
+    /// branches each hand back <c>x</c>, or <c>out=Loop(n,c){x}</c> for a <c>Loop</c> whose body
+    /// scans <c>x</c> out; <c>x</c> is a name or itself such a node, <c>If(c){x}</c>.</summary>
+    private static GraphProto AdamChainWith(params string[] edits)
+    {
+        var text = AdamChain;
+        for (int i = 0; i < edits.Length; i += 2) text = text.Replace(edits[i], edits[i + 1]);
+        var parts = text.Split(" | ");
+        return GraphOf(parts[0], parts[1], [.. Names(parts[2]).Select(ChainNode)]);
+    }
+
+    private static NodeProto ChainNode(string spec)
+    {
+        var (output, rest) = (spec[..spec.IndexOf('=')], spec[(spec.IndexOf('=') + 1)..]);
+        var inputs = rest[(rest.IndexOf('(') + 1)..rest.IndexOf(')')].Replace(',', ' ');
+        var op = rest[..rest.IndexOf('(')];
+        if (!rest.Contains('{')) return Op(op, inputs, output);
+        var read = rest[(rest.IndexOf('{') + 1)..^1];
+        NodeProto Reading(string into) => read.Contains('{') ? ChainNode($"{into}={read}") : Op("Identity", read, into);
+        GraphProto Branch()
+        {
+            var branch = GraphOf("", "t", Reading("t"));
+            branch.Name = output;
+            return branch;
+        }
+        if (op == "Loop")
+        {
+            var body = GraphOf("i:int64[1] ci:bool[1]", "co t", Op("Identity", "ci", "co"), Reading("t"));
+            body.Name = output;
+            var loop = Op("Loop", inputs, output);
+            loop.Attributes.Add(new AttributeProto { Name = "body", Type = AttributeProto.AttributeType.Graph, G = body });
+            return loop;
+        }
+        var node = Op("If", inputs, output, body: Branch());
+        node.Attributes.Add(new AttributeProto { Name = "else_branch", Type = AttributeProto.AttributeType.Graph, G = Branch() });
+        return node;
+    }
+
+    private static bool FusesAdamChain(params string[] edits) => OrtFusedUpdates.Fuse(new ModelProto { Graph = AdamChainWith(edits) });
+
+    [Fact]
+    public void TestAnAdamChainIsFusedOnlyWhereEachOperandIsInItsPlaceTheStateIsThreeInputsAndEveryCoefficientASingleValueOfNoGreaterRank()
+    {
+        Assert.True(FusesAdamChain());
+        Assert.True(FusesAdamChain(" P=Sub(p,u)", " w=Mul(p,y) P=Sub(w,u)", "k:float[1]", "k:float[1] y:float[1]"));
+        Assert.False(FusesAdamChain("Div(M,d)", "Div(d,M)"));
+        Assert.False(FusesAdamChain("Sub(p,u)", "Sub(u,p)"));
+        Assert.False(FusesAdamChain("k:float[1]", "k:float[1,1,1]"));
+        Assert.False(FusesAdamChain("k:float[1]", "k:float[2,3]"));
+        Assert.False(FusesAdamChain("g:float[2,3]", "g:float[3]"));
+        Assert.False(FusesAdamChain("Mul(b1,m)", "Mul(b1,v)"));
+        Assert.False(FusesAdamChain(" P=Sub(p,u)", " w=Mul(p,y) P=Sub(w,u)", "k:float[1]", "k:float[1] y:float[2,3]"));
+    }
+
+    [Fact]
+    public void TestAnAdamChainIsFusedOnlyWhereNothingElseReadsAnIntermediateAndNothingBeforeTheFusedNodeReadsWhatItWrites()
+    {
+        Assert.True(FusesAdamChain("k:float[1]", "kk:float[1]", " q=", " k=Identity(kk) z=Neg(M) q="));
+        Assert.True(FusesAdamChain("k:float[1]", "kk:float[1]", " q=", " k=Identity(kk) z=If(c){M} q="));
+        Assert.False(FusesAdamChain("k:float[1]", "kk:float[1]", " q=", " z=Neg(M) k=Identity(kk) q="));
+        Assert.False(FusesAdamChain("k:float[1]", "kk:float[1]", " q=", " z=If(c){M} k=Identity(kk) q="));
+        Assert.False(FusesAdamChain(" q=", " z=Neg(r) q="));
+        Assert.False(FusesAdamChain("| P M V |", "| P M V d |"));
+        Assert.False(FusesAdamChain(" q=", " z=If(c){r} q="));
+        Assert.False(FusesAdamChain(" q=", " z=Loop(k,c){r} q="));
+        Assert.False(FusesAdamChain(" q=", " z=If(c){If(c){r}} q="));
+    }
+
+    [Fact]
+    public void TestATrainingStepWhoseSubgraphReadsAnAdamChainsIntermediateBuildsItsSession()
+    {
+        var model = new ModelProto { IrVersion = 10, Graph = AdamChainWith(" q=", " z=If(c){r} q=", "| P M V |", "| P M V z |") };
+        model.Graph.Name = "step";
+        model.OpsetImports.Add(new OperatorSetIdProto { Domain = "", Version = 21 });
+        using var bytes = new MemoryStream();
+        ProtoBuf.Serializer.Serialize(bytes, model);
+        using var session = new FusingHost().CreateSession(bytes.ToArray(), ShorokooGraphOptimization.TrainingStep, LogSettings.None, DeviceMemorySettings.Default);
+        Assert.NotNull(session);
+    }
+
+    private sealed class FusingHost : OrtBackend;
+
     private static PlacementProof PlacementsOver(GraphProto graph, string consumed, PlacementMemory? memory = null)
     {
         var inputs = graph.Inputs.Where(i => i.Type?.TensorType?.Shape is not null).ToDictionary(
@@ -930,8 +1064,15 @@ public class ComputeContextLifetimeCoverageTests
     }
 
     [Fact]
-    public void TestAPlacementsShapesFollowTheShapeArithmeticFusedOperatorsAndTransposedConvolutionsOfATrainingStep()
+    public void TestAPlacementsShapesFollowTheShapeArithmeticFusedOperatorsTransposedConvolutionsAndLossesOfATrainingStep()
     {
+        Assert.Equal("", ShapeOf(GraphOf("x:float[4,3] l:int64[4]", "L P", Op("SoftmaxCrossEntropyLoss", "x l", "L P")), "L"));
+        Assert.Equal("4 4x3", ShapeOf(GraphOf("x:float[4,3] l:int64[4]", "L P", WithText(Op("SoftmaxCrossEntropyLoss", "x l", "L P"), "reduction", "none")), "L", "P"));
+        Assert.Equal("2x5 2x3x5", ShapeOf(GraphOf("x:float[2,3,5] l:int64[2,5]", "L P", WithText(Op("SoftmaxCrossEntropyLoss", "x l", "L P"), "reduction", "none")), "L", "P"));
+        Assert.Equal("3x2x5", ShapeOf(GraphOf("i:int64[3,2] v:float[2]", "O", Op("OneHot", "i five v", "O")), "O"));
+        Assert.Equal("5x3x2", ShapeOf(GraphOf("i:int64[3,2] v:float[2]", "O", Op("OneHot", "i five v", "O", attribute: ("axis", 0))), "O"));
+        Assert.Equal("3x5x2", ShapeOf(GraphOf("i:int64[3,2] v:float[2]", "O", Op("OneHot", "i five v", "O", attribute: ("axis", -2))), "O"));
+        Assert.Equal("3x5:7", ShapeOf(GraphOf("i:int64[3] v:int64[2]", "O", Op("OneHot", "i five v", "O")), "O"));
         Assert.Equal("4:7=1,4,2,1", ShapeOf(WithInts(GraphOf("a:float[4,2]", "O", Op("Shape", "a", "s"), Op("Pad", "s pads one", "O")), "pads", 1, 1), "O"));
         Assert.Equal("1:7=4", ShapeOf(GraphOf("a:float[4,2]", "O", Op("Shape", "a", "s"), Op("Greater", "s two", "g"), Op("Compress", "s g", "O")), "O"));
         Assert.Equal("1:7=0", ShapeOf(GraphOf("a:float[4]", "O", Op("Shape", "a", "s"), Op("Shape", "s", "n"), Op("Expand", "zero n", "O")), "O"));
@@ -966,6 +1107,12 @@ public class ComputeContextLifetimeCoverageTests
         loop.Inputs.Insert(1, "");
         loop.Attributes.Add(new AttributeProto { Name = "body", Type = AttributeProto.AttributeType.Graph, G = body });
         return loop;
+    }
+
+    private static NodeProto WithText(NodeProto node, string name, string text)
+    {
+        node.Attributes.Add(new AttributeProto { Name = name, Type = AttributeProto.AttributeType.String, S = System.Text.Encoding.UTF8.GetBytes(text) });
+        return node;
     }
 
     internal static NodeProto With(NodeProto node, string name, params long[] ints)
@@ -1376,7 +1523,7 @@ public class ComputeContextLifetimeCoverageTests
         Buffer.BlockCopy(w, 0, raw, 0, raw.Length);
         graph.Initializers.Add(new TensorProto { Name = "W", data_type = 1, Dims = [N, N], RawData = raw });
         using var session = (OrtSession)backend.CreateSession(
-            ModelOf(graph), ShorokooGraphOptimization.EnableAll, ShorokooLogSeverity.Fatal, new DeviceMemorySettings(), DiagnosticSettings.Default);
+            ModelOf(graph), ShorokooGraphOptimization.EnableAll, LogSettings.None, new DeviceMemorySettings(), DiagnosticSettings.Default);
         var input = backend.CreateTensorInBackendMemory(ShorokooTensorElementType.Float, MemoryMarshal.AsBytes(x.AsSpan()).ToArray(), [N, N]);
         var output = session.RunConsuming(new Dictionary<string, IShorokooTensorValue> { ["x"] = input }, [input], ["y"], RunSettings.Default, out _).Single();
         var bytes = backend.CopyTensorToHost(output);
@@ -1561,9 +1708,12 @@ public class ComputeContextLifetimeCoverageTests
     {
         string Temp(string prefix, string suffix = "") => Path.Combine(Path.GetTempPath(), $"{prefix}{Guid.NewGuid():N}{suffix}");
         string[] files = [Temp("shorokoo-model-", ".onnx"), Temp("shorokoo-model-", ".onnx"), Temp("shorokoo-model-", ".onnx")];
-        string[] folders = [Temp("shorokoo-runs-"), Temp("shorokoo-runs-")];
-        var (staleFile, heldFile, freshFile, staleFolder, heldFolder) = (files[0], files[1], files[2], folders[0], folders[1]);
+        string[] folders = [Temp("shorokoo-runs-"), Temp("shorokoo-runs-"), Temp("shorokoo-node-placement-"), Temp("shorokoo-node-placement-")];
+        var (staleFile, heldFile, freshFile) = (files[0], files[1], files[2]);
+        string[] staleFolders = [folders[0], folders[2]], heldFolders = [folders[1], folders[3]];
         var old = DateTime.UtcNow.AddDays(-2);
+        using var traced = (OrtSession)DefaultBackend.Instance.CreateSession(ModelOf(GraphOf("a:float[4] b:float[4]", "O:float[4]", Op("Sub", "a b", "O"))),
+            ShorokooGraphOptimization.EnableAll, LogSettings.None, new DeviceMemorySettings(), new DiagnosticSettings { TraceNodePlacement = true });
         try
         {
             foreach (var file in files) File.WriteAllBytes(file, [1]);
@@ -1573,19 +1723,19 @@ public class ComputeContextLifetimeCoverageTests
                 File.WriteAllBytes(Path.Combine(folder, OrtPlacements.KeptLockFile), [1]);
             }
             using (File.Open(heldFile, FileMode.Open, FileAccess.Read, FileShare.Read))
-            using (File.Open(Path.Combine(heldFolder, OrtPlacements.KeptLockFile), FileMode.Open, FileAccess.Read, FileShare.Read))
+            using (File.Open(Path.Combine(heldFolders[0], OrtPlacements.KeptLockFile), FileMode.Open, FileAccess.Read, FileShare.Read))
+            using (File.Open(Path.Combine(heldFolders[1], OrtPlacements.KeptLockFile), FileMode.Open, FileAccess.Read, FileShare.Read))
             {
                 File.SetLastWriteTimeUtc(staleFile, old);
                 File.SetLastWriteTimeUtc(heldFile, old);
-                Directory.SetLastWriteTimeUtc(staleFolder, old);
-                Directory.SetLastWriteTimeUtc(heldFolder, old);
+                foreach (var folder in folders.Append(traced.ProfileDirectory!)) Directory.SetLastWriteTimeUtc(folder, old);
                 OrtPlacements.SweepStale();
             }
             Assert.False(File.Exists(staleFile));
-            Assert.False(Directory.Exists(staleFolder));
+            Assert.All(staleFolders, folder => Assert.False(Directory.Exists(folder)));
             Assert.True(File.Exists(heldFile));
             Assert.True(File.Exists(freshFile));
-            Assert.True(Directory.Exists(heldFolder));
+            Assert.All(heldFolders.Append(traced.ProfileDirectory!), folder => Assert.True(Directory.Exists(folder)));
         }
         finally
         {
@@ -1619,7 +1769,7 @@ public class ComputeContextLifetimeCoverageTests
         var large = GraphOf($"x:float[1,{N}]", $"y:float[1,{N}]", Op("Add", "x b", "y"));
         large.Initializers.Add(new TensorProto { Name = "b", data_type = 1, Dims = [1, N], RawData = new byte[4 * N] });
         Assert.Equal((true, 1), Sweeping(() => backend.CreateSession(
-            ModelOf(large), ShorokooGraphOptimization.EnableAll, ShorokooLogSeverity.Fatal, new DeviceMemorySettings(), DiagnosticSettings.Default)));
+            ModelOf(large), ShorokooGraphOptimization.EnableAll, LogSettings.None, new DeviceMemorySettings(), DiagnosticSettings.Default)));
         Assert.Equal((true, 1), Sweeping(() => Aliasing(backend, GraphOf("a:float[4] b:float[4]", "O:float[4]", Op("Sub", "a b", "O")))));
     }
 
@@ -1630,7 +1780,7 @@ public class ComputeContextLifetimeCoverageTests
         using var session = (OrtSession)backend.CreateSession(
             ModelOf(GraphOf("a:float[1024,1024] b:float[1024,1024] c:bool[1024,1024]", "O:float[1024,1024]",
                 Op("Neg", "a", "n"), Op("Neg", "b", "m"), Op("Where", "c n m", "O"))),
-            ShorokooGraphOptimization.EnableAll, ShorokooLogSeverity.Fatal, new DeviceMemorySettings(), DiagnosticSettings.Default);
+            ShorokooGraphOptimization.EnableAll, LogSettings.None, new DeviceMemorySettings(), DiagnosticSettings.Default);
         float[] ones = [.. Enumerable.Repeat(1f, 1 << 20)];
         IShorokooTensorValue Ones() => backend.CreateTensorInBackendMemory(ShorokooTensorElementType.Float, MemoryMarshal.AsBytes(ones.AsSpan()).ToArray(), [1024, 1024]);
         using var c = backend.CreateTensorInBackendMemory(ShorokooTensorElementType.Bool, [.. Enumerable.Repeat((byte)1, 1 << 20)], [1024, 1024]);
@@ -1667,7 +1817,7 @@ public class ComputeContextLifetimeCoverageTests
         var backend = DefaultBackend.Instance;
         using var session = (OrtSession)backend.CreateSession(
             ModelOf(GraphOf("x:float[1024,1024]", "y:float[1024,1024]", Op("Neg", "x", "y"))),
-            ShorokooGraphOptimization.EnableAll, ShorokooLogSeverity.Fatal, new DeviceMemorySettings(), DiagnosticSettings.Default);
+            ShorokooGraphOptimization.EnableAll, LogSettings.None, new DeviceMemorySettings(), DiagnosticSettings.Default);
         ((IShorokooSession)session).StopPlacing();
         var x = backend.CreateTensorInBackendMemory(ShorokooTensorElementType.Float, new byte[4 << 20], [1024, 1024]);
         var made = ((IShorokooSession)session).Run(new Dictionary<string, IShorokooTensorValue> { ["x"] = x }, ["y"], RunSettings.Default).Single();
@@ -1686,7 +1836,7 @@ public class ComputeContextLifetimeCoverageTests
         var backend = DefaultBackend.Instance;
         using var session = (OrtSession)backend.CreateSession(
             ModelOf(GraphOf("x:float[1024,1024]", "y:float[1024,1024]", Op("Neg", "x", "t"), Op("Exp", "t", "y"))),
-            ShorokooGraphOptimization.EnableAll, ShorokooLogSeverity.Fatal, new DeviceMemorySettings(), DiagnosticSettings.Default);
+            ShorokooGraphOptimization.EnableAll, LogSettings.None, new DeviceMemorySettings(), DiagnosticSettings.Default);
         using var stop = new CancellationTokenSource();
         stop.Cancel();
         var x = backend.CreateTensorInBackendMemory(ShorokooTensorElementType.Float, new byte[4 << 20], [1024, 1024]);
@@ -1737,13 +1887,14 @@ public class ComputeContextLifetimeCoverageTests
         List<(string[], string[])> orders = [];
         string[] directories = [.. Enumerable.Range(0, 2).Select(_ => Path.Combine(Path.GetTempPath(), $"run-order-{Guid.NewGuid():N}"))];
         foreach (var directory in directories) Directory.CreateDirectory(directory);
+        using var unlogged = RuntimeLogRoutes.Open(LogSettings.None);
         try
         {
             for (int build = 0; build < 2; build++)
             {
                 var built = backend.NewSession(
                     build == 0 ? stream.ToArray() : File.ReadAllBytes(Path.Combine(directories[0], OrtBackend.OptimizedModelFile)),
-                    build == 0 ? ShorokooGraphOptimization.EnableAll : ShorokooGraphOptimization.DisableAll, ShorokooLogSeverity.Fatal,
+                    build == 0 ? ShorokooGraphOptimization.EnableAll : ShorokooGraphOptimization.DisableAll, unlogged,
                     new DeviceMemorySettings(), new DiagnosticSettings { TraceNodePlacement = true }, directories[build], 0, [], PrecisionSettings.Default,
                     externalDataDirectory: build == 0 ? null : directories[0]);
                 using var session = backend.Wrap(built, []);
@@ -1752,7 +1903,8 @@ public class ComputeContextLifetimeCoverageTests
                     new Dictionary<string, IShorokooTensorValue> { [model.Graph!.Inputs[0].Name] = input }, session.OutputNames, RunSettings.Default))
                     output.Dispose();
                 input.Dispose();
-                using var profile = System.Text.Json.JsonDocument.Parse(File.ReadAllText(built.Session.EndProfiling()));
+                using var profileFile = OrtProfile.OpenOnceLetGo(built.Session.EndProfiling());
+                using var profile = System.Text.Json.JsonDocument.Parse(profileFile);
                 var ran = profile.RootElement.EnumerateArray()
                     .Where(e => e.TryGetProperty("cat", out var cat) && cat.GetString() == "Node" && e.GetProperty("name").GetString()!.EndsWith("_kernel_time"))
                     .Select(e => (Ts: e.GetProperty("ts").GetInt64(), Name: e.GetProperty("name").GetString()![..^"_kernel_time".Length],
@@ -1881,7 +2033,7 @@ public class ComputeContextLifetimeCoverageTests
     /// write its output O into its input a.</summary>
     internal static OrtSession Aliasing(IShorokooBackend backend, GraphProto graph)
         => (OrtSession)backend.CreateSession(
-            ModelOf(graph), ShorokooGraphOptimization.EnableAll, ShorokooLogSeverity.Fatal,
+            ModelOf(graph), ShorokooGraphOptimization.EnableAll, LogSettings.None,
             new DeviceMemorySettings(), DiagnosticSettings.Default,
             [new OutputAlias("O", "a")]);
 
@@ -2232,7 +2384,7 @@ public class ComputeContextLifetimeCoverageTests
 
         public IShorokooSession CreateSession(
             ReadOnlyMemory<byte> modelBytes, ShorokooGraphOptimization graphOptimization,
-            ShorokooLogSeverity logSeverity,
+            LogSettings log,
             DeviceMemorySettings deviceMemory) => throw new NotSupportedException();
 
         public IShorokooTensorValue CreateTensor<T>(T[] data, long[] shape) where T : unmanaged

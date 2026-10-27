@@ -61,6 +61,45 @@ internal static class CudaDriver
         catch (Exception) { return default; }
     }
 
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate int DeviceGet(out int device, int ordinal);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate int DeviceGetAttribute(out int value, int attribute, int device);
+
+    private const int ComputeCapabilityMajor = 75, ComputeCapabilityMinor = 76;
+
+    private static readonly Dictionary<int, string?> Capabilities = [];
+
+    /// <summary>The compute capability of the CUDA device <paramref name="ordinal"/>, written
+    /// "major.minor", read once per device; null where the driver cannot tell.</summary>
+    internal static string? ComputeCapability(int ordinal)
+    {
+        lock (Gate)
+        {
+            if (Capabilities.TryGetValue(ordinal, out var known)) return known;
+            return Capabilities[ordinal] = ReadComputeCapability(ordinal);
+        }
+    }
+
+    private static string? ReadComputeCapability(int ordinal)
+    {
+        try
+        {
+            if (!Read().Installed || !NativeLibrary.TryLoad(LibraryName, out var library)
+                || !NativeLibrary.TryGetExport(library, "cuDeviceGet", out var get)
+                || !NativeLibrary.TryGetExport(library, "cuDeviceGetAttribute", out var attribute)
+                || Marshal.GetDelegateForFunctionPointer<DeviceGet>(get)(out var device, ordinal) != 0)
+                return null;
+            var read = Marshal.GetDelegateForFunctionPointer<DeviceGetAttribute>(attribute);
+            return read(out var major, ComputeCapabilityMajor, device) == 0 && read(out var minor, ComputeCapabilityMinor, device) == 0
+                ? $"{major}.{minor}"
+                : null;
+        }
+        // Best effort, as the class promises.
+        catch (Exception) { return null; }
+    }
+
     /// <summary>
     /// The driver API's number for a CUDA version written "major.minor" — 13000 for "13.0", 12040
     /// for "12.4" — or null for anything else.

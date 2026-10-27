@@ -75,8 +75,12 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
         /// Lowers every <c>AUTO_GRAD</c> node in <paramref name="graph"/> in place. Removes
         /// the AUTO_GRAD nodes, runs <see cref="FastProcessorHelper.RemoveUnreachableNodes"/>
         /// and <see cref="FastProcessorHelper.EnsureTopologicalOrder"/>, then returns.
+        /// <paramref name="recomputeInFusion"/> is for a graph a backend fusing elementwise
+        /// operators runs (see <c>IShorokooBackend.FusesElementwiseOperators</c>): where a rule
+        /// has the choice, it recomputes in the backward pass what it would otherwise read from the
+        /// forward pass.
         /// </summary>
-        public static void Process(InternalComputationGraph graph)
+        public static void Process(InternalComputationGraph graph, bool recomputeInFusion = false)
         {
             if (graph is null) throw new ArgumentNullException(nameof(graph));
 
@@ -99,7 +103,7 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
             Fast.FastIfBranchScoper.UnscopeAllIfBranches(graph);
 
             foreach (var autoGradNode in autoGradNodes)
-                ProcessOne(graph, autoGradNode);
+                ProcessOne(graph, autoGradNode, recomputeInFusion);
 
             graph.Nodes.RemoveAll(n => n.OpCode == InternalOpCodes.AUTO_GRAD);
             FastProcessorHelper.RemoveUnreachableNodes(graph);
@@ -119,7 +123,7 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
         internal static readonly ImmutableHashSet<string> LoweredOpCodes =
             ImmutableHashSet.Create(StringComparer.Ordinal, OpCodes.SOFTSIGN, OpCodes.TENSOR_SCATTER);
 
-        private static void ProcessOne(InternalComputationGraph graph, FastNode autoGradNode)
+        private static void ProcessOne(InternalComputationGraph graph, FastNode autoGradNode, bool recomputeInFusion)
         {
             // AUTO_GRAD inputs: [loss, ...params]; outputs: [grad_param_0, grad_param_1, ...]
             var allInputs = autoGradNode.Inputs;
@@ -156,6 +160,7 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
                     $"FastProcessAutoGrad: loss tensor {lossKey} has no producer.");
 
             var gradOpsMap = AutoDiffs.GetGradientOps();
+            if (recomputeInFusion) AutoDiffs.RecomputeInFusion(gradOpsMap);
             var paramDependent = ComputeParamDependentNodes(graph, paramKeySet, producerByOutput);
             var topoOrder = ComputeForwardTopoOrder(
                 graph, lossProducer, paramKeySet, producerByOutput, gradOpsMap, paramDependent);

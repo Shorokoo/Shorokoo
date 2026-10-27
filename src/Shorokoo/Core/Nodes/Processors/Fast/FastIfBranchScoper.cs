@@ -228,11 +228,16 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     if (!claim.ContainsKey(c)) claim[c] = (b, false);
             }
 
+            var lastIfOn = new Dictionary<FastTensorKey, int>();
+            for (int b = 0; b < blocks.Count; b++)
+                if (blocks[b].IsIf && ConditionOf(blocks[b].Nodes[0]) is FastTensorKey condition)
+                    lastIfOn[condition] = b;
+
             for (int b = 0; b < blocks.Count; b++)
             {
                 if (!blocks[b].IsIf) continue;
-                CollectExports(blocks, b, blockOfNode, claim, isThen: true, ctx, exports);
-                CollectExports(blocks, b, blockOfNode, claim, isThen: false, ctx, exports);
+                CollectExports(blocks, b, blockOfNode, claim, lastIfOn, isThen: true, ctx, exports);
+                CollectExports(blocks, b, blockOfNode, claim, lastIfOn, isThen: false, ctx, exports);
             }
 
             var moved = new List<FastNode>(level.Count);
@@ -316,7 +321,14 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
         /// <summary>
         /// The blocks preceding <paramref name="ifIdx"/> that compute one branch's value and
-        /// nothing else, and so may move inside the <c>IF</c>.
+        /// nothing else, and so may move inside the <c>IF</c>: the largest set of movable blocks
+        /// the branch's outputs are computed from and the other branch's are not, every reader of
+        /// which is in the set or in the <c>IF</c>, the <c>IF_OPEN</c> aside.
+        ///
+        /// <para>Built from the <c>IF</c> backwards: a block is decided once every block reading
+        /// it has joined, so the walk visits only the blocks the <c>IF</c> reads and those they
+        /// read in turn, as far as the set reaches, and never the rest of the graph. Whether a
+        /// block's nodes compute a branch's outputs then follows from its readers alone.</para>
         /// </summary>
         private static HashSet<int> Cone(
             List<Block> blocks, int ifIdx, Dictionary<FastNodeKey, int> blockOfNode,
@@ -325,25 +337,127 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             var ifBlock = blocks[ifIdx];
             var ifClose = ifBlock.Nodes[^1];
             var ifOpenKey = ifBlock.Nodes[0].Key;
-
-            var mine = ReachedBlocks(ifClose, BranchAttr(isThen), ifIdx, blockOfNode, ctx);
-            var other = ReachedBlocks(ifClose, BranchAttr(!isThen), ifIdx, blockOfNode, ctx);
+            var mineSlot = BranchSlot(ifClose, BranchAttr(isThen));
+            var otherSlot = BranchSlot(ifClose, BranchAttr(!isThen));
+            var mineInIf = ReachedInIf(ifBlock, mineSlot, ctx);
+            var otherInIf = ReachedInIf(ifBlock, otherSlot, ctx);
 
             var cone = new HashSet<int>();
-            foreach (var b in mine)
-                if (!other.Contains(b) && IsMovable(blocks[b], ctx)) cone.Add(b);
+            // The nodes of the cone the branch's outputs are computed from; none of its nodes
+            // computes the other branch's.
+            var mineInCone = new HashSet<FastNodeKey>();
+            // Per block reached: how many blocks reading it have yet to join, or -1 for a block
+            // that never can.
+            var waiting = new Dictionary<int, int>();
+            var ready = new Queue<int>();
 
-            bool changed = true;
-            while (changed)
+            void Reached(int b)
             {
-                changed = false;
-                var doomed = new List<int>();
-                foreach (var b in cone)
-                    if (HasConsumerOutside(blocks[b], cone, ifBlock, ifOpenKey, blockOfNode, ctx))
-                        doomed.Add(b);
-                foreach (var b in doomed) { cone.Remove(b); changed = true; }
+                if (waiting.TryGetValue(b, out var count))
+                {
+                    if (count > 0 && --count == 0) ready.Enqueue(b);
+                    if (count >= 0) waiting[b] = count;
+                    return;
+                }
+                var readers = new HashSet<int>();
+                foreach (var nk in blocks[b].Keys)
+                {
+                    if (!ctx.ConsumersOf.TryGetValue(nk, out var consumers)) continue;
+                    foreach (var c in consumers)
+                    {
+                        if (c == ifOpenKey || !ifBlock.Keys.Contains(c) && !blockOfNode.ContainsKey(c))
+                        {
+                            waiting[b] = -1;
+                            return;
+                        }
+                        if (!ifBlock.Keys.Contains(c) && blockOfNode[c] is var cb && cb != b && !cone.Contains(cb))
+                            readers.Add(cb);
+                    }
+                }
+                waiting[b] = readers.Count;
+                if (readers.Count == 0) ready.Enqueue(b);
+            }
+
+            void ReachProducersOf(IEnumerable<FastNode> nodes, int? joined)
+            {
+                var producers = new HashSet<int>();
+                foreach (var node in nodes)
+                    foreach (var grp in node.FullInputs)
+                        foreach (var key in grp.Value)
+                            if (key is FastTensorKey tk && !tk.IsEmpty && ctx.ProducerOf.TryGetValue(tk, out var p)
+                                && blockOfNode.TryGetValue(p, out var pb) && pb < ifIdx && pb != joined)
+                                producers.Add(pb);
+                foreach (var pb in producers) Reached(pb);
+            }
+
+            ReachProducersOf(ifBlock.Nodes, null);
+            while (ready.Count > 0)
+            {
+                var b = ready.Dequeue();
+                var block = blocks[b];
+                if (!IsMovable(block, ctx)) continue;
+
+                // A block's nodes are in order, so each one's readers in the block are decided
+                // before it is.
+                var mine = new HashSet<FastNodeKey>();
+                var other = new HashSet<FastNodeKey>();
+                for (int i = block.Nodes.Count - 1; i >= 0; i--)
+                {
+                    var node = block.Nodes[i];
+                    bool toMine = Produces(node, mineSlot), toOther = Produces(node, otherSlot);
+                    if (ctx.ConsumersOf.TryGetValue(node.Key, out var consumers))
+                        foreach (var c in consumers)
+                        {
+                            toMine |= mineInIf.Contains(c) || mine.Contains(c) || mineInCone.Contains(c);
+                            toOther |= otherInIf.Contains(c) || other.Contains(c);
+                        }
+                    if (toMine) mine.Add(node.Key);
+                    if (toOther) other.Add(node.Key);
+                }
+                if (mine.Count == 0 || other.Count > 0) continue;
+
+                cone.Add(b);
+                mineInCone.UnionWith(mine);
+                ReachProducersOf(block.Nodes, b);
             }
             return cone;
+        }
+
+        /// <summary>The values <paramref name="ifClose"/> takes as a branch's outputs.</summary>
+        private static HashSet<FastTensorKey> BranchSlot(FastNode ifClose, string branchAttr)
+        {
+            var slot = new HashSet<FastTensorKey>();
+            if (ifClose.FullInputs.TryGetValue(branchAttr, out var keys))
+                foreach (var key in keys)
+                    if (key is FastTensorKey tk && !tk.IsEmpty) slot.Add(tk);
+            return slot;
+        }
+
+        /// <summary>The nodes of the <c>IF</c> a branch's outputs, <paramref name="slot"/>, are
+        /// computed from. What a node of the <c>IF</c> is computed from is in it or before it, so
+        /// nothing outside it lies on the way.</summary>
+        private static HashSet<FastNodeKey> ReachedInIf(Block ifBlock, HashSet<FastTensorKey> slot, Context ctx)
+        {
+            var reached = new HashSet<FastNodeKey>();
+            var queue = new Queue<FastNodeKey>();
+            foreach (var key in slot)
+                if (ctx.ProducerOf.TryGetValue(key, out var p) && ifBlock.Keys.Contains(p) && reached.Add(p))
+                    queue.Enqueue(p);
+            while (queue.Count > 0)
+                foreach (var grp in ctx.NodeByKey[queue.Dequeue()].FullInputs)
+                    foreach (var key in grp.Value)
+                        if (key is FastTensorKey tk && !tk.IsEmpty && ctx.ProducerOf.TryGetValue(tk, out var p)
+                            && ifBlock.Keys.Contains(p) && reached.Add(p))
+                            queue.Enqueue(p);
+            return reached;
+        }
+
+        private static bool Produces(FastNode node, HashSet<FastTensorKey> values)
+        {
+            foreach (var grp in node.FullOutputs)
+                foreach (var key in grp.Value)
+                    if (key is FastTensorKey tk && values.Contains(tk)) return true;
+            return false;
         }
 
         private static string BranchAttr(bool isThen) => isThen
@@ -382,29 +496,6 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             return reached;
         }
 
-        /// <summary>
-        /// Whether any value <paramref name="block"/> produces is read from somewhere the move
-        /// would put out of reach: outside this level, outside the cone, or by the <c>IF_OPEN</c>,
-        /// whose condition is evaluated before either branch.
-        /// </summary>
-        private static bool HasConsumerOutside(
-            Block block, HashSet<int> cone, Block ifBlock, FastNodeKey ifOpenKey,
-            Dictionary<FastNodeKey, int> blockOfNode, Context ctx)
-        {
-            foreach (var nk in block.Keys)
-            {
-                if (!ctx.ConsumersOf.TryGetValue(nk, out var consumers)) continue;
-                foreach (var c in consumers)
-                {
-                    if (c == ifOpenKey) return true;
-                    if (ifBlock.Keys.Contains(c)) continue;
-                    if (blockOfNode.TryGetValue(c, out var cb) && cone.Contains(cb)) continue;
-                    return true;
-                }
-            }
-            return false;
-        }
-
         private static bool IsMovable(Block block, Context ctx)
         {
             foreach (var nk in block.Keys)
@@ -435,12 +526,16 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// </summary>
         private static void CollectExports(
             List<Block> blocks, int ifIdx, Dictionary<FastNodeKey, int> blockOfNode,
-            Dictionary<int, (int IfIdx, bool IsThen)> claim, bool isThen, Context ctx, List<Export> exports)
+            Dictionary<int, (int IfIdx, bool IsThen)> claim, Dictionary<FastTensorKey, int> lastIfOn, bool isThen,
+            Context ctx, List<Export> exports)
         {
             var ifBlock = blocks[ifIdx];
             var ifOpen = ifBlock.Nodes[0];
             var ifClose = ifBlock.Nodes[^1];
             if (ConditionOf(ifOpen) is not FastTensorKey condition) return;
+            // Only an IF after this one on its condition, at this level, reads a value of the
+            // branch from where the branch is taken.
+            if (lastIfOn[condition] <= ifIdx) return;
 
             var mine = ReachedBlocks(ifClose, BranchAttr(isThen), ifIdx, blockOfNode, ctx);
             var other = ReachedBlocks(ifClose, BranchAttr(!isThen), ifIdx, blockOfNode, ctx);

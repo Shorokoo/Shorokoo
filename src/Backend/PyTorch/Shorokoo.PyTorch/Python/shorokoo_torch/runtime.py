@@ -10,6 +10,8 @@ import collections
 import contextvars
 import ctypes
 import linecache
+import sys
+import threading
 import warnings
 
 import numpy as np
@@ -221,7 +223,7 @@ def _export(value, device, taken, ids):
 
 
 def run(main, args, wanted, run_device, constant_storages, constant_ids,
-        stop_address=0, severity=None, aliases=(), limit_bytes=-1, shrink=False, tensor_float32=False,
+        stop_address=0, warned=None, aliases=(), limit_bytes=-1, shrink=False, tensor_float32=False,
         placements=(), writable=()):
     """Runs a translated model and exports the outputs at indices `wanted`, each tensor on the run's
     device and each sequence in host memory -- where the .NET side reads every input and leaves every
@@ -231,8 +233,8 @@ def run(main, args, wanted, run_device, constant_storages, constant_ids,
 
     `args` are where the run reads them already: a tensor on the run's device, a string tensor or a
     sequence in host memory. `stop_address` is the address of a 32-bit flag the .NET side sets to
-    stop the run, or 0 for a run nothing can stop; `severity` the least ONNX log severity a warning
-    the run raises is shown at; `aliases` one (output index, input index) per slot of the
+    stop the run, or 0 for a run nothing can stop; `warned` the list the warnings the run raises are
+    collected into, as (category, message, location); `aliases` one (output index, input index) per slot of the
     translation's plan, in the numbering its `_alias_write` calls use -- an index -1 where the run may
     not write that slot into a consumed input -- see _Aliasing; `limit_bytes` what the run may
     allocate on a CUDA device beyond what its allocator holds there already, or -1; `shrink` whether
@@ -247,7 +249,8 @@ def run(main, args, wanted, run_device, constant_storages, constant_ids,
         float32_precision(tensor_float32)
     outputs = moved = None
     try:
-        tokens = [_device.set(run_device), _warning_severity.set(severity)]
+        tokens = [_device.set(run_device)]
+        collecting = _start_collecting(warned)
         capped = None
         try:
             if stop_address:
@@ -264,6 +267,7 @@ def run(main, args, wanted, run_device, constant_storages, constant_ids,
         finally:
             for token in reversed(tokens):
                 token.var.reset(token)
+            _stop_collecting(collecting)
             _uncap(capped)
         return _export_all(outputs, args, moved, wanted, run_device, aliasing, placing, constant_storages, constant_ids)
     finally:
@@ -391,22 +395,110 @@ def stop_point():
 
 # ---- warnings --------------------------------------------------------------------------------
 
-WARNING = 2
-_warning_severity = contextvars.ContextVar("shorokoo_warning_severity", default=None)
+_warnings_collected = contextvars.ContextVar("shorokoo_warnings_collected", default=None)
 _show_warning = warnings.showwarning
 
+# How many runs are collecting warnings, and the records Python made of the places their warnings
+# were shown from, which they hold until the last of them ends (see _collect_warning).
+_collecting_lock = threading.Lock()
+_collecting_runs = 0
+_held_records = {}
 
-def _show_warning_at_severity(message, category, filename, lineno, file=None, line=None):
-    """Shows a warning unless the run that raised it asked only for errors: the session's log
-    severity, read per run, since the interpreter's warning filters are the whole process's."""
-    severity = _warning_severity.get()
-    if severity is not None and severity > WARNING:
+
+def _start_collecting(warned):
+    """Collects the warnings the run this thread makes raises into the list `warned`, until
+    _stop_collecting is handed what this returns."""
+    global _collecting_runs
+    token = _warnings_collected.set(warned)
+    with _collecting_lock:
+        _collecting_runs += 1
+        if _collecting_runs > 1:
+            _forget_held_records()
+    return token
+
+
+def _stop_collecting(token):
+    global _collecting_runs
+    with _collecting_lock:
+        _collecting_runs -= 1
+        if _collecting_runs == 0:
+            _forget_held_records()
+    _warnings_collected.reset(token)
+
+
+def _forget_held_records():
+    for registry, key in _held_records.values():
+        registry.pop(key, None)
+    _held_records.clear()
+
+
+def _collect_warning(message, category, filename, lineno, file=None, line=None):
+    """Appends a warning a run raises to the list the .NET side handed that run, as (category,
+    message, location), rather than showing it: the .NET side delivers it to the run's own log
+    settings. The interpreter's warning machinery is the whole process's, so the list is read per
+    run. A warning raised outside a run goes on to whatever showed warnings when this hook was
+    installed, another backend's hook included.
+
+    Under the default filter action a warning reaches each run that raises it, once. Python shows
+    such a warning once per place in the whole process, keeping a record that it did (_shown_record).
+    While one run collects, the record stays, so Python itself skips the run's repeats there, and
+    it is taken back once the run ends, so the next run collects it too. While several runs
+    overlap, each record is taken back as soon as it is made, so that every one of them collects
+    the warning. Either way a run collects a warning from one place once: a repeat Python shows
+    again -- after an overlapping run took the record back, or after a change to the filters, which
+    clears every record -- is not collected a second time.
+
+    Under the "once" and "module" actions, Python keeps a further record, which this hook leaves
+    alone, so only the first run in the process to raise the warning collects it, as Python would
+    show it once. This hook counts its own backend's runs alone: a JAX call overlapping a run here
+    does not count as an overlap, so where both raise a warning from one place, the record one of
+    them holds can keep the other from collecting it.
+
+    Collection across overlapping runs is best-effort. Python records a warning as shown before
+    it calls this hook, so a warning that an overlapping run on another thread raises from the
+    same place, inside the window between Python's recording it and its calling this hook, finds
+    the record still there and is not shown, and that run misses it."""
+    collected = _warnings_collected.get()
+    if collected is None:
+        _show_warning(message, category, filename, lineno, file, line)
         return
-    _show_warning(message, category, filename, lineno, file, line)
+    entry = (getattr(category, "__name__", str(category)), str(message), f"{filename}:{lineno}")
+    record = _shown_record(message, category, filename, lineno)
+    if record is not None:
+        with _collecting_lock:
+            if _collecting_runs > 1:
+                record[0].pop(record[1], None)
+            else:
+                _held_records[(id(record[0]), record[1])] = record
+        if entry in collected:
+            return
+    collected.append(entry)
 
 
-if getattr(warnings.showwarning, "__name__", "") != "_show_warning_at_severity":
-    warnings.showwarning = _show_warning_at_severity
+def _shown_record(message, category, filename, lineno):
+    """The record Python made, as it showed this warning, that it was shown from its place -- its
+    (registry, key) -- or None where it made none, as for a warning the filters always show. The
+    registry is the `__warningregistry__` of the module whose frame raised it -- the one on this
+    thread's stack running `filename` at `lineno` -- or of `sys` for a warning raised with none."""
+    key = (str(message), category, lineno)
+    first = None
+    frame = sys._getframe(1)
+    while frame is not None:
+        registry = frame.f_globals.get("__warningregistry__")
+        if isinstance(registry, dict) and key in registry:
+            if frame.f_code.co_filename == filename and frame.f_lineno == lineno:
+                return registry, key
+            if first is None:
+                first = registry
+        frame = frame.f_back
+    registry = sys.__dict__.get("__warningregistry__")
+    if isinstance(registry, dict) and key in registry:
+        return registry, key
+    return None if first is None else (first, key)
+
+
+if getattr(warnings.showwarning, "__name__", "") != "_collect_warning":
+    warnings.showwarning = _collect_warning
 
 
 # ---- writing an output into a consumed input -------------------------------------------------

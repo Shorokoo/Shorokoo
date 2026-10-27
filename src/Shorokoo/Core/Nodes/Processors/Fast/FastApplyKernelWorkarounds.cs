@@ -5,6 +5,8 @@ using System.Linq;
 using System.Text;
 using Shorokoo.Core.Factory;
 using Shorokoo.Core.Graph;
+using Shorokoo.Core.Interpreter;
+using Shorokoo.Core.Interpreter.Helpers;
 using Shorokoo.Core.Lowering.KernelWorkarounds;
 using Shorokoo.Core.Nodes.NodeDefinitions;
 using Shorokoo.Graph;
@@ -64,10 +66,13 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// reports as <see cref="WorkaroundSite.ShapesAreConcrete"/>; a site inside one reports
         /// false (<see cref="WorkaroundSite.IsInLoopBody"/>). <paramref name="isFunctionBody"/> says
         /// the graph is a function's body, whose inputs are values from wherever it is called
-        /// (<see cref="WorkaroundSite.IsFromOutsideBody"/>).
+        /// (<see cref="WorkaroundSite.IsFromOutsideBody"/>). <paramref name="shapes"/> are what
+        /// <see cref="ConcreteShapes"/> worked out of the graph, which
+        /// <see cref="WorkaroundSite.ShapeOf"/> answers from.
         /// </summary>
         public static Splices Process(
-            InternalComputationGraph graph, KernelWorkaroundSet? set, bool shapesAreConcrete = false, bool isFunctionBody = false)
+            InternalComputationGraph graph, KernelWorkaroundSet? set, bool shapesAreConcrete = false, bool isFunctionBody = false,
+            IReadOnlyDictionary<FastTensorKey, Shape>? shapes = null)
         {
             if (graph is null) throw new ArgumentNullException(nameof(graph));
             if (set is null || set.IsEmpty) return Splices.None;
@@ -107,7 +112,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                         loops--;
 
                     if (!workaround.OpCodes.Contains(node.OpCode)
-                        || WorkaroundSite.TryCreate(node, tensorInfo, producers, read, shapesAreConcrete, inLoopBody: loops > 0, outsideBody: outsideBody?.Invoke(node)) is not { } site
+                        || WorkaroundSite.TryCreate(node, tensorInfo, producers, read, shapesAreConcrete, inLoopBody: loops > 0, outsideBody: outsideBody?.Invoke(node), shapes: workaround.ReadsShapes ? shapes : null) is not { } site
                         || !Applies(workaround, site, node))
                     {
                         newNodes.Add(node);
@@ -154,6 +159,59 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             return tensorInfo is null
                 ? Splices.None
                 : new Splices(minted, hosts, [.. graph.Nodes.Select(n => n.Key)], gaps, leadingGap, tensorInfo);
+        }
+
+        /// <summary>
+        /// The dimensions of the values of <paramref name="graph"/> that follow from
+        /// <paramref name="inputDims"/>, the dimensions of its inputs, positionally: what
+        /// <see cref="WorkaroundSite.ShapeOf"/> answers. Shorokoo's interpreter works them out from
+        /// the dimensions alone, leaving out every value whose shape it cannot tell without the
+        /// data. Null where <paramref name="set"/> holds no workaround that asks
+        /// (<see cref="KernelWorkaround.ReadsShapes"/>) of an operator the graph calls outside a
+        /// loop body — <see cref="WorkaroundSite.ShapeOf"/> answers nothing inside one — or an
+        /// input's dimensions are not stated.
+        ///
+        /// <para>Left out too is every value computed from a scope's result the interpreter
+        /// estimated rather than worked out (<see cref="ConcreteValues"/>): an <c>If</c> it could not
+        /// tell the branch of, and a <c>Loop</c> it could not tell the end of. The interpreter
+        /// gives each a shape all the same — the one branch's it knows, the shape a loop carries
+        /// after the few iterations it walks — which a run can contradict.</para>
+        ///
+        /// <para>Read off the graph before the pre-passes rewrite it: they keep each value they do
+        /// not replace under its key, and a value they add has no shape here.</para>
+        /// </summary>
+        public static IReadOnlyDictionary<FastTensorKey, Shape>? ConcreteShapes(
+            InternalComputationGraph graph, KernelWorkaroundSet? set, IReadOnlyList<long[]?>? inputDims,
+            ConcreteValues? values = null)
+        {
+            if (graph is null) throw new ArgumentNullException(nameof(graph));
+            if (set is null || inputDims is null || inputDims.Any(d => d is null)
+                || !CalledOutsideLoopBodies(graph, set.Workarounds.Where(w => w.ReadsShapes).SelectMany(w => w.OpCodes).ToHashSet()))
+                return null;
+
+            return (values ?? ConcreteValues.At(graph, inputDims))?.Shapes();
+        }
+
+        /// <summary>Whether <paramref name="graph"/> calls one of <paramref name="opCodes"/> outside
+        /// every loop body.</summary>
+        private static bool CalledOutsideLoopBodies(InternalComputationGraph graph, HashSet<string> opCodes)
+        {
+            if (opCodes.Count == 0) return false;
+            var scopes = new Stack<bool>();
+            int loops = 0;
+            foreach (var node in graph.Nodes)
+            {
+                if (FastOpsetResolver.IsOpenOpCode(node.OpCode))
+                {
+                    bool loop = node.OpCode is OpCodes.LOOP_OPEN or OpCodes.SEQUENCE_MAP_OPEN;
+                    scopes.Push(loop);
+                    if (loop) loops++;
+                }
+                else if (FastOpsetResolver.IsCloseOpCode(node.OpCode) && scopes.TryPop(out var closed) && closed)
+                    loops--;
+                if (loops == 0 && opCodes.Contains(node.OpCode)) return true;
+            }
+            return false;
         }
 
         /// <summary>

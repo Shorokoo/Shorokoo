@@ -17,7 +17,8 @@ using static OpCodes;
 /// refuses them, where the spec gives a sum of 0. Written out here, the reductions are Shorokoo's
 /// own and <see cref="CudaReduceEmptyAxisWorkaround"/>, after this, keeps their axes. The weight
 /// of a target is its class's weight, 1 without a weight input, and 0 for an ignored target, as
-/// the spec says; without a weight or an ignore index the mean divides by the number of targets.
+/// the spec says; without a weight or an ignore index the mean divides by the number of targets,
+/// counted on the card as a sum of ones rather than read off the shape, which would be copied there.
 /// A call whose input's dimensions follow from the stated ones and are none of them 0
 /// (<see cref="WorkaroundSite.ShapeOf"/>) and one with reduction <c>none</c> keep the call as it
 /// stands.</para>
@@ -50,7 +51,7 @@ internal sealed class CudaLossReductionWorkaround : KernelWorkaround
             ? kept is null ? null : CastLike(kept, x, null)
             : kept is null ? Gather(weight, target, 0)
             : Where(kept, Gather(weight, Where(kept, target, CastLike(Globals.Scalar(0L), target, null)), 0), CastLike(Globals.Scalar(0f), x, null));
-        var count = weights is null ? CastLike(Size(target), x, null) : ReduceSum(weights, null, false, null);
+        var count = ReduceSum(weights ?? CastLike(Equal(target, target), x, null), null, false, null);
         return [Div(sum, count)];
     }
 

@@ -1505,6 +1505,8 @@ public class GpuExecutionTests
             TensorData([2L, 2L], [1f, 2f, 3f, 4f])).CopyMemory<int>());
         Assert.Equal([1f, 2f, 0.5f, 4f], OnTheCard(f, OnnxOp.Cast(OnnxOp.ScatterND(OnnxOp.Cast(f, null, DType.Float16), Vector(0L, 1L, 1L, 0L).Reshape(Vector(2L, 2L)),
             OnnxOp.Cast(Vector(5f, 0.5f), null, DType.Float16), ScatterNDReduction.Min), null, DType.Float32), TensorData([2L, 2L], [1f, 2f, 3f, 4f])).CopyMemory<float>());
+        Assert.Equal([1f, 7f, 3.5f, 4f], OnTheCard(f, OnnxOp.Cast(OnnxOp.ScatterND(OnnxOp.Cast(f, null, DType.BFloat16), Vector(0L, 1L, 1L, 0L).Reshape(Vector(2L, 2L)),
+            OnnxOp.Cast(Vector(5f, 0.5f), null, DType.BFloat16), ScatterNDReduction.Add), null, DType.Float32), TensorData([2L, 2L], [1f, 2f, 3f, 4f])).CopyMemory<float>());
         Assert.Equal([1, -3, 2, 40, 0, 15, -25, 0], OnTheCard(f, OnnxOp.Cast(OnnxOp.QuantizeLinear(f, blocks, null, axis: 1, blockSize: 2, outputDatatype: DType.Int16), null, DType.Int32), data).CopyMemory<int>());
     }
 

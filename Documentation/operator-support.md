@@ -262,7 +262,7 @@ shape and type.
 | Reshape | ✅ | ✅ | ✅ |
 | ReverseSequence | 🟡 [10] | ✅ | ✅ |
 | Scatter | ❌ [11] | N/A | N/A |
-| ScatterElements | ✅ | ✅ | 🟡 [12] |
+| ScatterElements | ✅ [21] | ✅ | 🟡 [12] |
 | ScatterND | ✅ [21] | ✅ | 🟡 [12] |
 | Shape | ✅ | ✅ | N/A [2] |
 | Size | ✅ | ✅ | N/A [2] |
@@ -352,16 +352,17 @@ shape and type.
     counts from the end. An index outside is the backend's to handle: ONNX
     Runtime's CPU kernel raises its own error, and its CUDA kernel does not check
     and can read a zero row ([#501](https://github.com/Shorokoo/Shorokoo/issues/501)).
-21. A reduction (`add`, `mul`, `max`, `min`) over float16 or bfloat16 data, which
-    ONNX Runtime's CPU provider has no kernel for, is computed as float32: the data
-    and updates are cast to float32, scattered, and the result cast back. Float32
-    holds every value of both types, so `max` and `min` are exact; `add` and `mul`
-    accumulate in float32 and round to the data's type once, so where several
-    updates reach one element the result is the float32 sum or product rounded,
-    which can differ in the last place from rounding after every update. On a
-    card, only a bfloat16 call is computed this way, since the CUDA provider has no
-    kernel for it; a float16 call runs on the provider's own kernel, which
-    accumulates in float16.
+21. ONNX Runtime's CPU provider has no kernel for a reducing `ScatterND` over
+    float16 or bfloat16 data, nor for a reducing `ScatterElements` over bfloat16
+    data or over float16 data with `add` or `mul`. Each such call is computed as
+    float32: the data and updates are cast to float32, scattered, and the result
+    cast back. Float32 holds every value of both types, so `max` and `min` are
+    exact; `add` and `mul` accumulate in float32 and round to the data's type once,
+    so where several updates reach one element the result is the float32 sum or
+    product rounded, which can differ in the last place from rounding after every
+    update. On a card, only a reducing bfloat16 `ScatterND` is computed this way,
+    since the CUDA provider has no kernel for it; every other such call runs on
+    the provider's own kernel, which accumulates in the data's type.
 
 ## Convolution & pooling
 

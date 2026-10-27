@@ -415,6 +415,24 @@ public class KernelWorkaroundPassTests
     }
 
     [Fact]
+    public void TestAReducingScatterElementsScattersAsFloat32WhereOnnxRuntimeHasNoKernel()
+    {
+        var f = InputTensor<float32>("f", rank: 2);
+        var (cpu, cuda) = (KernelWorkaroundRegistry.OnnxRuntime, KernelWorkaroundRegistry.OnnxRuntimeCuda);
+        InternalComputationGraph Scattered(DType dtype, ScatterNDReduction? reduction, long axis, params long[] indices)
+            => Graph(f, OnnxOp.Cast(OnnxOp.ScatterElements(OnnxOp.Cast(f, null, dtype), Vector(indices).Reshape(Vector(1L, 2L)), OnnxOp.Cast(Vector(5f, 0.5f).Reshape(Vector(1L, 2L)), null, dtype), axis, reduction), null, DType.Float32));
+        Assert.Equal([1f, 2.5f, 8f, 4f], ScatteredAsFloat32(Scattered(DType.Float16, ScatterNDReduction.Add, 0, 1, 0), cpu, 1f, 2f, 3f, 4f));
+        Assert.Equal([1f, 1f, 15f, 4f], ScatteredAsFloat32(Scattered(DType.Float16, ScatterNDReduction.Mul, 0, 1, 0), cpu, 1f, 2f, 3f, 4f));
+        Assert.Equal([1f, 2f, 5f, 4f], ScatteredAsFloat32(Scattered(DType.BFloat16, ScatterNDReduction.Max, 0, 1, 0), cpu, 1f, 2f, 3f, 4f));
+        Assert.Equal([0.5f, 2f, 3f, 4f], ScatteredAsFloat32(Scattered(DType.BFloat16, ScatterNDReduction.Min, 1, 1, 0), cpu, 1f, 2f, 3f, 4f));
+        Assert.Equal([2048f, 2054f, 3f, 4f], ScatteredAsFloat32(Scattered(DType.Float16, ScatterNDReduction.Add, 1, 1, 1), cpu, 2048f, 2048f, 3f, 4f));
+        Assert.Equal(0, AddedCasts(Scattered(DType.Float16, ScatterNDReduction.Max, 0, 1, 0), cpu));
+        Assert.Equal(0, AddedCasts(Scattered(DType.BFloat16, null, 0, 1, 0), cpu));
+        Assert.Equal(0, AddedCasts(Scattered(DType.BFloat16, ScatterNDReduction.Add, 0, 1, 0), cuda));
+        Assert.Equal(0, AddedCasts(Scattered(DType.Float16, ScatterNDReduction.Mul, 0, 1, 0), cuda));
+    }
+
+    [Fact]
     public void TestTheCudaSetResizesALinearOrCubicCallScaledOnAxisOneButNotZeroOrThreeOverItsLastTwoAxes()
     {
         var y = InputTensor<float32>("y", rank: 4);

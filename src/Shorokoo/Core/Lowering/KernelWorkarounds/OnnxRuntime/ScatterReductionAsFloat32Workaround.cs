@@ -8,9 +8,10 @@ using static OnnxOpAttributeNames;
 using static OpCodes;
 
 /// <summary>
-/// A reducing <c>ScatterND</c> over float16 or bfloat16 data that an ONNX Runtime provider has
-/// no kernel for, computed as float32 and cast back:
-/// <c>Cast(ScatterND(Cast(data, float32), indices, Cast(updates, float32), reduction), dtype)</c>.
+/// A reducing <c>ScatterND</c> or <c>ScatterElements</c> over float16 or bfloat16 data that an
+/// ONNX Runtime provider has no kernel for, computed as float32 and cast back:
+/// <c>Cast(ScatterND(Cast(data, float32), indices, Cast(updates, float32), reduction), dtype)</c>,
+/// and the same with the call's <c>axis</c> for <c>ScatterElements</c>.
 ///
 /// <para>Float32 holds every float16 and bfloat16 value, so the scatter reads its operands exactly
 /// and a <c>max</c> or <c>min</c> comes out as the spec gives it. An <c>add</c> or <c>mul</c>
@@ -21,22 +22,25 @@ using static OpCodes;
 /// </summary>
 internal abstract class ScatterReductionAsFloat32Workaround : KernelWorkaround
 {
-    public override IReadOnlySet<string> OpCodes { get; } = new HashSet<string>([SCATTER_ND], StringComparer.Ordinal);
+    public override IReadOnlySet<string> OpCodes { get; } = new HashSet<string>([SCATTER_ND, SCATTER_ELEMENTS], StringComparer.Ordinal);
 
     public override bool Applies(WorkaroundSite site)
-        => ReductionOf(site) is { } reduction && reduction != ScatterNDReduction.None && Takes(site.DTypeOf(0));
+        => ReductionOf(site) is { } reduction && reduction != ScatterNDReduction.None && Takes(site.OpCode, site.DTypeOf(0), reduction);
 
     public override Variable?[] Rewrite(WorkaroundSite site, Variable?[] inputs)
     {
         var dtype = site.DTypeOf(0);
         var scattered = NodeBuilder.BuildNodeSingleOut(site.OpCode,
             [Cast(inputs[0]!, null, DType.Float32), inputs[1]!, Cast(inputs[2]!, null, DType.Float32)],
-            [(AttrReduction, site.Attributes.GetAttributeObj(AttrReduction))]);
+            site.OpCode == SCATTER_ELEMENTS
+                ? [(AttrAxis, site.Attributes.GetAttributeObj(AttrAxis)), (AttrReduction, site.Attributes.GetAttributeObj(AttrReduction))]
+                : [(AttrReduction, site.Attributes.GetAttributeObj(AttrReduction))]);
         return [Cast(scattered, null, dtype)];
     }
 
-    /// <summary>Whether a reducing call over <paramref name="dtype"/> data is rewritten.</summary>
-    protected abstract bool Takes(DType dtype);
+    /// <summary>Whether a call of <paramref name="opCode"/> over <paramref name="dtype"/> data with
+    /// <paramref name="reduction"/> is rewritten.</summary>
+    protected abstract bool Takes(string opCode, DType dtype, ScatterNDReduction reduction);
 
     /// <summary>The site's <c>reduction</c>: <see cref="ScatterNDReduction.None"/> where it is
     /// unset, null where it names none of the spec's.</summary>
@@ -56,13 +60,20 @@ internal abstract class ScatterReductionAsFloat32Workaround : KernelWorkaround
 }
 
 /// <summary>
-/// A reducing <c>ScatterND</c> over float16 or bfloat16 data, which ONNX Runtime's CPU provider
-/// has no kernel for, computed as float32 (<see cref="ScatterReductionAsFloat32Workaround"/>).
-/// The CUDA set takes <see cref="CudaBFloat16ScatterReductionWorkaround"/> in its place.
+/// A reducing call ONNX Runtime's CPU provider has no kernel for, computed as float32
+/// (<see cref="ScatterReductionAsFloat32Workaround"/>): a <c>ScatterND</c> over float16 or
+/// bfloat16 data with any reduction, and a <c>ScatterElements</c> over bfloat16 data with any
+/// reduction or over float16 data with <c>add</c> or <c>mul</c>. The provider computes a float16
+/// <c>ScatterElements</c> with <c>max</c> or <c>min</c>, which is left to it. The CUDA set takes
+/// <see cref="CudaBFloat16ScatterReductionWorkaround"/> in its place.
 /// </summary>
 internal sealed class HalfScatterReductionWorkaround : ScatterReductionAsFloat32Workaround
 {
-    protected override bool Takes(DType dtype) => IsHalf(dtype);
+    protected override bool Takes(string opCode, DType dtype, ScatterNDReduction reduction)
+        => opCode == SCATTER_ND
+            ? IsHalf(dtype)
+            : dtype.IsSameElementTypeAs(DType.BFloat16)
+              || (dtype.IsSameElementTypeAs(DType.Float16) && reduction is ScatterNDReduction.Add or ScatterNDReduction.Mul);
 }
 
 /// <summary>
@@ -71,9 +82,11 @@ internal sealed class HalfScatterReductionWorkaround : ScatterReductionAsFloat32
 /// Part of the CUDA set only
 /// (<see cref="Shorokoo.Core.Backends.KernelWorkaroundSets.OnnxRuntimeCuda"/>), in the place of
 /// <see cref="HalfScatterReductionWorkaround"/>: the provider's float16 kernel computes the call
-/// as the spec does, accumulating in float16, so a float16 call is left to it.
+/// as the spec does, accumulating in float16, so a float16 call is left to it, and the provider
+/// computes a reducing <c>ScatterElements</c> of either type, which is left to it too.
 /// </summary>
 internal sealed class CudaBFloat16ScatterReductionWorkaround : ScatterReductionAsFloat32Workaround
 {
-    protected override bool Takes(DType dtype) => dtype.IsSameElementTypeAs(DType.BFloat16);
+    protected override bool Takes(string opCode, DType dtype, ScatterNDReduction reduction)
+        => opCode == SCATTER_ND && dtype.IsSameElementTypeAs(DType.BFloat16);
 }

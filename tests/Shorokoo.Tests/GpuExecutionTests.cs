@@ -1263,6 +1263,19 @@ public class GpuExecutionTests
     }
 
     [CudaFact]
+    public void CudaProvider_ASessionRunOverManyShapesWhoseResultIsAViewKeepsNoMoreOnTheCardThanItsBusiestRunHadInUse()
+    {
+        using var ctx = new ComputeContext();
+        var shape = InputVector<int64>("shape");
+        using var filled = ctx.Compile(new InternalComputationGraph([shape],
+            [OnnxOp.Squeeze(OnnxOp.ReduceSum(OnnxOp.Expand(Vector(1f), shape), keepdims: true), null)]));
+        foreach (var elements in (long[])[16L << 20, 3L << 22, 1L << 23, 3L << 21, 1L << 22])
+            ComputeContext.ReleaseOutputs(filled.Execute(ArenaProbeModels.FilledShape(elements)));
+        var held = Assert.IsType<ArenaStatistics>(filled.ReadArenaStatistics());
+        Assert.True(held.TotalAllocatedBytes <= held.MaxInUseBytes);
+    }
+
+    [CudaFact]
     public void CudaProvider_ASessionCyclingThroughShapesTakesNothingMoreFromTheCardAfterItsFirstCycle()
     {
         using var ctx = new ComputeContext();

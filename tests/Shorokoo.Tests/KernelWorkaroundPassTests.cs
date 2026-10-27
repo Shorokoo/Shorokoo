@@ -388,6 +388,26 @@ public class KernelWorkaroundPassTests
     }
 
     [Fact]
+    public void TestTheCudaSetResizesALinearOrCubicCallScaledOnAxisOneButNotZeroOrThreeOverItsLastTwoAxes()
+    {
+        var y = InputTensor<float32>("y", rank: 4);
+        var data = TensorData(DType.Float32, [1L, 3L, 4L, 5L], [.. Enumerable.Range(0, 60).Select(i => (float)(i % 7))]);
+        var computed = OnnxOp.Add(Vector(1f, 2f, 2f, 1f), OnnxOp.Mul(OnnxOp.Cast(OnnxOp.Shape(y), null, DType.Float32), Scalar(0f)));
+        InternalComputationGraph Resized(Variable? scales, ResizeMode mode, CoordinateTransformationMode? transformation = null, Variable? sizes = null, long[]? axes = null, KeepAspectRatioPolicy? policy = null)
+            => Graph(y, OnnxOp.Resize(y, null, scales, sizes, null, axes, transformation, null, null, null, policy, mode, null));
+        Assert.True(RegroupedOnCuda(Resized(Vector(1f, 2f, 2f, 1f), ResizeMode.Linear), data));
+        Assert.True(RegroupedOnCuda(Resized(Vector(1f, 2f, 1f, 1f), ResizeMode.Linear, CoordinateTransformationMode.Align_corners), data));
+        Assert.True(RegroupedOnCuda(Resized(Vector(1f, 0.5f, 2f, 1f), ResizeMode.Linear, CoordinateTransformationMode.Asymmetric), data));
+        Assert.True(RegroupedOnCuda(Resized(Vector(1f, 2f, 2f, 1f), ResizeMode.Cubic), data));
+        Assert.True(RegroupedOnCuda(Resized(computed, ResizeMode.Linear), data));
+        Assert.True(RegroupedOnCuda(Resized(null, ResizeMode.Linear, sizes: Vector(1L, 6L, 8L, 5L)), data));
+        Assert.True(RegroupedOnCuda(Resized(null, ResizeMode.Linear, sizes: Vector(6L, 6L), axes: [1L, 2L], policy: KeepAspectRatioPolicy.not_larger), data));
+        Assert.Equal(0, CudaTransposes(Resized(Vector(1f, 1f, 2f, 2f), ResizeMode.Linear)));
+        Assert.Equal(0, CudaTransposes(Resized(Vector(1f, 2f, 2f, 1f), ResizeMode.Nearest)));
+        Assert.Equal(0, CudaTransposes(Resized(Vector(1f, 2f, 2f, 2f), ResizeMode.Linear)));
+    }
+
+    [Fact]
     public void TestTheCudaSetComputesWhatTheCallsItRewritesCompute()
     {
         var u = InputTensor<uint32>("u", rank: 1);
@@ -916,6 +936,14 @@ public class KernelWorkaroundPassTests
         ModelProto Built(KernelWorkaroundSet set) => FastOnnxModelBuilder.BuildInternalOnnxModel(g, prepForOnnx: true, inputDims: dims.Length == 0 ? null : dims, workarounds: set);
         return Bytes(Built(KernelWorkaroundRegistry.OnnxRuntime)).SequenceEqual(Bytes(Built(KernelWorkaroundRegistry.OnnxRuntimeCuda)));
     }
+
+    private static int CudaTransposes(InternalComputationGraph g)
+        => AllNodes(Session(g, KernelWorkaroundRegistry.OnnxRuntimeCuda)).Count(n => n.OpType == TRANSPOSE)
+         - AllNodes(Session(g, KernelWorkaroundRegistry.OnnxRuntime)).Count(n => n.OpType == TRANSPOSE);
+
+    private static bool RegroupedOnCuda(InternalComputationGraph g, params TensorData[] x)
+        => CudaTransposes(g) > 0
+           && ShapedRun(g, Session(g, KernelWorkaroundRegistry.OnnxRuntime), x).SequenceEqual(ShapedRun(g, Session(g, KernelWorkaroundRegistry.OnnxRuntimeCuda), x));
 
     private static readonly KernelWorkaroundSet CudaOptionalSet = new("cuda-optional",
         [.. KernelWorkaroundRegistry.CudaWorkarounds.Where(w => w.LooksThrough is not null)]);

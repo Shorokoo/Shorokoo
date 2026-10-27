@@ -590,6 +590,11 @@ shape and type.
       the regrouped positions of the axes it names; one that names axis 0 or 3
       never takes the channels-last route and is left as it stands
       ([#421](https://github.com/Shorokoo/Shorokoo/issues/421)).
+    - On a card, a linear or cubic rank-4 `Resize` whose scales for axes 0 and 3
+      are 1 and for axis 1 is not, in any coordinate transformation mode: the
+      CUDA provider computes it wrongly. It is regrouped the same way, so the
+      resize runs over its last two axes
+      ([#555](https://github.com/Shorokoo/Shorokoo/issues/555)).
     - A `Resize` with an `axes` attribute: ONNX Runtime's transpose optimizer
       moves a `Transpose` through it as though its `roi`, `scales` and `sizes`
       held one entry per input axis, so the session fails, or reorders them

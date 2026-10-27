@@ -29,7 +29,9 @@ internal static class KernelWorkaroundRegistry
 
     /// <summary>
     /// The rewrites around ONNX Runtime's kernels on its CUDA execution provider: every one of
-    /// <see cref="OnnxRuntime"/>, in its order, then the calls the provider runs on the CPU over
+    /// <see cref="OnnxRuntime"/>, in its order, then the linear and cubic resizes the provider
+    /// computes wrongly on its channels-last route, regrouped, ahead of the rest since the call it
+    /// builds over a computed scale is an <c>If</c>; then the calls the provider runs on the CPU over
     /// values from outside their body, which covers such calls the earlier rewrites build too; then
     /// a tensor read straight back out of its <c>Optional</c>, which the provider cannot run; then
     /// the summed or averaged losses written out as the reductions they are; then the reductions
@@ -44,6 +46,7 @@ internal static class KernelWorkaroundRegistry
     /// in their order.</summary>
     internal static ImmutableArray<KernelWorkaround> CudaWorkarounds =>
     [
+        new CudaResizeMiddleAxesWorkaround(),
         new CudaHostFallbackBodyInputWorkaround(),
         new CudaOptionalRoundTripWorkaround(),
         new CudaLossReductionWorkaround(),

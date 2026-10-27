@@ -9,57 +9,57 @@ using static OnnxOpAttributeNames;
 using static OpCodes;
 
 /// <summary>
-/// A cubic rank-4 <c>tf_crop_and_resize</c> <c>Resize</c> that ONNX Runtime computes on its
-/// channels-last route, rewritten as the same resize over the last two axes of a regrouped input
-/// (Shorokoo/Shorokoo#421).
+/// A linear or cubic rank-4 <c>Resize</c> that ONNX Runtime computes on its channels-last route,
+/// rewritten as the same resize over the last two axes of a regrouped input; which calls of that
+/// route are rewritten is the subclass's to say (<see cref="Takes"/>).
 ///
-/// <para>ONNX Runtime resizes a 4-D input in cubic mode along its last two axes when the scales
-/// of axes 0 and 1 are 1, and takes a route of its own, which treats the input as NHWC, when the
-/// scales of axes 0 and 3 are 1 and that of axis 1 is not. On that route an output coordinate a
-/// <c>tf_crop_and_resize</c> roi carries outside the input takes <c>extrapolation_value</c> at
-/// the wrong elements; every other coordinate transformation mode it computes as the spec does.
-/// The scale it tests is the one the call gives: the <c>scales</c> input itself, <c>sizes</c>
-/// over the input's extents, or the common ratio of a <c>not_larger</c> or <c>not_smaller</c>
-/// policy on the axes it covers.</para>
+/// <para>ONNX Runtime resizes a 4-D input in linear or cubic mode along its last two axes when the
+/// scales of axes 0 and 1 are 1, and takes a route of its own, which treats the input as NHWC, when
+/// the scales of axes 0 and 3 are 1 and that of axis 1 is not. The scale it tests is the one the
+/// call gives: the <c>scales</c> input itself, <c>sizes</c> over the input's extents, or the common
+/// ratio of a <c>not_larger</c> or <c>not_smaller</c> policy on the axes it covers.</para>
 ///
 /// <para>The rewrite brings axes 1 and 2 last and folds axis 3 into axis 0:
 /// <c>[N, C, H, W]</c> becomes <c>[N·W, 1, C, H]</c> through <c>Transpose(x, [0, 3, 1, 2])</c>
 /// and a <c>Reshape</c>, whose outer two axes stay at scale 1, so the resize takes the route along
 /// the last two axes; the result is reshaped and transposed back. On that route axes 0 and 3 are
 /// read straight across, which is what the call's scales of 1 give them, so the regrouped call
-/// carries the roi and the scale or length of axes 1 and 2 only, each along its new position. A
-/// <c>not_larger</c> or <c>not_smaller</c> policy is kept, over the new positions of the axes it
-/// names; one that names axis 0 or 3 scales it with axis 1, so its call never takes the
-/// channels-last route and is left as it stands. The regrouping keeps ONNX Runtime's
-/// own graph optimizations from folding the transposes back into the call, which a transpose
-/// pair around the resize alone does not.</para>
+/// carries the scale or length of axes 1 and 2 only, and in <c>tf_crop_and_resize</c> mode their
+/// roi, each along its new position; in every other mode the roi is ignored and the regrouped call
+/// carries none. A <c>not_larger</c> or <c>not_smaller</c> policy is kept, over the new positions
+/// of the axes it names; one that names axis 0 or 3 scales it with axis 1, so its call never takes
+/// the channels-last route and is left as it stands. The regrouping keeps ONNX Runtime's own graph
+/// optimizations from folding the transposes back into the call, which a transpose pair around the
+/// resize alone does not.</para>
 ///
 /// <para>A constant scales input decides the route when the model is built; otherwise an
 /// <c>If</c> chooses between the plain call and the sequence when it runs, the sequence built
 /// within its branch, and its test holding only for an input of rank 4 when the graph does not
-/// tell the rank. A constant roi of
-/// <c>[0, 1]</c> along every axis carries no coordinate outside the input, and its call is left as
-/// it stands.</para>
+/// tell the rank.</para>
 /// </summary>
-internal sealed class CubicResizeMiddleAxesWorkaround : KernelWorkaround
+internal abstract class ResizeMiddleAxesWorkaround : KernelWorkaround
 {
     private static readonly long[] ToChannelsSecond = [0, 3, 1, 2];
     private static readonly long[] ToChannelsLast = [0, 2, 3, 1];
 
     public override IReadOnlySet<string> OpCodes { get; } = new HashSet<string>([RESIZE], StringComparer.Ordinal);
 
+    /// <summary>Whether the call, of <paramref name="mode"/> and coordinate transformation mode
+    /// <paramref name="transformation"/>, is one to rewrite where it takes the channels-last
+    /// route.</summary>
+    protected abstract bool Takes(WorkaroundSite site, ResizeMode? mode, CoordinateTransformationMode? transformation);
+
     public override bool Applies(WorkaroundSite site)
     {
         var a = site.Attributes;
-        if (a.GetEnumVal<ResizeMode>(AttrMode) != ResizeMode.Cubic
-            || a.GetEnumVal<CoordinateTransformationMode>(AttrCoordinateTransformationMode)
-                != CoordinateTransformationMode.Tf_crop_and_resize
-            || !site.IsPresent(1)
+        var transformation = a.GetEnumVal<CoordinateTransformationMode>(AttrCoordinateTransformationMode);
+        if (!Takes(site, a.GetEnumVal<ResizeMode>(AttrMode), transformation)
+            || transformation == CoordinateTransformationMode.Tf_crop_and_resize && !site.IsPresent(1)
             || !(site.IsPresent(2) || site.IsPresent(3))
             || KnownRank(site) is { } rank && rank != 4)
             return false;
         var axes = Axes(a.GetLongsVal(AttrAxes));
-        if (!axes.Contains(1) || ResizeRois.IsIdentity(site.ConstantOf(1))) return false;
+        if (!axes.Contains(1)) return false;
         if (a.GetEnumVal<KeepAspectRatioPolicy>(AttrKeepAspectRatioPolicy) is not (null or KeepAspectRatioPolicy.stretch)
             && (axes.Contains(0) || axes.Contains(3)))
             return false;
@@ -72,7 +72,10 @@ internal sealed class CubicResizeMiddleAxesWorkaround : KernelWorkaround
     public override Variable?[] Rewrite(WorkaroundSite site, Variable?[] inputs)
     {
         var a = site.Attributes;
-        var (x, roi, scales, sizes) = (inputs[0]!, inputs[1]!, inputs[2], inputs[3]);
+        var transformation = a.GetEnumVal<CoordinateTransformationMode>(AttrCoordinateTransformationMode);
+        var mode = a.GetEnumVal<ResizeMode>(AttrMode);
+        var roi = transformation == CoordinateTransformationMode.Tf_crop_and_resize ? inputs[1] : null;
+        var (x, scales, sizes) = (inputs[0]!, inputs[2], inputs[3]);
         long[]? writtenAxes = a.GetLongsVal(AttrAxes);
         var axes = Axes(writtenAxes);
         bool? antialias = a.GetBoolVal(AttrAntialias);
@@ -82,7 +85,7 @@ internal sealed class CubicResizeMiddleAxesWorkaround : KernelWorkaround
         var policy = a.GetEnumVal<KeepAspectRatioPolicy>(AttrKeepAspectRatioPolicy);
         var nearestMode = a.GetEnumVal<NearestMode>(AttrNearestMode);
         Variable Regroup() => Regrouped(x, roi, sizes is null ? scales : null, sizes, policy,
-            axes, antialias, cubicCoeffA, excludeOutside, extrapolationValue, nearestMode);
+            axes, antialias, transformation, cubicCoeffA, excludeOutside, extrapolationValue, mode, nearestMode);
         var rank = KnownRank(site);
         if (rank == 4 && ConstantScales(site) is not null)
             return [Regroup()];
@@ -106,21 +109,22 @@ internal sealed class CubicResizeMiddleAxesWorkaround : KernelWorkaround
             channelsLast = And(Equal(Size(Shape(x)), Globals.Scalar(4L)), channelsLast);
         var open = IfOpen(channelsLast);
         var regrouped = Regroup();
-        var plain = Resize(x, roi, scales, sizes, antialias, writtenAxes, CoordinateTransformationMode.Tf_crop_and_resize,
-            cubicCoeffA, excludeOutside, extrapolationValue, policy, ResizeMode.Cubic, nearestMode);
+        var plain = Resize(x, inputs[1], scales, sizes, antialias, writtenAxes, transformation,
+            cubicCoeffA, excludeOutside, extrapolationValue, policy, mode, nearestMode);
         return [IfClose([regrouped], [plain], open)[0]];
     }
 
     /// <summary>
     /// The resize of axes 1 and 2 of <paramref name="x"/> over the last two axes of
-    /// <c>[N·W, 1, C, H]</c>, with the roi of each and either its scale from
+    /// <c>[N·W, 1, C, H]</c>, with the roi of each where <paramref name="roi"/> is given and either its scale from
     /// <paramref name="scales"/> or its length from <paramref name="sizes"/> (one per resized
     /// axis), and axes 0 and 3 read straight across. Under a <c>not_larger</c> or
     /// <c>not_smaller</c> <paramref name="policy"/> the call keeps its operands and names the new
     /// positions of its axes, all of them 1 or 2.
     /// </summary>
-    private static Variable Regrouped(Variable x, Variable roi, Variable? scales, Variable? sizes, KeepAspectRatioPolicy? policy,
-        long[] axes, bool? antialias, float? cubicCoeffA, bool? excludeOutside, float? extrapolationValue, NearestMode? nearestMode)
+    private static Variable Regrouped(Variable x, Variable? roi, Variable? scales, Variable? sizes, KeepAspectRatioPolicy? policy,
+        long[] axes, bool? antialias, CoordinateTransformationMode? transformation, float? cubicCoeffA, bool? excludeOutside,
+        float? extrapolationValue, ResizeMode? mode, NearestMode? nearestMode)
     {
         var moved = Transpose(x, ToChannelsSecond);
         var folded = Reshape(moved, Concat([Globals.Vector(-1L, 1L), Shape(moved, start: 2)], axis: 0), allowZero: false);
@@ -129,15 +133,14 @@ internal sealed class CubicResizeMiddleAxesWorkaround : KernelWorkaround
 
         if (policy is not (null or KeepAspectRatioPolicy.stretch))
             return Unfolded(Resize(folded, roi, null, sizes, antialias, [.. axes.Select(axis => axis + 1)],
-                CoordinateTransformationMode.Tf_crop_and_resize, cubicCoeffA, excludeOutside, extrapolationValue, policy,
-                ResizeMode.Cubic, nearestMode));
+                transformation, cubicCoeffA, excludeOutside, extrapolationValue, policy, mode, nearestMode));
 
         long n = axes.Length;
         long? channels = Array.IndexOf(axes, 1L) is var c and >= 0 ? c : null;
         long? height = Array.IndexOf(axes, 2L) is var h and >= 0 ? h : null;
 
         long zero = 2 * n, one = 2 * n + 1;
-        var roiOf = Gather(Concat([roi, CastLike(Globals.Vector(0f, 1f), roi, saturate: null)], axis: 0),
+        var roiOf = roi is null ? null : Gather(Concat([roi, CastLike(Globals.Vector(0f, 1f), roi, saturate: null)], axis: 0),
             Globals.Vector(zero, zero, channels ?? zero, height ?? zero, one, one, channels + n ?? one, height + n ?? one), axis: 0);
         var scalesOf = scales is null ? null
             : Gather(Concat([scales, Globals.Vector(1f)], axis: 0), Globals.Vector(n, n, channels ?? n, height ?? n), axis: 0);
@@ -146,8 +149,8 @@ internal sealed class CubicResizeMiddleAxesWorkaround : KernelWorkaround
             : Concat([Shape(folded, end: 2), Gather(Concat([sizes, Shape(x)], axis: 0),
                 Globals.Vector(channels ?? n + 1, height ?? n + 2), axis: 0)], axis: 0);
 
-        return Unfolded(Resize(folded, roiOf, scalesOf, sizesOf, antialias, null, CoordinateTransformationMode.Tf_crop_and_resize,
-            cubicCoeffA, excludeOutside, extrapolationValue, null, ResizeMode.Cubic, nearestMode));
+        return Unfolded(Resize(folded, roiOf, scalesOf, sizesOf, antialias, null, transformation,
+            cubicCoeffA, excludeOutside, extrapolationValue, null, mode, nearestMode));
     }
 
     private static Variable CommonScale(Variable ratios, KeepAspectRatioPolicy policy)
@@ -192,4 +195,40 @@ internal sealed class CubicResizeMiddleAxesWorkaround : KernelWorkaround
         return Equal(CommonScale(Div(Cast(sizes, null, DType.Float32), covered), policy.Value), Globals.Scalar(1f));
     }
 
+}
+
+/// <summary>
+/// A cubic rank-4 <c>tf_crop_and_resize</c> <c>Resize</c> on ONNX Runtime's channels-last route,
+/// rewritten over the last two axes of a regrouped input (<see cref="ResizeMiddleAxesWorkaround"/>,
+/// Shorokoo/Shorokoo#421).
+///
+/// <para>On that route an output coordinate a <c>tf_crop_and_resize</c> roi carries outside the
+/// input takes <c>extrapolation_value</c> at the wrong elements; every other coordinate
+/// transformation mode it computes as the spec does. A constant roi of <c>[0, 1]</c> along every
+/// axis carries no coordinate outside the input, and its call is left as it stands.</para>
+/// </summary>
+internal sealed class CubicResizeMiddleAxesWorkaround : ResizeMiddleAxesWorkaround
+{
+    protected override bool Takes(WorkaroundSite site, ResizeMode? mode, CoordinateTransformationMode? transformation)
+        => mode == ResizeMode.Cubic
+           && transformation == CoordinateTransformationMode.Tf_crop_and_resize
+           && site.IsPresent(1)
+           && !ResizeRois.IsIdentity(site.ConstantOf(1));
+}
+
+/// <summary>
+/// A linear or cubic rank-4 <c>Resize</c> on ONNX Runtime's channels-last route, rewritten over
+/// the last two axes of a regrouped input (<see cref="ResizeMiddleAxesWorkaround"/>,
+/// Shorokoo/Shorokoo#555).
+///
+/// <para>ONNX Runtime's CUDA execution provider computes such a call wrongly in every coordinate
+/// transformation mode — most of the result comes out 0 — and resizes along the last two axes as
+/// the spec does. Part of the CUDA set only
+/// (<see cref="Shorokoo.Core.Backends.KernelWorkaroundSets.OnnxRuntimeCuda"/>): the CPU provider
+/// computes the call as written.</para>
+/// </summary>
+internal sealed class CudaResizeMiddleAxesWorkaround : ResizeMiddleAxesWorkaround
+{
+    protected override bool Takes(WorkaroundSite site, ResizeMode? mode, CoordinateTransformationMode? transformation)
+        => mode is ResizeMode.Linear or ResizeMode.Cubic;
 }

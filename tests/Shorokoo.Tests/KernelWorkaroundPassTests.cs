@@ -317,6 +317,29 @@ public class KernelWorkaroundPassTests
         Assert.Equal(0, CudaSqueezes(Graph(s, s.Reduce(ReduceKind.Sum))));
         Assert.True(SqueezedOnCuda(Graph(t, OnnxOp.ReduceSum(t, Vector(Array.Empty<long>()), false, true)), full));
         Assert.Equal(0, AllNodes(Session(Graph(f, f.Reduce(ReduceKind.Max, Vector(0L))), KernelWorkaroundRegistry.OnnxRuntime)).Count(n => n.OpType == SQUEEZE));
+        Assert.Equal(0, StatedCudaSqueezes(Graph(f, f.Reduce(ReduceKind.Max, Vector(0L))), [2L, 3L]));
+        Assert.Equal(1, StatedCudaSqueezes(Graph(f, f.Reduce(ReduceKind.Max, Vector(0L))), [0L, 3L]));
+    }
+
+    [Fact]
+    public void TestTheCudaSetWritesASummedOrAveragedLossOutAsTheReductionsItIsMadeOf()
+    {
+        var x = InputTensor<float32>("x", rank: 2);
+        var t = InputTensor<int64>("t", rank: 1);
+        var w = Vector(0.5f, 2f, 1f);
+        var scores = TensorData(DType.Float32, [2L, 3L], -0.5f, -2f, -4f, -1f, -0.25f, -8f);
+        var (labels, empty, noLabels) = (TensorData([2L], [2L, 1L]), TensorData(DType.Float32, [0L, 3L], Array.Empty<object>()), TensorData(DType.Int64, [0L], Array.Empty<object>()));
+        InternalComputationGraph Loss(Variable? weight, long? ignore, string? reduction) => new([x, t], [OnnxOp.NegativeLogLikelihoodLoss(x, t, weight, ignore, reduction)]);
+        Assert.True(LossWrittenOut(Loss(null, null, "sum"), scores, labels));
+        Assert.True(LossWrittenOut(Loss(null, null, "sum"), empty, noLabels));
+        Assert.True(LossWrittenOut(Loss(w, null, "sum"), empty, noLabels));
+        Assert.True(LossWrittenOut(Loss(null, null, null), scores, labels));
+        Assert.True(LossWrittenOut(Loss(w, null, "mean"), scores, labels));
+        Assert.True(LossWrittenOut(Loss(null, 1L, "mean"), scores, labels));
+        Assert.True(LossWrittenOut(Loss(w, 1L, "mean"), scores, labels));
+        Assert.True(LossWrittenOut(Loss(w, 2L, "sum"), scores, labels));
+        Assert.True(CudaAsOnnxRuntime(Loss(w, null, "none")));
+        Assert.True(CudaAsOnnxRuntime(Loss(null, null, "mean"), [2L, 3L], [2L]));
     }
 
     [Fact]
@@ -853,6 +876,21 @@ public class KernelWorkaroundPassTests
         return CudaSqueezes(g) > 0
             && !AllNodes(rewritten).Any(n => n.OpType.StartsWith("Reduce", StringComparison.Ordinal) && n.Attributes.Any(a => a.Name == "keepdims" && a.I == 0))
             && ShapedRun(g, Session(g, KernelWorkaroundRegistry.OnnxRuntime), x).SequenceEqual(ShapedRun(g, rewritten, x));
+    }
+
+    private static int StatedCudaSqueezes(InternalComputationGraph g, params long[][] dims)
+        => AllNodes(FastOnnxModelBuilder.BuildInternalOnnxModel(g, prepForOnnx: true, inputDims: dims, workarounds: KernelWorkaroundRegistry.OnnxRuntimeCuda))
+            .Count(n => n.OpType == SQUEEZE);
+
+    private static bool LossWrittenOut(InternalComputationGraph g, params TensorData[] x)
+        => AllNodes(Session(g, KernelWorkaroundRegistry.OnnxRuntimeCuda)).Where(n => n.OpType == NEGATIVE_LOG_LIKELIHOOD_LOSS)
+               .All(n => n.Attributes.Any(a => a.Name == "reduction" && System.Text.Encoding.UTF8.GetString(a.S) == "none"))
+           && ShapedRun(g, Session(g, KernelWorkaroundRegistry.OnnxRuntime), x).SequenceEqual(ShapedRun(g, Session(g, KernelWorkaroundRegistry.OnnxRuntimeCuda), x));
+
+    private static bool CudaAsOnnxRuntime(InternalComputationGraph g, params long[][] dims)
+    {
+        ModelProto Built(KernelWorkaroundSet set) => FastOnnxModelBuilder.BuildInternalOnnxModel(g, prepForOnnx: true, inputDims: dims.Length == 0 ? null : dims, workarounds: set);
+        return Bytes(Built(KernelWorkaroundRegistry.OnnxRuntime)).SequenceEqual(Bytes(Built(KernelWorkaroundRegistry.OnnxRuntimeCuda)));
     }
 
     private static string[] HostKept(InternalComputationGraph g)

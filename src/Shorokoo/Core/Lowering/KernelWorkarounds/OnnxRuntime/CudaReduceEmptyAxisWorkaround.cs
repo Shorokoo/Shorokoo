@@ -19,8 +19,9 @@ using static OpCodes;
 /// them of extent 1. Axes the run computes are squeezed as computed, which reduces every axis when
 /// they come out empty, as the reduction then does; with <c>noop_with_empty_axes</c> 1, where empty
 /// axes reduce nothing, a trailing axis of 1 is put on and squeezed with them, so the squeeze never
-/// removes more than they name. A call that reduces nothing, a scalar input and a <c>Constant</c>
-/// input that is not empty keep the call as it stands.</para>
+/// removes more than they name. A call that reduces nothing, a scalar input, a <c>Constant</c>
+/// input that is not empty, and an input whose dimensions follow from the stated ones and are none
+/// of them 0 (<see cref="WorkaroundSite.ShapeOf"/>) keep the call as it stands.</para>
 ///
 /// <para>Part of the CUDA set only (<see cref="Shorokoo.Core.Backends.KernelWorkaroundSets.OnnxRuntimeCuda"/>),
 /// after every rewrite of <see cref="Shorokoo.Core.Backends.KernelWorkaroundSets.OnnxRuntime"/>,
@@ -31,9 +32,12 @@ internal sealed class CudaReduceEmptyAxisWorkaround : KernelWorkaround
 {
     public override IReadOnlySet<string> OpCodes { get; } = new HashSet<string>([REDUCE_L1, REDUCE_L2, REDUCE_LOG_SUM, REDUCE_LOG_SUM_EXP, REDUCE_MAX, REDUCE_MEAN, REDUCE_MIN, REDUCE_PROD, REDUCE_SUM, REDUCE_SUM_SQUARE], StringComparer.Ordinal);
 
+    public override bool ReadsShapes => true;
+
     public override bool Applies(WorkaroundSite site)
         => site.Attributes.GetBoolVal(AttrKeepdims) == false
            && site.RankOf(0) != 0
+           && !(site.ShapeOf(0) is { } shape && !shape.Dims.Contains(0))
            && !(NoOp(site) && (!site.IsPresent(1) || site.ConstantShapeOf(1) is { } axes && axes.Dims.Contains(0)))
            && Reductions.InputMayBeEmpty(site);
 

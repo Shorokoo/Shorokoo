@@ -994,14 +994,9 @@ public class KernelWorkaroundPassTests
         => HostKept(g).SequenceEqual([opType])
            && ShapedRun(g, Session(g, KernelWorkaroundRegistry.OnnxRuntime), x).SequenceEqual(ShapedRun(g, Session(g, KernelWorkaroundRegistry.OnnxRuntimeCuda), x));
 
-    private sealed class OrtHostBackend : Shorokoo.OnnxRuntime.OrtBackend;
-
     private static IEnumerable<string> ShapedRun(InternalComputationGraph g, ModelProto model, TensorData[] x)
-    {
-        using var host = new ComputeContext(new OrtHostBackend());
-        return [.. host.ExecuteModel(g, model, [.. x.Select(t => (IData)t.Shared())]).Select(p => p.ToTensorData())
+        => [.. QeeAuditOnBackend.Reference.ExecuteModel(g, model, [.. x.Select(t => (IData)t.Shared())]).Select(p => p.ToTensorData())
             .Select(t => $"{string.Join(",", t.Shape.Dims)}:{Convert.ToHexString(t.AccessRawMemory())}")];
-    }
 
     private static bool AsWritten(InternalComputationGraph g)
         => Bytes(Session(g, null)).SequenceEqual(Bytes(Session(g, KernelWorkaroundRegistry.OnnxRuntime)));

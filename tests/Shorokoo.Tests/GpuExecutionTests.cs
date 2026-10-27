@@ -10,6 +10,7 @@ using Shorokoo.Modules.Losses;
 using Shorokoo.Modules.Optimizers;
 using Shorokoo.OnnxRuntime;
 using Shorokoo.Runtime;
+using Shorokoo.Tests.Utils;
 
 namespace Shorokoo.Tests;
 
@@ -1515,14 +1516,11 @@ public class GpuExecutionTests
         var resized = OnnxOp.Resize(x, roi: null, scales: Vector(1f, 2f, 2f, 1f), sizes: null, antialias: null, axes: null,
             coordinateTransformationMode: null, cubicCoeffA: null, excludeOutside: null, extrapolationValue: null,
             keepAspectRatioPolicy: null, mode: ResizeMode.Linear, nearestMode: null);
-        using var host = new ComputeContext(new HostOrtBackend());
-        var expected = host.Execute(new InternalComputationGraph([x], [resized]), data.Shared())[0].ToTensorData().CopyMemory<float>();
+        var expected = QeeAuditOnBackend.Reference.Execute(new InternalComputationGraph([x], [resized]), data.Shared())[0].ToTensorData().CopyMemory<float>();
         var actual = OnTheCard(x, resized, data).CopyMemory<float>();
         Assert.Equal(expected.Length, actual.Length);
         Assert.All(expected.Zip(actual), p => Assert.Equal(p.First, p.Second, 1e-4f));
     }
-
-    private sealed class HostOrtBackend : OrtBackend;
 
     [CudaFact]
     public void CudaProvider_TheCrossEntropyGradientOfFloat64ScoresRunsOnTheCard()

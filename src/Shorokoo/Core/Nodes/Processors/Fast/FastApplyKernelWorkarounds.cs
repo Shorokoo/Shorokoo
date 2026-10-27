@@ -43,8 +43,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     ///
     /// <para><b>Looked through.</b> A workaround that looks through a producer
     /// (<see cref="KernelWorkaround.LooksThrough"/>) is offered a call as a call over that
-    /// producer's input; once its walk is done, each producer nothing reads any more is dropped, its
-    /// number left unused like a dropped call's.</para>
+    /// producer's input; once its walk is done, each such producer nothing then reads is dropped,
+    /// its number left unused like a dropped call's.</para>
     ///
     /// <para><b>Names.</b> What the pass did is returned as <see cref="Splices"/>, which says how
     /// <see cref="FastUseUniqueNames"/> numbers the graph: the spliced nodes, and the nodes the
@@ -102,7 +102,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 var plans = new Dictionary<string, List<CachedPlan>>(StringComparer.Ordinal);
                 var rewired = new Dictionary<FastTensorKey, FastTensorKey>();
                 var newNodes = new List<FastNode>(graph.Nodes.Count);
-                // The producers a call was looked at through, which the call no longer reads.
+                // The producers a call was looked at through, which the rewritten call does not read.
                 var lookedThrough = new HashSet<FastNode>();
                 // The last node kept so far that is numbered in place, which a dropped call's
                 // number is left unused after.
@@ -350,8 +350,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         }
 
         /// <summary>
-        /// Drops each of <paramref name="candidates"/> nothing in <paramref name="graph"/> reads any
-        /// more, leaving its number unused where it stood, as a dropped call's is.
+        /// Drops each of <paramref name="candidates"/> nothing in <paramref name="graph"/> reads,
+        /// leaving its number unused where it stood, as a dropped call's is.
         /// </summary>
         private static void DropUnread(InternalComputationGraph graph, HashSet<FastNode> candidates, HashSet<FastNodeKey> minted,
             Dictionary<FastNodeKey, int> gaps, ref int leadingGap, Dictionary<FastTensorKey, FastTensorInfo> tensorInfo)

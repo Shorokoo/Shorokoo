@@ -28,7 +28,7 @@ internal static class OrtProfile
     /// held is made again until <see cref="HeldForAtMost"/> has passed. A file that is not there is
     /// not waited for.
     /// </summary>
-    private static FileStream OpenOnceLetGo(string path)
+    internal static FileStream OpenOnceLetGo(string path)
     {
         var deadline = DateTime.UtcNow + HeldForAtMost;
         while (true)

@@ -1903,7 +1903,8 @@ public class ComputeContextLifetimeCoverageTests
                     new Dictionary<string, IShorokooTensorValue> { [model.Graph!.Inputs[0].Name] = input }, session.OutputNames, RunSettings.Default))
                     output.Dispose();
                 input.Dispose();
-                using var profile = System.Text.Json.JsonDocument.Parse(File.ReadAllText(built.Session.EndProfiling()));
+                using var profileFile = OrtProfile.OpenOnceLetGo(built.Session.EndProfiling());
+                using var profile = System.Text.Json.JsonDocument.Parse(profileFile);
                 var ran = profile.RootElement.EnumerateArray()
                     .Where(e => e.TryGetProperty("cat", out var cat) && cat.GetString() == "Node" && e.GetProperty("name").GetString()!.EndsWith("_kernel_time"))
                     .Select(e => (Ts: e.GetProperty("ts").GetInt64(), Name: e.GetProperty("name").GetString()![..^"_kernel_time".Length],

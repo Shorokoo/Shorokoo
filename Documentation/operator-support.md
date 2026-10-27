@@ -226,6 +226,10 @@ shape and type.
      gives 0, that is false: exact for every input, with no branch. A reduction with no
      axes and `noop_with_empty_axes` set is left alone
      ([#382](https://github.com/Shorokoo/Shorokoo/issues/382)).
+   - On a card, after those: the CUDA provider refuses `keepdims` 0 over a reduced
+     axis of extent 0. The call reduces with `keepdims` 1 and a `Squeeze` removes the
+     reduced axes, which gives the empty group's identity as on the host
+     ([#536](https://github.com/Shorokoo/Shorokoo/issues/536)).
 6. Over an integer input, Shorokoo's folding and QEE compute the sum, mean, product,
    L1 norm and sum of squares in the declared width, wrapping as two's complement:
    int32 `ReduceSum([2147483647, 2147483647])` is −2, and the mean of the same pair is

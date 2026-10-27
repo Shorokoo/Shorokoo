@@ -30,10 +30,20 @@ internal static class KernelWorkaroundRegistry
     /// <summary>
     /// The rewrites around ONNX Runtime's kernels on its CUDA execution provider: every one of
     /// <see cref="OnnxRuntime"/>, in its order, then the calls the provider runs on the CPU over
-    /// values from outside their body, which covers such calls the earlier rewrites build too.
+    /// values from outside their body, which covers such calls the earlier rewrites build too; then
+    /// the reductions with <c>keepdims</c> 0 over an input that may be empty, after every rewrite
+    /// that builds a reduction.
     /// </summary>
     public static KernelWorkaroundSet OnnxRuntimeCuda { get; } = new(KernelWorkaroundSets.OnnxRuntimeCuda,
-        [.. OnnxRuntimeWorkarounds, new CudaHostFallbackBodyInputWorkaround()]);
+        [.. OnnxRuntimeWorkarounds, .. CudaWorkarounds]);
+
+    /// <summary>The rewrites <see cref="OnnxRuntimeCuda"/> adds to <see cref="OnnxRuntime"/>'s,
+    /// in their order.</summary>
+    internal static ImmutableArray<KernelWorkaround> CudaWorkarounds =>
+    [
+        new CudaHostFallbackBodyInputWorkaround(),
+        new CudaReduceEmptyAxisWorkaround(),
+    ];
 
     private static ImmutableArray<KernelWorkaround> OnnxRuntimeWorkarounds =>
     [

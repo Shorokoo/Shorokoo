@@ -127,7 +127,8 @@ in one corner, a missing element type, a crash on an empty input. For each such 
 name a **kernel workaround**: a rewrite of the call into an equivalent one its kernels compute as the
 spec does. The workarounds a backend's sessions are built with form one ordered set, which the
 backend names through `IShorokooBackend.KernelWorkaroundSet` (the names are in
-`KernelWorkaroundSets`). The ONNX Runtime backend names `KernelWorkaroundSets.OnnxRuntime`; the
+`KernelWorkaroundSets`). The ONNX Runtime backend names `KernelWorkaroundSets.OnnxRuntime` on the
+host and `KernelWorkaroundSets.OnnxRuntimeCuda` on a card ([below](#the-cuda-set)); the
 [PyTorch](pytorch-backend.md) and [JAX](jax-backend.md) backends name none.
 
 The pass runs at one point only: when the model handed to a backend's session is built, after the
@@ -201,3 +202,14 @@ that meets one gets ONNX Runtime's result:
   `ReduceL1` or `ReduceSumSquare` accumulates in double precision and clamps the result to the type's range, where Shorokoo's
   folding wraps as two's complement: int32 `ReduceSum([2147483647, 2147483647])` gives 2147483647,
   not −2, and an int64 group is rounded once its accumulation passes 2^53.
+
+### The CUDA set
+
+A CUDA session of the ONNX Runtime backend is built with `KernelWorkaroundSets.OnnxRuntimeCuda`:
+every rewrite of the table above, in its order, then these, for what the CUDA execution provider
+alone does otherwise:
+
+| Operator | Scenario the CUDA provider gets wrong | Rewrite | Issue |
+|---|---|---|---|
+| `BitwiseAnd`, `BitwiseOr`, `BitwiseXor`, `BitwiseNot`, `BitShift` | Inside a loop or branch body, over an int32, int64, uint32 or uint64 value the body did not compute: the provider runs the call on the host and its copy of that value is not ordered after whatever wrote it | Each such operand first taken through `Max(v, v)`, computed in the body | |
+| Every `Reduce*` | `keepdims` 0 over an input that may be empty: the provider refuses a reduced axis of extent 0 | The same reduction with `keepdims` 1, then a `Squeeze` of the reduced axes — every axis for a reduction of all of them; axes the run computes under `noop_with_empty_axes` are squeezed with a trailing axis of 1 put on for them, so empty ones squeeze nothing | [#536](https://github.com/Shorokoo/Shorokoo/issues/536) |

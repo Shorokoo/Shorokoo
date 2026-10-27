@@ -1412,8 +1412,7 @@ public class GpuExecutionTests
         Assert.Equal([7L], OnTheCard(x, OnnxOp.Slice(Vector(7L), OnnxOp.Sub(OnnxOp.Shape(x), Vector(3L)), Vector(7L)), TensorData([3L], [1f, 2f, 3f])).CopyMemory<long>());
     }
 
-    // Shorokoo/Shorokoo#536: the CUDA reduction kernels refuse keepdims 0 over an axis of extent 0.
-    [CudaFact(Skip = "Shorokoo/Shorokoo#536")]
+    [CudaFact]
     public void CudaProvider_AReductionOverAnEmptyAxisGivesItsIdentityOnTheCard()
     {
         var i = InputTensor<int32>("i", rank: 2);

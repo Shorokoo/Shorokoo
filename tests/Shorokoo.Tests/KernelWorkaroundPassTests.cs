@@ -251,7 +251,7 @@ public class KernelWorkaroundPassTests
             KernelWorkaroundRegistry.For(DefaultBackend.Instance.KernelWorkaroundSet));
         Assert.Same(KernelWorkaroundRegistry.OnnxRuntimeCuda, KernelWorkaroundRegistry.For(KernelWorkaroundSets.OnnxRuntimeCuda));
         Assert.Equal(KernelWorkaroundRegistry.OnnxRuntime.Workarounds.Select(w => w.Name),
-            KernelWorkaroundRegistry.OnnxRuntimeCuda.Workarounds.SkipLast(1).Select(w => w.Name));
+            KernelWorkaroundRegistry.OnnxRuntimeCuda.Workarounds.SkipLast(KernelWorkaroundRegistry.CudaWorkarounds.Length).Select(w => w.Name));
         Assert.True(KernelWorkaroundRegistry.For(((IShorokooBackend)new TorchCpuBackend()).KernelWorkaroundSet).IsEmpty);
         Assert.True(KernelWorkaroundRegistry.For(((IShorokooBackend)new JaxCpuBackend()).KernelWorkaroundSet).IsEmpty);
         Assert.True(KernelWorkaroundRegistry.For(((IShorokooBackend)HostBackend.Instance).KernelWorkaroundSet).IsEmpty);
@@ -290,6 +290,33 @@ public class KernelWorkaroundPassTests
         Assert.Contains(AllNodes(Optimized(Session(InBody(u, (outer, carried) => OnnxOp.BitwiseXor(outer, Scalar(5u))), KernelWorkaroundRegistry.OnnxRuntimeCuda))), n => n.OpType == MAX);
         Assert.Equal(0, CudaMaxes(Graph(u, OnnxOp.BitwiseXor(u, u))));
         Assert.Equal(0, AllNodes(Session(InBody(u, (outer, carried) => OnnxOp.BitwiseXor(outer, carried)), KernelWorkaroundRegistry.OnnxRuntime)).Count(n => n.OpType == MAX));
+    }
+
+    [Fact]
+    public void TestTheCudaSetKeepsTheAxesAReductionMayFindEmptyAndSqueezesThemOut()
+    {
+        var f = InputTensor<float32>("f", rank: 2);
+        var t = InputTensor<float32>("t");
+        var s = InputTensor<float32>("s", rank: 0);
+        var axes = InputTensor<int64>("axes", rank: 1);
+        var empty = TensorData(DType.Float32, [0L, 3L], Array.Empty<object>());
+        var full = TensorData(DType.Float32, [2L, 3L], 1f, -2f, 3f, 4f, 5f, -6f);
+        var (first, none) = (TensorData([1L], [0L]), TensorData(DType.Int64, [0L], Array.Empty<object>()));
+        Assert.True(SqueezedOnCuda(Graph(f, f.Reduce(ReduceKind.Max, Vector(0L))), empty));
+        Assert.True(SqueezedOnCuda(Graph(f, f.Reduce(ReduceKind.Prod, Vector(-1L))), empty));
+        Assert.True(SqueezedOnCuda(Graph(f, f.Reduce(ReduceKind.Sum)), empty));
+        Assert.True(SqueezedOnCuda(Graph(t, t.Reduce(ReduceKind.LogSumExp, Vector(1L))), full));
+        Assert.True(SqueezedOnCuda(Graph(f, OnnxOp.ReduceMin(f, Vector(1L), false, true)), full));
+        Assert.True(SqueezedOnCuda(new([f, axes], [OnnxOp.ReduceSum(f, axes, false, null)]), empty, first));
+        Assert.True(SqueezedOnCuda(new([f, axes], [OnnxOp.ReduceSum(f, axes, false, null)]), full, none));
+        Assert.True(SqueezedOnCuda(new([f, axes], [OnnxOp.ReduceMean(f, axes, false, true)]), full, none));
+        Assert.True(SqueezedOnCuda(new([f, axes], [OnnxOp.ReduceL1(f, axes, false, true)]), empty, TensorData([1L], [-2L])));
+        Assert.True(SqueezedOnCuda(new([t, axes], [OnnxOp.ReduceL2(t, axes, false, true)]), full, first));
+        Assert.Equal(0, CudaSqueezes(Graph(f, f.Reduce(ReduceKind.Max, Vector(0L), keepDims: true))));
+        Assert.True(SqueezedOnCuda(Graph(f, OnnxOp.ReduceMax(f, null, false, true)), empty));
+        Assert.Equal(0, CudaSqueezes(Graph(s, s.Reduce(ReduceKind.Sum))));
+        Assert.True(SqueezedOnCuda(Graph(t, OnnxOp.ReduceSum(t, Vector(Array.Empty<long>()), false, true)), full));
+        Assert.Equal(0, AllNodes(Session(Graph(f, f.Reduce(ReduceKind.Max, Vector(0L))), KernelWorkaroundRegistry.OnnxRuntime)).Count(n => n.OpType == SQUEEZE));
     }
 
     [Fact]
@@ -794,6 +821,27 @@ public class KernelWorkaroundPassTests
 
     private static bool AsWrittenOnCuda(InternalComputationGraph g, TensorData x)
         => Run(g, Session(g, null), [x]).Zip(Run(g, Session(g, KernelWorkaroundRegistry.OnnxRuntimeCuda), [x])).All(p => p.First.SequenceEqual(p.Second));
+
+    private static int CudaSqueezes(InternalComputationGraph g)
+        => AllNodes(Session(g, KernelWorkaroundRegistry.OnnxRuntimeCuda)).Count(n => n.OpType == SQUEEZE)
+         - AllNodes(Session(g, KernelWorkaroundRegistry.OnnxRuntime)).Count(n => n.OpType == SQUEEZE);
+
+    private static bool SqueezedOnCuda(InternalComputationGraph g, params TensorData[] x)
+    {
+        var rewritten = Session(g, KernelWorkaroundRegistry.OnnxRuntimeCuda);
+        return CudaSqueezes(g) > 0
+            && !AllNodes(rewritten).Any(n => n.OpType.StartsWith("Reduce", StringComparison.Ordinal) && n.Attributes.Any(a => a.Name == "keepdims" && a.I == 0))
+            && ShapedRun(g, Session(g, KernelWorkaroundRegistry.OnnxRuntime), x).SequenceEqual(ShapedRun(g, rewritten, x));
+    }
+
+    private sealed class OrtHostBackend : Shorokoo.OnnxRuntime.OrtBackend;
+
+    private static IEnumerable<string> ShapedRun(InternalComputationGraph g, ModelProto model, TensorData[] x)
+    {
+        using var host = new ComputeContext(new OrtHostBackend());
+        return [.. host.ExecuteModel(g, model, [.. x.Select(t => (IData)t.Shared())]).Select(p => p.ToTensorData())
+            .Select(t => $"{string.Join(",", t.Shape.Dims)}:{Convert.ToHexString(t.AccessRawMemory())}")];
+    }
 
     private static bool AsWritten(InternalComputationGraph g)
         => Bytes(Session(g, null)).SequenceEqual(Bytes(Session(g, KernelWorkaroundRegistry.OnnxRuntime)));

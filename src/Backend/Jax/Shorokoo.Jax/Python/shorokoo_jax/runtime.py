@@ -649,7 +649,15 @@ def _collect_jax_warning(message, category, filename, lineno, file=None, line=No
     While one call collects, the record stays, so Python itself skips the call's repeats there, and
     it is taken back once the call ends, so the next call collects it too. While several calls
     overlap, each record is taken back as soon as it is made, so that every one of them collects
-    the warning, once."""
+    the warning. Either way a call collects a warning from one place once: a repeat Python shows
+    again -- after an overlapping call took the record back, or after a change to the filters, which
+    clears every record -- is not collected a second time.
+
+    Under the "once" and "module" actions, Python keeps a further record, which this hook leaves
+    alone, so only the first call in the process to raise the warning collects it, as Python would
+    show it once. This hook counts its own backend's calls alone: a PyTorch call overlapping a call
+    here does not count as an overlap, so where both raise a warning from one place, the record one
+    of them holds can keep the other from collecting it."""
     collected = _warnings_collected.get()
     if collected is None:
         _show_warning(message, category, filename, lineno, file, line)
@@ -660,10 +668,10 @@ def _collect_jax_warning(message, category, filename, lineno, file=None, line=No
         with _collecting_lock:
             if _collecting_calls > 1:
                 record[0].pop(record[1], None)
-                if entry in collected:
-                    return
             else:
                 _held_records[(id(record[0]), record[1])] = record
+        if entry in collected:
+            return
     collected.append(entry)
 
 

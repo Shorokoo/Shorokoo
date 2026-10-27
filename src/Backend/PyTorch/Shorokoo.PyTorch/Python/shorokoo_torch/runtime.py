@@ -441,10 +441,18 @@ def _collect_warning(message, category, filename, lineno, file=None, line=None):
 
     Under the default filter action a warning reaches each run that raises it, once. Python shows
     such a warning once per place in the whole process, keeping a record that it did (_shown_record).
-    While one run collects, the record stays, so Python itself skips the run's repeats there, and it
-    is taken back once the run ends, so the next run collects it too. While several runs overlap,
-    each record is taken back as soon as it is made, so that every one of them collects the warning,
-    once."""
+    While one run collects, the record stays, so Python itself skips the run's repeats there, and
+    it is taken back once the run ends, so the next run collects it too. While several runs
+    overlap, each record is taken back as soon as it is made, so that every one of them collects
+    the warning. Either way a run collects a warning from one place once: a repeat Python shows
+    again -- after an overlapping run took the record back, or after a change to the filters, which
+    clears every record -- is not collected a second time.
+
+    Under the "once" and "module" actions, Python keeps a further record, which this hook leaves
+    alone, so only the first run in the process to raise the warning collects it, as Python would
+    show it once. This hook counts its own backend's runs alone: a JAX call overlapping a run here
+    does not count as an overlap, so where both raise a warning from one place, the record one of
+    them holds can keep the other from collecting it."""
     collected = _warnings_collected.get()
     if collected is None:
         _show_warning(message, category, filename, lineno, file, line)
@@ -455,10 +463,10 @@ def _collect_warning(message, category, filename, lineno, file=None, line=None):
         with _collecting_lock:
             if _collecting_runs > 1:
                 record[0].pop(record[1], None)
-                if entry in collected:
-                    return
             else:
                 _held_records[(id(record[0]), record[1])] = record
+        if entry in collected:
+            return
     collected.append(entry)
 
 

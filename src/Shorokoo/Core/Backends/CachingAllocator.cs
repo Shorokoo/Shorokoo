@@ -702,9 +702,11 @@ internal sealed unsafe class CachingAllocator
             if (account.Used > account.MaxUsed) account.MaxUsed = account.Used;
         }
         account.InUse += size;
+        if (source == Source.Small) account.InUseSmall += size;
         account.Requested += requested;
         account.Allocations++;
         if (account.InUse > account.MaxInUse) account.MaxInUse = account.InUse;
+        if (account.InUse - account.InUseSmall > account.MaxInUseLarge) account.MaxInUseLarge = account.InUse - account.InUseSmall;
         if (account.InUse > account.SpanPeak) account.SpanPeak = account.InUse;
         if (requested > account.MaxAllocSize) account.MaxAllocSize = requested;
         return block;
@@ -728,6 +730,7 @@ internal sealed unsafe class CachingAllocator
             Observer?.Invoke(new Event(false, OnCard, pointer, block.Requested - block.ReleasedRequested, block.Size - block.ReleasedBytes, Fresh: false));
             var account = block.Account;
             account.InUse -= block.Size - block.ReleasedBytes;
+            if (block.Source == Source.Small) account.InUseSmall -= block.Size - block.ReleasedBytes;
             account.Requested -= block.Requested - block.ReleasedRequested;
             if (block.HandedOver) account.HandedOver -= block.Size - block.ReleasedBytes;
             if (block.Released is not null || block.FirstGone)
@@ -899,6 +902,7 @@ internal sealed unsafe class CachingAllocator
             if (pieces.Count > 0) block.Released = Merged(block.Released, pieces);
             block.ReleasedBytes += released;
             account.InUse -= released;
+            if (block.Source == Source.Small) account.InUseSmall -= released;
             if (block.HandedOver) account.HandedOver -= released;
             // Nothing of a closed account's is kept: what went back to its arena goes back to the
             // device.
@@ -1090,13 +1094,16 @@ internal sealed unsafe class CachingAllocator
     /// block of its own holds both, though it never had both in use. Their memory stays committed —
     /// the arena of small blocks keeps what it had in use at its busiest — so the next call carves
     /// them again with no work on the card, and nothing goes back to the card: it is not a
-    /// shrinkage. Short of that mark they stay kept, as they would be carved again for nothing.
-    /// Under the lock.
+    /// shrinkage. Short of that mark they stay kept, as they would be carved again for nothing. What
+    /// it holds over that mark beside its small blocks — large blocks, idle granules, blocks another
+    /// call holds — is beyond the most it has had in use of those alone (<see cref="Account.MaxInUseLarge"/>),
+    /// and is no small block's to make up: only the rest of the excess counts. Under the lock.
     /// </summary>
     private void ReturnSmall(Account account)
     {
         if (_small is null) return;
-        var excess = account.HeldBytes - account.MaxInUse;
+        var excess = account.HeldBytes - account.MaxInUse
+            - Math.Max(0, account.HeldBytes - account.InUseSmall - account.CachedSmall - account.MaxInUseLarge);
         if (excess <= 0 || excess > account.CachedSmall) return;
         while (excess > 0 && account.GiveWayOldest(fromArena: false, out var block, out var size, out _))
         {
@@ -1266,6 +1273,13 @@ internal sealed unsafe class CachingAllocator
         /// <summary>The part of <see cref="Cached"/> in kept blocks of the card's arena of small
         /// blocks.</summary>
         internal long CachedSmall;
+
+        /// <summary>The part of <see cref="InUse"/> in blocks of the card's arena of small blocks.</summary>
+        internal long InUseSmall;
+
+        /// <summary>The most the account has had in use at once beside blocks of the card's arena of
+        /// small blocks.</summary>
+        internal long MaxInUseLarge;
         internal long Held;
         internal long MaxInUse;
         internal long MaxAllocSize;

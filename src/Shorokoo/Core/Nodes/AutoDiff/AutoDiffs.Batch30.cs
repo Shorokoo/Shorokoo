@@ -185,10 +185,12 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         }
 
         // onehot(classIndex) along axis 1 of scores [N, C, d1, ...], in floatType. ONNX Runtime's
-        // OneHot has float32 values and no float64 ones, so another type is cast from float32.
+        // OneHot has float32 values and no float64 ones, so another type is cast from float32, and
+        // it has int64 indices at an int64 depth and no int32 ones, so the labels are read as int64.
         private static Variable OneHotOf(Variable classIndex, Variable scores, DType floatType)
         {
-            var onehot = OnnxOp.OneHot(classIndex, OnnxOp.Gather(OnnxOp.Shape(scores), Scalar(1L), axis: 0), Vector(0.0f, 1.0f), axis: 1);
+            var onehot = OnnxOp.OneHot(OnnxOp.Cast(classIndex, saturate: null, to: DType.Int64),
+                OnnxOp.Gather(OnnxOp.Shape(scores), Scalar(1L), axis: 0), Vector(0.0f, 1.0f), axis: 1);
             return floatType == DType.Float32 ? onehot : OnnxOp.Cast(onehot, saturate: null, to: floatType);
         }
 

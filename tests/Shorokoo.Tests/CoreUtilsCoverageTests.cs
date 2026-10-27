@@ -1648,6 +1648,24 @@ public class CoreUtilsCoverageTests
         Assert.Equal((false, false, true), ABlockACallLetGoOfGoesBackWithinItOnlyToARequestOnTheStreamItWasTakenOn());
         Assert.Equal((1, 0), (WaitsForTheCardAsACallEnds(unfinished: true), WaitsForTheCardAsACallEnds(unfinished: false)));
         Assert.Equal((4 * G + 512, 0L, 4 * G + 512), ASmallBlockACallIsHandedAfterLettingGoOfALargeOneGoesBackToTheSharedArena());
+        Assert.Equal(5 * G, SmallBlocksStayKeptWhereWhatTheAccountHoldsOverItsBusiestIsLargeBlocks());
+    }
+
+    private static long SmallBlocksStayKeptWhereWhatTheAccountHoldsOverItsBusiestIsLargeBlocks()
+    {
+        const long G = FakeCard.GranuleBytes;
+        var card = new FakeCard();
+        var allocator = card.Allocator;
+        var account = allocator.Open("probe");
+        using (CachingAllocator.Charge(null, account))
+        {
+            var large = allocator.Allocate(2 * G, out _, stream: 1);
+            IntPtr[] small = [.. Enumerable.Range(0, 4).Select(index => allocator.Allocate(1L << 20, out _, stream: 1))];
+            allocator.Free(large);
+            foreach (var block in small) allocator.Free(block);
+            allocator.Free(allocator.Allocate(G, out _, stream: 2));
+        }
+        return allocator.Statistics(account).TotalAllocatedBytes;
     }
 
     private static (long, long, long) ASmallBlockACallIsHandedAfterLettingGoOfALargeOneGoesBackToTheSharedArena()

@@ -30,7 +30,7 @@ internal sealed class CudaOptionalRoundTripWorkaround : KernelWorkaround
 
     public override string? LooksThrough => OPTIONAL;
 
-    public override bool Applies(WorkaroundSite site) => site.IsPresent(0);
+    public override bool Applies(WorkaroundSite site) => true;
 
     public override Variable?[] Rewrite(WorkaroundSite site, Variable?[] inputs)
         => [site.OpCode == OPTIONAL_GET_ELEMENT ? SequenceAt(SequenceConstruct(inputs[0]!), Globals.Scalar(0L)) : Globals.Scalar(true)];

@@ -384,6 +384,8 @@ public class KernelWorkaroundPassTests
         Assert.Empty(HostKept(Graph(f, OnnxOp.QuantizeLinear(f, Scalar(0.5f), Scalar((sbyte)0)))));
         Assert.Empty(HostKept(Graph(f, OnnxOp.QuantizeLinear(f, blocks, null, axis: 1, blockSize: 2, outputDatatype: DType.Int4))));
         Assert.Empty(HostKept(Graph(f, OnnxOp.Add(f, OnnxOp.DequantizeLinear(sbytes, Vector(0.5f, 2f), null, axis: 0)))));
+        Assert.Empty(HostKept(Graph(f, OnnxOp.QuantizeLinear(f, blocks, null, axis: 1, blockSize: 2, outputDatatype: DType.Int16))));
+        Assert.Empty(HostKept(Graph(f, OnnxOp.Add(f, OnnxOp.DequantizeLinear(OnnxOp.Cast(sbytes, null, DType.UInt16), blocks, null, axis: 1, blockSize: 2)))));
         Assert.DoesNotContain(AllNodes(Session(Graph(d, OnnxOp.ScatterND(d, rows, Vector(2d, 3d), ScatterNDReduction.Add)), KernelWorkaroundRegistry.OnnxRuntime)),
             n => n.Name.Contains(KernelWorkaroundSets.HostNodeNameSuffix, StringComparison.Ordinal));
     }

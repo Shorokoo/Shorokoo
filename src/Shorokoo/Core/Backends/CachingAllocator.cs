@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Numerics;
 using System.Runtime.CompilerServices;
@@ -63,10 +64,10 @@ namespace Shorokoo.Core.Backends;
 /// kept blocks of the arena — at once on the host, and on a card as the call that asked ends, since a
 /// granule must not go back while work the card has in hand may read it. On a card, as a call ends,
 /// an account holding more than it has ever had in use at once hands its kept small blocks back to the
-/// card's arena of small blocks, where they stay committed, as far as that brings it there
+/// card's arena of small blocks, where they stay committed, where that alone brings it there
 /// (<see cref="ReturnSmall"/>): a call handed a small block after letting go of a block of its own —
-/// an output written out of what it computed last — holds both but never had both in use, and has the
-/// small one carved again for no work on the card. The host's own account keeps
+/// an output written out of what it computed last — holds both but never had both in use, and the
+/// next call usually has the small one carved again with no work on the card. The host's own account keeps
 /// no block of <see cref="LargeBlock"/> or more (<see cref="Account.KeepsLargeBlocks"/>): a large
 /// tensor made outside a run goes back to the system as it goes. What is kept also goes back
 /// when a run that hands back its memory ends (<see cref="ReleaseCached(Account)"/>), when a session
@@ -1038,6 +1039,8 @@ internal sealed unsafe class CachingAllocator
         if (excess <= 0) return release;
         // What is cheapest to have again goes first: kept blocks of their own, and kept small blocks,
         // which go back to the card's arena of small blocks still committed -- longest kept first.
+        // Each counts as a shrinkage, the account trimming itself to its bound; what ReturnSmall
+        // hands back does not.
         while (excess > 0 && account.GiveWayOldest(fromArena: false, out var block, out var size, out var from))
         {
             if (from == Source.Own) release.Add((block, size));
@@ -1088,16 +1091,24 @@ internal sealed unsafe class CachingAllocator
     }
 
     /// <summary>
-    /// The small blocks <paramref name="account"/> keeps back to the card's arena of small blocks,
-    /// longest kept first, while it holds more than it has ever had in use at once, where giving
-    /// those alone way brings it there: a call handed a small block after letting go of another
-    /// block of its own holds both, though it never had both in use. Their memory stays committed —
-    /// the arena of small blocks keeps what it had in use at its busiest — so the next call carves
-    /// them again with no work on the card, and nothing goes back to the card: it is not a
-    /// shrinkage. Short of that mark they stay kept, as they would be carved again for nothing. What
-    /// it holds over that mark beside its small blocks — large blocks, idle granules, blocks another
-    /// call holds — is beyond the most it has had in use of those alone (<see cref="Account.MaxInUseLarge"/>),
-    /// and is no small block's to make up: only the rest of the excess counts. Under the lock.
+    /// Hands kept small blocks of <paramref name="account"/> back to the card's arena of small blocks
+    /// as a call ends, where the account holds more than it has ever had in use at once and that
+    /// alone brings it there: a call handed a small block after letting go of another block of its
+    /// own holds both, though it never had both in use. The smallest kept small block covering the
+    /// excess goes where there is one, and otherwise kept small blocks go longest kept first. What
+    /// the account holds over that mark beside its small blocks — large blocks, idle granules, blocks
+    /// another call holds — beyond the most it has had in use of those alone
+    /// (<see cref="Account.MaxInUseLarge"/>) is no small block's to make up: only the rest of the
+    /// excess counts. Short of the mark they stay kept, as they would be carved again for nothing.
+    ///
+    /// <para>Their memory stays committed — the arena of small blocks keeps what it had in use at its
+    /// busiest — so the next call usually carves them again with no work on the card; another
+    /// session may carve that memory first, and the next call commit fresh memory in its place. The
+    /// cost is the host's: a look over the account's kept classes and an uncarve as each such call
+    /// ends, and a carve as the next one asks, for each small block so handed back. Nothing goes back
+    /// to the card, so it is not counted as a shrinkage — unlike a small block <see cref="Shed"/>
+    /// gives way as the account trims itself to its bound: counted here, a loop whose runs repeat
+    /// would report a shrinkage every run. Under the lock.</para>
     /// </summary>
     private void ReturnSmall(Account account)
     {
@@ -1105,8 +1116,14 @@ internal sealed unsafe class CachingAllocator
         var excess = account.HeldBytes - account.MaxInUse
             - Math.Max(0, account.HeldBytes - account.InUseSmall - account.CachedSmall - account.MaxInUseLarge);
         if (excess <= 0 || excess > account.CachedSmall) return;
-        while (excess > 0 && account.GiveWayOldest(fromArena: false, out var block, out var size, out _))
+        if (account.GiveWaySmallest(excess, out var covering, out var coveringSize))
         {
+            _small.Uncarve(covering, coveringSize);
+            return;
+        }
+        while (excess > 0 && account.GiveWayOldest(fromArena: false, out var block, out var size, out var from))
+        {
+            Debug.Assert(from == Source.Small);
             _small.Uncarve(block, size);
             excess -= size;
         }
@@ -1495,6 +1512,34 @@ internal sealed unsafe class CachingAllocator
             return true;
         }
 
+        /// <summary>The kept block of the card's arena of small blocks of the smallest class of at
+        /// least <paramref name="atLeast"/> bytes, the one of it kept longest, taken out to give way,
+        /// with its class.</summary>
+        internal bool GiveWaySmallest(long atLeast, out IntPtr block, out long size)
+        {
+            block = IntPtr.Zero;
+            Kept? smallest = null;
+            long smallestSize = 0;
+            void Consider(long classSize, Kept? kept)
+            {
+                if (kept is null || kept.Count == 0 || classSize < atLeast || kept.Items[kept.Head].Source != Source.Small) return;
+                if (smallest is null || classSize < smallestSize)
+                {
+                    smallest = kept;
+                    smallestSize = classSize;
+                }
+            }
+            for (var index = 1; index < _small.Length; index++) Consider((long)index << 9, _small[index]);
+            foreach (var (classSize, kept) in _kept) Consider(classSize, kept);
+            size = smallestSize;
+            if (smallest is null) return false;
+            (block, _, _, _) = smallest.PopOldest();
+            Cached -= size;
+            CachedSmall -= size;
+            _keptCount--;
+            Blocks--;
+            return true;
+        }
     }
 
     // ---- what a thread is charging ----

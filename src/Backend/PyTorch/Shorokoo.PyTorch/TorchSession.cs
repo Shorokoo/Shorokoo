@@ -490,17 +490,26 @@ internal sealed class TorchSession : IShorokooSession
             using (PythonRuntime.Gil())
             {
                 using var warned = new PyList();
-                var ran = false;
+                IReadOnlyList<IShorokooTensorValue> outputs;
                 try
                 {
-                    var outputs = InvokeWarning(feeds, wanted, outputNames, targets, placing, writable, stop, warned, runSettings, out aliasedInputs);
-                    ran = true;
-                    return outputs;
+                    outputs = InvokeWarning(feeds, wanted, outputNames, targets, placing, writable, stop, warned, runSettings, out aliasedInputs);
                 }
-                finally
+                catch
                 {
-                    warnings = PythonWarnings.ReadAfter(warned, TorchRuntime.Source, callFailed: !ran);
+                    warnings = PythonWarnings.ReadAfter(warned, TorchRuntime.Source, callFailed: true);
+                    throw;
                 }
+                try
+                {
+                    warnings = PythonWarnings.ReadAfter(warned, TorchRuntime.Source, callFailed: false);
+                }
+                catch
+                {
+                    foreach (var output in outputs) output.Dispose();
+                    throw;
+                }
+                return outputs;
             }
         }
         finally

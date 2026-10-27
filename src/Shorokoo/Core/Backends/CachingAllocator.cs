@@ -61,7 +61,12 @@ namespace Shorokoo.Core.Backends;
 /// only as much as it would, the request then committing fresh memory. What is still over the mark
 /// is shed — kept blocks of their own and small ones first, then the granules idle longest, then
 /// kept blocks of the arena — at once on the host, and on a card as the call that asked ends, since a
-/// granule must not go back while work the card has in hand may read it. The host's own account keeps
+/// granule must not go back while work the card has in hand may read it. On a card, as a call ends,
+/// an account holding more than it has ever had in use at once hands its kept small blocks back to the
+/// card's arena of small blocks, where they stay committed, as far as that brings it there
+/// (<see cref="ReturnSmall"/>): a call handed a small block after letting go of a block of its own —
+/// an output written out of what it computed last — holds both but never had both in use, and has the
+/// small one carved again for no work on the card. The host's own account keeps
 /// no block of <see cref="LargeBlock"/> or more (<see cref="Account.KeepsLargeBlocks"/>): a large
 /// tensor made outside a run goes back to the system as it goes. What is kept also goes back
 /// when a run that hands back its memory ends (<see cref="ReleaseCached(Account)"/>), when a session
@@ -1078,6 +1083,28 @@ internal sealed unsafe class CachingAllocator
         else account.Arena!.Uncarve(block, size);
     }
 
+    /// <summary>
+    /// The small blocks <paramref name="account"/> keeps back to the card's arena of small blocks,
+    /// longest kept first, while it holds more than it has ever had in use at once, where giving
+    /// those alone way brings it there: a call handed a small block after letting go of another
+    /// block of its own holds both, though it never had both in use. Their memory stays committed —
+    /// the arena of small blocks keeps what it had in use at its busiest — so the next call carves
+    /// them again with no work on the card, and nothing goes back to the card: it is not a
+    /// shrinkage. Short of that mark they stay kept, as they would be carved again for nothing.
+    /// Under the lock.
+    /// </summary>
+    private void ReturnSmall(Account account)
+    {
+        if (_small is null) return;
+        var excess = account.HeldBytes - account.MaxInUse;
+        if (excess <= 0 || excess > account.CachedSmall) return;
+        while (excess > 0 && account.GiveWayOldest(fromArena: false, out var block, out var size, out _))
+        {
+            _small.Uncarve(block, size);
+            excess -= size;
+        }
+    }
+
     /// <summary>The card's arena of small blocks keeps no more committed than at its busiest.</summary>
     private void ShedSmall()
     {
@@ -1235,6 +1262,10 @@ internal sealed unsafe class CachingAllocator
         internal long Requested;
         internal long HandedOver;
         internal long Cached;
+
+        /// <summary>The part of <see cref="Cached"/> in kept blocks of the card's arena of small
+        /// blocks.</summary>
+        internal long CachedSmall;
         internal long Held;
         internal long MaxInUse;
         internal long MaxAllocSize;
@@ -1368,6 +1399,7 @@ internal sealed unsafe class CachingAllocator
             var kept = ClassOf(size, make: true)!;
             kept.Push((block, ++_clock, call, source));
             Cached += size;
+            if (source == Source.Small) CachedSmall += size;
             _keptCount++;
         }
 
@@ -1377,8 +1409,9 @@ internal sealed unsafe class CachingAllocator
         {
             if (ClassOf(size, make: false) is { Count: > 0 } kept)
             {
-                (block, _, call, _) = kept.PopNewest();
+                (block, _, call, var source) = kept.PopNewest();
                 Cached -= size;
+                if (source == Source.Small) CachedSmall -= size;
                 _keptCount--;
                 return true;
             }
@@ -1442,6 +1475,7 @@ internal sealed unsafe class CachingAllocator
             if (oldest is null) return false;
             (block, _, _, from) = oldest.PopOldest();
             Cached -= size;
+            if (from == Source.Small) CachedSmall -= size;
             _keptCount--;
             Blocks--;
             return true;
@@ -1602,7 +1636,10 @@ internal sealed unsafe class CachingAllocator
                     _held = null;
                 }
                 if (!account.Closed)
+                {
                     release.AddRange(allocator.Shed(account, account.HeldBytes - account.Bound));
+                    allocator.ReturnSmall(account);
+                }
             }
             allocator.Release(release);
         }

@@ -173,6 +173,11 @@ a smaller one shares a page with other small blocks; on the host a block shares 
   block the run was handed, each counted once: where a request would take it past that mark, the
   smallest larger block it keeps serves it, or the blocks it kept longest give way to it, and what
   is still over the mark goes back to the system — on the host at once, on a card as the run ends.
+  On a card a session also holds no more than it ever had in use at once where its small blocks can
+  bring it there: a run handed a small block after letting go of another of its blocks — an output
+  copied out of what it computed last, say — holds both though it never had both in use, so as the
+  run ends its kept small blocks go back to the small blocks every session shares, still committed,
+  and the next run carves them again with no work on the card.
   So a loop whose runs repeat finds every block it needs, and a session fed varied shapes holds
   what its busiest run used, not a block of every size it has seen. What the tensors placed on a
   card let go of is kept the same way, for the next tensor placed there, counting what is placed

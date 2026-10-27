@@ -29,10 +29,13 @@ internal static class KernelWorkaroundRegistry
 
     /// <summary>
     /// The rewrites around ONNX Runtime's kernels on its CUDA execution provider: every one of
-    /// <see cref="OnnxRuntime"/>, in its order, then the linear and cubic resizes the provider
-    /// computes wrongly on its channels-last route, regrouped, ahead of the rest since the call it
-    /// builds over a computed scale is an <c>If</c>; then the calls the provider runs on the CPU over
-    /// values from outside their body, which covers such calls the earlier rewrites build too; then
+    /// <see cref="OnnxRuntime"/>, in its order, but with the cubic crop-and-resize layout widened to
+    /// every linear and cubic resize the provider computes wrongly on its channels-last route, in
+    /// its place: so a call is regrouped once, whichever of the two would take it, and the call a
+    /// regrouping under a <c>not_larger</c> or <c>not_smaller</c> policy builds, which keeps its
+    /// <c>axes</c>, comes before the resize axes as that layout's does. Then the calls the provider
+    /// runs on the CPU over values from outside their body, which covers such calls the earlier
+    /// rewrites build too; then
     /// a tensor read straight back out of its <c>Optional</c>, which the provider cannot run; then
     /// the summed or averaged losses written out as the reductions they are; then the reductions
     /// with <c>keepdims</c> 0 over an input that may be empty, after every rewrite that builds a
@@ -40,13 +43,12 @@ internal static class KernelWorkaroundRegistry
     /// the host, which covers such calls every rewrite before builds.
     /// </summary>
     public static KernelWorkaroundSet OnnxRuntimeCuda { get; } = new(KernelWorkaroundSets.OnnxRuntimeCuda,
-        [.. OnnxRuntimeWorkarounds, .. CudaWorkarounds]);
+        [.. OnnxRuntimeWorkarounds.Select(w => w is CubicResizeMiddleAxesWorkaround ? new CudaResizeMiddleAxesWorkaround() : w), .. CudaWorkarounds]);
 
-    /// <summary>The rewrites <see cref="OnnxRuntimeCuda"/> adds to <see cref="OnnxRuntime"/>'s,
+    /// <summary>The rewrites <see cref="OnnxRuntimeCuda"/> adds after <see cref="OnnxRuntime"/>'s,
     /// in their order.</summary>
     internal static ImmutableArray<KernelWorkaround> CudaWorkarounds =>
     [
-        new CudaResizeMiddleAxesWorkaround(),
         new CudaHostFallbackBodyInputWorkaround(),
         new CudaOptionalRoundTripWorkaround(),
         new CudaLossReductionWorkaround(),

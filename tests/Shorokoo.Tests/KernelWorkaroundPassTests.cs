@@ -7,6 +7,7 @@ using Shorokoo.Core.Graph;
 using Shorokoo.Core.Interpreter;
 using Shorokoo.Core.Lowering;
 using Shorokoo.Core.Lowering.KernelWorkarounds;
+using Shorokoo.Core.Lowering.KernelWorkarounds.OnnxRuntime;
 using Shorokoo.Core.Nodes.Processors.Fast;
 using Shorokoo.Jax.Cpu;
 using Shorokoo.Modules.Losses;
@@ -257,7 +258,7 @@ public class KernelWorkaroundPassTests
         Assert.Same(DefaultBackend.Instance.Description.Device == ComputeDevice.Cuda ? KernelWorkaroundRegistry.OnnxRuntimeCuda : KernelWorkaroundRegistry.OnnxRuntime,
             KernelWorkaroundRegistry.For(DefaultBackend.Instance.KernelWorkaroundSet));
         Assert.Same(KernelWorkaroundRegistry.OnnxRuntimeCuda, KernelWorkaroundRegistry.For(KernelWorkaroundSets.OnnxRuntimeCuda));
-        Assert.Equal(KernelWorkaroundRegistry.OnnxRuntime.Workarounds.Select(w => w.Name),
+        Assert.Equal(KernelWorkaroundRegistry.OnnxRuntime.Workarounds.Select(w => w is CubicResizeMiddleAxesWorkaround ? new CudaResizeMiddleAxesWorkaround().Name : w.Name),
             KernelWorkaroundRegistry.OnnxRuntimeCuda.Workarounds.SkipLast(KernelWorkaroundRegistry.CudaWorkarounds.Length).Select(w => w.Name));
         Assert.True(KernelWorkaroundRegistry.For(((IShorokooBackend)new TorchCpuBackend()).KernelWorkaroundSet).IsEmpty);
         Assert.True(KernelWorkaroundRegistry.For(((IShorokooBackend)new JaxCpuBackend()).KernelWorkaroundSet).IsEmpty);

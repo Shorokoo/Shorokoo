@@ -1500,8 +1500,8 @@ public class GpuExecutionTests
         using var compiled = context.Compile(Float64CrossEntropyGradientModel.ComputationGraph
             .ToConcreteArchitecture([scores, TensorData([3L], labels)]).ToConcreteModel());
         var gradient = compiled.Execute(scores, TensorData([3L], labels))[0].ToTensorData().CopyMemory<double>();
-        Assert.Empty(compiled.ReadNodePlacement()!.Nodes
-            .Where(n => n.Provider != "CUDAExecutionProvider" || n.OpType.StartsWith("Memcpy", StringComparison.Ordinal)));
+        Assert.Equal(["Gather", "Gather", "Reshape"], compiled.ReadNodePlacement()!.Nodes
+            .Where(n => n.Provider != "CUDAExecutionProvider" || n.OpType.StartsWith("Memcpy", StringComparison.Ordinal)).Select(n => n.OpType).Order());
         for (int i = 0; i < 12; i++)
         {
             var row = x.Skip(i / 4 * 4).Take(4).Select(Math.Exp).ToArray();

@@ -76,21 +76,35 @@ namespace Shorokoo
             internal HeldMemoryPressure(long bytes)
             {
                 _bytes = bytes;
-                GC.AddMemoryPressure(bytes);
-                _observer?.Invoke(bytes);
+                Report(bytes);
             }
 
-            ~HeldMemoryPressure()
+            ~HeldMemoryPressure() => Report(-_bytes);
+
+            /// <summary>Tells the collector of <paramref name="change"/> bytes of pressure, added
+            /// where positive and withdrawn where negative, and the observer with it: one call for
+            /// both, so that what the observer is told is what the collector was.</summary>
+            private void Report(long change)
             {
-                GC.RemoveMemoryPressure(_bytes);
-                _observer?.Invoke(-_bytes);
+                if (change > 0) GC.AddMemoryPressure(change);
+                else GC.RemoveMemoryPressure(-change);
+                try
+                {
+                    _observer?.Invoke(change);
+                }
+                catch (Exception)
+                {
+                    // The observer must not throw: it is told of a withdrawal on the finalizer
+                    // thread, where an exception would end the process.
+                }
             }
         }
 
         /// <summary>
         /// Test hook: told the bytes of each pressure reported for a held tensor
         /// (<see cref="HeldMemoryPressure"/>) as it is reported, and the same bytes negated as it is
-        /// withdrawn. Thread-scoped: a pressure keeps the hook of the thread that reported it, and
+        /// withdrawn. It must not throw, and an exception it throws is dropped: it is told of a
+        /// withdrawal on the finalizer thread. Thread-scoped: a pressure keeps the hook of the thread that reported it, and
         /// tells that hook of its withdrawal from the finalizer thread, so a hook installed by one
         /// parallel test sees its own attributes and no other thread's. Still reset it in a
         /// <c>finally</c>.

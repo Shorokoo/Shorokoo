@@ -32,7 +32,9 @@ using static OpCodes;
 /// optimizations from folding the transposes back into the call, which a transpose pair around the
 /// resize alone does not.</para>
 ///
-/// <para>A constant scales input decides the route when the model is built; otherwise an
+/// <para>A constant scales input decides the route when the model is built, and so, for a call
+/// that gives its sizes under no <c>not_larger</c> or <c>not_smaller</c> policy, do the stated
+/// dimensions of its input and its result where the model is built with them; otherwise an
 /// <c>If</c> chooses between the plain call and the sequence when it runs, the sequence built
 /// within its branch, and its test holding only for an input of rank 4 when the graph does not
 /// tell the rank.</para>
@@ -43,6 +45,8 @@ internal abstract class ResizeMiddleAxesWorkaround : KernelWorkaround
     private static readonly long[] ToChannelsLast = [0, 2, 3, 1];
 
     public override IReadOnlySet<string> OpCodes { get; } = new HashSet<string>([RESIZE], StringComparer.Ordinal);
+
+    public override bool ReadsShapes => true;
 
     /// <summary>Whether the call, of <paramref name="mode"/> and coordinate transformation mode
     /// <paramref name="transformation"/>, is one to rewrite where it takes the channels-last
@@ -63,7 +67,7 @@ internal abstract class ResizeMiddleAxesWorkaround : KernelWorkaround
         if (a.GetEnumVal<KeepAspectRatioPolicy>(AttrKeepAspectRatioPolicy) is not (null or KeepAspectRatioPolicy.stretch)
             && (axes.Contains(0) || axes.Contains(3)))
             return false;
-        if (ConstantScales(site) is not { } scales) return true;
+        if (ConstantScales(site) is not { } scales) return StatedRoute(site) ?? true;
         if (scales.Length != axes.Length) return false;
         float ScaleOf(long axis) => Array.IndexOf(axes, axis) is var k and >= 0 ? scales[k] : 1f;
         return ScaleOf(0) == 1f && ScaleOf(3) == 1f && ScaleOf(1) != 1f;
@@ -172,6 +176,19 @@ internal abstract class ResizeMiddleAxesWorkaround : KernelWorkaround
         if (site.ConstantShapeOf(3) is { Dims: [var sizes] }) return (int)sizes;
         if (site.ConstantShapeOf(1) is { Dims: [var roi] }) return (int)(roi / 2);
         return null;
+    }
+
+    /// <summary>Whether a call that gives its sizes under no <c>not_larger</c> or <c>not_smaller</c>
+    /// policy takes the channels-last route, where the stated dimensions of its input and its
+    /// result tell: its sizes are its result's extents.</summary>
+    private static bool? StatedRoute(WorkaroundSite site)
+    {
+        if (!site.IsPresent(3)
+            || site.Attributes.GetEnumVal<KeepAspectRatioPolicy>(AttrKeepAspectRatioPolicy) is not (null or KeepAspectRatioPolicy.stretch)
+            || site.ShapeOf(0) is not { Dims: [var n, var c, _, var w] }
+            || site.OutputShapeOf(0) is not { Dims: [var resizedN, var resizedC, _, var resizedW] })
+            return null;
+        return resizedN == n && resizedW == w && resizedC != c;
     }
 
     /// <summary>The call's scales, when a constant gives them and no sizes input is present.</summary>

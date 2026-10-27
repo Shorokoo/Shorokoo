@@ -1116,6 +1116,83 @@ public class PyTorchBackendCoverageTests
         AssertWarningsReachTheirLogSettings("shorokoo_torch", TorchRuntime.Source);
     }
 
+    internal static int[] WarningsCollectedPerRun(string module)
+    {
+        lock (WarningSpyGate)
+            using (PythonRuntime.Gil())
+            {
+                using var scope = Py.CreateScope();
+                scope.Exec($$"""
+                    import contextvars, warnings
+                    from {{module}} import runtime as rt
+                    if hasattr(rt, "_collecting_warnings"):
+                        def begin(warned):
+                            held = rt._collecting_warnings(warned)
+                            held.__enter__()
+                            return held
+                        def end(held):
+                            held.__exit__(None, None, None)
+                    else:
+                        begin, end = rt._start_collecting, rt._stop_collecting
+                    emitter = {"__name__": "emitter", "warnings": warnings}
+                    exec(compile("def emit(text):\n    warnings.warn(text, UserWarning)\n", "emitter.py", "exec"), emitter)
+                    emit = emitter["emit"]
+                    def refilter():
+                        with warnings.catch_warnings():
+                            pass
+                    def alone(*steps):
+                        warned = []
+                        held = begin(warned)
+                        try:
+                            for step in steps:
+                                step()
+                        finally:
+                            end(held)
+                        return len(warned)
+                    def overlapping(text):
+                        a, b = [], []
+                        ca, cb = contextvars.Context(), contextvars.Context()
+                        ha = ca.run(begin, a)
+                        ca.run(emit, text)
+                        hb = cb.run(begin, b)
+                        cb.run(emit, text)
+                        ca.run(emit, text)
+                        cb.run(end, hb)
+                        ca.run(emit, text)
+                        ca.run(emit, text)
+                        ca.run(end, ha)
+                        return [len(a), len(b)]
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("default")
+                        counts = [alone(lambda: emit("repeated"), lambda: emit("repeated"), lambda: emit("repeated")),
+                                  alone(lambda: emit("refiltered"), refilter, lambda: emit("refiltered")),
+                                  alone(lambda: emit("again")),
+                                  alone(lambda: emit("again")),
+                                  *overlapping("overlapping")]
+                    """);
+                return scope.Get<int[]>("counts");
+            }
+    }
+
+    internal static void AssertEachRunCollectsAWarningOnce(string module, string source)
+    {
+        Assert.Equal([1, 1, 1, 1, 1, 1], WarningsCollectedPerRun(module));
+        using (PythonRuntime.Gil())
+        {
+            using var number = new PyInt(1);
+            using var unreadable = new PyList([number]);
+            Assert.Empty(PythonWarnings.ReadAfter(unreadable, source, callFailed: true));
+            Assert.ThrowsAny<PythonException>(() => PythonWarnings.ReadAfter(unreadable, source, callFailed: false));
+        }
+    }
+
+    [Fact]
+    public void TestEachRunCollectsAWarningOnceThroughRepeatsFilterChangesAndOverlappingRunsAndAFailedCallDropsAnUnreadableList()
+    {
+        Torch.Start();
+        AssertEachRunCollectsAWarningOnce("shorokoo_torch", TorchRuntime.Source);
+    }
+
     private const string PaletteWithByteTransparency = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAABAQMAAADO7O3JAAAABlBMVEX/AAAAAP9sof2OAAAAAnRSTlOA/2ASuv4AAAAKSURBVHjaY3AAAABCAEGEv45iAAAAAElFTkSuQmCC";
 
     internal static (string Source, string Category)[] RunWarnings<T>(IShorokooBackend backend, byte[] model, T[] input, ShorokooLogSeverity severity) where T : unmanaged

@@ -25,6 +25,13 @@ public class JaxBackendCoverageTests
         AssertWarningsReachTheirLogSettings("shorokoo_jax", JaxRuntime.Source);
     }
 
+    [Fact]
+    public void TestEachRunCollectsAWarningOnceThroughRepeatsFilterChangesAndOverlappingRunsAndAFailedCallDropsAnUnreadableList()
+    {
+        Jax.Start();
+        AssertEachRunCollectsAWarningOnce("shorokoo_jax", JaxRuntime.Source);
+    }
+
     private static readonly Lock NegWarnsGate = new();
 
     private static void WarningOnNegOnThisThread(Action body)

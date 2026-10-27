@@ -258,7 +258,12 @@ public class KernelWorkaroundPassTests
         Assert.Same(DefaultBackend.Instance.Description.Device == ComputeDevice.Cuda ? KernelWorkaroundRegistry.OnnxRuntimeCuda : KernelWorkaroundRegistry.OnnxRuntime,
             KernelWorkaroundRegistry.For(DefaultBackend.Instance.KernelWorkaroundSet));
         Assert.Same(KernelWorkaroundRegistry.OnnxRuntimeCuda, KernelWorkaroundRegistry.For(KernelWorkaroundSets.OnnxRuntimeCuda));
-        Assert.Equal(KernelWorkaroundRegistry.OnnxRuntime.Workarounds.Select(w => w is CubicResizeMiddleAxesWorkaround ? new CudaResizeMiddleAxesWorkaround().Name : w.Name),
+        Assert.Equal(KernelWorkaroundRegistry.OnnxRuntime.Workarounds.Select(w => w switch
+            {
+                CubicResizeMiddleAxesWorkaround => new CudaResizeMiddleAxesWorkaround().Name,
+                HalfScatterReductionWorkaround => new CudaBFloat16ScatterReductionWorkaround().Name,
+                _ => w.Name,
+            }),
             KernelWorkaroundRegistry.OnnxRuntimeCuda.Workarounds.SkipLast(KernelWorkaroundRegistry.CudaWorkarounds.Length).Select(w => w.Name));
         Assert.True(KernelWorkaroundRegistry.For(((IShorokooBackend)new TorchCpuBackend()).KernelWorkaroundSet).IsEmpty);
         Assert.True(KernelWorkaroundRegistry.For(((IShorokooBackend)new JaxCpuBackend()).KernelWorkaroundSet).IsEmpty);
@@ -388,6 +393,25 @@ public class KernelWorkaroundPassTests
         Assert.Empty(HostKept(Graph(f, OnnxOp.Add(f, OnnxOp.DequantizeLinear(OnnxOp.Cast(sbytes, null, DType.UInt16), blocks, null, axis: 1, blockSize: 2)))));
         Assert.DoesNotContain(AllNodes(Session(Graph(d, OnnxOp.ScatterND(d, rows, Vector(2d, 3d), ScatterNDReduction.Add)), KernelWorkaroundRegistry.OnnxRuntime)),
             n => n.Name.Contains(KernelWorkaroundSets.HostNodeNameSuffix, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void TestAFloat16OrBFloat16ReducingScatterNDScattersAsFloat32AndCastsBack()
+    {
+        var f = InputTensor<float32>("f", rank: 2);
+        var (cpu, cuda) = (KernelWorkaroundRegistry.OnnxRuntime, KernelWorkaroundRegistry.OnnxRuntimeCuda);
+        InternalComputationGraph Scattered(DType dtype, ScatterNDReduction? reduction, params long[] indices)
+            => Graph(f, OnnxOp.Cast(OnnxOp.ScatterND(OnnxOp.Cast(f, null, dtype), Vector(indices).Reshape(Vector(2L, 2L)), OnnxOp.Cast(Vector(5f, 0.5f), null, dtype), reduction), null, DType.Float32));
+        Assert.Equal([1f, 7f, 3.5f, 4f], ScatteredAsFloat32(Scattered(DType.Float16, ScatterNDReduction.Add, 0, 1, 1, 0), cpu, 1f, 2f, 3f, 4f));
+        Assert.Equal([1f, 10f, 1.5f, 4f], ScatteredAsFloat32(Scattered(DType.BFloat16, ScatterNDReduction.Mul, 0, 1, 1, 0), cpu, 1f, 2f, 3f, 4f));
+        Assert.Equal([1f, 5f, 3f, 4f], ScatteredAsFloat32(Scattered(DType.Float16, ScatterNDReduction.Max, 0, 1, 1, 0), cpu, 1f, 2f, 3f, 4f));
+        Assert.Equal([1f, 2f, 0.5f, 4f], ScatteredAsFloat32(Scattered(DType.BFloat16, ScatterNDReduction.Min, 0, 1, 1, 0), cpu, 1f, 2f, 3f, 4f));
+        Assert.Equal([2048f, 2054f, 3f, 4f], ScatteredAsFloat32(Scattered(DType.Float16, ScatterNDReduction.Add, 0, 1, 0, 1), cpu, 2048f, 2048f, 3f, 4f));
+        Assert.Equal([1f, 5f, 3f, 4f], ScatteredAsFloat32(Scattered(DType.BFloat16, ScatterNDReduction.Max, 0, 1, 1, 0), cuda, 1f, 2f, 3f, 4f));
+        Assert.Empty(HostKept(Scattered(DType.BFloat16, ScatterNDReduction.Add, 0, 1, 1, 0)));
+        Assert.Equal(0, AddedCasts(Scattered(DType.Float16, ScatterNDReduction.Add, 0, 1, 1, 0), cuda));
+        Assert.Equal(0, AddedCasts(Scattered(DType.Float16, null, 0, 1, 1, 0), cpu));
+        Assert.Equal(0, AddedCasts(Scattered(DType.Float32, ScatterNDReduction.Add, 0, 1, 1, 0), cpu));
     }
 
     [Fact]
@@ -985,6 +1009,14 @@ public class KernelWorkaroundPassTests
         return !AllNodes(rewritten).Any(n => n.OpType is OPTIONAL or OPTIONAL_GET_ELEMENT or OPTIONAL_HAS_ELEMENT)
             && ShapedRun(g, Session(g, KernelWorkaroundRegistry.OnnxRuntime), x).SequenceEqual(ShapedRun(g, rewritten, x));
     }
+
+    private static int AddedCasts(InternalComputationGraph g, KernelWorkaroundSet set)
+        => AllNodes(Session(g, set)).Count(n => n.OpType == CAST) - AllNodes(Session(g, null)).Count(n => n.OpType == CAST);
+
+    private static float[] ScatteredAsFloat32(InternalComputationGraph g, KernelWorkaroundSet set, params float[] data)
+        => AddedCasts(g, set) == 3
+            ? QeeAuditOnBackend.Reference.ExecuteModel(g, Session(g, set), [TensorData([2L, 2L], data).Shared()])[0].ToTensorData().CopyMemory<float>()
+            : [];
 
     private static string[] HostKept(InternalComputationGraph g)
         => [.. AllNodes(Session(g, KernelWorkaroundRegistry.OnnxRuntimeCuda))

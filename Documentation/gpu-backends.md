@@ -482,11 +482,12 @@ A CUDA session leaves operators the provider cannot run to the host: among them 
 operators of every random draw (`Dropout`, a random initializer), which the CUDA provider has no
 kernels for, so a draw is computed on the host and copied to the card. Some operators the provider
 takes and has no kernel for in a given type or form are kept on the host by the session as it is
-built: a reducing `ScatterND` of any type but float32 and float16 — a float64 table's gradient is
-one — and a blocked `QuantizeLinear` or `DequantizeLinear` of quantized type int8 or uint8
-([#541](https://github.com/Shorokoo/Shorokoo/issues/541)). Each costs a copy of its operands to the
-host and of its result back. A reducing bfloat16 `ScatterND` fails there too: neither provider has
-a kernel for it. ONNX Runtime's own notice
+built: a reducing `ScatterND` of any type but float32, float16 and bfloat16 — a float64 table's
+gradient is one — and a blocked `QuantizeLinear` or `DequantizeLinear` of quantized type int8 or
+uint8 ([#541](https://github.com/Shorokoo/Shorokoo/issues/541)). Each costs a copy of its operands
+to the host and of its result back. A reducing bfloat16 `ScatterND` stays on the card, computed as
+float32 and cast back ([operator-support.md](operator-support.md#shape--data-movement)). ONNX
+Runtime's own notice
 that it added such copies arrives as a `Verbose` message ([Log messages](backends-and-devices.md#log-messages)), once
 per session built; ask for placement instead. Two signals:
 

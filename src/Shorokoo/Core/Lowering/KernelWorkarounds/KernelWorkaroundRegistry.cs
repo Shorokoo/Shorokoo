@@ -21,7 +21,8 @@ internal static class KernelWorkaroundRegistry
     /// and both before the resize axes, since the calls they build keep the call's <c>axes</c>;
     /// the <c>MatMul</c> after the reductions, since the reductions it builds take no axes and
     /// need none of their rewrites. The int64 <c>Range</c> count comes after every other rewrite
-    /// that builds a <c>Range</c>, so such a call is looked at like one written in the model.
+    /// that builds a <c>Range</c>, so such a call is looked at like one written in the model, and
+    /// the float16 and bfloat16 reducing scatters after every rewrite that builds a scatter.
     /// <c>Where</c> last, since earlier rewrites, the <c>Range</c> count among them, build
     /// <c>Where</c>s of their own.
     /// </summary>
@@ -33,17 +34,23 @@ internal static class KernelWorkaroundRegistry
     /// every linear and cubic resize the provider computes wrongly on its channels-last route, in
     /// its place: so a call is regrouped once, whichever of the two would take it, and the call a
     /// regrouping under a <c>not_larger</c> or <c>not_smaller</c> policy builds, which keeps its
-    /// <c>axes</c>, comes before the resize axes as that layout's does. Then the calls the provider
-    /// runs on the CPU over values from outside their body, which covers such calls the earlier
-    /// rewrites build too; then
-    /// a tensor read straight back out of its <c>Optional</c>, which the provider cannot run; then
+    /// <c>axes</c>, comes before the resize axes as that layout's does; and with the float16 and
+    /// bfloat16 reducing scatters narrowed to the bfloat16 <c>ScatterND</c> the provider has no
+    /// kernel for, in their place, so the float32 call it builds runs on the card. Then the calls
+    /// the provider runs on the CPU over values from outside their body, which covers such calls
+    /// the earlier rewrites build too; then a tensor read straight back out of its <c>Optional</c>, which the provider cannot run; then
     /// the summed or averaged losses written out as the reductions they are; then the reductions
     /// with <c>keepdims</c> 0 over an input that may be empty, after every rewrite that builds a
     /// reduction; last, the calls the provider takes and has no kernel for, kept on
     /// the host, which covers such calls every rewrite before builds.
     /// </summary>
     public static KernelWorkaroundSet OnnxRuntimeCuda { get; } = new(KernelWorkaroundSets.OnnxRuntimeCuda,
-        [.. OnnxRuntimeWorkarounds.Select(w => w is CubicResizeMiddleAxesWorkaround ? new CudaResizeMiddleAxesWorkaround() : w), .. CudaWorkarounds]);
+        [.. OnnxRuntimeWorkarounds.Select(w => w switch
+            {
+                CubicResizeMiddleAxesWorkaround => new CudaResizeMiddleAxesWorkaround(),
+                HalfScatterReductionWorkaround => new CudaBFloat16ScatterReductionWorkaround(),
+                _ => w,
+            }), .. CudaWorkarounds]);
 
     /// <summary>The rewrites <see cref="OnnxRuntimeCuda"/> adds after <see cref="OnnxRuntime"/>'s,
     /// in their order.</summary>
@@ -71,6 +78,7 @@ internal static class KernelWorkaroundRegistry
         new ResizeAxesSubsetWorkaround(),
         new IntegerRangeCountWorkaround(),
         new MatMulEmptyOperandWorkaround(),
+        new HalfScatterReductionWorkaround(),
         new WhereTypesWorkaround(),
     ];
 

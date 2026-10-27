@@ -1649,6 +1649,24 @@ public class CoreUtilsCoverageTests
         Assert.Equal((1, 0), (WaitsForTheCardAsACallEnds(unfinished: true), WaitsForTheCardAsACallEnds(unfinished: false)));
         Assert.Equal((4 * G + 512, 0L, 4 * G + 512), ASmallBlockACallIsHandedAfterLettingGoOfALargeOneGoesBackToTheSharedArena());
         Assert.Equal(5 * G, SmallBlocksStayKeptWhereWhatTheAccountHoldsOverItsBusiestIsLargeBlocks());
+        Assert.Equal(4 * G + (1L << 20) + 512, TheSmallestKeptSmallBlockCoveringWhatAnAccountHoldsOverItsBusiestGoesBack());
+    }
+
+    private static long TheSmallestKeptSmallBlockCoveringWhatAnAccountHoldsOverItsBusiestGoesBack()
+    {
+        var card = new FakeCard();
+        var allocator = card.Allocator;
+        var account = allocator.Open("probe");
+        using (CachingAllocator.Charge(null, account))
+        {
+            var large = allocator.Allocate(4 * FakeCard.GranuleBytes, out _, stream: 1);
+            IntPtr[] small = [allocator.Allocate(512, out _, stream: 1), allocator.Allocate(1L << 20, out _, stream: 1)];
+            allocator.Free(large);
+            var output = allocator.Allocate(512, out _);
+            foreach (var block in small) allocator.Free(block);
+            allocator.Free(output);
+        }
+        return allocator.Statistics(account).TotalAllocatedBytes;
     }
 
     private static long SmallBlocksStayKeptWhereWhatTheAccountHoldsOverItsBusiestIsLargeBlocks()

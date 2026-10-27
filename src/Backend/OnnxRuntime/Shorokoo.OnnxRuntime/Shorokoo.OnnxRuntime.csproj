@@ -140,12 +140,14 @@
     <Error Condition="'$(_ShorokooCMakeFound)' != '0'"
            Text="Shorokoo.OnnxRuntime builds a native library of its own, which takes CMake and a C++ compiler, and '$(ShorokooCMake)' did not run. On Windows, install Visual Studio (2019 or later, the Build Tools will do) with its C++ workload, which brings both; on Linux, install cmake and g++. Or name a CMake with -p:ShorokooCMake=&lt;path&gt;." />
     <!-- The toolkit -p:CUDAToolkit_ROOT (or the environment variable) names, and none where it
-         names none: a toolkit an earlier configuration was named is not left in its cache. -->
+         names none: a toolkit an earlier configuration was named is not left in its cache. A
+         folder is passed less any trailing backslash, which would escape the quote closing it. -->
     <PropertyGroup>
-      <_ShorokooCudaToolkitRoot Condition="'$(CUDAToolkit_ROOT)' != ''">-DCUDAToolkit_ROOT=&quot;$(CUDAToolkit_ROOT)&quot;</_ShorokooCudaToolkitRoot>
+      <_ShorokooCudaHostCompiler>$(ShorokooCudaHostCompiler.TrimEnd('\'))</_ShorokooCudaHostCompiler>
+      <_ShorokooCudaToolkitRoot Condition="'$(CUDAToolkit_ROOT)' != ''">-DCUDAToolkit_ROOT=&quot;$(CUDAToolkit_ROOT.TrimEnd('\'))&quot;</_ShorokooCudaToolkitRoot>
       <_ShorokooCudaToolkitRoot Condition="'$(CUDAToolkit_ROOT)' == ''">-UCUDAToolkit_ROOT</_ShorokooCudaToolkitRoot>
     </PropertyGroup>
-    <Exec Command="&quot;$(ShorokooCMake)&quot; -S &quot;$(ShorokooAllocatorSource)&quot; -B &quot;$(ShorokooAllocatorBuildDir)&quot; -DSHOROKOO_OUTPUT_DIR=&quot;$(ShorokooAllocatorOutDir)&quot; -DSHOROKOO_ORT_INCLUDE_DIR=&quot;$(PkgMicrosoft_ML_OnnxRuntime)/build/native/include&quot; -DSHOROKOO_CUDA_OPS=$(ShorokooCudaOps) -DSHOROKOO_CUDA_HOST_COMPILER=&quot;$(ShorokooCudaHostCompiler)&quot; $(_ShorokooCudaToolkitRoot)"
+    <Exec Command="&quot;$(ShorokooCMake)&quot; -S &quot;$(ShorokooAllocatorSource)&quot; -B &quot;$(ShorokooAllocatorBuildDir)&quot; -DSHOROKOO_OUTPUT_DIR=&quot;$(ShorokooAllocatorOutDir)&quot; -DSHOROKOO_ORT_INCLUDE_DIR=&quot;$(PkgMicrosoft_ML_OnnxRuntime)/build/native/include&quot; -DSHOROKOO_CUDA_OPS=$(ShorokooCudaOps) -DSHOROKOO_CUDA_HOST_COMPILER=&quot;$(_ShorokooCudaHostCompiler)&quot; $(_ShorokooCudaToolkitRoot)"
           StandardOutputImportance="low" StandardErrorImportance="high" />
     <Exec Command="&quot;$(ShorokooCMake)&quot; --build &quot;$(ShorokooAllocatorBuildDir)&quot; --config Release"
           StandardOutputImportance="low" />

@@ -51,8 +51,12 @@ jobs:
   # the Linux CUDA one in native-linux-cuda, and both are handed to the publish job, which builds
   # the Linux allocator as part of its own build and packs them all.
   native-windows:
-    # Visual Studio 2022's MSVC, which every CUDA 13 release's nvcc supports as its host compiler.
-    runs-on: windows-2025
+    # Windows Server 2022, whose image installs Visual Studio 2022 (17.14) and so MSVC 14.44, which
+    # CUDA 13.0's nvcc supports as its host compiler. Not windows-2025 (nor windows-latest): that image
+    # installs Visual Studio 2026, whose default toolset is MSVC 14.5x, and nvcc loads the default
+    # toolset's environment, whose standard library headers refuse an nvcc older than 13.2 and a
+    # compiler older than 14.50, so that no CUDA 13.0 build can compile there.
+    runs-on: windows-2022
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
@@ -143,6 +147,18 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 10.0.x
+
+      # A version is a SemVer 2.0 version with no leading "v" and no build metadata: the tag is
+      # v<version>, MinVer reads a tag of any other shape as no version at all, stamping a default one
+      # into the packages, and a package file is named by its version less any build metadata.
+      - name: Check the version
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if ! printf '%s' "$VERSION" | grep -qxE '(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?'; then
+            echo "::error::'$VERSION' is not a SemVer version such as 0.1.0-preview.1 (no leading v)"
+            exit 1
+          fi
 
       # Tag locally so MinVer stamps <version> into the packages. The tag is
       # pushed by the publish job only after a successful publish, so a failed
@@ -250,6 +266,26 @@ jobs:
           dotnet pack Shorokoo.sln -c Release -o artifacts/nupkgs
           -p:ShorokooNativeAllocators=${{ github.workspace }}/artifacts/native
 
+      # Every package carries the version being released, before anything can publish one: a
+      # package of any other version would reach nuget.org, whose versions cannot be replaced, and a
+      # dry run passes only where the release itself would.
+      - name: Check every package carries the version
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          packages=(artifacts/nupkgs/*.nupkg)
+          [ "${#packages[@]}" -gt 0 ] || { echo "::error::dotnet pack made no package"; exit 1; }
+          failed=0
+          for pkg in "${packages[@]}" artifacts/nupkgs/*.snupkg; do
+            case "$(basename "$pkg")" in
+              *."$VERSION".nupkg | *."$VERSION".snupkg) echo "$pkg" ;;
+              *) echo "::error::$pkg does not carry version $VERSION"; failed=1 ;;
+            esac
+          done
+          exit "$failed"
+
       - uses: actions/upload-artifact@v4
         with:
           name: packages
@@ -286,10 +322,10 @@ jobs:
           user: ${{ secrets.NUGET_USER }}
 
       # Push each package individually: a glob push aborts the whole queue on
-      # the first rejected file, which half-publishes the release (immutable
-      # versions make that expensive — it burned 0.1.2/0.1.3). Attempt every
-      # package, then fail the job if any push failed. --skip-duplicate keeps
-      # re-runs of the same version safe.
+      # the first rejected file, which half-publishes the release, and nuget.org's
+      # versions are immutable, so a half-published version can never be
+      # completed under the same number. Attempt every package, then fail the job
+      # if any push failed. --skip-duplicate keeps re-runs of the same version safe.
       - name: Push to nuget.org
         run: |
           failed=0
@@ -323,7 +359,7 @@ jobs:
           done
 
       # The packages are verified live on the canonical feed: tag now, so no
-      # later (best-effort) step can leave a published version untagged again.
+      # later (best-effort) step can leave a published version untagged.
       - name: Push tag
         run: |
           git config user.name  "github-actions[bot]"

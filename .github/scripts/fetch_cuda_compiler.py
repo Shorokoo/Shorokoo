@@ -16,6 +16,7 @@ import shutil
 import sys
 import tarfile
 import tempfile
+import time
 import urllib.request
 import zipfile
 
@@ -45,10 +46,23 @@ ARCHIVES = {
 # Seconds a download may wait on the server for any one read before it fails.
 TIMEOUT = 120
 
+# Times a download is attempted before the script fails, and the seconds it waits between attempts.
+ATTEMPTS = 3
+RETRY_WAIT = 10
+
 
 def fetch(url: str, path: str) -> None:
-    with urllib.request.urlopen(url, timeout=TIMEOUT) as response, open(path, "wb") as out:
-        shutil.copyfileobj(response, out)
+    """url into path; a download that fails is attempted again, ATTEMPTS times in all."""
+    for attempt in range(1, ATTEMPTS + 1):
+        try:
+            with urllib.request.urlopen(url, timeout=TIMEOUT) as response, open(path, "wb") as out:
+                shutil.copyfileobj(response, out)
+            return
+        except OSError as error:
+            if attempt == ATTEMPTS:
+                raise SystemExit(f"{url} could not be downloaded: {error}")
+            print(f"{url}: {error}; attempting again in {RETRY_WAIT}s ({attempt}/{ATTEMPTS})")
+            time.sleep(RETRY_WAIT)
 
 
 def sha256(path: str) -> str:
@@ -59,11 +73,16 @@ def sha256(path: str) -> str:
     return digest.hexdigest()
 
 
+def resolves_under(root: str, path: str) -> bool:
+    """Whether path, every link on the way followed before the ".." after it, lies under root."""
+    real_root = os.path.realpath(root)
+    return os.path.commonpath([os.path.realpath(path), real_root]) == real_root
+
+
 def inside(root: str, relative: str) -> str:
     """root/relative, where every folder on the way, links followed, lies under root."""
     target = os.path.abspath(os.path.join(root, relative))
-    real_root = os.path.realpath(root)
-    if (os.path.commonpath([os.path.realpath(os.path.dirname(target)), real_root]) != real_root
+    if (not resolves_under(root, os.path.dirname(target))
             or os.path.commonpath([target, os.path.abspath(root)]) != os.path.abspath(root)):
         raise SystemExit(f"An archive entry points outside {root}: {relative}")
     return target
@@ -98,14 +117,16 @@ def unpack(archive: str, root: str) -> None:
                 continue
             target = inside(root, relative)
             if entry.issym():
-                if os.path.isabs(entry.linkname):
+                if (os.path.isabs(entry.linkname)
+                        or not resolves_under(root, os.path.join(os.path.dirname(target), entry.linkname))):
                     raise SystemExit(f"An archive link points outside {root}: {entry.name}")
-                inside(root, os.path.join(os.path.dirname(relative), entry.linkname))
                 replace(target)
                 os.symlink(entry.linkname, target)
             elif entry.islnk():
                 linked = entry.linkname.split("/", 1)[1] if "/" in entry.linkname else ""
                 source = os.path.realpath(inside(root, linked))
+                if not resolves_under(root, source):
+                    raise SystemExit(f"An archive link points outside {root}: {entry.name}")
                 replace(target)
                 shutil.copy2(source, target)
             elif entry.isfile():

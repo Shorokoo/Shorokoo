@@ -219,6 +219,13 @@ public class KernelWorkaroundPassTests
     }
 
     [Fact]
+    public void TestTheBackendAuditsReferenceRunsOnOnnxRuntimesCpuProviderWhateverTheDefaultBackend()
+    {
+        Assert.Equal(ComputeDevice.Cpu, QeeAuditOnBackend.Reference.ResolvedBackend.Description.Device);
+        Assert.Equal(KernelWorkaroundSets.OnnxRuntime, QeeAuditOnBackend.Reference.ResolvedBackend.KernelWorkaroundSet);
+    }
+
+    [Fact]
     public void TestOnlyTheSessionModelCarriesTheOnnxRuntimeWorkaround()
     {
         var x = InputTensor<float32>("x", rank: 3);

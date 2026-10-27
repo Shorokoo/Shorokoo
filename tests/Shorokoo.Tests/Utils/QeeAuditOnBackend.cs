@@ -90,7 +90,7 @@ internal sealed class QeeAuditOnBackend(
 
     /// <summary>The context the ONNX Runtime reference runs on: the CPU provider, whatever the
     /// default backend, so the reference is the same on a build whose default is a card.</summary>
-    private static readonly ComputeContext Reference = new(new HostOrtBackend());
+    internal static ComputeContext Reference { get; } = new(new HostOrtBackend());
 
     private sealed class HostOrtBackend : Shorokoo.OnnxRuntime.OrtBackend;
 

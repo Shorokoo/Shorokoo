@@ -728,6 +728,22 @@ public class QeeIntegerWidthTests
         Assert.Equal(2147483647L, Backend<QeeI32ReduceSumSquareRuntime>(TensorData(DType.Int32, [2L], 65536, 65536)));
     }
 
+    [Fact]
+    public void TestAFloat16OrBFloat16ScatterNDWithAReductionComputesOnOnnxRuntime()
+    {
+        Assert.Equal([1f, 7f, 3.5f, 4f], ScatteredOnOnnxRuntime(DType.Float16, ScatterNDReduction.Add));
+        Assert.Equal([1f, 5f, 3f, 4f], ScatteredOnOnnxRuntime(DType.BFloat16, ScatterNDReduction.Max));
+    }
+
+    private static float[] ScatteredOnOnnxRuntime(DType dtype, ScatterNDReduction reduction)
+    {
+        var f = InputTensor<float32>(defaultName: "f", rank: 2);
+        var scattered = OnnxOp.ScatterND(OnnxOp.Cast(f, null, dtype), Vector(0L, 1L, 1L, 0L).Reshape(Vector(2L, 2L)), OnnxOp.Cast(Vector(5f, 0.5f), null, dtype), reduction);
+        using var context = new ComputeContext();
+        return context.Execute(new InternalComputationGraph([f], [OnnxOp.Cast(scattered, null, DType.Float32)]),
+            TensorData([2L, 2L], [1f, 2f, 3f, 4f]).Shared())[0].ToTensorData().CopyMemory<float>();
+    }
+
     // The widths ONNX's Mean type constraint rejects, so there is no backend to compare against —
     // the declared-width rule is what keeps them self-consistent. Sums overflow every width here.
     [Fact]

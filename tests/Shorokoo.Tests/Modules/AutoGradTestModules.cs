@@ -3762,9 +3762,11 @@ namespace Shorokoo.Tests.Modules
     }
 
     /// <summary>
-    /// A mean cross-entropy whose class weights at its labels sum to zero, with no label ignored,
-    /// divides by zero, as PyTorch's does: every element of its gradient is non-finite, over
-    /// <c>float32</c> scores and over <c>float64</c> ones.
+    /// A mean cross-entropy or negative log-likelihood whose class weights at its active labels sum
+    /// to zero divides by zero, as PyTorch's does: with no label ignored every element of the
+    /// cross-entropy's gradient is non-finite, and with one ignored the active samples' target
+    /// elements are non-finite while the ignored sample's row is exactly zero, over <c>float32</c>
+    /// scores and over <c>float64</c> ones.
     /// </summary>
     [Module]
     public partial class AutoGradMeanCrossEntropyOverWeightsSummingToZeroCheck
@@ -3772,13 +3774,23 @@ namespace Shorokoo.Tests.Modules
         public static Scalar<bit> Inline(Tensor<float32> x)
         {
             var labels = Vector(0L, 1L, 2L);
-            Scalar<bit> NonFinite(Scalar<float32> loss)
+            var ignoring = Vector(0L, 1L, -100L);
+            Scalar<bit> All(Variable condition) => ((Tensor<float32>)OnnxOp.Cast(condition, null, DType.Float32)).Reduce(ReduceKind.Min, keepDims: false).Scalar() > Scalar(0.5f);
+            Tensor<float32> Grad(Scalar<float32> loss) => (Tensor<float32>)OnnxOp.Reshape(Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(x, loss), Vector(12L), allowZero: false);
+            Scalar<bit> NonFinite(Tensor<float32> v) => All(OnnxOp.IsNaN(v - v));
+            Scalar<bit> IgnoredRowZero(Scalar<float32> loss)
             {
-                var grad = (Tensor<float32>)Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(x, loss);
-                return ((Tensor<float32>)OnnxOp.Cast(OnnxOp.IsNaN(grad - grad), null, DType.Float32)).Reduce(ReduceKind.Min, keepDims: false).Scalar() > Scalar(0.5f);
+                var grad = Grad(loss);
+                return All(OnnxOp.Equal(OnnxOp.Gather(grad, Vector(8L, 9L, 10L, 11L), axis: 0), Scalar(0f)))
+                    & NonFinite((Tensor<float32>)OnnxOp.Gather(grad, Vector(0L, 5L), axis: 0));
             }
-            return NonFinite(((Tensor<float32>)OnnxOp.SoftmaxCrossEntropyLoss(x, labels, Vector(1f, -1f, 0f, 0f), null, "mean").output).Scalar())
-                & NonFinite(((Tensor<float64>)OnnxOp.SoftmaxCrossEntropyLoss(x.Cast<float64>(), labels, Vector(1.0, -1.0, 0.0, 0.0), null, "mean").output).Cast<float32>().Scalar());
+            var x64 = x.Cast<float64>();
+            return NonFinite(Grad(((Tensor<float32>)OnnxOp.SoftmaxCrossEntropyLoss(x, labels, Vector(1f, -1f, 0f, 0f), null, "mean").output).Scalar()))
+                & NonFinite(Grad(((Tensor<float64>)OnnxOp.SoftmaxCrossEntropyLoss(x64, labels, Vector(1.0, -1.0, 0.0, 0.0), null, "mean").output).Cast<float32>().Scalar()))
+                & IgnoredRowZero(((Tensor<float32>)OnnxOp.SoftmaxCrossEntropyLoss(x, ignoring, Vector(1f, -1f, 0f, 0f), -100L, "mean").output).Scalar())
+                & IgnoredRowZero(((Tensor<float64>)OnnxOp.SoftmaxCrossEntropyLoss(x64, ignoring, Vector(1.0, -1.0, 0.0, 0.0), -100L, "mean").output).Cast<float32>().Scalar())
+                & IgnoredRowZero(((Tensor<float32>)OnnxOp.NegativeLogLikelihoodLoss(x, ignoring, Vector(1f, -1f, 0f, 0f), -100L, "mean")).Scalar())
+                & IgnoredRowZero(((Tensor<float64>)OnnxOp.NegativeLogLikelihoodLoss(x64, ignoring, Vector(1.0, -1.0, 0.0, 0.0), -100L, "mean")).Cast<float32>().Scalar());
         }
     }
 

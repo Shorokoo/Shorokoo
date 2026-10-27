@@ -657,7 +657,12 @@ def _collect_jax_warning(message, category, filename, lineno, file=None, line=No
     alone, so only the first call in the process to raise the warning collects it, as Python would
     show it once. This hook counts its own backend's calls alone: a PyTorch call overlapping a call
     here does not count as an overlap, so where both raise a warning from one place, the record one
-    of them holds can keep the other from collecting it."""
+    of them holds can keep the other from collecting it.
+
+    Collection across overlapping calls is best-effort. Python records a warning as shown before
+    it calls this hook, so a warning that an overlapping call on another thread raises from the
+    same place, inside the window between Python's recording it and its calling this hook, finds
+    the record still there and is not shown, and that call misses it."""
     collected = _warnings_collected.get()
     if collected is None:
         _show_warning(message, category, filename, lineno, file, line)

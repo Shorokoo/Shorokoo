@@ -30,14 +30,14 @@ internal static class OrtProfile
     /// </summary>
     internal static FileStream OpenOnceLetGo(string path)
     {
-        var deadline = DateTime.UtcNow + HeldForAtMost;
+        var deadline = Environment.TickCount64 + (long)HeldForAtMost.TotalMilliseconds;
         while (true)
         {
             try
             {
                 return File.OpenRead(path);
             }
-            catch (IOException) when (File.Exists(path) && DateTime.UtcNow < deadline)
+            catch (IOException) when (File.Exists(path) && Environment.TickCount64 < deadline)
             {
                 Thread.Sleep(20);
             }

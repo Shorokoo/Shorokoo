@@ -32,6 +32,10 @@ public class JaxBackendCoverageTests
         AssertEachRunCollectsAWarningOnce("shorokoo_jax", JaxRuntime.Source);
     }
 
+    [Fact]
+    public void TestTheOutputsOfARunWhoseWarningsCannotBeReadAreReleased()
+        => Assert.True(OutputsOfARunWhoseWarningsAreUnreadableAreReleased(Jax, "shorokoo_jax"));
+
     private static readonly Lock NegWarnsGate = new();
 
     private static void WarningOnNegOnThisThread(Action body)

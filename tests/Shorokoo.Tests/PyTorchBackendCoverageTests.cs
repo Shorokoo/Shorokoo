@@ -1193,6 +1193,82 @@ public class PyTorchBackendCoverageTests
         AssertEachRunCollectsAWarningOnce("shorokoo_torch", TorchRuntime.Source);
     }
 
+    internal static bool OutputsOfARunWhoseWarningsAreUnreadableAreReleased(IShorokooBackend backend, string module)
+    {
+        var graph = ComputeContextLifetimeCoverageTests.GraphOf("a:float[2] b:float[2]", "O:float[2]",
+            ComputeContextLifetimeCoverageTests.Op("Sub", "a b", "O"));
+        using var session = backend.CreateSession(Serialize(graph), default, LogSettings.Default, DeviceMemorySettings.Default);
+        using var a = backend.CreateTensor([5f, 7f], [2]);
+        using var b = backend.CreateTensor([1f, 2f], [2]);
+        lock (WarningSpyGate)
+        {
+            using (PythonRuntime.Gil())
+            {
+                using var install = Py.CreateScope();
+                install.Exec($$"""
+                    import contextlib, threading, weakref
+                    from {{module}} import runtime as rt
+                    if not hasattr(rt, "_unreadable"):
+                        rt._unreadable = {}
+                        def spoil(warned, spoiled=rt._unreadable):
+                            if threading.get_ident() in spoiled and warned is not None:
+                                warned.append(1)
+                        def keep(value, spoiled=rt._unreadable):
+                            refs = spoiled.get(threading.get_ident())
+                            if refs is not None:
+                                refs.append(weakref.ref(value))
+                        if hasattr(rt, "_collecting_warnings"):
+                            @contextlib.contextmanager
+                            def collecting(warned, original=rt._collecting_warnings):
+                                with original(warned):
+                                    yield
+                                spoil(warned)
+                            rt._collecting_warnings = collecting
+                            def describe(value, original=rt.describe):
+                                keep(value)
+                                return original(value)
+                            rt.describe = describe
+                        else:
+                            def stop(token, original=rt._stop_collecting):
+                                spoil(rt._warnings_collected.get())
+                                original(token)
+                            rt._stop_collecting = stop
+                            def export_all(*args, original=rt._export_all):
+                                results = original(*args)
+                                for result in results:
+                                    keep(result[0])
+                                return results
+                            rt._export_all = export_all
+                    rt._unreadable[threading.get_ident()] = []
+                    """);
+            }
+            var released = false;
+            try
+            {
+                Assert.ThrowsAny<Exception>(() => session.Run(new Dictionary<string, IShorokooTensorValue> { ["a"] = a, ["b"] = b }, ["O"], RunSettings.Default));
+            }
+            finally
+            {
+                using (PythonRuntime.Gil())
+                {
+                    using var check = Py.CreateScope();
+                    check.Exec($$"""
+                        import threading
+                        from {{module}} import runtime as rt
+                        refs = rt._unreadable.pop(threading.get_ident())
+                        released = len(refs) > 0 and all(ref() is None for ref in refs)
+                        """);
+                    released = check.Get<bool>("released");
+                }
+            }
+            return released;
+        }
+    }
+
+    [Fact]
+    public void TestTheOutputsOfARunWhoseWarningsCannotBeReadAreReleased()
+        => Assert.True(OutputsOfARunWhoseWarningsAreUnreadableAreReleased(Torch, "shorokoo_torch"));
+
     private const string PaletteWithByteTransparency = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAABAQMAAADO7O3JAAAABlBMVEX/AAAAAP9sof2OAAAAAnRSTlOA/2ASuv4AAAAKSURBVHjaY3AAAABCAEGEv45iAAAAAElFTkSuQmCC";
 
     internal static (string Source, string Category)[] RunWarnings<T>(IShorokooBackend backend, byte[] model, T[] input, ShorokooLogSeverity severity) where T : unmanaged

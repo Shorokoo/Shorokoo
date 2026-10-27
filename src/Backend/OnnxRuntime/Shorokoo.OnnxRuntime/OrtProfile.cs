@@ -18,19 +18,46 @@ internal static class OrtProfile
     private const string NodeCategory = "Node";
     private const string KernelSuffix = "_kernel_time";
 
+    /// <summary>How long a profile another handle holds open is waited for.</summary>
+    internal static readonly TimeSpan HeldForAtMost = TimeSpan.FromSeconds(1);
+
+    /// <summary>
+    /// The profile at <paramref name="path"/>, opened for reading. A file ORT has just written is
+    /// often opened by another process a moment later — a virus scanner or an indexer reading it —
+    /// which holds it against a reader for as long as that takes, so an attempt that finds the file
+    /// held is made again until <see cref="HeldForAtMost"/> has passed. A file that is not there is
+    /// not waited for.
+    /// </summary>
+    private static FileStream OpenOnceLetGo(string path)
+    {
+        var deadline = DateTime.UtcNow + HeldForAtMost;
+        while (true)
+        {
+            try
+            {
+                return File.OpenRead(path);
+            }
+            catch (IOException) when (File.Exists(path) && DateTime.UtcNow < deadline)
+            {
+                Thread.Sleep(20);
+            }
+        }
+    }
+
     /// <summary>
     /// The node placement recorded in the profile at <paramref name="path"/>. A profile with no node
     /// events — a session that was never run — gives a placement with no nodes, which is the honest
     /// answer to "what ran": nothing did.
     /// </summary>
-    /// <exception cref="IOException">The file cannot be read.</exception>
+    /// <exception cref="IOException">The file cannot be read, or another handle still holds it
+    /// <see cref="HeldForAtMost"/> after the first attempt.</exception>
     /// <exception cref="UnauthorizedAccessException">The file cannot be opened.</exception>
     /// <exception cref="JsonException">The file is not JSON.</exception>
     /// <exception cref="InvalidDataException">The file is JSON but not a profile: its root is not an
     /// array of events.</exception>
     internal static NodePlacement Read(string path)
     {
-        using var file = File.OpenRead(path);
+        using var file = OpenOnceLetGo(path);
         using var profile = JsonDocument.Parse(file);
         if (profile.RootElement.ValueKind != JsonValueKind.Array)
             throw new InvalidDataException(

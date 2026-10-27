@@ -1496,10 +1496,12 @@ public class GpuExecutionTests
         double[] x = [0.5, -1.0, 2.0, 0.25, 1.5, 3.0, -2.0, 0.0, -0.75, 1.0, 2.5, -1.5];
         long[] labels = [2L, 0L, 3L];
         var scores = TensorData(DType.Float64, [3L, 4L], [.. x.Select(v => (object)v)]);
-        using var context = new ComputeContext();
+        using var context = new ComputeContext { Diagnostics = new DiagnosticSettings { TraceNodePlacement = true } };
         using var compiled = context.Compile(Float64CrossEntropyGradientModel.ComputationGraph
             .ToConcreteArchitecture([scores, TensorData([3L], labels)]).ToConcreteModel());
         var gradient = compiled.Execute(scores, TensorData([3L], labels))[0].ToTensorData().CopyMemory<double>();
+        Assert.Empty(compiled.ReadNodePlacement()!.Nodes
+            .Where(n => n.Provider != "CUDAExecutionProvider" || n.OpType.StartsWith("Memcpy", StringComparison.Ordinal)));
         for (int i = 0; i < 12; i++)
         {
             var row = x.Skip(i / 4 * 4).Take(4).Select(Math.Exp).ToArray();

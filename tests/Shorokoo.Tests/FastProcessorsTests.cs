@@ -39,11 +39,13 @@ public class FastProcessorsCoverageTests
     }
 
     private static readonly TensorData Six = TensorData(DType.Float32, [2L, 3L], 0.5f, -1f, 2f, 0.25f, 1.5f, -3f);
+    private static readonly TensorData ThreeByTwo = TensorData(DType.Float32, [3L, 2L], 0.5f, -1f, 2f, 0.25f, 1.5f, -3f);
+    private static readonly TensorData Four = TensorData(DType.Float32, [2L, 2L], 1.5f, -0.5f, 2f, 0.75f);
 
-    private static float[][] Outputs(InternalComputationGraph g, TensorData x)
+    private static float[][] Outputs(InternalComputationGraph g, params TensorData[] inputs)
     {
         using var context = new Shorokoo.Runtime.ComputeContext();
-        return [.. context.Execute(g.Clone(), x.Shared()).Select(o => o.ToTensorData().CopyMemory<float>())];
+        return [.. context.Execute(g.Clone(), [.. inputs.Select(i => i.Shared())]).Select(o => o.ToTensorData().CopyMemory<float>())];
     }
 
     private static int MulsAfterFolding(Func<Tensor<float32>, Variable[]> build)
@@ -81,7 +83,9 @@ public class FastProcessorsCoverageTests
     {
         var (x, w) = (InputTensor<float32>("x", rank: 2), InputTensor<float32>("w", rank: 2));
         var g = new InternalComputationGraph([x, w], [.. build(x, w)]);
+        var before = Outputs(g, ThreeByTwo, Four);
         FastScaleBesideMatMul.Process(g);
+        Assert.Equal(before, Outputs(g, ThreeByTwo, Four));
         var producer = g.Nodes.SelectMany(n => n.Outputs.OfType<FastTensorKey>().Select(o => (o, n))).ToDictionary(p => p.o, p => p.n);
         var mul = g.Nodes.Single(n => n.OpCode == Shorokoo.Core.Nodes.NodeDefinitions.OpCodes.MUL);
         var reads = mul.Inputs.OfType<FastTensorKey>().Select(k => producer[k].OpCode is var c && c == InternalOpCodes.MODEL_TENSOR_INPUT ? "input" : c).Single(c => c != Shorokoo.Core.Nodes.NodeDefinitions.OpCodes.CONSTANT);

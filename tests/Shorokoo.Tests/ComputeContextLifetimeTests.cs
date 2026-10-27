@@ -837,8 +837,9 @@ public class ComputeContextLifetimeCoverageTests
         + " | P M V | ma=Mul(b1,m) gc=Mul(c1,g) M=Add(ma,gc) vb=Mul(b2,v) cg=Mul(c2,g) gg=Mul(cg,g) V=Add(vb,gg) r=Sqrt(V) d=Add(r,e) q=Div(M,d) u=Mul(q,k) P=Sub(p,u)";
 
     /// <summary><see cref="AdamChain"/> with each (old, new) pair of <paramref name="edits"/>
-    /// replaced in turn; a node is <c>out=Op(a,b)</c>, or <c>out=If(c){x}</c> for an <c>If</c> whose
-    /// branches each hand back <c>x</c>.</summary>
+    /// replaced in turn; a node is <c>out=Op(a,b)</c>, <c>out=If(c){x}</c> for an <c>If</c> whose
+    /// branches each hand back <c>x</c>, or <c>out=Loop(n,c){x}</c> for a <c>Loop</c> whose body
+    /// scans <c>x</c> out; <c>x</c> is a name or itself such a node, <c>If(c){x}</c>.</summary>
     private static GraphProto AdamChainWith(params string[] edits)
     {
         var text = AdamChain;
@@ -851,12 +852,23 @@ public class ComputeContextLifetimeCoverageTests
     {
         var (output, rest) = (spec[..spec.IndexOf('=')], spec[(spec.IndexOf('=') + 1)..]);
         var inputs = rest[(rest.IndexOf('(') + 1)..rest.IndexOf(')')].Replace(',', ' ');
-        if (!rest.Contains('{')) return Op(rest[..rest.IndexOf('(')], inputs, output);
+        var op = rest[..rest.IndexOf('(')];
+        if (!rest.Contains('{')) return Op(op, inputs, output);
+        var read = rest[(rest.IndexOf('{') + 1)..^1];
+        NodeProto Reading(string into) => read.Contains('{') ? ChainNode($"{into}={read}") : Op("Identity", read, into);
         GraphProto Branch()
         {
-            var branch = GraphOf("", "t", Op("Identity", rest[(rest.IndexOf('{') + 1)..^1], "t"));
+            var branch = GraphOf("", "t", Reading("t"));
             branch.Name = output;
             return branch;
+        }
+        if (op == "Loop")
+        {
+            var body = GraphOf("i:int64[1] ci:bool[1]", "co t", Op("Identity", "ci", "co"), Reading("t"));
+            body.Name = output;
+            var loop = Op("Loop", inputs, output);
+            loop.Attributes.Add(new AttributeProto { Name = "body", Type = AttributeProto.AttributeType.Graph, G = body });
+            return loop;
         }
         var node = Op("If", inputs, output, body: Branch());
         node.Attributes.Add(new AttributeProto { Name = "else_branch", Type = AttributeProto.AttributeType.Graph, G = Branch() });
@@ -889,6 +901,8 @@ public class ComputeContextLifetimeCoverageTests
         Assert.False(FusesAdamChain(" q=", " z=Neg(r) q="));
         Assert.False(FusesAdamChain("| P M V |", "| P M V d |"));
         Assert.False(FusesAdamChain(" q=", " z=If(c){r} q="));
+        Assert.False(FusesAdamChain(" q=", " z=Loop(k,c){r} q="));
+        Assert.False(FusesAdamChain(" q=", " z=If(c){If(c){r}} q="));
     }
 
     [Fact]

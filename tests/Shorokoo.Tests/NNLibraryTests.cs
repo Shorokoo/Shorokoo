@@ -1035,6 +1035,10 @@ public class NNLibraryOptimizerTrainingCoverageTests
     public void TestAnAdamWStepOnTheHostFusesItsUpdateWithNoDecayOrADecayFedEachStep()
     {
         Assert.Equal(new Dictionary<string, int> { ["AdamUpdate"] = 1 }, ResidentStepsOnHost(true, AdamWOptimizer.ComputationGraph, [0.01f, 0.8f, 0.9f, 1e-6f, 0f], null).TableSized);
+        var adam = ResidentStepsOnHost(false, AdamOptimizer.ComputationGraph, [0.01f, 0.8f, 0.9f, 1e-6f], null);
+        var undecayed = ResidentStepsOnHost(false, AdamWOptimizer.ComputationGraph, [0.01f, 0.8f, 0.9f, 1e-6f, 0f], null);
+        Assert.Equal(adam.TableSized, undecayed.TableSized);
+        Assert.Equal(adam.State, undecayed.State);
         AssertFusedToTheBit(AdamWOptimizer.ComputationGraph,
             new AdamWOptimizerHyperparameters { WeightDecay = Hyperparameter.Runtime() }.InOptimizerOrder(), 0.1f);
     }

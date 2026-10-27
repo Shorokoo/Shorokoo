@@ -2,6 +2,7 @@ using static Shorokoo.Tests.AutoGradOpsRunners;
 using Shorokoo.Core.Backends;
 using Shorokoo.PyTorch.Cpu;
 using Shorokoo.Runtime;
+using Shorokoo.Tests.Utils;
 
 namespace Shorokoo.Tests;
 
@@ -185,7 +186,7 @@ public class AutoGradElementwiseOpsCoverageTests
     public void TestAutoGradOfAFloat64OrFloat16Loss()
     {
         float[] x = [0.5f, -1f, 2f, 0.25f, 1.5f, 3f, -2f, 0f, -0.75f, 1f, 2.5f, -1.5f];
-        Assert.True(AutoTest.AdvancedTestGraph<AutoGradFloat64LossCheck>([], [TensorData(DType.Float64, [3L, 4L], [.. x.Select(v => (object)(double)v)])]));
+        Assert.True(AutoTest.AdvancedTestGraph<AutoGradFloat64LossCheck>([], [TensorData(DType.Float64, [3L, 4L], [.. x.Select(v => (object)(double)v)]), Float64SoftmaxTolerance]));
         Assert.True(AutoTest.AdvancedTestGraph<AutoGradFloat16LossCheck>([], [TensorData(DType.Float16, [3L, 4L], [.. x.Select(v => (object)(Float16)v)])]));
     }
 
@@ -195,9 +196,15 @@ public class AutoGradElementwiseOpsCoverageTests
         Run<AutoGradLossOfAnAllIgnoredBatchCheck>(0.5f);
         RunTensor<AutoGradCrossEntropyLossAtANegativeLabelCheck>([3L, 4L], 0.5f, -1f, 2f, 0.25f, 1.5f, 3f, -2f, 0f, -0.75f, 1f, 2.5f, -1.5f);
         RunTensor<AutoGradHalfPrecisionMeanLossOverManySamplesCheck>([70000L, 2L], new float[140000]);
-        Assert.True(AutoTest.AdvancedTestGraph<AutoGradFloat64LossesThroughAFloat32LossCheck>(
-            [], [TensorData(DType.Float64, [3L, 4L], 0.5, -1.0, 2.0, 0.25, 1.5, 3.0, -2.0, 0.0, -0.75, 1.0, 2.5, -1.5)]));
+        Assert.True(AutoTest.AdvancedTestGraph<AutoGradFloat64LossesThroughAFloat32LossCheck>([], [Float64Scores, Float64SoftmaxTolerance]));
+        Assert.True(AutoTest.AdvancedTestGraph<AutoGradLossesAtInt32LabelsCheck>([], [Float64Scores, Float64SoftmaxTolerance]));
+        RunTensor<AutoGradMeanCrossEntropyOverWeightsSummingToZeroCheck>([3L, 4L], 0.5f, -1f, 2f, 0.25f, 1.5f, 3f, -2f, 0f, -0.75f, 1f, 2.5f, -1.5f);
     }
+
+    private static TensorData Float64Scores => TensorData(DType.Float64, [3L, 4L], 0.5, -1.0, 2.0, 0.25, 1.5, 3.0, -2.0, 0.0, -0.75, 1.0, 2.5, -1.5);
+
+    // The card's float64 Softmax and LogSoftmax are ONNX Runtime's, good to about 1e-8.
+    private static TensorData Float64SoftmaxTolerance => TensorData(DType.Float64, [], CudaFactAttribute.RunsOnACard ? 1e-7 : 1e-12);
 
     [Fact]
     public void TestAutoGradLossGradients()

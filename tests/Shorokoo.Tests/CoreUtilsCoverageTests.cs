@@ -2247,6 +2247,25 @@ public class CoreUtilsCoverageTests
         Assert.Same(unread, Assert.Throws<InvalidOperationException>(() => compiled.ReadNodePlacement()));
     }
 
+    [Fact]
+    public void TestAProfileAnotherHandleHoldsForAMomentIsReadOnceItIsLetGo()
+    {
+        using var traced = new ComputeContext { Diagnostics = new DiagnosticSettings { TraceNodePlacement = true } };
+        var compiled = Doubling(traced);
+        compiled.Execute(ThreeFloats());
+        var profile = Assert.Single(Directory.GetFiles(((OrtSession)compiled.Session).ProfileDirectory!, "*.json"));
+        var held = new FileStream(profile, FileMode.Open, FileAccess.ReadWrite, OperatingSystem.IsWindows() ? FileShare.ReadWrite : FileShare.None);
+        var letGo = Task.Delay(200).ContinueWith(_ => held.Dispose());
+        try
+        {
+            Assert.NotEmpty(compiled.ReadNodePlacement()!.Nodes);
+        }
+        finally
+        {
+            letGo.Wait();
+        }
+    }
+
     /// <summary>
     /// The profiler's output prefix is read when profiling is switched on and a later change is
     /// ignored, so a session built to trace its nodes has to set the prefix first or write its

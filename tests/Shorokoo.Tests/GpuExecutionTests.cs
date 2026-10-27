@@ -1504,6 +1504,10 @@ public class GpuExecutionTests
         Assert.All(expected.Zip(actual), p => Assert.Equal(p.First, p.Second, 1e-4f));
     }
 
+    [CudaFact]
+    public void CudaProvider_AnAuditTakesItsReferenceRunFromTheHostWhateverTheDefaultBackend()
+        => Assert.True(Utils.QeeAudit.OrtOnly<Modules.AutoGradRmsNormInputCheck>(Utils.QeeAudit.F32([2L, 3L], 0.5f, -1f, 2f, 1.5f, -0.5f, 1f)));
+
     private sealed class HostOrtBackend : OrtBackend;
 
     [CudaFact]

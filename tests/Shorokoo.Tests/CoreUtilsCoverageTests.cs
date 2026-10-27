@@ -1647,6 +1647,26 @@ public class CoreUtilsCoverageTests
         Assert.Equal((0L, 4 * G, 4 * G), MemoryTheSystemWouldNotTakeBackStaysCountedAsCommitted());
         Assert.Equal((false, false, true), ABlockACallLetGoOfGoesBackWithinItOnlyToARequestOnTheStreamItWasTakenOn());
         Assert.Equal((1, 0), (WaitsForTheCardAsACallEnds(unfinished: true), WaitsForTheCardAsACallEnds(unfinished: false)));
+        Assert.Equal((4 * G + 512, 0L, 4 * G + 512), ASmallBlockACallIsHandedAfterLettingGoOfALargeOneGoesBackToTheSharedArena());
+    }
+
+    private static (long, long, long) ASmallBlockACallIsHandedAfterLettingGoOfALargeOneGoesBackToTheSharedArena()
+    {
+        var card = new FakeCard();
+        var allocator = card.Allocator;
+        var account = allocator.Open("probe");
+        for (var call = 0; call < 3; call++)
+            using (CachingAllocator.Charge(null, account))
+            {
+                var large = allocator.Allocate(4 * FakeCard.GranuleBytes, out _, stream: 1);
+                var small = allocator.Allocate(512, out _, stream: 1);
+                allocator.Free(large);
+                var output = allocator.Allocate(512, out _);
+                allocator.Free(small);
+                allocator.Free(output);
+            }
+        var statistics = allocator.Statistics(account);
+        return (statistics.TotalAllocatedBytes, statistics.ArenaShrinkageCount, statistics.MaxInUseBytes);
     }
 
     private static int WaitsForTheCardAsACallEnds(bool unfinished)

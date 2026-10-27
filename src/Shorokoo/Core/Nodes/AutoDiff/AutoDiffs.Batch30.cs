@@ -171,21 +171,23 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         }
 
         // lossGrad / Σ weightPerSample, the factor a "mean" reduction scales each sample's gradient
-        // by. Where every sample is ignored (activeMask) it is zero, as PyTorch has it, rather than
-        // the NaN of 0 · (1 / 0); where some are not and their weights sum to zero, it divides by
-        // that zero, as PyTorch's does. Without an ignore index there is no such case to guard: a
-        // batch of no samples has no gradient to scale. A half-precision sum is taken in float32,
+        // by. With an ignore index it is per sample, [labels]-shaped, and zero at every ignored
+        // sample (activeMask), as PyTorch has it, rather than the NaN of 0 · (1 / 0): an ignored
+        // sample's gradient is zero even where the active weights sum to zero, where the active
+        // samples' factor divides by that zero, as PyTorch's does, and a batch whose every sample
+        // is ignored has a zero gradient. Without an ignore index it is one value, and a weight sum
+        // of zero divides every sample's gradient by it. A half-precision sum is taken in float32,
         // as float16 counts only to 65504.
         private static Variable MeanScale(Variable lossGrad, Variable weightPerSample, Variable? activeMask, DType floatType)
         {
             var wide = floatType == DType.Float16 || floatType == DType.BFloat16 ? DType.Float32 : floatType;
             Variable Widened(Variable v) => wide == floatType ? v : OnnxOp.Cast(v, saturate: null, to: wide);
-            Variable Sum(Variable v) => OnnxOp.ReduceSum(Widened(v), axes: null, keepdims: false, noopWithEmptyAxes: false);
-            Variable scale = OnnxOp.Div(Widened(lossGrad), Sum(weightPerSample));
+            Variable scale = OnnxOp.Div(Widened(lossGrad),
+                OnnxOp.ReduceSum(Widened(weightPerSample), axes: null, keepdims: false, noopWithEmptyAxes: false));
             if (activeMask is not null)
             {
                 var zero = OnnxOp.Cast(Scalar(0.0f), saturate: null, to: wide);
-                scale = OnnxOp.Where(OnnxOp.Equal(Sum(activeMask), zero), zero, scale);
+                scale = OnnxOp.Where(OnnxOp.Equal(Widened(activeMask), zero), zero, scale);
             }
             return wide == floatType ? scale : OnnxOp.Cast(scale, saturate: null, to: floatType);
         }

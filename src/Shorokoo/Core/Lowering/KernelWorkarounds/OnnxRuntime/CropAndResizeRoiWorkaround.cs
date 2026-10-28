@@ -42,8 +42,12 @@ using static OpCodes;
 /// <c>not_smaller</c> policy. Scales stay scales, with a grown axis given one that floors to
 /// <c>2L−1</c>; sizes are written out under <c>stretch</c>.</para>
 /// </summary>
-internal sealed class CropAndResizeRoiWorkaround : KernelWorkaround
+internal class CropAndResizeRoiWorkaround : KernelWorkaround
 {
+    /// <summary>Whether the choice the input's shape makes is an <c>If</c> holding each sequence in a
+    /// branch, rather than a <c>Where</c> over both, computed alike.</summary>
+    protected virtual bool Branches => true;
+
     public override IReadOnlySet<string> OpCodes { get; } = new HashSet<string>([RESIZE], StringComparer.Ordinal);
 
     public override bool Applies(WorkaroundSite site)
@@ -56,7 +60,7 @@ internal sealed class CropAndResizeRoiWorkaround : KernelWorkaround
     public override Variable?[] Rewrite(WorkaroundSite site, Variable?[] inputs)
     {
         var a = site.Attributes;
-        return [CropAndResize(Growth(site) == AxisGrowth.Unknown, inputs[0]!, inputs[1]!, inputs[2], inputs[3],
+        return [CropAndResize(Growth(site) == AxisGrowth.Unknown, Branches, inputs[0]!, inputs[1]!, inputs[2], inputs[3],
             a.GetBoolVal(AttrAntialias), a.GetLongsVal(AttrAxes), a.GetFloatVal(AttrCubicCoeffA),
             a.GetBoolVal(AttrExcludeOutside), a.GetFloatVal(AttrExtrapolationValue),
             a.GetEnumVal<KeepAspectRatioPolicy>(AttrKeepAspectRatioPolicy),
@@ -93,7 +97,7 @@ internal sealed class CropAndResizeRoiWorkaround : KernelWorkaround
         return roi is not null && mayGrow.Any(i => scales[i] == 1f) ? AxisGrowth.WhenLonger : AxisGrowth.Unknown;
     }
 
-    private static Variable CropAndResize(bool choose, Variable x, Variable roi, Variable? scales,
+    private static Variable CropAndResize(bool choose, bool branches, Variable x, Variable roi, Variable? scales,
         Variable? sizes, bool? antialias, long[]? axes,
         float? cubicCoeffA, bool? excludeOutside,
         float? extrapolationValue, KeepAspectRatioPolicy? keepAspectRatioPolicy,
@@ -140,6 +144,26 @@ internal sealed class CropAndResizeRoiWorkaround : KernelWorkaround
         var cropped = Slice(grown, Mul(outDims, Globals.Scalar(0L)), grownDims,
             axes is null ? Range(Globals.Scalar(0L), Size(dims), Globals.Scalar(1L)) : Globals.Vector(axes), Add(twice, Globals.Scalar(1L)));
 
-        return choose ? Ops.IfElse((Scalar<bit>)anyGrows, cropped, plain) : cropped;
+        if (!choose) return cropped;
+        return branches ? Ops.IfElse((Scalar<bit>)anyGrows, cropped, plain) : Where(anyGrows, cropped, plain);
     }
+}
+
+/// <summary>
+/// <see cref="CropAndResizeRoiWorkaround"/> with the choice the input's shape makes taken by a
+/// <c>Where</c> over the plain call and the sequence, both computed, rather than by an <c>If</c>
+/// (Shorokoo/Shorokoo#538).
+///
+/// <para>Built with ONNX Runtime's CUDA execution provider and graph optimizations off, a session
+/// holding such an <c>If</c> stops the process: the branches read the call's constant <c>roi</c>,
+/// which the choice before them reads too, and the provider cannot place one initializer read
+/// inside and outside a branch. The two results have one shape, so the <c>Where</c> keeps the graph
+/// free of branches, at the cost of computing both on every run.</para>
+///
+/// <para>Part of the CUDA set only (<see cref="Shorokoo.Core.Backends.KernelWorkaroundSets.OnnxRuntimeCuda"/>),
+/// in that workaround's place.</para>
+/// </summary>
+internal sealed class CudaCropAndResizeRoiWorkaround : CropAndResizeRoiWorkaround
+{
+    protected override bool Branches => false;
 }

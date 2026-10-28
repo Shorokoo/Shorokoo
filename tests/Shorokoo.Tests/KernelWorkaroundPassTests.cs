@@ -261,6 +261,7 @@ public class KernelWorkaroundPassTests
         Assert.Equal(KernelWorkaroundRegistry.OnnxRuntime.Workarounds.Select(w => w switch
             {
                 ReduceNoopEmptyAxesWorkaround => new CudaReduceNoopAxesWorkaround().Name,
+                CropAndResizeRoiWorkaround => new CudaCropAndResizeRoiWorkaround().Name,
                 CubicResizeMiddleAxesWorkaround => new CudaResizeMiddleAxesWorkaround().Name,
                 HalfScatterReductionWorkaround => new CudaBFloat16ScatterReductionWorkaround().Name,
                 _ => w.Name,
@@ -506,7 +507,7 @@ public class KernelWorkaroundPassTests
             null, null, null, CoordinateTransformationMode.Tf_crop_and_resize, null, null, -1f, null, ResizeMode.Cubic, null));
         InternalComputationGraph Sized(Variable sizes) => Graph(y, OnnxOp.Resize(y, null, null, sizes, null, null, null, null, null, null, null, ResizeMode.Linear, null));
         Assert.Equal(0, CudaIfs(Crop(Vector(1f, 2f, 2f, 1f))));
-        Assert.Equal(0, CudaIfs(Crop(computed)));
+        Assert.Equal(-1, CudaIfs(Crop(computed)));
         Assert.Equal(0, CudaIfs(Sized(OnnxOp.Concat([OnnxOp.Shape(y, end: 2), Vector(8L, 10L)], 0L)), [1L, 3L, 4L, 5L]));
         Assert.True(StatedRegroupedOnCuda(Sized(OnnxOp.Concat([OnnxOp.Shape(y, end: 1), Vector(6L, 8L), OnnxOp.Shape(y, start: 3)], 0L)), data));
     }

@@ -1480,6 +1480,16 @@ public class GpuExecutionTests
     }
 
     [CudaFact]
+    public void CudaProvider_ARangeReturnedBesideTheGatherItDrivesIsRefusedAsOnTheHost()
+    {
+        var x = InputTensor<float32>("x", rank: 2);
+        var r = OnnxOp.Range(Scalar(0L), OnnxOp.Gather(OnnxOp.Shape(x), Scalar(0L), axis: 0), Scalar(1L));
+        using var context = new ComputeContext();
+        Assert.Equal(ErrorCodes.OU002, Assert.Throws<UnsupportedDTypeException>(() => context.Execute(
+            new InternalComputationGraph([x], [r, OnnxOp.Gather(x, r, axis: 0)]), TensorData([3L, 2L], [0f, 1f, 2f, 3f, 4f, 5f]).Shared())).ErrorCode);
+    }
+
+    [CudaFact]
     public void CudaProvider_AnOptionalOfAComputedTensorRunsOnTheCard()
     {
         var x = InputTensor<float32>("x", rank: 1);

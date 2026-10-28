@@ -1535,6 +1535,16 @@ public class GpuExecutionTests
     }
 
     [CudaFact]
+    public void CudaProvider_ALinearResizeOfUInt8ComputesWhatTheHostDoes()
+    {
+        var x = InputTensor<uint8>("x", rank: 4);
+        var data = TensorData([1L, 1L, 1L, 8L], new byte[] { 0, 255, 255, 0, 0, 255, 0, 0 });
+        Variable Linear(float scale) => OnnxOp.Resize(x, null, Vector(1f, 1f, 1f, scale), null, null, null, null, null, null, null, null, ResizeMode.Linear, null);
+        Assert.Equal([0, 97, 247, 255, 217, 67, 0, 0, 127, 232, 82, 0, 0], OnTheCard(x, Linear(1.7f), data).CopyMemory<byte>());
+        Assert.Equal([84, 255, 0, 170], OnTheCard(x, Linear(0.6f), data).CopyMemory<byte>());
+    }
+
+    [CudaFact]
     public void CudaProvider_ACallKeptOnTheHostOverAShapeBuildsItsSessionOnTheCard()
     {
         var x = InputTensor<float32>("x", rank: 2);

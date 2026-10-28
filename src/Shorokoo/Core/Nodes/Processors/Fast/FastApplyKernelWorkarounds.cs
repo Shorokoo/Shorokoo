@@ -193,7 +193,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// <summary>
         /// Marks <see cref="FastNode.RunsOnHost"/> the shape arithmetic a call kept on the host reads:
         /// every <c>Shape</c> and <c>Size</c> whose result reaches an input of such a call, and every
-        /// node on the way, whose inputs all come from such arithmetic or a <c>Constant</c>.
+        /// node on the way, whose inputs all come from such arithmetic, a <c>Constant</c>, a parameter
+        /// or an input of the graph: the CPU provider reads each as it reads an initializer.
         ///
         /// <para>ONNX Runtime's CUDA execution provider computes a <c>Shape</c> or <c>Size</c> into
         /// host memory; a session that assigns a node reading that result, directly or through such
@@ -205,7 +206,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         {
             var producers = graph.BuildProducerByOutputMap();
             // Of a value: null where it is not such arithmetic, false where it is computed from
-            // constants alone, true where a Shape or Size reaches it.
+            // constants, parameters and graph inputs alone, true where a Shape or Size reaches it.
             var arithmetic = new Dictionary<FastTensorKey, bool?>();
             bool? Of(FastTensorKey key)
             {
@@ -215,7 +216,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 if (producers.TryGetValue(key, out var producer))
                 {
                     if (producer.OpCode is OpCodes.SHAPE or OpCodes.SIZE) result = true;
-                    else if (producer.OpCode == OpCodes.CONSTANT) result = false;
+                    else if (producer.OpCode == OpCodes.CONSTANT || producer.IsModelInput() || producer.IsModelParamData()) result = false;
                     else if (!FastOpsetResolver.IsOpenOpCode(producer.OpCode) && !FastOpsetResolver.IsCloseOpCode(producer.OpCode)
                              && producer.Inputs.Any(k => k is { IsEmpty: false }))
                     {

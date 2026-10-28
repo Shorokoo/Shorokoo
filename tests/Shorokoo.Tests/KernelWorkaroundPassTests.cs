@@ -419,6 +419,10 @@ public class KernelWorkaroundPassTests
             => OnnxOp.Resize(x, null, Vector(1f, 1f, 1f, scale), null, antialias, null, null, null, null, null, null, mode, null);
         Assert.True(KeptOnHost(Graph(u, Resized(u, ResizeMode.Linear, null)), [RESIZE], data));
         Assert.True(KeptOnHost(Graph(u, Resized(u, ResizeMode.Linear, false, 0.6f)), [RESIZE], data));
+        Variable Sized(Variable sizes) => OnnxOp.Resize(u, null, null, sizes, null, null, null, null, null, null, null, ResizeMode.Linear, null);
+        Assert.True(KeptOnHost(Graph(u, Sized(Vector(1L, 1L, 1L, 16L))), [RESIZE], data));
+        Assert.True(KeptOnHost(Graph(u, Sized(OnnxOp.Shape(u))), [SHAPE, RESIZE], data));
+        Assert.True(KeptOnHost(Graph(u, Sized(OnnxOp.Mul(OnnxOp.Shape(u), Vector(1L, 1L, 1L, 2L)))), [SHAPE, MUL, RESIZE], data));
         Assert.Empty(HostKept(Graph(u, Resized(u, ResizeMode.Linear, true))));
         Assert.Empty(HostKept(Graph(u, Resized(u, ResizeMode.Cubic, null))));
         Assert.Empty(HostKept(Graph(f, Resized(f, ResizeMode.Linear, null))));

@@ -1540,6 +1540,10 @@ public class GpuExecutionTests
         Variable Linear(float scale) => OnnxOp.Resize(x, null, Vector(1f, 1f, 1f, scale), null, null, null, null, null, null, null, null, ResizeMode.Linear, null);
         Assert.Equal([0, 97, 247, 255, 217, 67, 0, 0, 127, 232, 82, 0, 0], OnTheCard(x, Linear(1.7f), data).CopyMemory<byte>());
         Assert.Equal([84, 255, 0, 170], OnTheCard(x, Linear(0.6f), data).CopyMemory<byte>());
+        Variable Sized(Variable sizes) => OnnxOp.Resize(x, null, null, sizes, null, null, null, null, null, null, null, ResizeMode.Linear, null);
+        byte[] OnTheHost(Variable resized) => QeeAuditOnBackend.Reference.Execute(new InternalComputationGraph([x], [resized]), data.Shared())[0].ToTensorData().CopyMemory<byte>();
+        foreach (var resized in (Variable[])[Sized(Vector(1L, 1L, 1L, 16L)), Sized(OnnxOp.Shape(x)), Sized(OnnxOp.Mul(OnnxOp.Shape(x), Vector(1L, 1L, 1L, 2L)))])
+            Assert.Equal(OnTheHost(resized), OnTheCard(x, resized, data).CopyMemory<byte>());
     }
 
     [CudaFact]

@@ -1478,8 +1478,7 @@ public class GpuExecutionTests
         return [.. compiled.Execute(data.Shared()).Select(o => o.ToTensorData().Shape.Dims)];
     }
 
-    // Shorokoo/Shorokoo#539: the CUDA Resize kernel returns zeros for tf_crop_and_resize.
-    [CudaFact(Skip = "Shorokoo/Shorokoo#539")]
+    [CudaFact]
     public void CudaProvider_ACropAndResizeCropsToItsRoiOnTheCard()
     {
         var x = InputTensor<float32>("x", rank: 4);

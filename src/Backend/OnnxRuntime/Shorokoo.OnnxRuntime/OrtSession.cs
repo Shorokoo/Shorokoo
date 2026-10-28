@@ -50,6 +50,11 @@ internal sealed class OrtSession : IShorokooSession
     // it as a bare pointer.
     private readonly OrtMemoryInfo? _cardMemory;
 
+    // Whether ONNX Runtime can say where each of the session's outputs is, asked once, on a CUDA session
+    // only: it cannot for an output its graph optimizations removed the producer of, which a run then
+    // returns as a value of no type.
+    private readonly Lazy<bool> _outputsLocated;
+
     // The pinned host arena a CUDA session stages its crossings through, which ONNX Runtime keeps
     // for itself, and the memory info naming it -- both in fields for the reason the one above is.
     // Built on first ask, because no session needs them unless something asked for its figures; a
@@ -154,6 +159,7 @@ internal sealed class OrtSession : IShorokooSession
         // The info names the card's memory as a binding wants it: ONNX Runtime binds an output to
         // the device an info names, and allocates it there from the session's allocator for it.
         _cardMemory = cudaDeviceId is { } device ? CudaMemoryInfo(device) : null;
+        _outputsLocated = new Lazy<bool>(OutputsLocated);
         _pinnedAllocator = new Lazy<OrtAllocator?>(CreatePinnedAllocator);
         // Last, so that a constructor that throws leaves the folder unclaimed for the caller to delete.
         if (profileDirectory is not null) _profileClaim = OrtPlacements.ClaimFolder(profileDirectory);
@@ -705,10 +711,14 @@ internal sealed class OrtSession : IShorokooSession
     }
 
     /// <summary>Whether output <paramref name="name"/> is left on this session's card: on a CUDA
-    /// session, every tensor output but a string one.</summary>
+    /// session, every tensor output but a string one, unless ONNX Runtime cannot say where the
+    /// session's outputs are. Such a session has an output whose producer its graph optimizations
+    /// removed, which the run returns as a value of no type: bound to the host, that value comes back
+    /// as it does from a host session and is refused as such (<c>OU002</c>), where bound to the card
+    /// ONNX Runtime fails to copy it there.</summary>
     private bool OnTheCard(string name)
     {
-        if (_cardMemory is null) return false;
+        if (_cardMemory is null || !_outputsLocated.Value) return false;
         var output = _session.OutputMetadata[name];
         return output.IsTensor && output.ElementDataType != TensorElementType.String;
     }
@@ -788,6 +798,23 @@ internal sealed class OrtSession : IShorokooSession
         }
         // Not said is answered as such, and the caller takes nothing for read on the card.
         catch (Exception) { return null; }
+    }
+
+    /// <summary>Whether ONNX Runtime says where each of the session's outputs is: it refuses to for
+    /// an output no node of its graph produces and no initializer holds.</summary>
+    private bool OutputsLocated()
+    {
+        try
+        {
+            using var outputs = _session.GetMemoryInfosForOutputs();
+            // For the reason DiscoverPlacement gives.
+            GC.KeepAlive(_session);
+            return true;
+        }
+        catch (OnnxRuntimeException) { return false; }
+        // A native build that cannot be asked says nothing either way, and the outputs stay where
+        // they would be.
+        catch (Exception) { return true; }
     }
 
     /// <summary>ORT's memory info for a CUDA device's memory, as a binding names the device an

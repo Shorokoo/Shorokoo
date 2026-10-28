@@ -416,7 +416,8 @@ public class KernelWorkaroundPassTests
     {
         var u = InputTensor<uint8>("u", rank: 4);
         var f = InputTensor<float32>("f", rank: 4);
-        var data = TensorData([1L, 1L, 1L, 8L], new byte[] { 0, 255, 255, 0, 0, 255, 0, 0 });
+        byte[] row = [0, 255, 255, 0, 0, 255, 0, 0];
+        var data = TensorData([1L, 1L, 1L, 8L], row);
         Variable Resized(Variable x, ResizeMode mode, bool? antialias, float scale = 1.7f)
             => OnnxOp.Resize(x, null, Vector(1f, 1f, 1f, scale), null, antialias, null, null, null, null, null, null, mode, null);
         Assert.True(KeptOnHost(Graph(u, Resized(u, ResizeMode.Linear, null)), [RESIZE], data));

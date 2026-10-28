@@ -623,7 +623,8 @@ shape and type.
       build with graph optimizations off
       ([#538](https://github.com/Shorokoo/Shorokoo/issues/538)).
     - On a card, a linear uint8 `Resize` without `antialias`: the CUDA provider
-      computes it wrongly. It runs on the host.
+      computes it wrongly. It runs on the host, whether it gives scales or sizes
+      ([#557](https://github.com/Shorokoo/Shorokoo/issues/557)).
     - A `Resize` with an `axes` attribute: ONNX Runtime's transpose optimizer
       moves a `Transpose` through it as though its `roi`, `scales` and `sizes`
       held one entry per input axis, so the session fails, or reorders them

@@ -485,8 +485,9 @@ takes and has no kernel for in a given type or form are kept on the host by the 
 built: a reducing `ScatterND` of any type but float32, float16 and bfloat16 — a float64 table's
 gradient is one — and a blocked `QuantizeLinear` or `DequantizeLinear` of quantized type int8 or
 uint8 ([#541](https://github.com/Shorokoo/Shorokoo/issues/541)), and a linear uint8 `Resize` without
-`antialias`, which the provider computes wrongly; the `Shape` and `Size` such a call reads, and what
-is computed from them on the way, stay on the host with it. Each costs a copy of its operands to
+`antialias`, which the provider computes wrongly ([#557](https://github.com/Shorokoo/Shorokoo/issues/557));
+the `Shape` and `Size` such a call reads, and what is computed from them on the way, stay on the
+host with it ([#558](https://github.com/Shorokoo/Shorokoo/issues/558)). Each costs a copy of its operands to
 the host and of its result back. A reducing bfloat16 `ScatterND` stays on the card, computed as
 float32 and cast back ([operator-support.md](operator-support.md#shape--data-movement)). ONNX
 Runtime's own notice

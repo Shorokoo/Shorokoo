@@ -8,7 +8,7 @@ using static OnnxOpAttributeNames;
 using static OpCodes;
 
 /// <summary>
-/// A linear <c>Resize</c> of uint8 without <c>antialias</c>, kept on the host.
+/// A linear <c>Resize</c> of uint8 without <c>antialias</c>, kept on the host (Shorokoo/Shorokoo#557).
 ///
 /// <para>ONNX Runtime's CUDA execution provider computes such a call wrongly, with no error: a row
 /// <c>[0, 255, 255, 0, 0, 255, 0, 0]</c> resized by 1.7 comes out all zeros, by 0.6 as

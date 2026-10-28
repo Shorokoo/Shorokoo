@@ -198,7 +198,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         ///
         /// <para>ONNX Runtime's CUDA execution provider computes a <c>Shape</c> or <c>Size</c> into
         /// host memory; a session that assigns a node reading that result, directly or through such
-        /// arithmetic, to the CPU provider by its name stops the process while it is built. On the host, that arithmetic is computed where the
+        /// arithmetic, to the CPU provider by its name stops the process while it is built (Shorokoo/Shorokoo#558). On the host, that arithmetic is computed where the
         /// call reads it. A value the arithmetic does not reach — the data a call reads, say — stays where the
         /// session places it.</para>
         /// </summary>

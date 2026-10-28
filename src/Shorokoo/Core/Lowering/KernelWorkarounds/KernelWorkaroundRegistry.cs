@@ -47,6 +47,7 @@ internal static class KernelWorkaroundRegistry
     public static KernelWorkaroundSet OnnxRuntimeCuda { get; } = new(KernelWorkaroundSets.OnnxRuntimeCuda,
         [.. OnnxRuntimeWorkarounds.Select(w => w switch
             {
+                ReduceNoopEmptyAxesWorkaround => new CudaReduceNoopAxesWorkaround(),
                 CubicResizeMiddleAxesWorkaround => new CudaResizeMiddleAxesWorkaround(),
                 HalfScatterReductionWorkaround => new CudaBFloat16ScatterReductionWorkaround(),
                 _ => w,

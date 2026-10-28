@@ -260,6 +260,7 @@ public class KernelWorkaroundPassTests
         Assert.Same(KernelWorkaroundRegistry.OnnxRuntimeCuda, KernelWorkaroundRegistry.For(KernelWorkaroundSets.OnnxRuntimeCuda));
         Assert.Equal(KernelWorkaroundRegistry.OnnxRuntime.Workarounds.Select(w => w switch
             {
+                ReduceNoopEmptyAxesWorkaround => new CudaReduceNoopAxesWorkaround().Name,
                 CubicResizeMiddleAxesWorkaround => new CudaResizeMiddleAxesWorkaround().Name,
                 HalfScatterReductionWorkaround => new CudaBFloat16ScatterReductionWorkaround().Name,
                 _ => w.Name,
@@ -405,6 +406,37 @@ public class KernelWorkaroundPassTests
         Assert.True(KeptOnHost(Graph(f, OnnxOp.ScatterND(OnnxOp.Mul(OnnxOp.Shape(f), Scalar(3L)), first, Vector(4L), ScatterNDReduction.Min)), [SHAPE, MUL, SCATTER_ND], data));
         Assert.True(KeptOnHost(Graph(f, OnnxOp.ScatterND(OnnxOp.Shape(OnnxOp.Shape(f)), first, Vector(4L), ScatterNDReduction.Max)), [SHAPE, SHAPE, SCATTER_ND], data));
         Assert.True(KeptOnHost(Graph(f, OnnxOp.ScatterND(OnnxOp.Cast(f, null, DType.Int64), OnnxOp.Reshape(Vector(0L, 1L), Vector(1L, 2L), false), Vector(5L), ScatterNDReduction.Add)), [SCATTER_ND], data));
+    }
+
+    [Fact]
+    public void TestTheCudaSetViewsANoopL1L2SumSquareOrLogSumWithATrailingAxisWhateverItsInput()
+    {
+        var f = InputTensor<float32>("f", rank: 2);
+        var s = InputTensor<float32>("s", rank: 0);
+        var i = InputTensor<int64>("i", rank: 1);
+        var axes = InputTensor<int64>("axes", rank: 1);
+        var full = TensorData(DType.Float32, [2L, 3L], 1f, -2f, 3f, 4f, 5f, -6f);
+        var positive = TensorData(DType.Float32, [2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f);
+        var (none, second) = (TensorData(DType.Int64, [0L], Array.Empty<object>()), TensorData([1L], [1L]));
+        Variable Noop(ReduceKind kind, Variable x, Variable? a = null, bool keepDims = true) => kind switch
+        {
+            ReduceKind.L1 => OnnxOp.ReduceL1(x, a, keepDims, true),
+            ReduceKind.L2 => OnnxOp.ReduceL2(x, a, keepDims, true),
+            ReduceKind.LogSum => OnnxOp.ReduceLogSum(x, a, keepDims, true),
+            ReduceKind.SumSquare => OnnxOp.ReduceSumSquare(x, a, keepDims, true),
+            _ => OnnxOp.ReduceSum(x, a, keepDims, true),
+        };
+        Assert.True(NoopOnCuda(Graph(f, Noop(ReduceKind.SumSquare, f)), full));
+        Assert.True(NoopOnCuda(Graph(f, Noop(ReduceKind.L1, f, keepDims: false)), full));
+        Assert.True(NoopOnCuda(Graph(f, Noop(ReduceKind.L2, f, Vector(Array.Empty<long>()))), full));
+        Assert.True(NoopOnCuda(Graph(f, Noop(ReduceKind.LogSum, f)), positive));
+        Assert.True(NoopOnCuda(Graph(s, Noop(ReduceKind.SumSquare, s)), TensorData([], -3f)));
+        Assert.True(NoopOnCuda(Graph(i, Noop(ReduceKind.L1, i)), TensorData([3L], [-2L, 0L, 5L])));
+        Assert.True(NoopOnCuda(new([f, axes], [Noop(ReduceKind.SumSquare, f, axes)]), full, none));
+        Assert.True(NoopOnCuda(new([f, axes], [Noop(ReduceKind.L1, f, axes, keepDims: false)]), full, second));
+        Assert.True(NoopOnCuda(Graph(f, Noop(ReduceKind.SumSquare, Vector(-1f, 2f))), full));
+        Assert.True(NoopOnCuda(Graph(f, Noop(ReduceKind.Sum, f)), full));
+        Assert.True(CudaAsOnnxRuntime(Graph(f, Noop(ReduceKind.Sum, Vector(-1f, 2f)))));
     }
 
     [Fact]
@@ -1007,6 +1039,16 @@ public class KernelWorkaroundPassTests
     {
         ModelProto Built(KernelWorkaroundSet set) => FastOnnxModelBuilder.BuildInternalOnnxModel(g, prepForOnnx: true, inputDims: dims.Length == 0 ? null : dims, workarounds: set);
         return Bytes(Built(KernelWorkaroundRegistry.OnnxRuntime)).SequenceEqual(Bytes(Built(KernelWorkaroundRegistry.OnnxRuntimeCuda)));
+    }
+
+    private static bool NoopOnCuda(InternalComputationGraph g, params TensorData[] x)
+    {
+        var rewritten = Session(g, KernelWorkaroundRegistry.OnnxRuntimeCuda);
+        var stated = FastOnnxModelBuilder.BuildInternalOnnxModel(g, prepForOnnx: true, inputDims: [.. x.Select(t => t.Shape.Dims)], workarounds: KernelWorkaroundRegistry.OnnxRuntimeCuda);
+        var expected = ShapedRun(g, Session(g, KernelWorkaroundRegistry.OnnxRuntime), x);
+        return AllNodes(rewritten).Where(n => n.Attributes.Any(a => a.Name == "noop_with_empty_axes" && a.I == 1)).All(n => n.Inputs.Count > 1 && n.Inputs[1].Length > 0)
+            && AllNodes(rewritten).Count(n => n.OpType == UNSQUEEZE) > AllNodes(Session(g, null)).Count(n => n.OpType == UNSQUEEZE)
+            && expected.SequenceEqual(ShapedRun(g, rewritten, x)) && expected.SequenceEqual(ShapedRun(g, stated, x));
     }
 
     private static int CudaTransposes(InternalComputationGraph g)

@@ -1438,8 +1438,7 @@ public class GpuExecutionTests
         Assert.Equal([1f, 1f], OnTheCard(f, f.Reduce(ReduceKind.Prod, Vector(1L)), TensorData(DType.Float32, [2L, 0L], Array.Empty<object>())).CopyMemory<float>());
     }
 
-    // Shorokoo/Shorokoo#537: the CUDA reduction kernels pass the input through when no axis is reduced.
-    [CudaFact(Skip = "Shorokoo/Shorokoo#537")]
+    [CudaFact]
     public void CudaProvider_ANoopReductionComputesEachElementsOwnGroupOnTheCard()
     {
         var x = InputTensor<float32>("x", rank: 1);

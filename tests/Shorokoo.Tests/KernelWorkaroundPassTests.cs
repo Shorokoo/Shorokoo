@@ -410,6 +410,21 @@ public class KernelWorkaroundPassTests
     }
 
     [Fact]
+    public void TestTheCudaSetKeepsALinearResizeOfUInt8WithoutAntialiasOnTheHost()
+    {
+        var u = InputTensor<uint8>("u", rank: 4);
+        var f = InputTensor<float32>("f", rank: 4);
+        var data = TensorData([1L, 1L, 1L, 8L], new byte[] { 0, 255, 255, 0, 0, 255, 0, 0 });
+        Variable Resized(Variable x, ResizeMode mode, bool? antialias, float scale = 1.7f)
+            => OnnxOp.Resize(x, null, Vector(1f, 1f, 1f, scale), null, antialias, null, null, null, null, null, null, mode, null);
+        Assert.True(KeptOnHost(Graph(u, Resized(u, ResizeMode.Linear, null)), [RESIZE], data));
+        Assert.True(KeptOnHost(Graph(u, Resized(u, ResizeMode.Linear, false, 0.6f)), [RESIZE], data));
+        Assert.Empty(HostKept(Graph(u, Resized(u, ResizeMode.Linear, true))));
+        Assert.Empty(HostKept(Graph(u, Resized(u, ResizeMode.Cubic, null))));
+        Assert.Empty(HostKept(Graph(f, Resized(f, ResizeMode.Linear, null))));
+    }
+
+    [Fact]
     public void TestTheCudaSetViewsANoopL1L2SumSquareOrLogSumWithATrailingAxisWhateverItsInput()
     {
         var f = InputTensor<float32>("f", rank: 2);

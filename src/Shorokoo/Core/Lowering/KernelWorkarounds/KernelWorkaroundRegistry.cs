@@ -64,6 +64,7 @@ internal static class KernelWorkaroundRegistry
         new CudaReduceEmptyAxisWorkaround(),
         new CudaNoKernelFormOnHostWorkaround(),
         new CudaCropAndResizeConstantRoiWorkaround(),
+        new CudaUInt8LinearResizeOnHostWorkaround(),
     ];
 
     private static ImmutableArray<KernelWorkaround> OnnxRuntimeWorkarounds =>

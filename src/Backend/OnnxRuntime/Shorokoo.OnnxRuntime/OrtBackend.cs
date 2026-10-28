@@ -1279,6 +1279,13 @@ public abstract class OrtBackend : IShorokooBackend
     /// single copy, which crashes the process when the node runs
     /// (<see href="https://github.com/Shorokoo/Shorokoo/issues/535">Shorokoo/Shorokoo#535</see>).</para>
     ///
+    /// <para>On a card, every node whose name holds <see cref="KernelWorkaroundSets.HostNodeNameSuffix"/>
+    /// is assigned to the CPU execution provider (<c>session.name_based_layer_assignment</c>): the calls
+    /// the CUDA kernel-workaround set keeps on the host, which the CUDA provider would take and then
+    /// fail (<see href="https://github.com/Shorokoo/Shorokoo/issues/541">Shorokoo/Shorokoo#541</see>).
+    /// The name rides on the node into the graph the session writes out, so a session built from that
+    /// graph assigns it the same way.</para>
+    ///
     /// <para>Deliberately absent: <c>session.set_denormal_as_zero</c>. ORT applies that entry to
     /// the constructing thread once per process (first session wins) by setting FTZ/DAZ in its
     /// MXCSR, which then flushes every later float and double operation on that thread — the
@@ -1306,6 +1313,7 @@ public abstract class OrtBackend : IShorokooBackend
         if (trainingStep) disabled.Add("CommonSubexpressionElimination");
         if (onCard) disabled.Add("ConstantSharing");
         if (disabled.Count > 0) options.AddSessionConfigEntry("optimization.disable_specified_optimizers", string.Join(",", disabled));
+        if (onCard) options.AddSessionConfigEntry("session.name_based_layer_assignment", $"cpu({KernelWorkaroundSets.HostNodeNameSuffix})");
     }
 
     /// <summary>

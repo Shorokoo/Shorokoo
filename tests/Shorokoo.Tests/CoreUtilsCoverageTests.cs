@@ -1647,6 +1647,62 @@ public class CoreUtilsCoverageTests
         Assert.Equal((0L, 4 * G, 4 * G), MemoryTheSystemWouldNotTakeBackStaysCountedAsCommitted());
         Assert.Equal((false, false, true), ABlockACallLetGoOfGoesBackWithinItOnlyToARequestOnTheStreamItWasTakenOn());
         Assert.Equal((1, 0), (WaitsForTheCardAsACallEnds(unfinished: true), WaitsForTheCardAsACallEnds(unfinished: false)));
+        Assert.Equal((4 * G + 512, 0L, 4 * G + 512), ASmallBlockACallIsHandedAfterLettingGoOfALargeOneGoesBackToTheSharedArena());
+        Assert.Equal(5 * G, SmallBlocksStayKeptWhereWhatTheAccountHoldsOverItsBusiestIsLargeBlocks());
+        Assert.Equal(4 * G + (1L << 20) + 512, TheSmallestKeptSmallBlockCoveringWhatAnAccountHoldsOverItsBusiestGoesBack());
+    }
+
+    private static long TheSmallestKeptSmallBlockCoveringWhatAnAccountHoldsOverItsBusiestGoesBack()
+    {
+        var card = new FakeCard();
+        var allocator = card.Allocator;
+        var account = allocator.Open("probe");
+        using (CachingAllocator.Charge(null, account))
+        {
+            var large = allocator.Allocate(4 * FakeCard.GranuleBytes, out _, stream: 1);
+            IntPtr[] small = [allocator.Allocate(512, out _, stream: 1), allocator.Allocate(1L << 20, out _, stream: 1)];
+            allocator.Free(large);
+            var output = allocator.Allocate(512, out _);
+            foreach (var block in small) allocator.Free(block);
+            allocator.Free(output);
+        }
+        return allocator.Statistics(account).TotalAllocatedBytes;
+    }
+
+    private static long SmallBlocksStayKeptWhereWhatTheAccountHoldsOverItsBusiestIsLargeBlocks()
+    {
+        const long G = FakeCard.GranuleBytes;
+        var card = new FakeCard();
+        var allocator = card.Allocator;
+        var account = allocator.Open("probe");
+        using (CachingAllocator.Charge(null, account))
+        {
+            var large = allocator.Allocate(2 * G, out _, stream: 1);
+            IntPtr[] small = [.. Enumerable.Range(0, 4).Select(index => allocator.Allocate(1L << 20, out _, stream: 1))];
+            allocator.Free(large);
+            foreach (var block in small) allocator.Free(block);
+            allocator.Free(allocator.Allocate(G, out _, stream: 2));
+        }
+        return allocator.Statistics(account).TotalAllocatedBytes;
+    }
+
+    private static (long, long, long) ASmallBlockACallIsHandedAfterLettingGoOfALargeOneGoesBackToTheSharedArena()
+    {
+        var card = new FakeCard();
+        var allocator = card.Allocator;
+        var account = allocator.Open("probe");
+        for (var call = 0; call < 3; call++)
+            using (CachingAllocator.Charge(null, account))
+            {
+                var large = allocator.Allocate(4 * FakeCard.GranuleBytes, out _, stream: 1);
+                var small = allocator.Allocate(512, out _, stream: 1);
+                allocator.Free(large);
+                var output = allocator.Allocate(512, out _);
+                allocator.Free(small);
+                allocator.Free(output);
+            }
+        var statistics = allocator.Statistics(account);
+        return (statistics.TotalAllocatedBytes, statistics.ArenaShrinkageCount, statistics.MaxInUseBytes);
     }
 
     private static int WaitsForTheCardAsACallEnds(bool unfinished)
@@ -2338,6 +2394,8 @@ public class CoreUtilsCoverageTests
         Assert.Matches(@"card\.Limit\s*=\s*deviceMemory\.LimitBytes", source);
         Assert.Matches(@"using\s*\(\s*CachingAllocator\.Charge\s*\(\s*host\s*,\s*card\s*\)\s*\)\s*session\s*=\s*(model\s+is\s+null\s*\?\s*new\s+InferenceSession\s*\([^;:]*:\s*)?new\s+InferenceSession", source);
         Assert.Contains("\"session.use_env_allocators\", \"1\"", File.ReadAllText(
+            Path.Combine(backend, "Shorokoo.OnnxRuntime", "OrtBackend.cs")));
+        Assert.Matches(@"if\s*\(\s*onCard\s*\)\s*options\.AddSessionConfigEntry\s*\(\s*""session\.name_based_layer_assignment""\s*,\s*\$""cpu\(\{KernelWorkaroundSets\.HostNodeNameSuffix\}\)""\s*\)", File.ReadAllText(
             Path.Combine(backend, "Shorokoo.OnnxRuntime", "OrtBackend.cs")));
         Assert.Matches(@"_configureExecutionProvider\s*\(\s*options\s*,\s*deviceMemory\s*,\s*precision\s*\)", source);
 

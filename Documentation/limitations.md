@@ -320,6 +320,19 @@ sequences. They run on CUDA backends, including ones loaded through
 `IsolatedBackend.Load` or `BackendPackage.TryLoad`, and a sequence moves to another
 context element by element.
 
+### On a card, an `Optional` of a computed tensor is read straight back only
+
+ONNX Runtime's `Optional` kernel shares its input's buffer with its output and then
+copies the one onto the other, which the CUDA provider's copy refuses for a buffer on
+the card. A CUDA session therefore writes an `OptionalGetElement` or
+`OptionalHasElement` of the `Optional` of a tensor without the `Optional`
+([debugging.md](debugging.md#the-cuda-set)), which covers an optional built and
+unwrapped in one graph and its gradient. An `Optional` of a tensor the graph computes
+on the card that anything else reads — a branch, a loop, another operator — still
+fails when the session runs it
+([#540](https://github.com/Shorokoo/Shorokoo/issues/540)). An `Optional` of a graph
+input runs.
+
 ### Device-memory readings are process-wide, and device 0's
 
 Device-memory configuration is per context, session and run

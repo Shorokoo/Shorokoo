@@ -226,6 +226,10 @@ shape and type.
      gives 0, that is false: exact for every input, with no branch. A reduction with no
      axes and `noop_with_empty_axes` set is left alone
      ([#382](https://github.com/Shorokoo/Shorokoo/issues/382)).
+   - On a card, after those: the CUDA provider refuses `keepdims` 0 over a reduced
+     axis of extent 0. The call reduces with `keepdims` 1 and a `Squeeze` removes the
+     reduced axes, which gives the empty group's identity as on the host
+     ([#536](https://github.com/Shorokoo/Shorokoo/issues/536)).
 6. Over an integer input, Shorokoo's folding and QEE compute the sum, mean, product,
    L1 norm and sum of squares in the declared width, wrapping as two's complement:
    int32 `ReduceSum([2147483647, 2147483647])` is −2, and the mean of the same pair is
@@ -258,8 +262,8 @@ shape and type.
 | Reshape | ✅ | ✅ | ✅ |
 | ReverseSequence | 🟡 [10] | ✅ | ✅ |
 | Scatter | ❌ [11] | N/A | N/A |
-| ScatterElements | ✅ | ✅ | 🟡 [12] |
-| ScatterND | ✅ | ✅ | 🟡 [12] |
+| ScatterElements | ✅ [21] | ✅ | 🟡 [12] |
+| ScatterND | ✅ [21] | ✅ | 🟡 [12] |
 | Shape | ✅ | ✅ | N/A [2] |
 | Size | ✅ | ✅ | N/A [2] |
 | Slice | ✅ | ✅ | 🟡 [13] |
@@ -348,6 +352,17 @@ shape and type.
     counts from the end. An index outside is the backend's to handle: ONNX
     Runtime's CPU kernel raises its own error, and its CUDA kernel does not check
     and can read a zero row ([#501](https://github.com/Shorokoo/Shorokoo/issues/501)).
+21. ONNX Runtime's CPU provider has no kernel for a reducing `ScatterND` over
+    float16 or bfloat16 data, nor for a reducing `ScatterElements` over bfloat16
+    data or over float16 data with `add` or `mul`. Each such call is computed as
+    float32: the data and updates are cast to float32, scattered, and the result
+    cast back. Float32 holds every value of both types, so `max` and `min` are
+    exact; `add` and `mul` accumulate in float32 and round to the data's type once,
+    so where several updates reach one element the result is the float32 sum or
+    product rounded, which can differ in the last place from rounding after every
+    update. On a card, only a reducing bfloat16 `ScatterND` is computed this way,
+    since the CUDA provider has no kernel for it; every other such call runs on
+    the provider's own kernel, which accumulates in the data's type.
 
 ## Convolution & pooling
 
@@ -586,6 +601,11 @@ shape and type.
       the regrouped positions of the axes it names; one that names axis 0 or 3
       never takes the channels-last route and is left as it stands
       ([#421](https://github.com/Shorokoo/Shorokoo/issues/421)).
+    - On a card, a linear or cubic rank-4 `Resize` whose scales for axes 0 and 3
+      are 1 and for axis 1 is not, in any coordinate transformation mode: the
+      CUDA provider computes it wrongly. It is regrouped the same way, so the
+      resize runs over its last two axes
+      ([#555](https://github.com/Shorokoo/Shorokoo/issues/555)).
     - A `Resize` with an `axes` attribute: ONNX Runtime's transpose optimizer
       moves a `Transpose` through it as though its `roi`, `scales` and `sizes`
       held one entry per input axis, so the session fails, or reorders them

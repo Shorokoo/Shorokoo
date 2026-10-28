@@ -131,6 +131,16 @@ internal sealed class WorkaroundSite
         => shapesAreConcrete && slot < inputKeys.Length && inputKeys[slot] is { } key
            && shapes is not null && shapes.TryGetValue(key, out var shape) ? shape : null;
 
+    /// <summary>
+    /// The dimensions of output slot <paramref name="slot"/>, on the terms <see cref="ShapeOf"/>
+    /// answers an input's: where <see cref="ShapesAreConcrete"/> and they follow from the dimensions
+    /// the graph's inputs are stated with, for a workaround that says it asks, and only of
+    /// <see cref="KernelWorkaround.Applies"/>.
+    /// </summary>
+    public Shape? OutputShapeOf(int slot)
+        => shapesAreConcrete && slot < outputKeys.Length && outputKeys[slot] is { } key
+           && shapes is not null && shapes.TryGetValue(key, out var shape) ? shape : null;
+
     /// <summary>The operator's op code.</summary>
     public string OpCode => node.OpCode;
 

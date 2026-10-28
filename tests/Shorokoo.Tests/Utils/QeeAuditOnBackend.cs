@@ -46,8 +46,9 @@ namespace Shorokoo.Tests.Utils;
 /// refuses fails the audit as well.</para>
 ///
 /// <para><b>Kernel workarounds.</b> Each runtime runs the model a session of its own receives: the
-/// ONNX Runtime reference is built with the ONNX Runtime kernel workarounds, the backend's model with
-/// the backend's own set. A workaround leaves the name of every value it does not touch as it is,
+/// ONNX Runtime reference runs on ONNX Runtime's CPU provider, whatever the default backend, built
+/// with the ONNX Runtime kernel workarounds, and the backend's model with the backend's own set. A
+/// workaround leaves the name of every value it does not touch as it is,
 /// and numbers what it splices in last, so the values compared, and the nodes blamed, are those of
 /// the model built with no workarounds at all. A call a workaround drops has its outputs compared
 /// all the same, as the values that replace them: a node that reads one reads its replacement in
@@ -86,6 +87,12 @@ internal sealed class QeeAuditOnBackend(
     };
 
     // After the tables they read: static fields are initialized in the order they are written.
+
+    /// <summary>The context the ONNX Runtime reference runs on: the CPU provider, whatever the
+    /// default backend, so the reference is the same on a build whose default is a card.</summary>
+    internal static ComputeContext Reference { get; } = new(new HostOrtBackend());
+
+    private sealed class HostOrtBackend : Shorokoo.OnnxRuntime.OrtBackend;
 
     /// <summary>The PyTorch CPU backend's audit.</summary>
     public static QeeAuditOnBackend Torch { get; } = new(() => new TorchCpuBackend(), TorchKnownDisagreements);
@@ -126,7 +133,7 @@ internal sealed class QeeAuditOnBackend(
         ExposeEveryValue(built);
         var compared = built.Graph.Outputs.Select(o => o.Name).ToHashSet();
         var referenceModel = ExposeEveryValue(Build(model, referenceWorkarounds));
-        var reference = ByNeutralName(Values(ComputeContext.Default.ExecuteModel(model, referenceModel, feeds)), built, declared, referenceModel);
+        var reference = ByNeutralName(Values(Reference.ExecuteModel(model, referenceModel, feeds)), built, declared, referenceModel);
         reference = reference.Where(p => compared.Contains(p.Key)).ToDictionary();
         var known = new Dictionary<string, IData>(reference);
         foreach (var (input, value) in built.Graph.Inputs.Zip(inputs)) known.TryAdd(input.Name, value);

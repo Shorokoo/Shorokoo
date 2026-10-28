@@ -441,6 +441,7 @@ namespace Shorokoo.Graph
                 GraphOpenNodeKey = node.GraphOpenNodeKey,
                 IdentifierTemplate = node.IdentifierTemplate,
                 TargetFunction = node.TargetFunction,
+                RunsOnHost = node.RunsOnHost,
             };
 
             foreach (var kvp in node.FullInputs)

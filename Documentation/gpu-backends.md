@@ -180,7 +180,12 @@ a smaller one shares a page with other small blocks; on the host a block shares 
   lets go of under a mebibyte, while from a mebibyte its memory goes back to the system as it goes,
   as the C runtime's heap hands back a block that large: nothing says another of its size follows.
   The small blocks every session on the card shares keep no more memory committed than they had in
-  use at their busiest.
+  use at their busiest. A session on a card also holds no more than it ever had in use at once
+  where its small blocks alone can bring it there: a run handed a small block after letting go of
+  another of its blocks — an output copied out of what it computed last, say — holds both though it
+  never had both in use, so as the run ends a kept small block goes back to the small blocks every
+  session shares, still committed, and the next run usually carves it again with no work on the
+  card.
 - **What is kept goes back to the system**:
   - at the end of a run that asks for it (`RunSettings.ShrinkArenaAfterRun`, always on under a
     budget): what its session keeps, and what the placed tensors left on that device;
@@ -475,7 +480,14 @@ foreach (var run in stats.RecentRuns.TakeLast(5))
 
 A CUDA session leaves operators the provider cannot run to the host: among them the bitwise
 operators of every random draw (`Dropout`, a random initializer), which the CUDA provider has no
-kernels for, so a draw is computed on the host and copied to the card. ONNX Runtime's own notice
+kernels for, so a draw is computed on the host and copied to the card. Some operators the provider
+takes and has no kernel for in a given type or form are kept on the host by the session as it is
+built: a reducing `ScatterND` of any type but float32, float16 and bfloat16 — a float64 table's
+gradient is one — and a blocked `QuantizeLinear` or `DequantizeLinear` of quantized type int8 or
+uint8 ([#541](https://github.com/Shorokoo/Shorokoo/issues/541)). Each costs a copy of its operands
+to the host and of its result back. A reducing bfloat16 `ScatterND` stays on the card, computed as
+float32 and cast back ([operator-support.md](operator-support.md#shape--data-movement)). ONNX
+Runtime's own notice
 that it added such copies arrives as a `Verbose` message ([Log messages](backends-and-devices.md#log-messages)), once
 per session built; ask for placement instead. Two signals:
 

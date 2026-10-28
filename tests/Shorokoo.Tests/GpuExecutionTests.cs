@@ -1451,18 +1451,32 @@ public class GpuExecutionTests
         Assert.Equal([0f, MathF.Log(3f)], OnTheCard(x, Noop(ReduceKind.LogSum), TensorData([2L], [1f, 3f])).CopyMemory<float>());
     }
 
-    // Shorokoo/Shorokoo#538: building the session crashes the process.
-    [CudaFact(Skip = "Shorokoo/Shorokoo#538")]
+    [CudaFact]
     public void CudaProvider_ACropAndResizeWithAnAspectRatioPolicyBuildsItsSessionOnTheCard()
     {
         var x = InputTensor<float32>("x", rank: 4);
-        Variable Crop(ResizeMode mode) => OnnxOp.Resize(x, roi: Vector(-0.2f, 0.05f, 1.1f, 0.95f), scales: null, sizes: Vector(3L, 4L),
+        InternalComputationGraph Crop(ResizeMode mode) => new([x], [OnnxOp.Resize(x, roi: Vector(-0.2f, 0.05f, 1.1f, 0.95f), scales: null, sizes: Vector(3L, 4L),
             antialias: null, axes: [1L, 2L], coordinateTransformationMode: CoordinateTransformationMode.Tf_crop_and_resize,
             cubicCoeffA: null, excludeOutside: null, extrapolationValue: -1f,
-            keepAspectRatioPolicy: KeepAspectRatioPolicy.not_larger, mode: mode, nearestMode: null);
+            keepAspectRatioPolicy: KeepAspectRatioPolicy.not_larger, mode: mode, nearestMode: null)]);
+        var beside = new InternalComputationGraph([x], [
+            OnnxOp.Resize(x, null, null, Vector(3L, 14L), null, [2L, 3L], CoordinateTransformationMode.Half_pixel_symmetric, null, null, null, KeepAspectRatioPolicy.not_smaller, ResizeMode.Cubic, null),
+            OnnxOp.Resize(x, Vector(0f, 0f, 0.1f, -0.2f, 1f, 1f, 0.8f, 1.3f), Vector(1f, 1f, 1.4f, 0.6f), null, null, null, CoordinateTransformationMode.Tf_crop_and_resize, null, null, -5f, null, ResizeMode.Nearest, null)]);
         var data = TensorData([1L, 4L, 6L, 2L], [.. Enumerable.Range(0, 48).Select(i => (float)(i % 7))]);
-        Assert.Equal([1L, 3L, 4L, 2L], OnTheCard(x, Crop(ResizeMode.Linear), data).Shape.Dims);
-        Assert.Equal([1L, 3L, 4L, 2L], OnTheCard(x, Crop(ResizeMode.Cubic), data).Shape.Dims);
+        var wave = TensorData([1L, 2L, 5L, 7L], [.. Enumerable.Range(0, 70).Select(i => (float)(i % 9))]);
+        Assert.Equal([[1L, 3L, 4L, 2L]], ShapesOnTheCard(Crop(ResizeMode.Linear), data, ShorokooGraphOptimization.EnableAll));
+        Assert.Equal([[1L, 3L, 4L, 2L]], ShapesOnTheCard(Crop(ResizeMode.Cubic), data, ShorokooGraphOptimization.EnableAll));
+        Assert.Equal([[1L, 3L, 4L, 2L]], ShapesOnTheCard(Crop(ResizeMode.Linear), data, ShorokooGraphOptimization.DisableAll));
+        Assert.Equal([[1L, 3L, 4L, 2L]], ShapesOnTheCard(Crop(ResizeMode.Cubic), data, ShorokooGraphOptimization.DisableAll));
+        Assert.Equal([[1L, 2L, 10L, 14L], [1L, 2L, 7L, 4L]], ShapesOnTheCard(beside, wave, ShorokooGraphOptimization.EnableAll));
+        Assert.Equal([[1L, 2L, 10L, 14L], [1L, 2L, 7L, 4L]], ShapesOnTheCard(beside, wave, ShorokooGraphOptimization.DisableAll));
+    }
+
+    private static long[][] ShapesOnTheCard(InternalComputationGraph g, TensorData data, ShorokooGraphOptimization optimization)
+    {
+        using var context = new ComputeContext();
+        using var compiled = context.Compile(g, optimization);
+        return [.. compiled.Execute(data.Shared()).Select(o => o.ToTensorData().Shape.Dims)];
     }
 
     // Shorokoo/Shorokoo#539: the CUDA Resize kernel returns zeros for tf_crop_and_resize.

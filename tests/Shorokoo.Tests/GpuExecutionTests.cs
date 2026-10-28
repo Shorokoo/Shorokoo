@@ -1535,6 +1535,15 @@ public class GpuExecutionTests
     }
 
     [CudaFact]
+    public void CudaProvider_ACallKeptOnTheHostOverAShapeBuildsItsSessionOnTheCard()
+    {
+        var x = InputTensor<float32>("x", rank: 2);
+        var data = TensorData([2L, 3L], [1f, 2f, 3f, 4f, 5f, 6f]);
+        Assert.Equal([7L, 3L], OnTheCard(x, OnnxOp.ScatterND(OnnxOp.Shape(x), Vector(0L).Reshape(Vector(1L, 1L)), Vector(5L), ScatterNDReduction.Add), data).CopyMemory<long>());
+        Assert.Equal([4L, 9L], OnTheCard(x, OnnxOp.ScatterND(OnnxOp.Mul(OnnxOp.Shape(x), Scalar(3L)), Vector(0L).Reshape(Vector(1L, 1L)), Vector(4L), ScatterNDReduction.Min), data).CopyMemory<long>());
+    }
+
+    [CudaFact]
     public void CudaProvider_ALinearResizeOverTheLeadingAxesOfARankFourTensorComputesWhatTheHostDoes()
     {
         var x = InputTensor<float32>("x", rank: 4);

@@ -30,7 +30,10 @@ internal static class KernelWorkaroundRegistry
 
     /// <summary>
     /// The rewrites around ONNX Runtime's kernels on its CUDA execution provider: every one of
-    /// <see cref="OnnxRuntime"/>, in its order, but with the cubic crop-and-resize layout widened to
+    /// <see cref="OnnxRuntime"/>, in its order, but with the reductions of no axis widened to every
+    /// input for the four the provider passes through, in their place; with the crop-and-resize roi
+    /// choosing its sequence by a <c>Where</c> rather than an <c>If</c>, in its place; with the cubic
+    /// crop-and-resize layout widened to
     /// every linear and cubic resize the provider computes wrongly on its channels-last route, in
     /// its place: so a call is regrouped once, whichever of the two would take it, and the call a
     /// regrouping under a <c>not_larger</c> or <c>not_smaller</c> policy builds, which keeps its
@@ -41,8 +44,10 @@ internal static class KernelWorkaroundRegistry
     /// the earlier rewrites build too; then a tensor read straight back out of its <c>Optional</c>, which the provider cannot run; then
     /// the summed or averaged losses written out as the reductions they are; then the reductions
     /// with <c>keepdims</c> 0 over an input that may be empty, after every rewrite that builds a
-    /// reduction; last, the calls the provider takes and has no kernel for, kept on
-    /// the host, which covers such calls every rewrite before builds.
+    /// reduction; then the calls the provider takes and has no kernel for, kept on
+    /// the host, which covers such calls every rewrite before builds; then a crop-and-resize's
+    /// constant <c>roi</c> read as a value the card computes, after every rewrite that builds a
+    /// resize; last, the linear uint8 resizes the provider computes wrongly, kept on the host.
     /// </summary>
     public static KernelWorkaroundSet OnnxRuntimeCuda { get; } = new(KernelWorkaroundSets.OnnxRuntimeCuda,
         [.. OnnxRuntimeWorkarounds.Select(w => w switch

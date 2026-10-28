@@ -1553,6 +1553,10 @@ public class GpuExecutionTests
         var data = TensorData([2L, 3L], [1f, 2f, 3f, 4f, 5f, 6f]);
         Assert.Equal([7L, 3L], OnTheCard(x, OnnxOp.ScatterND(OnnxOp.Shape(x), Vector(0L).Reshape(Vector(1L, 1L)), Vector(5L), ScatterNDReduction.Add), data).CopyMemory<long>());
         Assert.Equal([4L, 9L], OnTheCard(x, OnnxOp.ScatterND(OnnxOp.Mul(OnnxOp.Shape(x), Scalar(3L)), Vector(0L).Reshape(Vector(1L, 1L)), Vector(4L), ScatterNDReduction.Min), data).CopyMemory<long>());
+        var k = InputTensor<int64>("k", rank: 0);
+        using var context = new ComputeContext();
+        Assert.Equal([10L, 9L], context.Execute(new InternalComputationGraph([x, k], [OnnxOp.ScatterND(OnnxOp.Mul(OnnxOp.Shape(x), k), Vector(0L).Reshape(Vector(1L, 1L)), Vector(4L), ScatterNDReduction.Add)]),
+            data.Shared(), TensorData([], 3L).Shared())[0].ToTensorData().CopyMemory<long>());
     }
 
     [CudaFact]

@@ -407,6 +407,8 @@ public class KernelWorkaroundPassTests
         Assert.True(KeptOnHost(Graph(f, OnnxOp.ScatterND(OnnxOp.Mul(OnnxOp.Shape(f), Scalar(3L)), first, Vector(4L), ScatterNDReduction.Min)), [SHAPE, MUL, SCATTER_ND], data));
         Assert.True(KeptOnHost(Graph(f, OnnxOp.ScatterND(OnnxOp.Shape(OnnxOp.Shape(f)), first, Vector(4L), ScatterNDReduction.Max)), [SHAPE, SHAPE, SCATTER_ND], data));
         Assert.True(KeptOnHost(Graph(f, OnnxOp.ScatterND(OnnxOp.Cast(f, null, DType.Int64), OnnxOp.Reshape(Vector(0L, 1L), Vector(1L, 2L), false), Vector(5L), ScatterNDReduction.Add)), [SCATTER_ND], data));
+        var k = InputTensor<int64>("k", rank: 0);
+        Assert.True(KeptOnHost(new([f, k], [OnnxOp.ScatterND(OnnxOp.Mul(OnnxOp.Shape(f), k), first, Vector(5L), ScatterNDReduction.Add)]), [SHAPE, MUL, SCATTER_ND], data, TensorData([], 3L)));
     }
 
     [Fact]
@@ -1151,9 +1153,9 @@ public class KernelWorkaroundPassTests
         => HostKept(g).SequenceEqual([opType])
            && ShapedRun(g, Session(g, KernelWorkaroundRegistry.OnnxRuntime), x).SequenceEqual(ShapedRun(g, Session(g, KernelWorkaroundRegistry.OnnxRuntimeCuda), x));
 
-    private static bool KeptOnHost(InternalComputationGraph g, string[] opTypes, TensorData x)
+    private static bool KeptOnHost(InternalComputationGraph g, string[] opTypes, params TensorData[] x)
         => HostKept(g).SequenceEqual(opTypes)
-           && ShapedRun(g, Session(g, KernelWorkaroundRegistry.OnnxRuntime), [x]).SequenceEqual(ShapedRun(g, Session(g, KernelWorkaroundRegistry.OnnxRuntimeCuda), [x]));
+           && ShapedRun(g, Session(g, KernelWorkaroundRegistry.OnnxRuntime), x).SequenceEqual(ShapedRun(g, Session(g, KernelWorkaroundRegistry.OnnxRuntimeCuda), x));
 
     private static IEnumerable<string> ShapedRun(InternalComputationGraph g, ModelProto model, TensorData[] x)
         => [.. QeeAuditOnBackend.Reference.ExecuteModel(g, model, [.. x.Select(t => (IData)t.Shared())]).Select(p => p.ToTensorData())

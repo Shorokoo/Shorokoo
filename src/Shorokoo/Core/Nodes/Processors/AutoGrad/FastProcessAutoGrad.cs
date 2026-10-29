@@ -710,13 +710,13 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
         {
             // Mirror DType's known concrete dtypes back to their IVarType class. The set must
             // cover anything an [AutoDiff] method might declare as a concrete generic argument.
-            var dtypes = new[]
-            {
+            DType[] dtypes =
+            [
                 DType.BFloat16, DType.Float16, DType.Float32, DType.Float64,
                 DType.Int8, DType.Int16, DType.Int32, DType.Int64,
                 DType.UInt8, DType.UInt16, DType.UInt32, DType.UInt64,
                 DType.Bool,
-            };
+            ];
             var map = new Dictionary<Type, DType>();
             foreach (var d in dtypes)
             {

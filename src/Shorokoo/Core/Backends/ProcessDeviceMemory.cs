@@ -16,17 +16,23 @@ namespace Shorokoo.Core.Backends;
 /// process. NVML cannot give it there: under WDDM it lists the process with its usage not
 /// available, which is what <c>nvidia-smi</c> prints as <c>[N/A]</c>. The card is matched to the
 /// CUDA device by its LUID.</item>
-/// <item>Everywhere else — Linux, and a Windows card in TCC mode, which DXGI does not see — NVML
-/// lists each process's usage of the device, and this takes the entries under this process's id.
-/// The card is matched by its PCI bus id.</item>
+/// <item>Under WSL, the Windows driver drives the card and the Linux side reaches it through
+/// <c>libdxcore.so</c>, beside <c>libcuda.so.1</c> in <c>/usr/lib/wsl/lib</c>. Its
+/// <c>D3DKMTQueryVideoMemoryInfo</c>, asked with no process, reports the calling process's usage of
+/// the adapter's own memory: the figure DXGI gives on Windows. NVML cannot give it there, as it
+/// lists no process on the card. The card is matched to the CUDA device by its PCI bus, device and
+/// function, which the adapter reports as CUDA does; its LUID is not the one CUDA reports.</item>
+/// <item>Everywhere else — native Linux, and a Windows card in TCC mode, which DXGI does not see —
+/// NVML lists each process's usage of the device, and this takes the entries under this process's
+/// id. The card is matched by its PCI bus id.</item>
 /// </list>
 ///
 /// <para>Bound lazily, per device, and best effort, as <see cref="CudaRuntime"/> is: a device no
 /// interface will attribute memory on, or a machine that has none of them, reads <c>null</c>
 /// rather than throwing. That includes a process NVML does not list under its own id, as in a
 /// container with its own process-id namespace: an absent entry cannot be told from one this
-/// process does not have, and a reading of zero would be a guess. It includes WSL too, which has
-/// no DXGI and whose NVML lists no process on the card.</para>
+/// process does not have, and a reading of zero would be a guess. So is a WSL card that no adapter,
+/// or more than one, matches.</para>
 /// </summary>
 internal static unsafe class ProcessDeviceMemory
 {
@@ -61,8 +67,10 @@ internal static unsafe class ProcessDeviceMemory
     {
         try
         {
-            Source? dxgi = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? Dxgi.Bind(device) : null;
-            return dxgi ?? Nvml.Bind(device);
+            Source? driverModel = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? Dxgi.Bind(device)
+                : RuntimeInformation.IsOSPlatform(OSPlatform.Linux) ? DxCore.Bind(device)
+                : null;
+            return driverModel ?? Nvml.Bind(device);
         }
         catch (Exception) { return null; }
     }
@@ -156,6 +164,158 @@ internal static unsafe class ProcessDeviceMemory
                 || ((delegate* unmanaged<long*, uint*, int, int>)luidExport)(&luid, &nodeMask, handle) != 0)
                 return null;
             return luid;
+        }
+    }
+
+    /// <summary>
+    /// The WSL route: the DXCore adapter at the CUDA device's PCI address, through the kernel-mode
+    /// thunks <c>libdxcore.so</c> exports. Bound only where that library is there, which is WSL.
+    /// </summary>
+    private sealed class DxCore : Source
+    {
+        private const string Library = "/usr/lib/wsl/lib/libdxcore.so";
+        private const int SegmentGroupLocal = 0;
+        /// <summary><c>KMTQAITYPE_ADAPTERADDRESS</c>.</summary>
+        private const int AdapterAddress = 6;
+
+        private readonly uint _adapter;
+        private readonly delegate* unmanaged<VideoMemoryInfo*, int> _query;
+
+        private DxCore(uint adapter, delegate* unmanaged<VideoMemoryInfo*, int> query)
+        {
+            _adapter = adapter;
+            _query = query;
+        }
+
+        /// <summary><c>D3DKMT_ADAPTERINFO</c>.</summary>
+        [StructLayout(LayoutKind.Sequential)]
+        private struct AdapterInfo
+        {
+            public uint Adapter;
+            public uint LuidLowPart;
+            public int LuidHighPart;
+            public uint NumOfSources;
+            public int PrecisePresentRegionsPreferred;
+        }
+
+        /// <summary><c>D3DKMT_ENUMADAPTERS2</c>.</summary>
+        [StructLayout(LayoutKind.Sequential)]
+        private struct EnumAdapters
+        {
+            public uint NumAdapters;
+            public AdapterInfo* Adapters;
+        }
+
+        /// <summary><c>D3DKMT_QUERYADAPTERINFO</c>.</summary>
+        [StructLayout(LayoutKind.Sequential)]
+        private struct QueryAdapterInfo
+        {
+            public uint Adapter;
+            public int Type;
+            public void* PrivateDriverData;
+            public uint PrivateDriverDataSize;
+        }
+
+        /// <summary><c>D3DKMT_ADAPTERADDRESS</c>.</summary>
+        [StructLayout(LayoutKind.Sequential)]
+        private struct Address
+        {
+            public uint BusNumber;
+            public uint DeviceNumber;
+            public uint FunctionNumber;
+        }
+
+        /// <summary><c>D3DKMT_QUERYVIDEOMEMORYINFO</c>.</summary>
+        [StructLayout(LayoutKind.Sequential)]
+        private struct VideoMemoryInfo
+        {
+            public nint Process;
+            public uint Adapter;
+            public int MemorySegmentGroup;
+            public ulong Budget;
+            public ulong CurrentUsage;
+            public ulong CurrentReservation;
+            public ulong AvailableForReservation;
+            public uint PhysicalAdapterIndex;
+        }
+
+        internal static DxCore? Bind(int device)
+        {
+            if (!File.Exists(Library) || PciAddress(device) is not { } wanted) return null;
+            // The library stays loaded, and the matched adapter open, for as long as the process reads.
+            if (!NativeLibrary.TryLoad(Library, out var dxcore)
+                || !NativeLibrary.TryGetExport(dxcore, "D3DKMTEnumAdapters2", out var enumExport)
+                || !NativeLibrary.TryGetExport(dxcore, "D3DKMTQueryAdapterInfo", out var infoExport)
+                || !NativeLibrary.TryGetExport(dxcore, "D3DKMTQueryVideoMemoryInfo", out var queryExport)
+                || !NativeLibrary.TryGetExport(dxcore, "D3DKMTCloseAdapter", out var closeExport))
+                return null;
+            var enumerate = (delegate* unmanaged<EnumAdapters*, int>)enumExport;
+            var info = (delegate* unmanaged<QueryAdapterInfo*, int>)infoExport;
+            var close = (delegate* unmanaged<uint*, int>)closeExport;
+
+            // Asked with no array, the call counts the adapters; asked again, it opens each one.
+            EnumAdapters list = default;
+            if (enumerate(&list) != 0 || list.NumAdapters == 0) return null;
+            var adapters = new AdapterInfo[list.NumAdapters];
+            fixed (AdapterInfo* first = adapters)
+            {
+                list.Adapters = first;
+                if (enumerate(&list) != 0) return null;
+            }
+            var opened = adapters.AsSpan(0, (int)Math.Min(list.NumAdapters, (uint)adapters.Length));
+
+            uint? match = null;
+            bool ambiguous = false;
+            foreach (var adapter in opened)
+            {
+                Address address = default;
+                var query = new QueryAdapterInfo
+                {
+                    Adapter = adapter.Adapter,
+                    Type = AdapterAddress,
+                    PrivateDriverData = &address,
+                    PrivateDriverDataSize = (uint)sizeof(Address),
+                };
+                if (info(&query) != 0 || (address.BusNumber, address.DeviceNumber, address.FunctionNumber) != wanted) continue;
+                ambiguous |= match is not null;
+                match = adapter.Adapter;
+            }
+            foreach (var adapter in opened)
+            {
+                uint handle = adapter.Adapter;
+                if (ambiguous || handle != match) close(&handle);
+            }
+            if (ambiguous || match is not { } matched) return null;
+
+            var bound = new DxCore(matched, (delegate* unmanaged<VideoMemoryInfo*, int>)queryExport);
+            if (bound.Read() is null)
+            {
+                close(&matched);
+                return null;
+            }
+            return bound;
+        }
+
+        internal override long? Read()
+        {
+            // With no process named, the query answers for the calling one.
+            var info = new VideoMemoryInfo { Adapter = _adapter, MemorySegmentGroup = SegmentGroupLocal };
+            return _query(&info) == 0 ? (long)info.CurrentUsage : null;
+        }
+
+        /// <summary>
+        /// The bus, device and function of CUDA device <paramref name="device"/>, from its PCI bus id
+        /// (<c>domain:bus:device.function</c>, in hexadecimal).
+        /// </summary>
+        private static (uint Bus, uint Device, uint Function)? PciAddress(int device)
+        {
+            if (CudaRuntime.TryGetPciBusId(device) is not { } busId) return null;
+            var parts = busId.Split(':', '.');
+            if (parts.Length != 4) return null;
+            uint[] numbers = [0, 0, 0];
+            for (int i = 0; i < 3; i++)
+                if (!uint.TryParse(parts[i + 1], System.Globalization.NumberStyles.HexNumber, null, out numbers[i])) return null;
+            return (numbers[0], numbers[1], numbers[2]);
         }
     }
 

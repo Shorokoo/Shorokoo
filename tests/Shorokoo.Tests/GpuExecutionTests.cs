@@ -1505,8 +1505,23 @@ public class GpuExecutionTests
     public void CudaProvider_AnOptionalOfAComputedTensorRunsOnTheCard()
     {
         var x = InputTensor<float32>("x", rank: 1);
-        Assert.Equal([2f, 4f, 6f], OnTheCard(x, OnnxOp.OptionalGetElement(OnnxOp.Optional(OnnxOp.Add(x, x), DataStructure.Tensor, DType.Float32)),
-            TensorData([3L], [1f, 2f, 3f])).CopyMemory<float>());
+        var data = TensorData([3L], [1f, 2f, 3f]);
+        Variable Opt(Variable v) => OnnxOp.Optional(v, DataStructure.Tensor, DType.Float32);
+        var none = OnnxOp.Optional(null, DataStructure.Tensor, DType.Float32);
+        var positive = ((Tensor<bit>)OnnxOp.Greater(OnnxOp.ReduceSum(x, null, false, null), Scalar(0f))).Scalar();
+        float[] Run(Variable output) => OnTheCard(x, output, data).CopyMemory<float>();
+        Variable InBranch(Func<Variable> optional)
+        {
+            var open = OnnxOp.IfOpen(positive);
+            return OnnxOp.OptionalGetElement(OnnxOp.IfClose([optional()], [none], open)[0]);
+        }
+        var sum = OnnxOp.Add(x, x);
+        Assert.Equal([2f, 4f, 6f], Run(OnnxOp.OptionalGetElement(Opt(sum))));
+        Assert.Equal([2f, 4f, 6f], Run(OnnxOp.OptionalGetElement(OnnxOp.Identity(Opt(sum), null))));
+        Assert.Equal([4f, 16f, 36f], Run(OnnxOp.Mul(OnnxOp.OptionalGetElement(OnnxOp.Identity(Opt(sum), null)), sum)));
+        Assert.Equal([2f, 4f, 6f], Run(InBranch(() => Opt(OnnxOp.Add(x, x)))));
+        Assert.Equal([2f, 4f, 6f], Run(OnnxOp.OptionalGetElement(Shorokoo.Core.Nodes.Ops.IfElse(positive, Opt(OnnxOp.Add(x, x)), none))));
+        Assert.Equal([2f, 4f, 6f], Run(InBranch(() => Opt(OnnxOp.SequenceAt(OnnxOp.SequenceConstruct(OnnxOp.Add(x, x)), Scalar(0L))))));
     }
 
     [CudaFact]

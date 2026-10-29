@@ -80,7 +80,7 @@ namespace Shorokoo
     /// <see cref="FeedMode"/> — stay readable. A tensor read out of its state before the release
     /// is released with it when nothing else holds it, and then throws on every access too.</para>
     /// </summary>
-    public class TrainingCheckpoint : IDisposable
+    public sealed class TrainingCheckpoint : IDisposable
     {
         private readonly TensorDataStruct _trainableParams = null!;
         private readonly TensorDataStruct _modelState = null!;

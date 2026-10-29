@@ -3804,6 +3804,32 @@ namespace Shorokoo.Tests.Modules
                 ((Tensor<float16>)OnnxOp.SoftmaxCrossEntropyLoss(x, Vector(2L, 0L, 3L), null, null, "mean").output).Scalar())).Cast<float32>());
     }
 
+    /// <summary>The <c>float32</c> gradient <c>2x/n</c> of a <c>float64</c> mean square of a <c>float32</c> <c>x</c>.</summary>
+    [Module]
+    public partial class AutoGradFloat64LossOfAFloat32TensorCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x)
+        {
+            var x64 = x.Cast<float64>();
+            var grad = (Tensor<float32>)Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(x, (x64 * x64).Reduce(ReduceKind.Mean, keepDims: false).Scalar());
+            var n = ((Tensor<int64>)OnnxOp.Size(x)).Cast<float32>().Scalar();
+            return (grad - x * Scalar(2f) / n).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar() < Scalar(1e-6f);
+        }
+    }
+
+    /// <summary>The <c>float32</c> gradient <c>2x/n</c> of a <c>float16</c> mean square of a <c>float32</c> <c>x</c>.</summary>
+    [Module]
+    public partial class AutoGradFloat16LossOfAFloat32TensorCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x)
+        {
+            var x16 = x.Cast<float16>();
+            var grad = (Tensor<float32>)Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(x, (x16 * x16).Reduce(ReduceKind.Mean, keepDims: false).Scalar());
+            var n = ((Tensor<int64>)OnnxOp.Size(x)).Cast<float32>().Scalar();
+            return (grad - x * Scalar(2f) / n).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar() < Scalar(2e-2f);
+        }
+    }
+
     internal static class HalfPrecisionLoss
     {
         public static Scalar<bit> Holds(Variable x, Tensor<float32> x32, Tensor<float32> meanGrad, Tensor<float32> ceGrad)

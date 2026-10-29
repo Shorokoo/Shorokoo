@@ -187,6 +187,8 @@ public class AutoGradElementwiseOpsCoverageTests
         float[] x = [0.5f, -1f, 2f, 0.25f, 1.5f, 3f, -2f, 0f, -0.75f, 1f, 2.5f, -1.5f];
         Assert.True(AutoTest.AdvancedTestGraph<AutoGradFloat64LossCheck>([], [TensorData(DType.Float64, [3L, 4L], [.. x.Select(v => (object)(double)v)]), Float64SoftmaxTolerance]));
         Assert.True(AutoTest.AdvancedTestGraph<AutoGradFloat16LossCheck>([], [TensorData(DType.Float16, [3L, 4L], [.. x.Select(v => (object)(Float16)v)])]));
+        RunTensor<AutoGradFloat64LossOfAFloat32TensorCheck>([3L, 4L], x);
+        RunTensor<AutoGradFloat16LossOfAFloat32TensorCheck>([3L, 4L], x);
     }
 
     [Fact]

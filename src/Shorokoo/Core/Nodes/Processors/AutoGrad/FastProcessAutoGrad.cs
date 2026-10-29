@@ -734,8 +734,9 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
         /// matching rank (0 for Scalar, 1 for Vector, null for Tensor) so
         /// <see cref="Node.MakeOutput"/> picks the same concrete Variable subtype the gradient
         /// method declares — otherwise the eventual reflection invoke fails with a cast error.
-        /// Defaults to (<see cref="DType.Float32"/>, null) when the parameter is generic or
-        /// untyped.
+        /// Returns <c>(null, null)</c> when the parameter is generic or untyped, or when there is
+        /// no parameter at that index; the caller then takes the dtype and rank of the host-graph
+        /// tensor the slot stands for, with <see cref="DType.Float32"/> where that dtype is unknown.
         /// </summary>
         private static (DType? Dtype, int? Rank) ResolveSlotDtype(ParameterInfo[]? methodParams, int slotIdx)
         {

@@ -2626,11 +2626,12 @@ public class TrainingRigTrainingLoopCoverageTests
     }
 
     [Fact]
-    public void TestARigOverAFloat32ModelTrainsOnAFloat64OrFloat16Loss()
+    public void TestARigOverAFloat32ModelTrainsOnAFloat64Float16OrBFloat16Loss()
     {
         var expected = LossOfASecondStep(L2Loss.ComputationGraph);
         Assert.Equal(expected, LossOfASecondStep(Float64L2Loss.ComputationGraph), 1e-5f);
         Assert.Equal(expected, LossOfASecondStep(Float16L2Loss.ComputationGraph), 1e-2f);
+        Assert.Equal(expected, LossOfASecondStep(BFloat16L2Loss.ComputationGraph), 1e-2f);
     }
 
     // A read placed after Globals.StateUpdate must still see the value fed in for this step: the

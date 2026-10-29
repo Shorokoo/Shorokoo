@@ -65,8 +65,10 @@ namespace Shorokoo
     /// with an initializer, a <see cref="WithTrainableParams"/>-style derivation, a <see cref="ToHost"/>
     /// copy — and a tensor it shares with another one stays alive until both are released.</item>
     /// <item>A <see cref="ResidentTrainingRun"/> holds the state it trains from, so releasing a
-    /// checkpoint it handed out, or the one it began from, never takes that state from under it: the
-    /// run takes it over, and its next step consumes it, so it is freed as the step supersedes it.</item>
+    /// checkpoint it handed out, or the one it began from, never takes that state from under it.
+    /// Once no other checkpoint holds any of that state, the run takes it over, and its next step
+    /// consumes it, so it is freed as the step supersedes it; while another checkpoint still holds
+    /// some of it, the run only reads it.</item>
     /// <item>The rig never shares a tensor with a checkpoint: an initial checkpoint is a copy of the
     /// rig's values.</item>
     /// </list>
@@ -121,17 +123,70 @@ namespace Shorokoo
 
         /// <summary>Joins <paramref name="state"/>'s tensors to this checkpoint's hold, where this
         /// checkpoint takes its state rather than being derived over one already held. A missing
-        /// slot fails the initializer, and the checkpoint is never built: the holds the slots set
-        /// before it took are given back, so they keep nothing alive.</summary>
+        /// slot fails the initializer, and the checkpoint is never built: see
+        /// <see cref="Abandoned"/>.</summary>
         private TensorDataStruct Held(TensorDataStruct? state, string slot)
         {
-            if (state is null)
-            {
-                if (_takesState) _hold.Abandon();
-                throw new ArgumentNullException(slot);
-            }
+            if (state is null) throw Abandoned(new ArgumentNullException(slot));
             if (_takesState) _hold.Take(state);
             return state;
+        }
+
+        /// <summary>What a slot this checkpoint refuses fails its initializer with: the checkpoint is
+        /// never built, so the holds the slots set before it took are given back first, and they keep
+        /// nothing alive.</summary>
+        private Exception Abandoned(Exception refusal)
+        {
+            Abandon();
+            return refusal;
+        }
+
+        private void Abandon()
+        {
+            if (_takesState) _hold.Abandon();
+        }
+
+        /// <summary>
+        /// Whether every tensor of this checkpoint's state is alive, nested structs included: false
+        /// once a step has consumed any of it, or it has been released. What a step from it needs.
+        /// </summary>
+        internal bool IsWhole
+            => !_hold.IsReleased && IsAlive(_trainableParams) && IsAlive(_modelState) && IsAlive(_optimizerState);
+
+        private static bool IsAlive(TensorDataStruct state)
+        {
+            foreach (var field in state.Fields.Values)
+                switch (field)
+                {
+                    case TensorData { IsDisposed: true }: return false;
+                    case TensorDataStruct nested when !IsAlive(nested): return false;
+                }
+            return true;
+        }
+
+        /// <summary>
+        /// Throws unless a step can train from this checkpoint: it is not released, and no tensor of
+        /// its state is dead — refused, where one is, in that tensor's own words, saying what took
+        /// it. Checked before a step takes anything, or draws from a loader.
+        /// </summary>
+        /// <exception cref="ObjectDisposedException">The checkpoint has been released, or a tensor of
+        /// its state is dead.</exception>
+        internal void RequireWhole()
+        {
+            ThrowIfDisposed();
+            RequireAlive(_trainableParams);
+            RequireAlive(_modelState);
+            RequireAlive(_optimizerState);
+        }
+
+        private static void RequireAlive(TensorDataStruct state)
+        {
+            foreach (var field in state.Fields.Values)
+                switch (field)
+                {
+                    case TensorData tensor: tensor.ThrowIfDisposed(); break;
+                    case TensorDataStruct nested: RequireAlive(nested); break;
+                }
         }
 
         /// <summary>
@@ -165,8 +220,9 @@ namespace Shorokoo
             {
                 try
                 {
+                    // Its death takes it off every count of superseded state it sits in, before its
+                    // memory is dealt with, so a deletion that fails still leaves it uncounted.
                     if (!tensor.IsDisposed) tensor.DeleteOnceUnread(TensorDeath.ReleasedWithItsCheckpoint);
-                    TrainingRig.ForgetSuperseded(tensor);
                 }
                 catch (Exception e)
                 {
@@ -348,7 +404,18 @@ namespace Shorokoo
         public IReadOnlyDictionary<string, AppliedHyperparameter>? AppliedHyperparameters
         {
             get => _appliedHyperparameters;
-            init => _appliedHyperparameters = value is null ? null : AppliedHyperparameterMap.Of(value);
+            init
+            {
+                try
+                {
+                    _appliedHyperparameters = value is null ? null : AppliedHyperparameterMap.Of(value);
+                }
+                catch
+                {
+                    Abandon();
+                    throw;
+                }
+            }
         }
 
         private readonly IReadOnlyDictionary<string, AppliedHyperparameter>? _appliedHyperparameters;
@@ -370,7 +437,7 @@ namespace Shorokoo
         public TrainingHistory History
         {
             get => _history;
-            init => _history = value ?? throw new ArgumentNullException(nameof(History));
+            init => _history = value ?? throw Abandoned(new ArgumentNullException(nameof(History)));
         }
 
         private readonly TrainingHistory _history = TrainingHistory.Empty;
@@ -484,7 +551,14 @@ namespace Shorokoo
         /// values only when the position is known.</para>
         ///
         /// <para>The checkpoint holds the tensors of the three structs it is given: its
-        /// <see cref="Dispose"/> deletes each of them that no other checkpoint holds.</para>
+        /// <see cref="Dispose"/> deletes each of them that no other checkpoint holds. A value the
+        /// checkpoint refuses — a <c>null</c> state slot or <see cref="History"/>, an
+        /// <see cref="AppliedHyperparameters"/> map with a null value — fails the initializer and
+        /// gives back what the slots set before it took. An expression of your own that throws
+        /// part-way through the initializer cannot be seen to: the tensors of the state slots set
+        /// before it stay held by a checkpoint that was never built, so releasing another checkpoint
+        /// over them does not delete them, and they are freed only when collected. Compute the
+        /// values first and build the checkpoint from them.</para>
         /// </summary>
         public TrainingCheckpoint() : this(new StateHold(), takesState: true) { }
 

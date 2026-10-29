@@ -338,8 +338,9 @@ for (int step = 0; step < 50_000; step++)
   `Dispose` leaves it alone. A later step therefore writes its new state beside it rather than over
   it: on a card that is a second copy of the state for as long as you hold the checkpoint.
   **Release it when you are done with it**, as the loop above does with `using`: the run holds the
-  state it trains from, so releasing the checkpoint takes nothing from the run — the run takes the
-  state back, and its next step consumes it and writes over it as it would its own
+  state it trains from, so releasing the checkpoint takes nothing from the run — once no other
+  checkpoint holds any of that state, the run takes it back, and its next step consumes it and
+  writes over it as it would its own
   ([Releasing a checkpoint](#releasing-a-checkpoint)). A checkpoint you drop without releasing is
   freed by the collection the rig triggers once the state dropped since the last one exceeds its
   budget for superseded state: 32 MiB, doubling up to 8 GiB while the rig finds you keeping your
@@ -355,7 +356,9 @@ for (int step = 0; step < 50_000; step++)
   step throws `InvalidOperationException` saying so and what is left to restart from. Restart from
   the last checkpoint you took with `StepToCheckpoint` or `TakeCheckpoint` (a failure while reading a
   checkpoint handed out leaves it and the run intact), or, before any, from the starting checkpoint
-  if you passed it `.Shared()`.
+  if you passed it `.Shared()`. That holds only while you still hold that checkpoint, or saved it:
+  once you release it and no other checkpoint holds any of its state, the run takes the state over
+  as its own, and a step that fails then loses it — restart from the file you saved.
 - **Feeding a published checkpoint elsewhere as-is consumes the run's state too**, since they share
   tensors; the run's next step is then refused with that state's error, naming the step that took it.
 
@@ -398,8 +401,8 @@ its state and a release ends only the tensors nothing else holds:
   released.
 - **A resident run holds the state it trains from.** Releasing a checkpoint it handed out, or the
   one it began from `.Shared()`, never takes that state from the run, nor from another checkpoint
-  holding any of its tensors on its own. Once no checkpoint you hold is left over that state, the
-  run takes it over, its next step consumes it, and it is freed as that step supersedes it.
+  holding any of its tensors on its own. Once no other checkpoint holds any of that state, the run
+  takes it over, its next step consumes it, and it is freed as that step supersedes it.
 - **The rig shares nothing with a checkpoint**: an initial checkpoint is a copy of the rig's values.
 
 Disposing twice does nothing more. A released checkpoint's `IsDisposed` is `true`, and its state

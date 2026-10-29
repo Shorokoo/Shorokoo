@@ -42,6 +42,10 @@ namespace Shorokoo
 
         /// <summary>Retires every copy runs made of the owner, which live no longer than it.</summary>
         void RetireRunCopies();
+
+        /// <summary>Told once, as the owner dies — however it dies, and before its memory is dealt
+        /// with — so whatever the owner is counted in while alive can forget it. Never throws.</summary>
+        void Died() { }
     }
 
     /// <summary>
@@ -143,8 +147,9 @@ namespace Shorokoo
                 if (_locks > 0) return TakeOutcome.Locked;
                 _death = death;
                 _taken = true;
-                return TakeOutcome.Taken;
             }
+            _owner.Died();
+            return TakeOutcome.Taken;
         }
 
         /// <summary>
@@ -212,6 +217,7 @@ namespace Shorokoo
                     releaseNow = true;
                 }
             }
+            _owner.Died();
             if (releaseNow) ReleaseTaken();
         }
 
@@ -224,7 +230,7 @@ namespace Shorokoo
         /// </summary>
         internal async Task<bool> DeleteAsync(TimeSpan timeout, CancellationToken cancellationToken)
         {
-            bool releaseNow = false;
+            bool releaseNow = false, died = false;
             CancellationTokenSource? eviction = null;
             Task? reclaimed = null;
             lock (this)
@@ -232,6 +238,7 @@ namespace Shorokoo
                 if (_death is null)
                 {
                     _death = TensorDeath.Deleted;
+                    died = true;
                     // Unread, the memory is this call's to release, exactly as a take hands it
                     // over; read, it is released by the last reader to stand down.
                     if (_locks == 0)
@@ -248,6 +255,7 @@ namespace Shorokoo
                 }
             }
 
+            if (died) _owner.Died();
             if (releaseNow)
             {
                 ReleaseTaken();

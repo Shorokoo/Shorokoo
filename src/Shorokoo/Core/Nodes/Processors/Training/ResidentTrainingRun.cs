@@ -32,8 +32,8 @@ namespace Shorokoo
     ///
     /// <para><b>Releasing a checkpoint it handed out.</b> The run holds the state it trains from on
     /// its own, so <see cref="TrainingCheckpoint.Dispose"/> on a checkpoint it handed out — or on the
-    /// one it began from — takes nothing from the run: once no checkpoint you hold is over that state,
-    /// the run takes it over, and its next step consumes it, as it would state of its own. A loop
+    /// one it began from — takes nothing from the run: once no other checkpoint holds any of that
+    /// state, the run takes it over, and its next step consumes it, as it would state of its own. A loop
     /// that saves a checkpoint every N steps and releases it straight after
     /// (<c>using var cp = run.StepToCheckpoint(...); cp.Save(path);</c>) therefore keeps no second copy
     /// of the state past the next step.</para>
@@ -50,8 +50,10 @@ namespace Shorokoo
     /// <para><b>A failed step.</b> A step takes what it consumes when it starts, and a step that
     /// then fails cannot give it back. Where that was the run's own state there is nothing left to
     /// train from, and every later step says so: begin a new run from the last checkpoint you took,
-    /// or, before the run has handed any out, from a checkpoint you still hold. A checkpoint handed
-    /// out is only read, so a step that fails after one leaves it — and the run — whole. State
+    /// or, before the run has handed any out, from a checkpoint you still hold. That holds only while
+    /// you still hold that checkpoint, or saved it: once you release it and the run takes the state
+    /// over, the state is the run's own, and a step that fails loses it. A checkpoint handed out and
+    /// still held is only read, so a step that fails after one leaves it — and the run — whole. State
     /// something else took is not the run's loss: a checkpoint handed out shares its tensors with
     /// the state the run goes on training from, so fed as it is to another step it takes that state
     /// with it, and every later step of the run is refused over it, naming what took it.</para>
@@ -218,8 +220,7 @@ namespace Shorokoo
         public float Step(IDataLoader loader)
         {
             if (loader is null) throw new ArgumentNullException(nameof(loader));
-            // Before the draw: a refused step must leave the loader at the batch it would have trained.
-            RequireUsable();
+            RequireCanDraw();
             return Step(loader.Next());
         }
 
@@ -238,8 +239,10 @@ namespace Shorokoo
         /// <see cref="TakeCheckpoint"/>). The returned checkpoint owns its tensors: the run goes on
         /// training from them but only ever reads them, so holding it is safe. Releasing it —
         /// <see cref="TrainingCheckpoint.Dispose"/> once it is saved — is safe too: the run holds the
-        /// state it trains from, takes it over, and its next step consumes it, so no copy of the
-        /// state is left waiting for a collection.
+        /// state it trains from, and once no other checkpoint holds any of that state it takes it
+        /// over and its next step consumes it, so no copy of the state is left waiting for a
+        /// collection. A step that fails after that loses the state, as it would the run's own:
+        /// begin again from what you saved.
         /// </summary>
         /// <param name="trainingInput">Training input data: a <see cref="TensorDataStruct"/>,
         /// consumed by the step, or one passed through <c>.Shared()</c> or <c>.TryConsume()</c>.</param>
@@ -276,7 +279,7 @@ namespace Shorokoo
         public TrainingCheckpoint StepToCheckpoint(IDataLoader loader)
         {
             if (loader is null) throw new ArgumentNullException(nameof(loader));
-            RequireUsable();
+            RequireCanDraw();
             return StepToCheckpoint(loader.Next());
         }
 
@@ -345,6 +348,17 @@ namespace Shorokoo
             }
         }
 
+        /// <summary>
+        /// Throws unless a step on a batch drawn from a loader can run: the run can still step, the
+        /// rig needs no runtime hyperparameter values, and the state the run trains from is whole.
+        /// Before the draw, so a refused step leaves the loader at the batch it would have trained.
+        /// </summary>
+        private void RequireCanDraw()
+        {
+            _rig.RequireNoRuntimeHyperparameters();
+            Current.RequireWhole();
+        }
+
         /// <summary>Throws unless the run can still step: it is not disposed, and no step has
         /// lost its state.</summary>
         private void RequireUsable()
@@ -369,7 +383,7 @@ namespace Shorokoo
             // The caller's checkpoint released, and no other holding a tensor of the state on its
             // own: a state with no tensors is held by nothing, and is the caller's for as long as
             // the caller holds its checkpoint.
-            if (_ownsCurrent || _published is not null || !_current.HoldsItsStateAlone || IsSpent(_current)) return;
+            if (_ownsCurrent || _published is not null || !_current.HoldsItsStateAlone || !_current.IsWhole) return;
             _current = _current.FedAsItIs();
             _ownsCurrent = true;
             _tookOver = true;
@@ -400,7 +414,8 @@ namespace Shorokoo
             Func<TrainingCheckpoint, TrainingCheckpoint> step, Action<TrainingCheckpoint> adopt)
         {
             var current = Current;
-            var whole = !IsSpent(current);
+            // State something else took is refused before the step takes anything.
+            current.RequireWhole();
             var owned = _ownsCurrent;
             TrainingCheckpoint next;
             try
@@ -409,7 +424,7 @@ namespace Shorokoo
             }
             catch
             {
-                if (whole && IsSpent(current)) _lost = Lost(beganFrom: !owned);
+                if (!current.IsWhole) _lost = Lost(beganFrom: !owned);
                 throw;
             }
             finally
@@ -449,9 +464,9 @@ namespace Shorokoo
                + "step takes the state it trains from when it starts, and one that fails cannot give it "
                + "back, so there is nothing left to train from. "
                + (_tookOver
-                   ? "The run held that state alone: you released every checkpoint over it -- the one "
-                     + "the run began from, and any it handed out since. Begin a new run from a "
-                     + "checkpoint you still hold, or from one you saved."
+                   ? "The run held that state alone: the checkpoints over the state it took over were "
+                     + "released, and with no other checkpoint holding any of it, the run took it over. "
+                     + "Begin a new run from a checkpoint you still hold, or from one you saved."
                    : _handedOut
                    ? "Begin a new run from the last checkpoint you took with TakeCheckpoint() or StepToCheckpoint(...); the "
                      + "run only ever reads a checkpoint it has handed out, so a failure leaves that one "
@@ -465,15 +480,6 @@ namespace Shorokoo
                          + "takes one, and so does TakeCheckpoint() -- so begin a new run from a checkpoint you still hold. The one this "
                          + "run began from is whole only if it was passed .Shared(); passed as it is, the "
                          + "run's first step consumed it.");
-
-        /// <summary>Whether any tensor of <paramref name="checkpoint"/>'s state is dead.</summary>
-        private static bool IsSpent(TrainingCheckpoint checkpoint)
-        {
-            foreach (var state in (TensorDataStruct[])[checkpoint.TrainableParams, checkpoint.ModelState, checkpoint.OptimizerState])
-                foreach (var field in state.Fields.Values)
-                    if (field is TensorData { IsDisposed: true }) return true;
-            return false;
-        }
 
         /// <summary>
         /// Takes a step and takes over its result. The state it superseded was the step's to deal

@@ -3176,7 +3176,8 @@ namespace Shorokoo
             if (checkpoint is null) throw new ArgumentNullException(nameof(checkpoint));
             if (loader is null) throw new ArgumentNullException(nameof(loader));
             // Before the draw: a refused step must leave the loader at the batch it would have trained.
-            checkpoint.ThrowIfDisposed();
+            checkpoint.RequireWhole();
+            RequireNoRuntimeHyperparameters();
             return BatchStep(checkpoint, loader.Next(), TrainStepCall);
         }
 
@@ -3194,11 +3195,11 @@ namespace Shorokoo
         /// <summary>
         /// Superseded checkpoint state counted towards one collection: the bytes of each tensor a
         /// step superseded and left alive, counted once however many steps superseded it, and taken
-        /// off again when the tensor is released (<see cref="ForgetSuperseded"/>). A collection
-        /// closes the tally it was made for and opens the next, so everything counted before it is
-        /// that collection's, and nothing is carried past it.
+        /// off again when the tensor dies, whatever ends it (<see cref="SupersededMarks.Release"/>).
+        /// A collection closes the tally it was made for and opens the next, so everything counted
+        /// before it is that collection's, and nothing is carried past it.
         /// </summary>
-        private sealed class SupersededTally
+        internal sealed class SupersededTally
         {
             internal long Bytes;
             internal volatile bool Closed;
@@ -3209,10 +3210,11 @@ namespace Shorokoo
 
         /// <summary>
         /// The tallies a superseded tensor is counted in — one per rig whose step superseded it, open
-        /// or since closed — so that releasing it takes it off each of them, whichever rig counted
-        /// it and however often.
+        /// or since closed — so that its death takes it off each of them, whichever rig counted it
+        /// and however often. Held by the tensor itself (<see cref="TensorData.SupersededMarks"/>),
+        /// which releases it as it dies: released by its checkpoint, deleted, or consumed by a run.
         /// </summary>
-        private sealed class SupersededMarks(long bytes)
+        internal sealed class SupersededMarks(long bytes)
         {
             private readonly List<SupersededTally> _counted = [];
             private bool _released;
@@ -3232,7 +3234,8 @@ namespace Shorokoo
                 }
             }
 
-            /// <summary>Takes the tensor off every tally it is counted in, for good.</summary>
+            /// <summary>Takes the tensor off every tally it is counted in, for good: called once, as
+            /// it dies.</summary>
             internal void Release()
             {
                 lock (_counted)
@@ -3243,10 +3246,6 @@ namespace Shorokoo
                 }
             }
         }
-
-        /// <summary>The tallies each superseded tensor is counted in, for as long as the tensor
-        /// lives.</summary>
-        private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<TensorData, SupersededMarks> SupersededMarksOf = new();
 
         /// <summary>
         /// The budget currently in force. Starts at <see cref="SupersededStateBudgetBytes"/> and
@@ -3349,16 +3348,17 @@ namespace Shorokoo
         /// older watch survived, which one retained checkpoint among several cannot produce.</para>
         ///
         /// <para>A caller who wants determinism has it: <see cref="TrainingCheckpoint.Dispose"/>
-        /// releases a checkpoint's state at once, and takes what it frees off the count
-        /// (<see cref="ForgetSuperseded"/>), so a checkpoint released by its owner prompts no
+        /// releases a checkpoint's state at once, and a tensor that dies is taken off the count
+        /// (<see cref="SupersededMarks.Release"/>), so a checkpoint released by its owner prompts no
         /// collection. What the rig cannot do is dispose the checkpoint it was handed, because the
         /// caller may still be holding it. Nothing here disposes anything the caller can still see —
         /// it schedules a collection, and only unreachable state is affected.</para>
         ///
         /// <para><b>When it is decided.</b> A release can only take state off the count before the
         /// collection is decided on it, so each step decides at the point its caller has had the
-        /// chance to release what it superseded. A <c>TrainStep</c> decides at its start, on what
-        /// the steps before it counted, and counts what it supersedes as it returns: the checkpoint
+        /// chance to release what it superseded. A <c>TrainStep</c> decides once it has accepted its
+        /// arguments and before it runs, on what the steps before it counted — so a step refused
+        /// over its arguments makes no collection — and counts what it supersedes as it returns: the checkpoint
         /// it was fed <c>.Shared()</c> is still its caller's argument until then, and the caller
         /// releasing it straight after —
         /// <c>var next = rig.TrainStep(cp.Shared(), …); cp.Save(…); cp.Dispose();</c> — takes it
@@ -3430,7 +3430,7 @@ namespace Shorokoo
         /// Counts <paramref name="checkpoint"/>'s state, which a step has just superseded, towards
         /// this rig's next collection (<see cref="ReclaimSupersededState"/>): each of its tensors
         /// still alive and not counted there already. Returns the bytes it added. A tensor of it a
-        /// step consumed is dead, and is taken off whatever it was counted in before. Only a tensor —
+        /// step consumed is dead, and its death took it off whatever it was counted in before. Only a tensor —
         /// its own or in a nested struct — counts: a sequence or an optional contributes nothing,
         /// which only makes the budget conservative.
         /// </summary>
@@ -3439,8 +3439,8 @@ namespace Shorokoo
             long total = 0;
             foreach (var tensor in checkpoint.HeldTensors())
             {
-                if (tensor.IsDisposed) { ForgetSuperseded(tensor); continue; }
-                var marks = SupersededMarksOf.GetValue(tensor, t => new SupersededMarks(t.ByteCount));
+                if (tensor.IsDisposed) continue;
+                var marks = tensor.SupersededMarks;
                 while (true)
                 {
                     var tally = System.Threading.Volatile.Read(ref _tally);
@@ -3450,16 +3450,6 @@ namespace Shorokoo
                 }
             }
             return total;
-        }
-
-        /// <summary>
-        /// Takes <paramref name="tensor"/>, just released, off every count of superseded state it
-        /// sits in — on any rig, however many steps counted it — so a checkpoint released by its
-        /// owner does not go on prompting a collection that has nothing left to free.
-        /// </summary>
-        internal static void ForgetSuperseded(TensorData tensor)
-        {
-            if (SupersededMarksOf.TryGetValue(tensor, out var marks)) marks.Release();
         }
 
         /// <summary>
@@ -3546,8 +3536,6 @@ namespace Shorokoo
             if (checkpoint is null) throw new ArgumentNullException(nameof(checkpoint));
             if (trainingInput is null) throw new ArgumentNullException(nameof(trainingInput));
             if (trainingOutput is null) throw new ArgumentNullException(nameof(trainingOutput));
-            // On what earlier steps superseded, which their callers have had the chance to release.
-            bool reclaimed = reclaimSuperseded && ReclaimSupersededState();
             if (HyperparameterStructDef.Fields.Length > 0 && hyperparams is null)
                 throw new ArgumentNullException(nameof(hyperparams),
                     "This rig was built with dynamic hyperparameters; supply their values each step " +
@@ -3570,6 +3558,10 @@ namespace Shorokoo
                         HyperparameterValues.AssertShape(
                             fed, HyperparameterShapes[DynamicHyperparameterIndices[i]], DynamicHyperparameterNames[i]);
             }
+            checkpoint.RequireWhole();
+            // On what earlier steps superseded, which their callers have had the chance to release,
+            // and only for a step that is going to run: a refused one collects nothing.
+            bool reclaimed = reclaimSuperseded && ReclaimSupersededState();
 
             // Execute the training step graph.
             // Graph inputs (after lowering): [param_fields..., state_fields..., opt_state_fields..., hyperparam_fields..., counter_inputs..., model_input_fields..., target_fields...]
@@ -3964,7 +3956,7 @@ namespace Shorokoo
 
         /// <summary>The guard the schedule-driven step paths share: a schedule-less runtime
         /// hyperparameter has no value to apply automatically, so it must be supplied.</summary>
-        private void RequireNoRuntimeHyperparameters()
+        internal void RequireNoRuntimeHyperparameters()
         {
             if (HyperparameterStructDef.Fields.Length > 0)
                 throw new InvalidOperationException(
@@ -4292,9 +4284,10 @@ namespace Shorokoo
             Action<TrainingStepReport>? onStep,
             CancellationToken cancellationToken)
         {
-            var checkpoint = initialCheckpoint ?? CreateInitialCheckpoint();
             // Before the loader is repositioned: a refused fit leaves it where it was.
-            checkpoint.ThrowIfDisposed();
+            RequireNoRuntimeHyperparameters();
+            var checkpoint = initialCheckpoint ?? CreateInitialCheckpoint();
+            checkpoint.RequireWhole();
 
             // Resume: point the loader at the next batch to train. A checkpoint's epoch / batch names
             // the batch that was USED, so a resuming run advances one past it via RestoreAfter (the loader

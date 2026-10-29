@@ -30,13 +30,30 @@ namespace Shorokoo
         Lifetime ILifetimeOwner.Life => _life;
 
         /// <inheritdoc/>
-        void ILifetimeOwner.ReleaseOwnMemory() => ReleaseMemory();
+        void ILifetimeOwner.ReleaseOwnMemory()
+        {
+            ReleaseFaultInjection?.Invoke(this);
+            ReleaseMemory();
+        }
+
+        /// <summary>
+        /// Test hook: invoked with a tensor as its own memory is about to be released, the tensor
+        /// already dead, so a test can make that release fail and see what a failed release leaves
+        /// behind. Thread-scoped, so a hook installed by one parallel test is invisible to every
+        /// other thread; still reset it in a <c>finally</c>.
+        /// </summary>
+        [ThreadStatic]
+        internal static Action<TensorData>? ReleaseFaultInjection;
 
         /// <inheritdoc/>
         void ILifetimeOwner.RetireRunCopies() => RetireCopies();
 
         /// <inheritdoc/>
         string ILifetimeOwner.Describe() => Describe();
+
+        /// <summary>Takes this tensor, dying, off every count of superseded checkpoint state it sits
+        /// in — whatever ended it: a release, a deletion, or a run consuming it.</summary>
+        void ILifetimeOwner.Died() => Interlocked.CompareExchange(ref _supersededMarks, null, null)?.Release();
 
         /// <summary>
         /// True once this tensor is dead — deleted, consumed by a run, or moved into an attribute;
@@ -345,6 +362,16 @@ namespace Shorokoo
 
         /// <summary>How many checkpoints hold this tensor as part of their state.</summary>
         internal int CheckpointHolds => Volatile.Read(ref _checkpointHolds);
+
+        // The counts of superseded checkpoint state this tensor sits in, created the first time a
+        // step counts it. Its death takes it off every one of them.
+        private TrainingRig.SupersededMarks? _supersededMarks;
+
+        /// <summary>The counts of superseded checkpoint state this tensor sits in.</summary>
+        internal TrainingRig.SupersededMarks SupersededMarks
+            => Volatile.Read(ref _supersededMarks)
+               ?? Interlocked.CompareExchange(ref _supersededMarks, new TrainingRig.SupersededMarks(ByteCount), null)
+               ?? _supersededMarks!;
 
         private RunCopies<TensorData> RunCopiesOf()
             => Volatile.Read(ref _copies)

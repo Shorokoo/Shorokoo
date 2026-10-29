@@ -63,5 +63,6 @@ public class AutoGradStructuralTests
         Run<AutoGradStructDropoutRatioInputCheck>(2f);
         Run<AutoGradStructFloat64DropoutCheck>(2f);
         Run<AutoGradStructFloat64DropoutFloat32LossCheck>(2f);
+        Run<AutoGradStructFloat64DropoutFloat32RatioCheck>(2f);
     }
 }

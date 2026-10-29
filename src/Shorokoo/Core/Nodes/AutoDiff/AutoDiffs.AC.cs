@@ -762,12 +762,14 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         /// FastProcessAutoGrad reads this signature's parameter types so the
         /// <c>training_mode</c> input gets a <c>Scalar&lt;bit&gt;</c> stand-in and the
         /// plumbed-through forward <c>mask</c> output (appended as trailing input slot 3)
-        /// gets a <c>Tensor&lt;bit&gt;</c> stand-in.
+        /// gets a <c>Tensor&lt;bit&gt;</c> stand-in. <c>data</c> and <c>ratio</c> are generic, so
+        /// their stand-ins take the dtypes of the tensors they stand for.
         /// </summary>
         [AutoDiff(DROPOUT)]
-        public static Variable?[] DropoutGradientStandInTypes(
-            Tensor<float32> data, Tensor<float32>? ratio, Scalar<bit>? trainingMode, Tensor<bit>? mask,
-            Tensor<float32> gradOutput, Tensor<bit>? gradMask, long? seed)
+        public static Variable?[] DropoutGradientStandInTypes<T, T1>(
+            Tensor<T> data, Tensor<T1>? ratio, Scalar<bit>? trainingMode, Tensor<bit>? mask,
+            Tensor<T> gradOutput, Tensor<bit>? gradMask, long? seed)
+            where T : IVarType where T1 : IVarType
             => throw new InvalidOperationException(
                 "DropoutGradientStandInTypes exists only for stand-in dtype resolution; "
                 + "dispatch goes through the dict-registered DropoutGradient.");
@@ -804,7 +806,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
             var one = OnnxOp.Cast(Scalar(1.0f), saturate: null, to: gradOutput.Type);
             var keepProb = ratio is null
                 ? OnnxOp.Cast(Scalar(0.5f), saturate: null, to: gradOutput.Type) // ONNX default ratio
-                : OnnxOp.Sub(one, ratio);
+                : OnnxOp.Sub(one, OnnxOp.Cast(ratio, saturate: null, to: gradOutput.Type)); // ratio's float type may differ from data's
             var scaledGrad = OnnxOp.Div(gradOutput, keepProb);
             var zeros = OnnxOp.Sub(gradOutput, gradOutput);
             var trainingGrad = OnnxOp.Where(mask, scaledGrad, zeros);

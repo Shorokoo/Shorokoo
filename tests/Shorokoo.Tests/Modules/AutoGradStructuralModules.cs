@@ -843,4 +843,18 @@ namespace Shorokoo.Tests.Modules
             return (grad - Scalar(3f)).Abs().Scalar() < Scalar(1e-6f);
         }
     }
+
+    /// <summary><see cref="AutoGradStructFloat64DropoutCheck"/> with a <c>float32</c> ratio.</summary>
+    [Module]
+    public partial class AutoGradStructFloat64DropoutFloat32RatioCheck
+    {
+        public static Scalar<bit> Inline(Scalar<float32> a)
+        {
+            var aVec = (Tensor<float64>)OnnxOp.Expand(a.Cast<float64>(), Vector(3L));
+            var (output, _) = OnnxOp.Dropout(aVec, Scalar(0.5f), Scalar(false));
+            var loss = ((Tensor<float64>)output).Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+            var grad = (Tensor<float32>)Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(a, loss);
+            return (grad - Scalar(3f)).Abs().Scalar() < Scalar(1e-6f);
+        }
+    }
 }

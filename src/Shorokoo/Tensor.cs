@@ -89,7 +89,6 @@ namespace Shorokoo
         public string UniqueName => Immutable.UniqueName;
         public bool IsValid { get => Immutable.IsValid; set => Immutable.IsValid = value; }
 #pragma warning disable CS0618
-        string? IValue.FriendlyName => ((IValue)Immutable).FriendlyName;
 #pragma warning restore CS0618
 
         // user-facing reinterpret casts: the Variable→handle operators validate rank

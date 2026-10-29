@@ -141,6 +141,7 @@ public class CSharpModelBuilderCoverageTests
     {
         AssertCodegens(new InternalComputationGraph([], [.. OnnxOp.Split(Tensor([2L, 2L], 1f, 2f, 3f, 4f), null, null, 2, 2)]));
         AssertRoundTrips(new InternalComputationGraph([], [OnnxOp.Split(Tensor([2L, 2L], 1f, 2f, 3f, 4f), null, null, 2, 2)[1]]), []);
+        AssertRoundTrips(new InternalComputationGraph([], [OnnxOp.Split(Tensor([2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f), null, 0, 2, 2)[1]]), []);
     }
 
     [Fact]
@@ -158,6 +159,16 @@ public class CSharpModelBuilderCoverageTests
         => AssertCodegens(new InternalComputationGraph([], [OnnxOp.Resize(Tensor([1L, 1L, 1L, 2L], 1f, 2f),
             Vector(0f, 0f, 0f, 0f, 1f, 1f, 1f, 1f), Vector(1f, 1f, 1f, 2f), null, null, null,
             CoordinateTransformationMode.Asymmetric, null, null, null, null, ResizeMode.Nearest, null)]));
+
+    [Fact]
+    public void TestAResizeWithAnUnknownRankRoiCodegensSourceThatCompiles()
+        => AssertCodegens(new InternalComputationGraph([], [OnnxOp.Resize(Tensor([1L, 1L, 1L, 2L], 1f, 2f),
+            OnnxOp.ConstantOfShape(Vector(8L), TensorData([1], 0f).MoveToAttribute()), Vector(1f, 1f, 1f, 2f), null, null, null,
+            CoordinateTransformationMode.Asymmetric, null, null, null, null, ResizeMode.Nearest, null)]));
+
+    [Fact]
+    public void TestASplitOutputFedToAVectorParameterCodegensSourceThatCompiles()
+        => AssertRoundTrips(new InternalComputationGraph([], [OnnxOp.Slice(Vector(1f, 2f, 3f, 4f), OnnxOp.Split(Vector(0L, 1L), null, 0, 2, 2)[1], Vector(3L))]), []);
 
     [Fact]
     public void TestAStructFirstRegisteredUnderItsShortNameCodegensSourceThatCompiles()

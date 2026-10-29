@@ -124,18 +124,6 @@ namespace Shorokoo.Core
         public string UniqueName => this.uniqueName ?? this.Key.ToString();
 
         /// <summary>
-        /// Obsolete: Use UniqueName instead. DefaultName now redirects to UniqueName for backwards compatibility.
-        /// </summary>
-        [Obsolete("Use UniqueName instead. DefaultName is deprecated and will be removed in a future version.")]
-        public string DefaultName => this.UniqueName;
-
-        /// <summary>
-        /// Deprecated: FriendlyName is no longer used. Use UniqueName for ONNX names or Key for stable identifiers.
-        /// </summary>
-        [Obsolete("FriendlyName is deprecated. Use UniqueName for ONNX names or Key.ToString() for stable identifiers.")]
-        public string? FriendlyName => this.uniqueName;
-
-        /// <summary>
         /// Converts this <c>Variable</c> to the <see cref="IValue"/> type <typeparamref name="A"/> — the
         /// generic form of the <c>Variable</c>→<c>IValue</c> conversion, for call sites where the target
         /// <see cref="IValue"/> type is only known as a type parameter (so the compiler cannot apply the

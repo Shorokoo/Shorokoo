@@ -185,7 +185,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .InputTestShapes("input", [[2,1,3],[1,6,2]])
                 .InputTestValues("split", [TensorData([2], 1L,2L), null])
                 .VariadicTestCounts("V", [2, 3])
-                .Output("outputs", ["T", "V"], rank: "R2")
+                .Output("outputs", ["T", "V"], rank: "R1")
                 .Code("{1:tensorthis}.Split({2:param}{a:param0}{numoutputs:param})"),
 
             Op(SQUEEZE)

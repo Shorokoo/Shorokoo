@@ -1613,8 +1613,7 @@ public class GpuExecutionTests
         Assert.InRange(logSoftmaxError, 1e-12, 1e-7);
     }
 
-    // Shorokoo/Shorokoo#553: the card divides a half-precision mean by a count that overflows float16.
-    [CudaFact(Skip = "Shorokoo/Shorokoo#553")]
+    [CudaFact]
     public void CudaProvider_AHalfPrecisionMeanLossOverMoreSamplesThanFloat16CountsToIsTheMeanOnTheCard()
     {
         var scores = TensorData(DType.Float16, [70000L, 2L], [.. Enumerable.Repeat((object)(Shorokoo.Core.Backends.Float16)(-1f), 140000)]);

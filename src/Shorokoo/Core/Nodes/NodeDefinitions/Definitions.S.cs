@@ -161,7 +161,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .InputTestValues("ends", [TensorData([2], 8L,3L), TensorData([3], 3L, 3L, 3L)])
                 .InputTestValues("axes", [TensorData([2], 1L,2L), TensorData([3], 1L,2L,3L)])
                 .InputTestValues("steps", [TensorData([2], 2L,1L), TensorData([3], 1L,1L,1L)])
-                .Code("{1:this}.Slice({2:param}{3:param}{4:param}{5:param})"),
+                .Code("{1:tensorthis}.Slice({2:param}{3:param}{4:param}{5:param}){o1:torank}"),
 
             Op(SOFTMAX)
                 .Tensor<FloatLike>("T")
@@ -185,8 +185,8 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .InputTestShapes("input", [[2,1,3],[1,6,2]])
                 .InputTestValues("split", [TensorData([2], 1L,2L), null])
                 .VariadicTestCounts("V", [2, 3])
-                .Output("outputs", ["T", "V"], rank: "R2")
-                .Code("{1:this}.Split({2:param}{a:param}{numoutputs:param})"),
+                .Output("outputs", ["T", "V"], rank: "R1")
+                .Code("{1:tensorthis}.Split({2:param}{a:param0}{numoutputs:param})"),
 
             Op(SQUEEZE)
                 .Tensor<AnyLike>("T1")

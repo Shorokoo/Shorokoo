@@ -3,13 +3,12 @@ using Shorokoo.Core.Nodes.NodeDefinitions;
 
 namespace Shorokoo
 {
-    // Compatibility shims that restore behaviour the value-struct conversion would otherwise
-    // lose to the absence of class inheritance, so user/module code keeps compiling unchanged:
-    //   * Scalar/Vector are no longer subclasses of Tensor, so generic inference that used to flow
-    //     through the base type (e.g. Pow<T1>(Tensor<T1>) called with a Scalar<T1>) needs explicit
-    //     overloads taking the concrete struct.
-    //   * `struct Scalar<T>` cannot declare a member named `Scalar` (CS0542), so the inherited
-    //     `.Scalar()` reinterpret becomes an extension.
+    // Overloads that the value structs need because they share no base type:
+    //   * Scalar, Vector and Tensor are separate structs, so generic inference cannot reach a
+    //     Tensor<T1> parameter from a Scalar<T1> or Vector<T1> argument (e.g. Pow<T1>(Tensor<T1>)
+    //     called with a Scalar<T1>); each needs an explicit overload taking the concrete struct.
+    //   * `struct Scalar<T>` cannot declare a member named `Scalar` (CS0542), so the
+    //     `.Scalar()` reinterpret is an extension.
     public partial struct Tensor<T> where T : IVarType
     {
         /// <summary>Element-wise power with a scalar exponent (overload so T1 infers from a <see cref="Scalar{T1}"/>).</summary>
@@ -20,24 +19,24 @@ namespace Shorokoo
 
     public partial struct Vector<T> where T : IVarType
     {
-        // Vector declares its own Reduce(ReduceKind) -> Scalar, which made the op-generator skip ALL
-        // Reduce overloads; restore Tensor's axis/keepDims overload (with inheritance both coexisted).
-        // The no-arg call still binds to Vector.Reduce(ReduceKind) (exact arity wins).
+        // Vector declares its own Reduce(ReduceKind) -> Scalar, so the op-generator emits none of
+        // Tensor's Reduce overloads for it; this is Tensor's axis/keepDims overload.
+        // The no-arg call binds to Vector.Reduce(ReduceKind) (exact arity wins).
         public Tensor<T> Reduce(ReduceKind reduceKind, Vector<int64>? axes = null, bool keepDims = false)
             => ((Tensor<T>)this).Reduce(reduceKind, axes, keepDims);
 
         public Tensor<T> Pow<T1>(Scalar<T1> power) where T1 : IVarType => ((Tensor<T>)this).Pow<T1>((Tensor<T1>)power);
         public Tensor<T> Pow<T1>(Vector<T1> power) where T1 : IVarType => ((Tensor<T>)this).Pow<T1>((Tensor<T1>)power);
 
-        // Vector declares its own Concat(params Vector[]) -> Vector, which made the op-generator skip
-        // Tensor's axis/params overload; restore it (with inheritance both coexisted).
+        // Vector declares its own Concat(params Vector[]) -> Vector, so the op-generator emits none of
+        // Tensor's Concat overloads for it; this is Tensor's axis/params overload.
         public Tensor<T> Concat(long axis, params Tensor<T>[] others)
             => ((Tensor<T>)this).Concat(axis, others);
     }
 
     public partial struct Scalar<T> where T : IVarType
     {
-        /// <summary>Power with a tensor exponent — the base broadcasts (former <c>Scalar : Tensor</c> inheritance).</summary>
+        /// <summary>Power with a tensor exponent — the base broadcasts.</summary>
         public Tensor<T> Pow<T1>(Tensor<T1> power) where T1 : IVarType => ((Tensor<T>)this).Pow<T1>(power);
         /// <summary>Power with a vector exponent — the base broadcasts (overload so T1 infers from a <see cref="Vector{T1}"/>).</summary>
         public Tensor<T> Pow<T1>(Vector<T1> power) where T1 : IVarType => ((Tensor<T>)this).Pow<T1>((Tensor<T1>)power);
@@ -45,11 +44,11 @@ namespace Shorokoo
 
     public static class ValueStructCompatExtensions
     {
-        /// <summary>Identity reinterpret of an already-rank-0 scalar (the inherited <c>Scalar()</c> on the
-        /// former <c>Scalar : Tensor</c>; the struct cannot declare a same-named member).</summary>
+        /// <summary>Identity reinterpret of an already-rank-0 scalar, matching <c>Scalar()</c> on the other
+        /// value types (a struct named <c>Scalar</c> cannot declare a same-named member, so it is an extension).</summary>
         public static Scalar<T> Scalar<T>(this Scalar<T> self) where T : IVarType => self;
 
-        /// <summary>Reinterpret a handle as a <c>Tensor</c> (the inherited <c>Variable.Tensor()</c>;
+        /// <summary>Reinterpret a handle as a <c>Tensor</c>, matching <c>Variable.Tensor()</c>;
         /// a struct named <c>Tensor</c> cannot declare a same-named member, so it is an extension).</summary>
         public static Tensor<T> Tensor<T>(this Tensor<T> self) where T : IVarType => self;
         public static Tensor<T> Tensor<T>(this Vector<T> self) where T : IVarType => self;

@@ -90,7 +90,6 @@ namespace Shorokoo
         public bool IsValid { get => Immutable.IsValid; set => Immutable.IsValid = value; }
 
 #pragma warning disable CS0618 // forwarding the obsolete member is intentional
-        string? IValue.FriendlyName => ((IValue)Immutable).FriendlyName;
 #pragma warning restore CS0618
     }
 }

@@ -177,8 +177,7 @@ namespace Shorokoo.Core.Factory.CSharpFactory
 
         public static string GetModuleAwareTypeDefString(Variable variable, int? rank)
         {
-            // Model/module params are scalar nodes distinguished by runtime DType (formerly the generic
-            // Variable<IModelVarType> / Variable<IModuleVarType>).
+            // Model/module params are scalar nodes distinguished by their runtime DType.
             if (variable is Variable modelVariable && modelVariable.Type == DType.Model)
                 return GetModuleAwareTypeDefString(modelVariable.ModuleFn.AssertNotNull(), asModel: true);
             else if(variable is Variable moduleVariable && moduleVariable.Type == DType.Module)
@@ -413,9 +412,8 @@ public static class " + modelName + @"
             // Collect all code lines with scope depths. Variables that the
             // standard pipeline produces are always either pre-declared at the
             // outer scope (loop carry-overs, scan outputs) or used only within
-            // their own scope, so there's no need for the duplicate-declaration
-            // dedup or cross-scope hoisting passes that earlier versions of
-            // this codegen carried.
+            // their own scope, so the lines need no duplicate-declaration
+            // dedup or cross-scope hoisting.
             var allLines = new List<(string code, int indent)>();
             int defaultIndent = 2;
 
@@ -575,10 +573,9 @@ public static class " + modelName + @"
 
             var nodeDef = node.NodeDef;
 
-            // Per-node code generation. The per-input inlining mechanism that this
-            // function used to support is currently disabled (the standard MakeNode
-            // path always nulls out InlineExpression below, so no upstream node ever
-            // exposes an inline form). Build the code template with no inlines.
+            // Per-node code generation. Per-input inlining is disabled: the standard
+            // MakeNode path always nulls out InlineExpression below, so no upstream node
+            // ever exposes an inline form. Build the code template with no inlines.
             var inlines = ImmutableDictionary<Node, string>.Empty;
             string mostInLinesCode = MakeNodeWithInlines(node, inlines, currentNames, codeTemplateOverride);
             ImmutableList<Node> inlineNodes = node.IsModelInput ? [node] : [];
@@ -616,7 +613,7 @@ public static class " + modelName + @"
                 else
                 {
                     Debug.Assert(node.Inputs.Length > 0 && node.Inputs[0] is not null);
-                    var arrayVariableName = SanitizeVariableName(node.Inputs[0]!.UniqueName + "_split");
+                    var arrayVariableName = GetSanitizedVariableName(node.Outputs[0]!) + "_split";
                     var codeLines = new List<CodeLine>();
 
                     codeLines.Add(new CodeLine(0, $"var {arrayVariableName} = {inlineExpressionForNode};"));
@@ -624,8 +621,15 @@ public static class " + modelName + @"
                     // Possible optimization: for long arrays, or when an array item is only used once,
                     // we may want to preffer to use indexing into the array as the variable name.
 
+                    // The array's elements are Tensor<T>; an element of statically known rank 0 or 1
+                    // narrows to the Scalar<T> or Vector<T> its rank calls for.
                     for (var i = 0; i < node.Outputs.Length; i++)
-                        codeLines.Add(new CodeLine(0, $"var {GetSanitizedVariableName(node.Outputs[i]!)} = {arrayVariableName}[{i}];"));
+                    {
+                        var narrowing = node.Outputs[i] is { Kind: DataStructure.Tensor, Rank: 0 } ? ".Scalar()"
+                                      : node.Outputs[i] is { Kind: DataStructure.Tensor, Rank: 1 } ? ".Vec()"
+                                      : "";
+                        codeLines.Add(new CodeLine(0, $"var {GetSanitizedVariableName(node.Outputs[i]!)} = {arrayVariableName}[{i}]{narrowing};"));
+                    }
 
                     for (var i = 0; i < node.Outputs.Length; i++)
                         newVariables[node.Outputs[i].AssertNotNull()] = GetSanitizedVariableName(node.Outputs[i]!);
@@ -1428,8 +1432,22 @@ public static class " + modelName + @"
                     // precedence-paren wrap that fires only for inlined inputs never fires either.
                     // An absent input is still an argument, so it takes the placeholder's own
                     // separator: a template that writes its own would otherwise get two.
+                    // "tensorthis" is a "this" that binds a Tensor<T> member whatever the input's
+                    // static type, since Vector<T> declares narrower overloads of the same name.
+                    // Scalar<T> declares the same overloads Tensor<T> does, so a rank-0 input's cast
+                    // changes no binding; it only keeps every rank-0/1 input in one form.
+                    // "nvecparam?" is a "param?" bound to a generic Vector<T>? parameter, which C#
+                    // cannot infer T for from a Vector<T> argument; an input not statically rank 1
+                    // is narrowed with .Vec().
                     var replacement = input is null ? "null" : currentNames[input];
-                    if (keyword.StartsWith("param"))
+                    if (input is { Kind: DataStructure.Tensor })
+                    {
+                        if (keyword == "tensorthis" && input.Rank is 0 or 1)
+                            replacement = $"((Tensor<{input.Type.ToIVarType().Name}>){replacement})";
+                        else if (keyword == "nvecparam?")
+                            replacement = $"(Vector<{input.Type.ToIVarType().Name}>?){replacement}{(input.Rank == 1 ? "" : ".Vec()")}";
+                    }
+                    if (keyword.StartsWith("param") || keyword.StartsWith("nvecparam"))
                         replacement += ", ";
 
                     result = result.Replace(fullPlaceholder, replacement);
@@ -1468,8 +1486,9 @@ public static class " + modelName + @"
                     }
 
                     string attrValue;
+                    // "param0" is a "param" bound to a non-nullable long whose ONNX default is 0.
                     if (attributes.IsDefaultValue(attrName))
-                        attrValue = "null";
+                        attrValue = keyword == "param0" ? "0L" : "null";
                     else if (attrType is AttributeType.Long)
                         attrValue = Literal(attributes.GetLongVal(attrName).AssertNotNull()) + "L";
                     else if (attrType is AttributeType.Float)
@@ -1594,9 +1613,6 @@ public static class " + modelName + @"
                                 result = result.Replace(fullPlaceholder, $".{dtypename}().Tensor()");
                         }
                     }
-                    // Note: an "objtype" keyword arm was here too, but no
-                    // node-definition CodeTemplate in the codebase uses
-                    // {oN:objtype}, so it was unreachable and removed.
                 }
             }
 
@@ -1621,7 +1637,7 @@ public static class " + modelName + @"
 
 
             var trailingNulls = ")";
-            var maxNullTrimCount = codeTemplate.Split(":param?}").Length - 1;
+            var maxNullTrimCount = codeTemplate.Split("param?}").Length - 1;
             for (var trailingNullCount = 0; trailingNullCount < maxNullTrimCount; trailingNullCount++)
             {
                 if (!result.Contains("null, " + trailingNulls))

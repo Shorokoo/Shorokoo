@@ -411,7 +411,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .InputTestValues("roi", [null])
                 .InputTestValues("scales", [TensorData([3], 1.4f, 0.5f, 1.2f)])
                 .InputTestValues("sizes", [null])
-                .Code("NN.Resize({1:param}{3:param}{4:param}{a:param}{b:param}{c:param}{d:param}{e:param}{f:param}{g:param}{h:param}{i:param}{2:param?})"),
+                .Code("NN.Resize({1:param}{3:param}{4:param}{a:param}{b:param}{c:param}{d:param}{e:param}{f:param}{g:param}{h:param}{i:param}{2:nvecparam?})"),
 
             Op(ROI_ALIGN)
                 .Tensor<FloatLike>("T1")       // X and Y

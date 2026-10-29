@@ -48,18 +48,6 @@ namespace Shorokoo
         /// </summary>
         string UniqueName { get; }
         
-        /// <summary>
-        /// Obsolete: Use UniqueName instead. DefaultName now redirects to UniqueName for backwards compatibility.
-        /// </summary>
-        [Obsolete("Use UniqueName instead. DefaultName is deprecated and will be removed in a future version.")]
-        string DefaultName => UniqueName;
-        
-        /// <summary>
-        /// Deprecated: FriendlyName is no longer used. Use UniqueName for ONNX names or Key for stable identifiers.
-        /// </summary>
-        [Obsolete("FriendlyName is deprecated. Use UniqueName for ONNX names or Key.ToString() for stable identifiers.")]
-        string? FriendlyName { get; }
-        
         bool IsValid { get; set; }
 
         /// <summary>

@@ -67,7 +67,6 @@ namespace Shorokoo
         public string UniqueName => Immutable.UniqueName;
         public bool IsValid { get => Immutable.IsValid; set => Immutable.IsValid = value; }
 #pragma warning disable CS0618
-        string? IValue.FriendlyName => ((IValue)Immutable).FriendlyName;
 #pragma warning restore CS0618
         public override bool Equals(object? obj) => obj is Vector<T> t && Equals(inner, t.inner);
         public override int GetHashCode() => inner?.GetHashCode() ?? 0;

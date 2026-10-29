@@ -2634,6 +2634,20 @@ public class TrainingRigTrainingLoopCoverageTests
         Assert.Equal(expected, LossOfASecondStep(BFloat16L2Loss.ComputationGraph), 1e-2f);
     }
 
+    private static string LossRefused(ComputationGraph lossGraph)
+    {
+        var (sample, _, _) = ScalarMultiplyBatches();
+        return Assert.Throws<ModelException>(() => TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, lossGraph, SGDOptimizer.ComputationGraph, sample, 0.1f)).ErrorCode;
+    }
+
+    [Fact]
+    public void TestARigWhoseLossIsNotFloatingPointIsRefusedAtConstruction()
+    {
+        Assert.Equal(ErrorCodes.FW061, LossRefused(Int32L2Loss.ComputationGraph));
+        Assert.Equal(ErrorCodes.FW061, LossRefused(BoolL2Loss.ComputationGraph));
+    }
+
     // A read placed after Globals.StateUpdate must still see the value fed in for this step: the
     // link is a graph-level registration, not an assignment. Guards the semantics an attempt at
     // Shorokoo/Shorokoo#306 broke while the whole suite stayed green.

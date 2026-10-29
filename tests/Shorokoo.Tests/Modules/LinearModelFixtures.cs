@@ -2496,6 +2496,28 @@ public partial class BFloat16L2Loss
     }
 }
 
+/// <summary>The mean squared error of a <c>float32</c> model's predictions, returned as <c>int32</c>.</summary>
+[Module]
+public partial class Int32L2Loss
+{
+    public static Scalar<int32> Inline(Tensor<float32> predictions, Tensor<float32> targets)
+    {
+        var diff = predictions - targets;
+        return (diff * diff).Reduce(ReduceKind.Mean, keepDims: false).Cast<int32>().Scalar();
+    }
+}
+
+/// <summary>Whether a <c>float32</c> model's predictions miss their targets at all.</summary>
+[Module]
+public partial class BoolL2Loss
+{
+    public static Scalar<bit> Inline(Tensor<float32> predictions, Tensor<float32> targets)
+    {
+        var diff = predictions - targets;
+        return (diff * diff).Reduce(ReduceKind.Mean, keepDims: false).Scalar() > Scalar(0f);
+    }
+}
+
 /// <summary>
 /// A model whose forward pass <b>reads</b> its module-owned state, not merely updates it — so a
 /// checkpoint whose state has moved off its initial value produces a different output, and binding

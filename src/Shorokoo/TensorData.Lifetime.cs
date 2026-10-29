@@ -328,6 +328,24 @@ namespace Shorokoo
         /// </summary>
         private protected void RetireCopies() => Volatile.Read(ref _copies)?.RetireAll();
 
+        // ---- Checkpoints holding this tensor ----
+
+        // How many training checkpoints hold this tensor as part of their state, each counted once
+        // however many checkpoints derived over the same state share its hold. What decides whether
+        // releasing one of them ends the tensor: only the last hold to go does.
+        private int _checkpointHolds;
+
+        /// <summary>Counts one more checkpoint holding this tensor as part of its state.</summary>
+        internal void AddCheckpointHold() => Interlocked.Increment(ref _checkpointHolds);
+
+        /// <summary>Counts one checkpoint fewer holding this tensor, and says whether it was the
+        /// last: then nothing else holds the tensor as checkpoint state, and the one letting go may
+        /// end it.</summary>
+        internal bool ReleaseCheckpointHold() => Interlocked.Decrement(ref _checkpointHolds) == 0;
+
+        /// <summary>How many checkpoints hold this tensor as part of their state.</summary>
+        internal int CheckpointHolds => Volatile.Read(ref _checkpointHolds);
+
         private RunCopies<TensorData> RunCopiesOf()
             => Volatile.Read(ref _copies)
                ?? Interlocked.CompareExchange(ref _copies, new RunCopies<TensorData>(), null)
@@ -381,6 +399,13 @@ namespace Shorokoo
         internal static TensorDeath Deleted { get; } = new("deleted", what =>
             $"{what} has been deleted -- by Delete(), Dispose(), TryDelete() or DeleteAsync() -- so "
             + "its memory is gone and nothing may read it.");
+
+        /// <summary>State of a training checkpoint, ended by that checkpoint's <c>Dispose</c> with
+        /// nothing else holding it.</summary>
+        internal static TensorDeath ReleasedWithItsCheckpoint { get; } = new("released with its checkpoint", what =>
+            $"{what} was state of a training checkpoint, and was released with it by the checkpoint's "
+            + "Dispose() -- that checkpoint's, or that of one derived over the same state -- with no other "
+            + "checkpoint or resident run holding it, so its memory is gone and nothing may read it.");
 
         /// <summary>A sequence ended by its <c>Dispose</c>.</summary>
         internal static TensorDeath Disposed { get; } = new("disposed", what =>

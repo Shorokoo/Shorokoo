@@ -4574,6 +4574,170 @@ public class TrainingRigCheckpointCoverageTests
         Assert.Equal(1, worstKeepingOne);
     }
 
+    private static TensorData[] StateTensors(TrainingCheckpoint c) =>
+        [.. ((TensorDataStruct[])[c.TrainableParams, c.ModelState, c.OptimizerState]).SelectMany(s => s.Fields.Values.OfType<TensorData>())];
+
+    private static bool AllDead(TensorData[] tensors) => tensors.All(t => t.IsDisposed);
+
+    private static bool AllAlive(TensorData[] tensors) => tensors.All(t => !t.IsDisposed);
+
+    private static string?[] Deaths(TensorData[] tensors) => [.. tensors.Select(t => ((ILifetimeOwner)t).Life.Death?.Cause).Distinct()];
+
+    [Fact]
+    public void TestDisposingACheckpointReleasesItsStateOnceKeepsItsHostValuesAndRefusesEveryOtherUse()
+    {
+        var rig = AdamRig();
+        var (input, target) = (InBatch(1f, 2f, 3f, 4f), TargetBatch(2f, 4f, 6f, 8f));
+        var cp = SteppedOnce(rig);
+        var tensors = StateTensors(cp);
+        var path = TempPath("released") + ".safetensors";
+
+        cp.Dispose();
+        cp.Dispose();
+
+        Assert.True(cp.IsDisposed);
+        Assert.True(AllDead(tensors));
+        Assert.Throws<ObjectDisposedException>(() => tensors[0].CopyRawMemory());
+        Assert.Equal((1L, 1, true, rig), (cp.Step, cp.History.Count, cp.Loss.HasValue, cp.Rig));
+        Assert.Throws<ObjectDisposedException>(() => cp.TrainableParams);
+        Assert.Throws<ObjectDisposedException>(() => cp.ModelState);
+        Assert.Throws<ObjectDisposedException>(() => cp.OptimizerState);
+        Assert.Throws<ObjectDisposedException>(() => cp.Save(path));
+        Assert.Throws<ObjectDisposedException>(() => Persistence.SaveTrainingCheckpointToSkpt(cp, path));
+        Assert.False(File.Exists(path));
+        Assert.Throws<ObjectDisposedException>(() => cp.Shared());
+        Assert.Throws<ObjectDisposedException>(() => cp.WithStep(5));
+        Assert.Throws<ObjectDisposedException>(() => cp.ToHost());
+        Assert.Throws<ObjectDisposedException>(() => cp.ToInferenceModel());
+        Assert.Throws<ObjectDisposedException>(() => rig.AdoptCheckpoint(cp));
+        Assert.Throws<ObjectDisposedException>(() => rig.TrainStep(cp, input.Shared(), target.Shared()));
+        Assert.Throws<ObjectDisposedException>(() => rig.BeginResidentRun(cp));
+        Assert.True(AllAlive([.. input.Fields.Values.OfType<TensorData>(), .. target.Fields.Values.OfType<TensorData>()]));
+    }
+
+    [Fact]
+    public void TestDisposingACheckpointReleasesTheSameStateDerivedOverItAndLeavesWhatAnotherCheckpointHolds()
+    {
+        var rig = AdamRig();
+        var (input, target) = (InBatch(1f, 2f, 3f, 4f), TargetBatch(2f, 4f, 6f, 8f));
+        var cp = SteppedOnce(rig);
+        var trainable = cp.TrainableParams.Fields.Values.OfType<TensorData>().ToArray();
+        TrainingCheckpoint[] same = [cp.Shared(), cp.TryConsume(), cp.WithStep(7), cp.WithoutHistory(), cp.ToHost(), rig.AdoptCheckpoint(cp)];
+        var swapped = cp.WithTrainableParams(rig.CreateInitialCheckpoint().TrainableParams);
+        var built = new TrainingCheckpoint { TrainableParams = cp.TrainableParams, ModelState = cp.ModelState, OptimizerState = cp.OptimizerState };
+        var next = rig.TrainStep(cp.Shared(), input.Shared(), target.Shared());
+
+        cp.Dispose();
+
+        Assert.All(same, c => Assert.True(c.IsDisposed));
+        Assert.True(AllAlive(StateTensors(swapped)));
+        Assert.True(AllAlive(StateTensors(built)));
+        Assert.True(AllAlive(StateTensors(next)));
+        built.Dispose();
+        Assert.True(AllDead(trainable));
+        Assert.True(AllAlive(StateTensors(swapped)));
+        Assert.Equal(2L, rig.TrainStep(swapped, input.Shared(), target.Shared()).Step);
+        Assert.Equal(3L, rig.TrainStep(next, input.Shared(), target.Shared()).Step);
+    }
+
+    [Fact]
+    public void TestAResidentRunTakesOverStateItsCheckpointsReleasedAndTrainsAsIfNoneWereReleased()
+    {
+        var rig = AdamRig();
+        var (input, target) = (InBatch(1f, 2f, 3f, 4f), TargetBatch(2f, 4f, 6f, 8f));
+        float[] Trained(bool release)
+        {
+            var path = TempPath("released_run") + ".safetensors";
+            var begin = rig.CreateInitialCheckpoint();
+            var losses = new List<float>();
+            using (var run = rig.BeginResidentRun(begin.Shared()))
+            {
+                var began = StateTensors(begin);
+                if (release) begin.Dispose();
+                Assert.True(AllAlive(began));
+                losses.Add(run.Step(input.Shared(), target.Shared()));
+                Assert.Equal([release ? "consumed by a run" : null], Deaths(began));
+                for (int i = 0; i < 3; i++)
+                {
+                    var handed = run.StepToCheckpoint(input.Shared(), target.Shared());
+                    var tensors = StateTensors(handed);
+                    handed.Save(path);
+                    if (release) handed.Dispose();
+                    Assert.True(AllAlive(tensors));
+                    losses.Add(run.Step(input.Shared(), target.Shared()));
+                    Assert.Equal([release ? "consumed by a run" : null], Deaths(tensors));
+                    Assert.Equal(release, handed.IsDisposed);
+                }
+                var taken = run.TakeCheckpoint();
+                if (release) taken.Dispose();
+                losses.Add(run.Step(input.Shared(), target.Shared()));
+                var last = run.TakeCheckpoint();
+                Assert.True(AllAlive(StateTensors(last)));
+                losses.Add(last.Loss!.Value);
+                if (release) last.Dispose();
+                losses.Add(run.Step(input.Shared(), target.Shared()));
+            }
+            losses.Add(rig.LoadCheckpoint(path).Step);
+            File.Delete(path);
+            return [.. losses];
+        }
+
+        Assert.Equal(Trained(release: false), Trained(release: true));
+    }
+
+    [Fact]
+    public void TestDisposingTheCheckpointsOfARunReleasesTheStateTheRunWasHoldingForThem()
+    {
+        var rig = AdamRig();
+        var (input, target) = (InBatch(1f, 2f, 3f, 4f), TargetBatch(2f, 4f, 6f, 8f));
+
+        var run = rig.BeginResidentRun();
+        var handed = run.StepToCheckpoint(input.Shared(), target.Shared());
+        var tensors = StateTensors(handed);
+        handed.Dispose();
+        Assert.True(AllAlive(tensors));
+        run.Dispose();
+        Assert.True(AllDead(tensors));
+
+        var kept = rig.CreateInitialCheckpoint();
+        var keptTensors = StateTensors(kept);
+        rig.BeginResidentRun(kept.Shared()).Dispose();
+        Assert.True(AllAlive(keptTensors));
+        kept.Dispose();
+        Assert.True(AllDead(keptTensors));
+
+        var fitted = rig.Fit([input, input], [target, target], 2).FinalCheckpoint;
+        var fittedTensors = StateTensors(fitted);
+        fitted.Dispose();
+        Assert.True(AllDead(fittedTensors));
+    }
+
+    [Fact]
+    public void TestAReleasedCheckpointIsTakenOffTheSupersededStateItWasCountedTowards()
+    {
+        var rig = ShapeRig(ParamOrderAModel.ComputationGraph);
+        var input = rig.InputDef.FromOrderedData(TensorData([4L], [1f, 2f, 3f, 4f]));
+        var target = rig.TargetDef.FromOrderedData(TensorData([4L], [1f, 2f, 3f, 4f]));
+        rig.SetReclaimBudgetForTests(long.MaxValue / 2);
+
+        var cp = rig.CreateInitialCheckpoint();
+        var next = rig.TrainStep(cp.Shared(), input.Shared(), target.Shared());
+        Assert.True(rig.SupersededStateBytesPending > 0);
+        cp.Dispose();
+        Assert.Equal(0, rig.SupersededStateBytesPending);
+
+        using var run = rig.BeginResidentRun(next);
+        var handed = run.StepToCheckpoint(input.Shared(), target.Shared());
+        run.Step(input.Shared(), target.Shared());
+        Assert.True(rig.SupersededStateBytesPending > 0);
+        handed.Dispose();
+        Assert.Equal(0, rig.SupersededStateBytesPending);
+
+        run.StepToCheckpoint(input.Shared(), target.Shared()).Dispose();
+        run.Step(input.Shared(), target.Shared());
+        Assert.Equal(0, rig.SupersededStateBytesPending);
+    }
+
     /// <summary>A checkpoint whose parameters are shaped differently is refused on every route
     /// into a rig: dimensions are compared, not just ranks.</summary>
     [Fact]

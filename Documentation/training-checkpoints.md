@@ -22,6 +22,10 @@ var ckpt = rig.LoadCheckpoint("run.safetensors");   // params + optimizer moment
 var more = rig.Fit(inputs, targets, numEpochs: 5, ckpt);  // continues where it left off
 ```
 
+- **Release a saved checkpoint you are done with.** `checkpoint.Dispose()` frees its state's memory
+  at once instead of at the next collection, and leaves alive whatever another checkpoint or a
+  resident run still holds; using the released checkpoint's state afterwards throws
+  `ObjectDisposedException`. See [Releasing a checkpoint](training.md#releasing-a-checkpoint).
 - **Flat file layout.** One SafeTensors file with every param/state field. An `int64` marker holds
   `[version, step]`; epoch and batch index are separate `int64` scalars written only when set, so
   unknown counters reload as `null` and a concrete `0` as `0`.

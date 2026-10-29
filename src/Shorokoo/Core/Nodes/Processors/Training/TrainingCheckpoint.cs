@@ -6,6 +6,7 @@ using Shorokoo.Core.Utils;
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 
 namespace Shorokoo
 {
@@ -48,32 +49,193 @@ namespace Shorokoo
 
     /// <summary>
     /// Holds the full training state between training steps.
+    ///
+    /// <para><b>Releasing it.</b> The state — trainable parameters, model state and optimizer
+    /// moments — lives in runtime memory, on a GPU the training device's. <see cref="Dispose"/>
+    /// releases it at once; without it, a checkpoint you drop is freed when the collector gets to
+    /// its tensors, which the rig prompts once enough state has been dropped. A checkpoint
+    /// <b>holds</b> the tensors of its state, and releasing it ends each tensor nothing else holds:</para>
+    /// <list type="bullet">
+    /// <item>A checkpoint derived over the same state — <see cref="Shared"/>,
+    /// <see cref="TryConsume"/>, <see cref="WithCounters"/> and its one-counter forms,
+    /// <see cref="WithHistory"/>, <see cref="WithoutHistory"/>, <see cref="TrainingRig.AdoptCheckpoint"/>,
+    /// and <see cref="ToHost"/> where it returns the checkpoint itself — <b>is</b> that state, and is
+    /// released with it: disposing either disposes both.</item>
+    /// <item>Any other checkpoint holds its tensors on its own — one a step returns, a load, one built
+    /// with an initializer, a <see cref="WithTrainableParams"/>-style derivation, a <see cref="ToHost"/>
+    /// copy — and a tensor it shares with another one stays alive until both are released.</item>
+    /// <item>A <see cref="ResidentTrainingRun"/> holds the state it trains from, so releasing a
+    /// checkpoint it handed out, or the one it began from, never takes that state from under it: the
+    /// run takes it over, and its next step consumes it, so it is freed as the step supersedes it.</item>
+    /// <item>The rig never shares a tensor with a checkpoint: an initial checkpoint is a copy of the
+    /// rig's values.</item>
+    /// </list>
+    /// <para>A released checkpoint's <see cref="IsDisposed"/> is true, and its state cannot be
+    /// reached through it: reading <see cref="TrainableParams"/>, <see cref="ModelState"/> or
+    /// <see cref="OptimizerState"/>, training from it, saving it, deriving from it,
+    /// <see cref="ToHost"/> and <see cref="ToInferenceModel"/> throw
+    /// <see cref="ObjectDisposedException"/>. Its host values — <see cref="Step"/>,
+    /// <see cref="Epoch"/>, <see cref="BatchIndex"/>, <see cref="Loss"/>,
+    /// <see cref="AppliedHyperparameters"/>, <see cref="History"/>, <see cref="Rig"/> and
+    /// <see cref="FeedMode"/> — stay readable. A tensor read out of its state before the release
+    /// is released with it when nothing else holds it, and then throws on every access too.</para>
     /// </summary>
-    public class TrainingCheckpoint
+    public class TrainingCheckpoint : IDisposable
     {
         private readonly TensorDataStruct _trainableParams = null!;
         private readonly TensorDataStruct _modelState = null!;
         private readonly TensorDataStruct _optimizerState = null!;
 
+        /// <summary>The hold this checkpoint has on its state's tensors, shared by every checkpoint
+        /// derived over the same state.</summary>
+        private readonly StateHold _hold;
+
+        /// <summary>Whether the state slots set on this checkpoint join <see cref="_hold"/> — true
+        /// for a checkpoint holding its state on its own; false for one derived over a state already
+        /// held.</summary>
+        private readonly bool _takesState;
+
         /// <summary>Current trainable parameter values (fields per <see cref="TrainingRig.TrainableParamStructDef"/>).</summary>
+        /// <exception cref="ObjectDisposedException">The checkpoint has been released.</exception>
         public required TensorDataStruct TrainableParams
         {
-            get => _trainableParams;
-            init => _trainableParams = value ?? throw new ArgumentNullException(nameof(TrainableParams));
+            get { ThrowIfDisposed(); return _trainableParams; }
+            init => _trainableParams = Held(value ?? throw new ArgumentNullException(nameof(TrainableParams)));
         }
 
         /// <summary>Current model state values (empty struct for stateless models).</summary>
+        /// <exception cref="ObjectDisposedException">The checkpoint has been released.</exception>
         public required TensorDataStruct ModelState
         {
-            get => _modelState;
-            init => _modelState = value ?? throw new ArgumentNullException(nameof(ModelState));
+            get { ThrowIfDisposed(); return _modelState; }
+            init => _modelState = Held(value ?? throw new ArgumentNullException(nameof(ModelState)));
         }
 
         /// <summary>Current optimizer state values, e.g. moment buffers (empty for basic SGD).</summary>
+        /// <exception cref="ObjectDisposedException">The checkpoint has been released.</exception>
         public required TensorDataStruct OptimizerState
         {
-            get => _optimizerState;
-            init => _optimizerState = value ?? throw new ArgumentNullException(nameof(OptimizerState));
+            get { ThrowIfDisposed(); return _optimizerState; }
+            init => _optimizerState = Held(value ?? throw new ArgumentNullException(nameof(OptimizerState)));
+        }
+
+        /// <summary>Joins <paramref name="state"/>'s tensors to this checkpoint's hold, where this
+        /// checkpoint takes its state rather than being derived over one already held.</summary>
+        private TensorDataStruct Held(TensorDataStruct state)
+        {
+            if (_takesState) _hold.Take(state);
+            return state;
+        }
+
+        /// <summary>
+        /// True once this checkpoint has been released by <see cref="Dispose"/> — it, or a
+        /// checkpoint derived over the same state. Its state cannot then be reached through
+        /// it; its counters, loss and history stay readable.
+        /// </summary>
+        public bool IsDisposed => _hold.IsReleased;
+
+        /// <summary>
+        /// Releases this checkpoint's state: every tensor of its trainable parameters, model state
+        /// and optimizer state that nothing else holds is deleted at once, its runtime memory — on a
+        /// GPU, device memory — going back to the backend that made it. A tensor another checkpoint
+        /// or a <see cref="ResidentTrainingRun"/> still holds stays alive for it; see the class
+        /// remarks for what holds what. A tensor a run is reading as this is called is ended all the
+        /// same, and its memory goes back once that run has stood down.
+        ///
+        /// <para>Every checkpoint derived over the same state is released with this one. Disposing
+        /// a second time, or a checkpoint whose state a step has already consumed, does nothing more.
+        /// Afterwards <see cref="IsDisposed"/> is true, and reaching the state through the checkpoint
+        /// throws <see cref="ObjectDisposedException"/>.</para>
+        /// </summary>
+        public void Dispose()
+        {
+            if (_hold.Release() is not { } last) return;
+            foreach (var tensor in last)
+            {
+                if (tensor.IsDisposed) continue;
+                long bytes = tensor.ByteCount;
+                tensor.DeleteOnceUnread(TensorDeath.ReleasedWithItsCheckpoint);
+                TrainingRig.ForgetSuperseded(tensor, bytes);
+            }
+        }
+
+        private void ThrowIfDisposed()
+        {
+            if (_hold.IsReleased)
+                throw new ObjectDisposedException(nameof(TrainingCheckpoint),
+                    "This training checkpoint has been released by Dispose() -- it, or a checkpoint derived "
+                    + "over the same state -- and its state with it, so its trainable parameters, model state "
+                    + "and optimizer state cannot be read, saved, trained from or derived from. Its "
+                    + "counters, loss and history stay readable. Release a checkpoint once you are done with "
+                    + "it: after saving it, or after the step fed it .Shared() has returned.");
+        }
+
+        /// <summary>Whether this checkpoint is the only one holding any tensor of its state — what
+        /// lets a <see cref="ResidentTrainingRun"/> take over state whose other holders have all
+        /// released it.</summary>
+        internal bool HoldsItsStateAlone => !_hold.IsReleased && _hold.IsSole;
+
+        /// <summary>The tensors of this checkpoint's state, whether or not it has been released —
+        /// what the rig counts as superseded once a step has moved on from them.</summary>
+        internal TensorData[] HeldTensors() => _hold.Snapshot();
+
+        /// <summary>
+        /// The tensors a checkpoint's state holds, and how many checkpoints hold each: one hold per
+        /// checkpoint taking its state, shared by every checkpoint derived over that same state.
+        /// Each tensor counts the holds on it (<see cref="TensorData.CheckpointHolds"/>), so releasing
+        /// one ends only the tensors no other hold has.
+        /// </summary>
+        private sealed class StateHold
+        {
+            private readonly HashSet<TensorData> _tensors = new(ReferenceEqualityComparer.Instance);
+            private int _released;
+
+            internal bool IsReleased => Volatile.Read(ref _released) != 0;
+
+            internal void Take(TensorDataStruct state)
+            {
+                lock (_tensors) Add(state);
+            }
+
+            private void Add(TensorDataStruct state)
+            {
+                foreach (var field in state.Fields.Values)
+                    switch (field)
+                    {
+                        case TensorData tensor when _tensors.Add(tensor): tensor.AddCheckpointHold(); break;
+                        case TensorDataStruct nested: Add(nested); break;
+                    }
+            }
+
+            internal bool IsSole
+            {
+                get
+                {
+                    lock (_tensors)
+                    {
+                        foreach (var tensor in _tensors)
+                            if (tensor.CheckpointHolds != 1) return false;
+                        return true;
+                    }
+                }
+            }
+
+            internal TensorData[] Snapshot()
+            {
+                lock (_tensors) return [.. _tensors];
+            }
+
+            /// <summary>Releases the hold, once: the tensors it was the last hold on, or null when it
+            /// was released already.</summary>
+            internal List<TensorData>? Release()
+            {
+                if (Interlocked.Exchange(ref _released, 1) != 0) return null;
+                var last = new List<TensorData>();
+                lock (_tensors)
+                    foreach (var tensor in _tensors)
+                        if (tensor.ReleaseCheckpointHold()) last.Add(tensor);
+                return last;
+            }
         }
 
         /// <summary>
@@ -207,15 +369,17 @@ namespace Shorokoo
         /// rather than consumed: every tensor of its state stays alive and unchanged, and the step
         /// returns new state beside it. A new checkpoint, since this one keeps its own
         /// <see cref="FeedMode"/>; every other slot is carried through, so it is read, saved and
-        /// resumed from exactly as this one is.
+        /// resumed from exactly as this one is. It is the same state, released with this one by
+        /// either's <see cref="Dispose"/>: in <c>var next = rig.TrainStep(cp.Shared(), x, y);</c>,
+        /// <c>cp.Dispose()</c> once the step has returned frees what it superseded.
         /// </summary>
         public TrainingCheckpoint Shared() => Derive(feedMode: SharedInputMode.Shared);
 
         /// <summary>
         /// A checkpoint over this one's tensors, its state to be consumed by the training step it is
         /// fed to where nothing else is reading it when the step starts, and read otherwise —
-        /// decided tensor by tensor; see <see cref="TensorData.TryConsume"/>. A new checkpoint, as
-        /// <see cref="Shared"/>'s is.
+        /// decided tensor by tensor; see <see cref="TensorData.TryConsume"/>. A new checkpoint over
+        /// the same state, released with this one, as <see cref="Shared"/>'s is.
         /// </summary>
         public TrainingCheckpoint TryConsume() => Derive(feedMode: SharedInputMode.TryConsume);
 
@@ -233,8 +397,12 @@ namespace Shorokoo
         /// host-readable is taken as it is, not copied, and is still this checkpoint's too: a
         /// checkpoint this one's owner only lends must not have its tensors consumed through the
         /// copy.</para>
+        ///
+        /// <para>A new checkpoint holds its state on its own: releasing this one leaves the tensors it
+        /// took as they are alive for it, and releasing it leaves them alive for this one.</para>
         /// </summary>
-        /// <exception cref="ObjectDisposedException">A tensor of the state is dead.</exception>
+        /// <exception cref="ObjectDisposedException">A tensor of the state is dead, or the checkpoint
+        /// has been released.</exception>
         public TrainingCheckpoint ToHost()
         {
             var (trainable, model, optimizer) = (TrainableParams.ToHost(), ModelState.ToHost(), OptimizerState.ToHost());
@@ -287,8 +455,17 @@ namespace Shorokoo
         /// <para><see cref="Epoch"/> and <see cref="BatchIndex"/> default to <c>null</c> — "unknown",
         /// the right value for a checkpoint with no data loader or explicit position; set concrete
         /// values only when the position is known.</para>
+        ///
+        /// <para>The checkpoint holds the tensors of the three structs it is given: its
+        /// <see cref="Dispose"/> deletes each of them that no other checkpoint holds.</para>
         /// </summary>
-        public TrainingCheckpoint() { }
+        public TrainingCheckpoint() : this(new StateHold(), takesState: true) { }
+
+        private TrainingCheckpoint(StateHold hold, bool takesState)
+        {
+            _hold = hold;
+            _takesState = takesState;
+        }
 
         /// <summary>
         /// The one place a derived checkpoint is assembled: copies every slot of this checkpoint,
@@ -300,6 +477,9 @@ namespace Shorokoo
         /// an explicit override rather than passing <c>null</c> here and expecting it to take.
         /// Nothing in the run needs to: an unknown counter, a null loss and a bare checkpoint's
         /// absent rig all arise at construction, and every later step only ever sets them.</para>
+        ///
+        /// <para>A derivation keeping all three state slots is over the same state, and shares this
+        /// checkpoint's hold on it; one replacing a slot holds its state on its own.</para>
         /// </summary>
         private TrainingCheckpoint Derive(
             TensorDataStruct? trainableParams = null,
@@ -313,7 +493,9 @@ namespace Shorokoo
             IReadOnlyDictionary<string, AppliedHyperparameter>? appliedHyperparameters = null,
             TrainingHistory? history = null,
             SharedInputMode? feedMode = null)
-            => new()
+        {
+            bool sameState = trainableParams is null && modelState is null && optimizerState is null;
+            return new(sameState ? _hold : new StateHold(), takesState: !sameState)
             {
                 TrainableParams = trainableParams ?? TrainableParams,
                 ModelState = modelState ?? ModelState,
@@ -327,20 +509,86 @@ namespace Shorokoo
                 History = history ?? History,
                 FeedMode = feedMode ?? FeedMode,
             };
+        }
+
+        /// <summary>
+        /// A checkpoint over this one's state relabelled with <paramref name="rig"/>'s struct
+        /// definitions and attached to it, sharing this one's hold — what
+        /// <see cref="TrainingRig.AdoptCheckpoint"/> returns. Every other slot carries through.
+        /// </summary>
+        internal TrainingCheckpoint Relabelled(
+            TrainingRig rig, TensorStructDef trainableParamDef, TensorStructDef modelStateDef, TensorStructDef optimizerStateDef)
+            => new(_hold, takesState: false)
+            {
+                TrainableParams = TrainableParams.WithDefinition(trainableParamDef),
+                ModelState = ModelState.WithDefinition(modelStateDef),
+                OptimizerState = OptimizerState.WithDefinition(optimizerStateDef),
+                Step = Step,
+                Epoch = Epoch,
+                BatchIndex = BatchIndex,
+                Rig = rig,
+                Loss = Loss,
+                AppliedHyperparameters = AppliedHyperparameters,
+                History = History,
+                FeedMode = FeedMode,
+            };
+
+        /// <summary>
+        /// A checkpoint over this one's state, fed as <paramref name="feedMode"/>, that holds the
+        /// state on its own: releasing either leaves every tensor alive for the other. What a
+        /// <see cref="ResidentTrainingRun"/> trains from where it shares its state with a checkpoint
+        /// the caller holds.
+        /// </summary>
+        internal TrainingCheckpoint HeldApart(SharedInputMode? feedMode)
+            => new()
+            {
+                TrainableParams = TrainableParams,
+                ModelState = ModelState,
+                OptimizerState = OptimizerState,
+                Step = Step,
+                Epoch = Epoch,
+                BatchIndex = BatchIndex,
+                Rig = Rig,
+                Loss = Loss,
+                AppliedHyperparameters = AppliedHyperparameters,
+                History = History,
+                FeedMode = feedMode,
+            };
+
+        /// <summary>This checkpoint, sharing its hold, to be fed as it is: its state consumed by the
+        /// step it feeds. For a <see cref="ResidentTrainingRun"/> taking over state nothing else
+        /// holds.</summary>
+        internal TrainingCheckpoint FedAsItIs()
+            => new(_hold, takesState: false)
+            {
+                TrainableParams = TrainableParams,
+                ModelState = ModelState,
+                OptimizerState = OptimizerState,
+                Step = Step,
+                Epoch = Epoch,
+                BatchIndex = BatchIndex,
+                Rig = Rig,
+                Loss = Loss,
+                AppliedHyperparameters = AppliedHyperparameters,
+                History = History,
+            };
 
         /// <summary>A new checkpoint with <see cref="TrainableParams"/> replaced; every other slot —
         /// model state, optimizer state, counters, rig, loss, applied hyperparameters, history and
         /// <see cref="FeedMode"/> — carries
-        /// through unchanged.</summary>
+        /// through unchanged. It holds its state on its own: a tensor it shares with this checkpoint
+        /// stays alive until both are released.</summary>
         public TrainingCheckpoint WithTrainableParams(TensorDataStruct trainableParams)
             => Derive(trainableParams: trainableParams
                 ?? throw new ArgumentNullException(nameof(trainableParams)));
 
-        /// <summary>A new checkpoint with <see cref="ModelState"/> replaced; every other slot carries through.</summary>
+        /// <summary>A new checkpoint with <see cref="ModelState"/> replaced; every other slot carries
+        /// through. It holds its state on its own, as <see cref="WithTrainableParams"/>'s does.</summary>
         public TrainingCheckpoint WithModelState(TensorDataStruct modelState)
             => Derive(modelState: modelState ?? throw new ArgumentNullException(nameof(modelState)));
 
-        /// <summary>A new checkpoint with <see cref="OptimizerState"/> replaced; every other slot carries through.</summary>
+        /// <summary>A new checkpoint with <see cref="OptimizerState"/> replaced; every other slot carries
+        /// through. It holds its state on its own, as <see cref="WithTrainableParams"/>'s does.</summary>
         public TrainingCheckpoint WithOptimizerState(TensorDataStruct optimizerState)
             => Derive(optimizerState: optimizerState
                 ?? throw new ArgumentNullException(nameof(optimizerState)));
@@ -354,7 +602,8 @@ namespace Shorokoo
         /// Returns a new checkpoint identical to this one but with the given host-owned run
         /// counter(s) set (each defaulting to this checkpoint's current value when omitted). The
         /// tensor state — trainable params, model state, optimizer state — is shared by reference,
-        /// since counters are not graph state. The receiver is unchanged.
+        /// since counters are not graph state, and released with the receiver: it is the same state.
+        /// The receiver is unchanged.
         ///
         /// <para>An omitted (<c>null</c>) argument keeps the current value — which, for
         /// <paramref name="epoch"/> / <paramref name="batchIndex"/>, may itself be <c>null</c> (unknown).
@@ -396,8 +645,10 @@ namespace Shorokoo
         /// Attach a rig first via <see cref="TrainingRig.AdoptCheckpoint"/> — or load the checkpoint
         /// against a rig — if this one has none.
         /// </summary>
+        /// <exception cref="ObjectDisposedException">The checkpoint has been released.</exception>
         public ComputationGraph ToInferenceModel()
         {
+            ThrowIfDisposed();
             if (Rig is null)
                 throw new InvalidOperationException(
                     "ToInferenceModel() requires a training rig, but this checkpoint has none attached. " +
@@ -483,7 +734,8 @@ namespace Shorokoo
         /// The write is atomic: the checkpoint is staged to a temp file in the target directory and
         /// committed by rename, so a crash or power loss mid-save never corrupts an existing
         /// checkpoint at <paramref name="filePath"/> — either the old or the new content survives.
-        /// The directory must already exist.
+        /// The directory must already exist. A checkpoint saved and not needed further can be released
+        /// straight after with <see cref="Dispose"/>.
         /// </para>
         ///
         /// <para>
@@ -497,10 +749,12 @@ namespace Shorokoo
         /// from the file's size.
         /// </para>
         /// </summary>
+        /// <exception cref="ObjectDisposedException">The checkpoint has been released.</exception>
         public SaveReport Save(string filePath, CheckpointComponents? components = null)
         {
             if (string.IsNullOrWhiteSpace(filePath))
                 throw new ArgumentException("Checkpoint path cannot be null or empty.", nameof(filePath));
+            ThrowIfDisposed();
 
             var comps = ResolveSaveComponents(components);
             return AtomicFileWriter.WriteFile(

@@ -1912,6 +1912,9 @@ namespace Shorokoo
         /// order. That matters to anything reading a struct positionally (the <c>[int]</c> indexer,
         /// <c>FlattenedFieldsOfType</c>): a checkpoint read from a file orders its fields the way the
         /// file does.</para>
+        ///
+        /// <para>The result is over the argument's state, as a derivation of it is, so
+        /// <see cref="TrainingCheckpoint.Dispose"/> on either releases both.</para>
         /// </summary>
         public TrainingCheckpoint AdoptCheckpoint(TrainingCheckpoint checkpoint)
         {
@@ -1939,21 +1942,9 @@ namespace Shorokoo
             // reconstructed from that file, whose field ORDER is the file's. Everything that indexes
             // a struct positionally (TensorDataStruct's indexer, FlattenedFieldsOfType) would then
             // read the rig's order against the file's. Same values, rig's definition -- and each
-            // field fed as it was given, as the checkpoint's own FeedMode is carried below.
-            return new TrainingCheckpoint
-            {
-                TrainableParams = checkpoint.TrainableParams.WithDefinition(TrainableParamStructDef),
-                ModelState = checkpoint.ModelState.WithDefinition(ModelStateDef),
-                OptimizerState = checkpoint.OptimizerState.WithDefinition(OptimizerStateDef),
-                Step = checkpoint.Step,
-                Epoch = checkpoint.Epoch,
-                BatchIndex = checkpoint.BatchIndex,
-                Rig = this,
-                Loss = checkpoint.Loss,
-                AppliedHyperparameters = checkpoint.AppliedHyperparameters,
-                History = checkpoint.History,
-                FeedMode = checkpoint.FeedMode,
-            };
+            // field fed as it was given, as the checkpoint's own FeedMode is carried. The same state,
+            // so released with the argument, as any derivation over it is.
+            return checkpoint.Relabelled(this, TrainableParamStructDef, ModelStateDef, OptimizerStateDef);
         }
 
         /// <summary>Fails loud when a checkpoint's struct def does not match this rig's, by field
@@ -3203,6 +3194,19 @@ namespace Shorokoo
         /// </summary>
         private long _supersededStateBytes;
 
+        /// <summary>Which reclamation the bytes in <see cref="_supersededStateBytes"/> are counted
+        /// towards: advanced by each one, so a tensor counted before it is not taken off the
+        /// count after it when it is released.</summary>
+        private long _reclaimGeneration;
+
+        /// <summary>The rig, and the reclamation, each superseded tensor was counted towards, for
+        /// as long as the tensor lives: a checkpoint released explicitly takes its tensors' bytes
+        /// off that count again (<see cref="ForgetSuperseded"/>), since there is then nothing left
+        /// for a collection to free.</summary>
+        private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<TensorData, SupersededMark> SupersededMarks = new();
+
+        private sealed record SupersededMark(TrainingRig Rig, long Generation);
+
         /// <summary>
         /// The budget currently in force. Starts at <see cref="SupersededStateBudgetBytes"/> and
         /// doubles, up to <see cref="MaxReclaimBudgetBytes"/>, for as long as reclaiming turns out
@@ -3298,10 +3302,12 @@ namespace Shorokoo
         /// The question is therefore asked of a population: the budget doubles only when <b>every</b>
         /// older watch survived, which one retained checkpoint among several cannot produce.</para>
         ///
-        /// <para>A tensor owns its storage and releases it when disposed, so a caller who wants
-        /// determinism has it; what the rig cannot do is dispose the checkpoint it was handed,
-        /// because the caller may still be holding it. Nothing here disposes anything the caller
-        /// can still see — it schedules a collection, and only unreachable state is affected.</para>
+        /// <para>A caller who wants determinism has it: <see cref="TrainingCheckpoint.Dispose"/>
+        /// releases a checkpoint's state at once, and takes what it frees off this count again
+        /// (<see cref="ForgetSuperseded"/>), so a checkpoint released by its owner prompts no
+        /// collection. What the rig cannot do is dispose the checkpoint it was handed, because the
+        /// caller may still be holding it. Nothing here disposes anything the caller can still see —
+        /// it schedules a collection, and only unreachable state is affected.</para>
         /// </summary>
         internal void ReclaimSupersededState(long stepBytes, TrainingCheckpoint produced)
         {
@@ -3319,6 +3325,7 @@ namespace Shorokoo
                 // Subtract the budget rather than zeroing: another step's bytes may have landed in
                 // between, and zeroing would drop them.
                 System.Threading.Interlocked.Add(ref _supersededStateBytes, -budget);
+                System.Threading.Interlocked.Increment(ref _reclaimGeneration);
 
                 GC.Collect(2, GCCollectionMode.Forced, blocking: true);
                 GC.WaitForPendingFinalizers();
@@ -3346,27 +3353,47 @@ namespace Shorokoo
             }
         }
 
-        /// <summary>Backend bytes <paramref name="checkpoint"/>'s state still holds; see
-        /// <see cref="SupersededBytes"/>.</summary>
-        internal static long StateBytes(TrainingCheckpoint checkpoint)
-            => SupersededBytes(checkpoint.TrainableParams, checkpoint.ModelState, checkpoint.OptimizerState);
-
-        /// <summary>Backend bytes the tensor fields of <paramref name="structs"/> that are still
-        /// alive hold. A field whose size is not derivable — a dtype with no fixed byte stride, a
-        /// shape with no element count, or a sequence or optional rather than a tensor — contributes
-        /// nothing, which only makes the budget conservative.</summary>
-        private static long SupersededBytes(params IEnumerable<IData>[] structs)
+        /// <summary>
+        /// Backend bytes <paramref name="checkpoint"/>'s state still holds, which a step has just
+        /// superseded: what <see cref="ReclaimSupersededState"/> is handed. Each tensor counted is
+        /// marked as counted towards this rig's next reclamation, so that releasing it explicitly
+        /// takes it off the count again (<see cref="ForgetSuperseded"/>). Only a tensor — its own or
+        /// in a nested struct — counts: a sequence or an optional contributes nothing, which only
+        /// makes the budget conservative.
+        /// </summary>
+        internal long CountSuperseded(TrainingCheckpoint checkpoint)
         {
+            var mark = new SupersededMark(this, System.Threading.Interlocked.Read(ref _reclaimGeneration));
             long total = 0;
-            foreach (var s in structs)
-                foreach (var field in s)
-                    total += field switch
-                    {
-                        TensorDataStruct nested => SupersededBytes(nested),
-                        TensorData { IsDisposed: false } tensor => tensor.ByteCount,
-                        _ => 0,
-                    };
+            foreach (var tensor in checkpoint.HeldTensors())
+            {
+                if (tensor.IsDisposed) continue;
+                total += tensor.ByteCount;
+                SupersededMarks.AddOrUpdate(tensor, mark);
+            }
             return total;
+        }
+
+        /// <summary>
+        /// Takes <paramref name="bytes"/> of <paramref name="tensor"/>, just released explicitly, off
+        /// the count of superseded state it was counted towards — where the reclamation it was
+        /// counted for has not happened yet — so a checkpoint released by its owner does not go on
+        /// prompting a collection that has nothing left to free.
+        /// </summary>
+        internal static void ForgetSuperseded(TensorData tensor, long bytes)
+        {
+            if (!SupersededMarks.TryGetValue(tensor, out var mark)) return;
+            SupersededMarks.Remove(tensor);
+            var rig = mark.Rig;
+            if (System.Threading.Interlocked.Read(ref rig._reclaimGeneration) != mark.Generation) return;
+            long pending = System.Threading.Interlocked.Read(ref rig._supersededStateBytes);
+            while (true)
+            {
+                long next = Math.Max(0, pending - bytes);
+                long seen = System.Threading.Interlocked.CompareExchange(ref rig._supersededStateBytes, next, pending);
+                if (seen == pending) return;
+                pending = seen;
+            }
         }
 
         /// <summary>
@@ -3665,7 +3692,7 @@ namespace Shorokoo
             };
 
             // Only state this step superseded and left alive: what it consumed is released already.
-            if (reclaimSuperseded) ReclaimSupersededState(StateBytes(checkpoint), newCheckpoint);
+            if (reclaimSuperseded) ReclaimSupersededState(CountSuperseded(checkpoint), newCheckpoint);
 
             return newCheckpoint;
         }

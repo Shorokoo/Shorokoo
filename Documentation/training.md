@@ -310,9 +310,12 @@ using var run = rig.BeginResidentRun();
 for (int step = 0; step < 50_000; step++)
 {
     if (step % 1_000 == 999)
-        run.StepToCheckpoint(loader).Save($"ckpt-{step}.safetensors");  // saved from the card
+    {
+        using var checkpoint = run.StepToCheckpoint(loader);
+        checkpoint.Save($"ckpt-{step}.safetensors");  // saved from the card, then released
+    }
     else
-        run.Step(loader);                                               // loss only
+        run.Step(loader);                             // loss only
 }
 ```
 
@@ -333,15 +336,18 @@ for (int step = 0; step < 50_000; step++)
   ```
 - **A checkpoint handed out is yours.** The run goes on training from it but only reads it, and
   `Dispose` leaves it alone. A later step therefore writes its new state beside it rather than over
-  it: on a card that is a second copy of the state for as long as you hold the checkpoint. A
-  checkpoint you drop is freed by the collection the rig triggers once the state dropped since the
-  last one exceeds its budget for superseded state: 32 MiB, doubling up to 8 GiB while the rig finds
-  you keeping your checkpoints ([What construction costs](#what-construction-costs)). Until then it
-  stays beside the run's own state. So a loop that saves and drops a checkpoint every N steps holds,
-  besides the run's state, at most that budget of dropped state: a state larger than the budget is
-  freed by the step after the checkpoint, so two copies are held only in between, while the dropped
-  copies of a smaller state add up to the budget before they are collected.
-- **`Dispose`** discards what the run still holds; checkpoints it handed out stay valid.
+  it: on a card that is a second copy of the state for as long as you hold the checkpoint.
+  **Release it when you are done with it**, as the loop above does with `using`: the run holds the
+  state it trains from, so releasing the checkpoint takes nothing from the run — the run takes the
+  state back, and its next step consumes it and writes over it as it would its own
+  ([Releasing a checkpoint](#releasing-a-checkpoint)). A checkpoint you drop without releasing is
+  freed by the collection the rig triggers once the state dropped since the last one exceeds its
+  budget for superseded state: 32 MiB, doubling up to 8 GiB while the rig finds you keeping your
+  checkpoints ([What construction costs](#what-construction-costs)). Until then it stays beside the
+  run's own state, so a loop that saves and drops a checkpoint every N steps holds, besides the run's
+  state, up to that budget of dropped state.
+- **`Dispose`** discards what the run still holds; checkpoints it handed out stay valid, and state
+  the run held only for checkpoints you have released goes with it.
 - **Each step consumes the state the previous step produced**, writing over it where it can
   ([below](#a-step-writes-its-state-over-the-state-it-consumed)). The starting checkpoint is
   consumed unless passed `.Shared()`; the default is a fresh `CreateInitialCheckpoint()`.
@@ -358,6 +364,51 @@ for (int step = 0; step < 50_000; step++)
 step left it — on a GPU, device memory. A manual `TrainStep` loop leaves its state there too. On a
 backend with no device memory, a resident run gives the same losses and checkpoints, to the bit, as
 a step loop.
+
+### Releasing a checkpoint
+
+A checkpoint's state — parameters, model state and optimizer moments — is runtime memory, on a GPU
+the card's. `TrainingCheckpoint` is `IDisposable`: `Dispose()` releases that memory at once, where
+dropping the checkpoint leaves it to the collection the rig triggers
+([What construction costs](#what-construction-costs)). A checkpoint a step consumed needs no
+release; release the ones a step only read, once you are done with them:
+
+```csharp
+// A TrainStep loop that saves every 1,000 steps: the saved checkpoint is fed .Shared(), then released.
+for (int step = 0; step < 50_000; step++)
+{
+    if (step % 1_000 != 999) { cp = rig.TrainStep(cp, loader); continue; }
+    var next = rig.TrainStep(cp.Shared(), loader);
+    cp.Save($"ckpt-{step}.safetensors");
+    cp.Dispose();
+    cp = next;
+}
+```
+
+Releasing is safe whatever the checkpoint shares, because each checkpoint **holds** the tensors of
+its state and a release ends only the tensors nothing else holds:
+
+- **A checkpoint derived over the same state is that state.** `Shared()`, `TryConsume()`,
+  `WithCounters` / `WithStep` / `WithEpoch` / `WithBatchIndex`, `WithHistory`, `WithoutHistory`,
+  `rig.AdoptCheckpoint`, and `ToHost()` where it returns the checkpoint itself are released with it:
+  disposing either disposes both.
+- **Every other checkpoint holds its tensors on its own**: one a step returns, a load, one built
+  with an initializer, a `WithTrainableParams` / `WithModelState` / `WithOptimizerState`
+  derivation, and a `ToHost()` copy. A tensor two of them share stays alive until both are
+  released.
+- **A resident run holds the state it trains from.** Releasing a checkpoint it handed out, or the
+  one it began from `.Shared()`, never takes that state from the run: the run takes it over, its next
+  step consumes it, and it is freed as that step supersedes it.
+- **The rig shares nothing with a checkpoint**: an initial checkpoint is a copy of the rig's values.
+
+Disposing twice does nothing more. A released checkpoint's `IsDisposed` is `true`, and its state
+cannot be reached through it: reading `TrainableParams`, `ModelState` or `OptimizerState`,
+training from it, beginning a run from it, saving it, deriving from it, `rig.AdoptCheckpoint`,
+`ToHost()` and `ToInferenceModel()` throw `ObjectDisposedException`. Its `Step`, `Epoch`,
+`BatchIndex`, `Loss`, `AppliedHyperparameters`, `History`, `Rig` and `FeedMode` stay readable. A
+tensor you read out of its state before releasing it is released with it when nothing else holds
+it, and throws `ObjectDisposedException` on every access after that. A released checkpoint is
+also taken off the rig's superseded-state budget, so it does not prompt a collection.
 
 > Saving, resuming, training from and reading a checkpoint work wherever its state is. Reading a
 > tensor's values (`CopyMemory`, `ValueAt`, `AccessMemory` and the other accessors) copies them to
@@ -487,7 +538,9 @@ Steady-state memory is flat: consumed state is freed as each step returns. Check
 did not let a step consume (fed `.Shared()`, or `.TryConsume()` while shared) hold backend memory
 behind small managed handles, so the rig triggers a garbage collection once more than 32 MiB of
 such state has accumulated across steps, and backs off (doubling the threshold, up to 8 GiB) while collections
-reclaim nothing, e.g. when you keep every checkpoint. You need not collect yourself. Initial
+reclaim nothing, e.g. when you keep every checkpoint. You need not collect yourself, and a
+checkpoint you release with `Dispose()` ([Releasing a checkpoint](#releasing-a-checkpoint)) is
+freed at once and taken off that count. Initial
 checkpoints count against the same budget. A resident run's `Step` bypasses it, but a checkpoint
 the run hands out — from `StepToCheckpoint` or `TakeCheckpoint` — counts once a later step has
 moved on from it, and the collection it triggers runs after that step, when the run no longer holds
@@ -545,7 +598,8 @@ context's `ReadDeviceMemoryUse()` inside your loop.
 
 **Host vs device memory.** The rig's collection governs the memory behind a `TrainStep` loop's
 dropped checkpoints, on the host or on the card; `DeviceMemory` settings govern only device memory.
-A resident run keeps state on the card and frees it deterministically.
+A resident run keeps state on the card and frees it deterministically, and so does a checkpoint's
+`Dispose()`.
 
 Result types:
 - `TrainingCheckpoint`:
@@ -561,6 +615,8 @@ Result types:
   - `.ToHost()`: the checkpoint with its state in host memory, copying each tensor the host cannot
     read; the same checkpoint where every tensor already is host-readable. Every other slot carries
     through.
+  - `.Dispose()` / `.IsDisposed`: releases the state's memory at once; see
+    [Releasing a checkpoint](#releasing-a-checkpoint).
 
   `WithCounters`/`WithStep`/`WithEpoch`/`WithBatchIndex` and
   `WithTrainableParams`/`WithModelState`/`WithOptimizerState` return a new checkpoint with one slot
@@ -764,6 +820,8 @@ declared rank is refused with `FW056`, naming the offenders and listing the mode
   `rig.BeginResidentRun()`, `Fit` or `Train`.
 - Do not expect a resident run's state after disposing it; take it with `TakeCheckpoint` or
   `StepToCheckpoint` first.
+- Do not dispose the tensors of a checkpoint's state one by one; release the checkpoint with
+  `Dispose()`, which leaves alive what another checkpoint or a resident run still holds.
 - Do not declare optimizer state as `Inline` parameters.
 - Do not call `Globals.StateUpdate` on inputs, trainable parameters, or computed tensors — only on
   a `[StateInitializer]` `Init` result.

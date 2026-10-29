@@ -815,4 +815,32 @@ namespace Shorokoo.Tests.Modules
             return (grad - Scalar(3f)).Abs() < Scalar(1e-3f);
         }
     }
+
+    /// <summary><see cref="AutoGradStructDropoutRatioInputCheck"/> through a <c>float64</c> Dropout and a <c>float64</c> loss.</summary>
+    [Module]
+    public partial class AutoGradStructFloat64DropoutCheck
+    {
+        public static Scalar<bit> Inline(Scalar<float32> a)
+        {
+            var aVec = (Tensor<float64>)OnnxOp.Expand(a.Cast<float64>(), Vector(3L));
+            var (output, _) = OnnxOp.Dropout(aVec, Scalar(0.5), Scalar(false));
+            var loss = ((Tensor<float64>)output).Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+            var grad = (Tensor<float32>)Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(a, loss);
+            return (grad - Scalar(3f)).Abs().Scalar() < Scalar(1e-6f);
+        }
+    }
+
+    /// <summary><see cref="AutoGradStructDropoutRatioInputCheck"/> through a <c>float64</c> Dropout and a <c>float32</c> loss.</summary>
+    [Module]
+    public partial class AutoGradStructFloat64DropoutFloat32LossCheck
+    {
+        public static Scalar<bit> Inline(Scalar<float32> a)
+        {
+            var aVec = (Tensor<float64>)OnnxOp.Expand(a.Cast<float64>(), Vector(3L));
+            var (output, _) = OnnxOp.Dropout(aVec, Scalar(0.5), Scalar(false));
+            var loss = ((Tensor<float64>)output).Reduce(ReduceKind.Sum, keepDims: false).Cast<float32>().Scalar();
+            var grad = (Tensor<float32>)Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(a, loss);
+            return (grad - Scalar(3f)).Abs().Scalar() < Scalar(1e-6f);
+        }
+    }
 }

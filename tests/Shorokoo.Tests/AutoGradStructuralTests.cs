@@ -61,5 +61,7 @@ public class AutoGradStructuralTests
         Run<AutoGradStructMaxBroadcastCheck>(2f, 5f);
         Run<AutoGradStructMinBroadcastCheck>(7f, 2f);
         Run<AutoGradStructDropoutRatioInputCheck>(2f);
+        Run<AutoGradStructFloat64DropoutCheck>(2f);
+        Run<AutoGradStructFloat64DropoutFloat32LossCheck>(2f);
     }
 }

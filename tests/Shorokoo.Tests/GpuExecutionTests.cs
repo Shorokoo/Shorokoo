@@ -1546,8 +1546,8 @@ public class GpuExecutionTests
         Assert.Equal(Four(-1f, -2f, -3f), AtEveryOptimization(new([x], [OnnxOp.Neg(x), OnnxOp.OptionalGetElement(Opt(OnnxOp.Neg(x)))])));
         Assert.Equal(Four(2f, 4f, 6f), AtEveryOptimization(new([x], [returned])));
         Assert.Equal(Four(2f, 4f, 6f), AtEveryOptimization(new([x], [OnnxOp.OptionalGetElement(Shorokoo.Core.Nodes.Ops.IfElse(positive, Opt(OnnxOp.Add(x, x)), none))])));
-        Assert.Equal(Four(), AtEveryOptimization(new([x], [sum, Opt(sum)])));
-        Assert.Equal(Four(), AtEveryOptimization(new([x], [Opt(sum)])));
+        Assert.Equal(Four(2f, 4f, 6f), AtEveryOptimization(new([x], [sum, Opt(sum)])));
+        Assert.Equal(Four(2f, 4f, 6f), AtEveryOptimization(new([x], [Opt(sum)])));
     }
 
     private static float[][] AtEveryOptimization(InternalComputationGraph g)
@@ -1559,7 +1559,7 @@ public class GpuExecutionTests
         {
             using var compiled = context.Compile(g, level);
             var outputs = compiled.Execute(TensorData([3L], [1f, 2f, 3f]).Shared());
-            return outputs[^1].Structure == DataStructure.Tensor ? outputs[^1].ToTensorData().CopyMemory<float>() : [];
+            return outputs[^1].ToTensorData().CopyMemory<float>();
         })];
     }
 

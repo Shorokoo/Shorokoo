@@ -1020,7 +1020,7 @@ public class GpuExecutionTests
     // A resident AdamW run of WideLinearModel, shrinking as under a budget: the plain step holds the
     // new state beside the consumed one, two of its three parameter-sized values at once on the card
     // (the third is written after a temporary goes).
-    [CudaFact(needsProcessFigure: true)]
+    [CudaFact]
     public void CudaProvider_WritingAStepsStateOverWhatItConsumedTakesMostOfTheStateOffTheCardsPeak()
     {
         DeviceMemory.ResetPeak();
@@ -1039,7 +1039,7 @@ public class GpuExecutionTests
         }
     }
 
-    [CudaFact(needsProcessFigure: true)]
+    [CudaFact]
     public void CudaProvider_PlacingAStepsStateOverWhatItConsumedTakesTheStateOffTheCardsPeakAsAliasingDoes()
     {
         DeviceMemory.ResetPeak();
@@ -1150,7 +1150,7 @@ public class GpuExecutionTests
     /// use its weights and each output's own bytes once a run that hands its memory back is over,
     /// nothing beyond what is in use, and its weights alone once the outputs are let go of.
     /// </summary>
-    [CudaFact(needsProcessFigure: true)]
+    [CudaFact]
     public void CudaProvider_AKeptOutputHoldsOnlyItsOwnBytesOnTheCardAndNothingOfItsSessionsArena()
     {
         const long MiB = 1024 * 1024;
@@ -1195,7 +1195,7 @@ public class GpuExecutionTests
     /// allocator holds exactly its bytes more while it is kept and nothing more once it is let go,
     /// and the card holds less than the output twice over for the run's every block.
     /// </summary>
-    [CudaFact(needsProcessFigure: true)]
+    [CudaFact]
     public void CudaProvider_AnOutputWhoseShapeTheRunLearnsIsOnTheCardOnceAsTheBlockItsSessionWroteItInto()
     {
         using var ctx = new ComputeContext();
@@ -1218,7 +1218,7 @@ public class GpuExecutionTests
     /// has, and hands them back to the card as a run that hands back its memory ends, or as the
     /// program asks.
     /// </summary>
-    [CudaFact(needsProcessFigure: true)]
+    [CudaFact]
     public void CudaProvider_TheCardsAllocatorHandsBackWhatNoTensorUsesAsARunThatHandsBackItsMemoryEndsOrTheProgramAsks()
     {
         const long MiB = 1024 * 1024;
@@ -1829,7 +1829,7 @@ public class GpuExecutionTests
     /// The card's figure for this process alone, which #406 asked for: a gigabyte held on the card
     /// is in it, and it is a part of what the card reports across every process.
     /// </summary>
-    [CudaFact(needsProcessFigure: true)]
+    [CudaFact]
     public void CudaProvider_TheProcessFigureHoldsWhatThisProcessPutOnTheCard()
     {
         using var ctx = new ComputeContext();

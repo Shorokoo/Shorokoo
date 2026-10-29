@@ -100,7 +100,7 @@ namespace Shorokoo
         public required TensorDataStruct TrainableParams
         {
             get { ThrowIfDisposed(); return _trainableParams; }
-            init => _trainableParams = Held(value ?? throw new ArgumentNullException(nameof(TrainableParams)));
+            init => _trainableParams = Held(value, nameof(TrainableParams));
         }
 
         /// <summary>Current model state values (empty struct for stateless models).</summary>
@@ -108,7 +108,7 @@ namespace Shorokoo
         public required TensorDataStruct ModelState
         {
             get { ThrowIfDisposed(); return _modelState; }
-            init => _modelState = Held(value ?? throw new ArgumentNullException(nameof(ModelState)));
+            init => _modelState = Held(value, nameof(ModelState));
         }
 
         /// <summary>Current optimizer state values, e.g. moment buffers (empty for basic SGD).</summary>
@@ -116,13 +116,20 @@ namespace Shorokoo
         public required TensorDataStruct OptimizerState
         {
             get { ThrowIfDisposed(); return _optimizerState; }
-            init => _optimizerState = Held(value ?? throw new ArgumentNullException(nameof(OptimizerState)));
+            init => _optimizerState = Held(value, nameof(OptimizerState));
         }
 
         /// <summary>Joins <paramref name="state"/>'s tensors to this checkpoint's hold, where this
-        /// checkpoint takes its state rather than being derived over one already held.</summary>
-        private TensorDataStruct Held(TensorDataStruct state)
+        /// checkpoint takes its state rather than being derived over one already held. A missing
+        /// slot fails the initializer, and the checkpoint is never built: the holds the slots set
+        /// before it took are given back, so they keep nothing alive.</summary>
+        private TensorDataStruct Held(TensorDataStruct? state, string slot)
         {
+            if (state is null)
+            {
+                if (_takesState) _hold.Abandon();
+                throw new ArgumentNullException(slot);
+            }
             if (_takesState) _hold.Take(state);
             return state;
         }
@@ -145,21 +152,31 @@ namespace Shorokoo
         /// <para>Every checkpoint derived over the same state is released with this one. Disposing
         /// a second time, or a checkpoint whose state a step has already consumed, does nothing more.
         /// Afterwards <see cref="IsDisposed"/> is true, and reaching the state through the checkpoint
-        /// throws <see cref="ObjectDisposedException"/>.</para>
+        /// throws <see cref="ObjectDisposedException"/>. Should deleting one tensor fail, every other
+        /// is still deleted, and the first failure is thrown once they have been.</para>
         /// </summary>
         public void Dispose()
         {
             if (_hold.Release() is not { } last) return;
+            // Every one of them, whatever one deletion does: a tensor left undeleted would keep its
+            // memory with no checkpoint left to release it.
+            Exception? failed = null;
             foreach (var tensor in last)
             {
-                if (tensor.IsDisposed) continue;
-                long bytes = tensor.ByteCount;
-                tensor.DeleteOnceUnread(TensorDeath.ReleasedWithItsCheckpoint);
-                TrainingRig.ForgetSuperseded(tensor, bytes);
+                try
+                {
+                    if (!tensor.IsDisposed) tensor.DeleteOnceUnread(TensorDeath.ReleasedWithItsCheckpoint);
+                    TrainingRig.ForgetSuperseded(tensor);
+                }
+                catch (Exception e)
+                {
+                    failed ??= e;
+                }
             }
+            if (failed is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Throw(failed);
         }
 
-        private void ThrowIfDisposed()
+        internal void ThrowIfDisposed()
         {
             if (_hold.IsReleased)
                 throw new ObjectDisposedException(nameof(TrainingCheckpoint),
@@ -223,6 +240,16 @@ namespace Shorokoo
             internal TensorData[] Snapshot()
             {
                 lock (_tensors) return [.. _tensors];
+            }
+
+            /// <summary>Gives the hold back without ending anything, for a checkpoint whose
+            /// initializer failed: whoever handed it the state still has it.</summary>
+            internal void Abandon()
+            {
+                if (Interlocked.Exchange(ref _released, 1) != 0) return;
+                lock (_tensors)
+                    foreach (var tensor in _tensors)
+                        tensor.ReleaseCheckpointHold();
             }
 
             /// <summary>Releases the hold, once: the tensors it was the last hold on, or null when it
@@ -494,6 +521,9 @@ namespace Shorokoo
             TrainingHistory? history = null,
             SharedInputMode? feedMode = null)
         {
+            // Before any slot is set: a slot this one replaces would otherwise take a hold for a
+            // checkpoint that is never built.
+            ThrowIfDisposed();
             bool sameState = trainableParams is null && modelState is null && optimizerState is null;
             return new(sameState ? _hold : new StateHold(), takesState: !sameState)
             {

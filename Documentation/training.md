@@ -397,8 +397,9 @@ its state and a release ends only the tensors nothing else holds:
   derivation, and a `ToHost()` copy. A tensor two of them share stays alive until both are
   released.
 - **A resident run holds the state it trains from.** Releasing a checkpoint it handed out, or the
-  one it began from `.Shared()`, never takes that state from the run: the run takes it over, its next
-  step consumes it, and it is freed as that step supersedes it.
+  one it began from `.Shared()`, never takes that state from the run, nor from another checkpoint
+  holding any of its tensors on its own. Once no checkpoint you hold is left over that state, the
+  run takes it over, its next step consumes it, and it is freed as that step supersedes it.
 - **The rig shares nothing with a checkpoint**: an initial checkpoint is a copy of the rig's values.
 
 Disposing twice does nothing more. A released checkpoint's `IsDisposed` is `true`, and its state
@@ -408,7 +409,9 @@ training from it, beginning a run from it, saving it, deriving from it, `rig.Ado
 `BatchIndex`, `Loss`, `AppliedHyperparameters`, `History`, `Rig` and `FeedMode` stay readable. A
 tensor you read out of its state before releasing it is released with it when nothing else holds
 it, and throws `ObjectDisposedException` on every access after that. A released checkpoint is
-also taken off the rig's superseded-state budget, so it does not prompt a collection.
+also taken off the rig's superseded-state budget before any collection is decided on it: a
+`TrainStep` decides when it starts, on what earlier steps superseded, so the loop above prompts no
+collection.
 
 > Saving, resuming, training from and reading a checkpoint work wherever its state is. Reading a
 > tensor's values (`CopyMemory`, `ValueAt`, `AccessMemory` and the other accessors) copies them to
@@ -538,13 +541,16 @@ Steady-state memory is flat: consumed state is freed as each step returns. Check
 did not let a step consume (fed `.Shared()`, or `.TryConsume()` while shared) hold backend memory
 behind small managed handles, so the rig triggers a garbage collection once more than 32 MiB of
 such state has accumulated across steps, and backs off (doubling the threshold, up to 8 GiB) while collections
-reclaim nothing, e.g. when you keep every checkpoint. You need not collect yourself, and a
-checkpoint you release with `Dispose()` ([Releasing a checkpoint](#releasing-a-checkpoint)) is
-freed at once and taken off that count. Initial
+reclaim nothing, e.g. when you keep every checkpoint. You need not collect yourself. A step counts
+the state it superseded as it returns, and the next step decides, when it starts, whether to
+collect: a checkpoint you release with `Dispose()` in between
+([Releasing a checkpoint](#releasing-a-checkpoint)) is freed at once and taken off that count, and
+the previous checkpoint of a loop that drops them is freed before the next step allocates. Initial
 checkpoints count against the same budget. A resident run's `Step` bypasses it, but a checkpoint
-the run hands out — from `StepToCheckpoint` or `TakeCheckpoint` — counts once a later step has
-moved on from it, and the collection it triggers runs after that step, when the run no longer holds
-it, so a checkpoint you have dropped by then is freed by it.
+the run hands out — from `StepToCheckpoint` or `TakeCheckpoint` — that you still hold when a
+later step moves on from it counts then, and the collection it triggers runs after that step, when the
+run holds nothing of it, so a checkpoint you have dropped by then is freed by it. One you released
+before that step is the run's to consume, and counts not at all.
 
 On a large model the build can take minutes; see [Watching a long build](#watching-a-long-build).
 

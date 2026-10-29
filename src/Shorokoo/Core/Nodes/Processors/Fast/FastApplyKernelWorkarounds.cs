@@ -615,7 +615,6 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             return new WorkaroundPlan(FastSplice.Build(standIns, [.. built], typed: true)!, slots);
         }
 
-        /// <summary>Every tensor key some node of <paramref name="graph"/> reads.</summary>
         /// <summary>The values the graph's outputs read and no other node does.</summary>
         private static HashSet<FastTensorKey> ReadOnlyAsGraphOutputs(InternalComputationGraph graph)
         {
@@ -629,6 +628,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             return outputs;
         }
 
+        /// <summary>Every tensor key some node of <paramref name="graph"/> reads.</summary>
         private static HashSet<FastTensorKey> ReadKeys(InternalComputationGraph graph)
         {
             var read = new HashSet<FastTensorKey>();

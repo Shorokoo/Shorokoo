@@ -2617,6 +2617,22 @@ public class TrainingRigTrainingLoopCoverageTests
         Assert.Equal(9f, LossOfAPoolStep(SameStridedAveragePoolModel.ComputationGraph, [2L, 4L, 2L, 3L]), 1e-4f);
     }
 
+    private static float LossOfASecondStep(ComputationGraph lossGraph)
+    {
+        var (sample, input, target) = ScalarMultiplyBatches();
+        var rig = TrainingRig.FromScratch(ScalarMultiplyModel.ComputationGraph, lossGraph, SGDOptimizer.ComputationGraph, sample, 0.1f);
+        var ckpt = rig.TrainStep(rig.CreateInitialCheckpoint(), input.Shared(), target.Shared());
+        return rig.TrainStep(ckpt, input, target).Loss!.Value;
+    }
+
+    [Fact]
+    public void TestARigOverAFloat32ModelTrainsOnAFloat64OrFloat16Loss()
+    {
+        var expected = LossOfASecondStep(L2Loss.ComputationGraph);
+        Assert.Equal(expected, LossOfASecondStep(Float64L2Loss.ComputationGraph), 1e-5f);
+        Assert.Equal(expected, LossOfASecondStep(Float16L2Loss.ComputationGraph), 1e-2f);
+    }
+
     // A read placed after Globals.StateUpdate must still see the value fed in for this step: the
     // link is a graph-level registration, not an assignment. Guards the semantics an attempt at
     // Shorokoo/Shorokoo#306 broke while the whole suite stayed green.

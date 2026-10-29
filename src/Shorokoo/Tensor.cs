@@ -386,9 +386,8 @@ namespace Shorokoo
         /// <summary>Removes size-1 dimensions; when <paramref name="axes"/> is null, all size-1 dimensions are removed.</summary>
         public Tensor<T> Squeeze(Vector<int64>? axes = null)
         {
-            // Absent axes propagate as an absent (optional) input: ONNX then squeezes ALL
-            // size-1 dims. (Previously substituted axes=[-1] — squeeze only the LAST dim,
-            // and an ORT shape-inference error when that dim isn't 1.)
+            // Absent axes propagate as an absent (optional) input, so ONNX squeezes every
+            // size-1 dimension.
             return OnnxOp.Squeeze(this, axes);
         }
 

@@ -116,31 +116,44 @@ public class CSharpModelBuilderCoverageTests
         AssertRoundTrips(new InternalComputationGraph([], [Tensor([2L, 2L], "w", "x", "y", "z").ToVariable()]), []);
     }
 
-    // #412: codegen writes a four-argument Slice that Vector lacks
-    [Fact(Skip = "#412: codegen writes a four-argument Slice that Vector lacks")]
+    [Fact]
     public void TestASliceOfAVectorCodegensSourceThatCompiles()
-        => AssertCodegens(new InternalComputationGraph([], [OnnxOp.Slice(Vector(1f, 2f, 3f), Vector(0L), Vector(2L))]));
+    {
+        AssertCodegens(new InternalComputationGraph([], [OnnxOp.Slice(Vector(1f, 2f, 3f), Vector(0L), Vector(2L))]));
+        AssertRoundTrips(new InternalComputationGraph([], [OnnxOp.Slice(Vector(1f, 2f, 3f, 4f, 5f), Vector(4L), Vector(0L), Vector(0L), Vector(-2L))]), []);
+        AssertRoundTrips(new InternalComputationGraph([], [OnnxOp.Slice(Vector(1f, 2f, 3f, 4f, 5f), Vector(1L), Vector(5L), null, Vector(3L))]), []);
+    }
 
     [Fact]
     public void TestAMaxOfAVectorAndAScalarCodegensSourceThatCompiles()
         => AssertCodegens(new InternalComputationGraph([], [OnnxOp.Max(Vector(1f, 2f), Scalar(1.5f))]));
 
-    // #415: codegen writes a three-argument Split that Vector lacks
-    [Fact(Skip = "#415: codegen writes a three-argument Split that Vector lacks")]
+    [Fact]
     public void TestASplitOfAVectorCodegensSourceThatCompiles()
-        => AssertCodegens(new InternalComputationGraph([], [.. OnnxOp.Split(Vector(1f, 2f, 3f, 4f), null, 0, 2, 2)]));
+    {
+        AssertCodegens(new InternalComputationGraph([], [.. OnnxOp.Split(Vector(1f, 2f, 3f, 4f), null, 0, 2, 2)]));
+        AssertRoundTrips(new InternalComputationGraph([], [OnnxOp.Split(Vector(1f, 2f, 3f, 4f), Vector(1L, 3L), 0, null, 2)[1]]), []);
+        AssertRoundTrips(new InternalComputationGraph([], [OnnxOp.Split(Vector(1f, 2f, 3f, 4f, 5f, 6f), null, 0, 3, 3)[2]]), []);
+    }
 
-    // #416: codegen names both Splits of one input the same local
-    [Fact(Skip = "#416: codegen names both Splits of one input the same local")]
+    [Fact]
+    public void TestASplitWithTheDefaultAxisCodegensSourceThatCompiles()
+    {
+        AssertCodegens(new InternalComputationGraph([], [.. OnnxOp.Split(Tensor([2L, 2L], 1f, 2f, 3f, 4f), null, null, 2, 2)]));
+        AssertRoundTrips(new InternalComputationGraph([], [OnnxOp.Split(Tensor([2L, 2L], 1f, 2f, 3f, 4f), null, null, 2, 2)[1]]), []);
+    }
+
+    [Fact]
     public void TestTwoSplitsOfOneInputCodegenSourceThatCompiles()
     {
         Variable x = Tensor([2L, 2L], 1f, 2f, 3f, 4f);
         AssertCodegens(new InternalComputationGraph([],
             [.. OnnxOp.Split(x, null, 0, 2, 2), .. OnnxOp.Split(x, null, 1, 2, 2)]));
+        AssertRoundTrips(new InternalComputationGraph([],
+            [OnnxOp.Add(OnnxOp.Split(x, null, 0, 2, 2)[1], OnnxOp.Split(x, null, 1, 2, 2)[0])]), []);
     }
 
-    // #414: codegen writes an NN.Resize whose nullable Vector<T2>? roi C# cannot infer T2 from
-    [Fact(Skip = "#414: codegen writes an NN.Resize whose nullable Vector<T2>? roi C# cannot infer T2 from")]
+    [Fact]
     public void TestAResizeWithARoiCodegensSourceThatCompiles()
         => AssertCodegens(new InternalComputationGraph([], [OnnxOp.Resize(Tensor([1L, 1L, 1L, 2L], 1f, 2f),
             Vector(0f, 0f, 0f, 0f, 1f, 1f, 1f, 1f), Vector(1f, 1f, 1f, 2f), null, null, null,
@@ -217,8 +230,7 @@ public class CSharpModelBuilderCoverageTests
             [.. two, TensorData([], 3f), TensorData([], 4f)]);
     }
 
-    // #414: codegen writes an NN.Resize whose nullable Vector<T2>? roi C# cannot infer T2 from
-    [Fact(Skip = "#414: codegen writes an NN.Resize whose nullable Vector<T2>? roi C# cannot infer T2 from")]
+    [Fact]
     public void TestCodegenedSourceRebuildsACropAndResize()
     {
         TensorData[] x = [TensorData([1L, 1L, 1L, 5L], 0f, 1f, 2f, 3f, 4f)];

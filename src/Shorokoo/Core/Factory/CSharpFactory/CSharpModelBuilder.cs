@@ -616,7 +616,7 @@ public static class " + modelName + @"
                 else
                 {
                     Debug.Assert(node.Inputs.Length > 0 && node.Inputs[0] is not null);
-                    var arrayVariableName = SanitizeVariableName(node.Inputs[0]!.UniqueName + "_split");
+                    var arrayVariableName = GetSanitizedVariableName(node.Outputs[0]!) + "_split";
                     var codeLines = new List<CodeLine>();
 
                     codeLines.Add(new CodeLine(0, $"var {arrayVariableName} = {inlineExpressionForNode};"));
@@ -1428,8 +1428,19 @@ public static class " + modelName + @"
                     // precedence-paren wrap that fires only for inlined inputs never fires either.
                     // An absent input is still an argument, so it takes the placeholder's own
                     // separator: a template that writes its own would otherwise get two.
+                    // "tensorthis" is a "this" that binds a Tensor<T> member whatever the input's
+                    // static type, since Vector<T> and Scalar<T> declare narrower overloads of the
+                    // same name. "nvecparam?" is a "param?" bound to a generic Vector<T>? parameter,
+                    // which C# cannot infer T for from a Vector<T> argument.
                     var replacement = input is null ? "null" : currentNames[input];
-                    if (keyword.StartsWith("param"))
+                    if (input is { Kind: DataStructure.Tensor })
+                    {
+                        if (keyword == "tensorthis" && input.Rank is 0 or 1)
+                            replacement = $"((Tensor<{input.Type.ToIVarType().Name}>){replacement})";
+                        else if (keyword == "nvecparam?")
+                            replacement = $"(Vector<{input.Type.ToIVarType().Name}>?){replacement}";
+                    }
+                    if (keyword.StartsWith("param") || keyword.StartsWith("nvecparam"))
                         replacement += ", ";
 
                     result = result.Replace(fullPlaceholder, replacement);
@@ -1468,8 +1479,9 @@ public static class " + modelName + @"
                     }
 
                     string attrValue;
+                    // "param0" is a "param" bound to a non-nullable long whose ONNX default is 0.
                     if (attributes.IsDefaultValue(attrName))
-                        attrValue = "null";
+                        attrValue = keyword == "param0" ? "0L" : "null";
                     else if (attrType is AttributeType.Long)
                         attrValue = Literal(attributes.GetLongVal(attrName).AssertNotNull()) + "L";
                     else if (attrType is AttributeType.Float)
@@ -1621,7 +1633,7 @@ public static class " + modelName + @"
 
 
             var trailingNulls = ")";
-            var maxNullTrimCount = codeTemplate.Split(":param?}").Length - 1;
+            var maxNullTrimCount = codeTemplate.Split("param?}").Length - 1;
             for (var trailingNullCount = 0; trailingNullCount < maxNullTrimCount; trailingNullCount++)
             {
                 if (!result.Contains("null, " + trailingNulls))

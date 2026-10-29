@@ -51,7 +51,9 @@ thirteen sets, and how each hyperparameter is bound, are in
 
 A loss module has signature `(predictions, targets) -> Scalar<float32>` with exactly two tensor
 inputs; targets are typically `Tensor<float32>`, but class-index losses (`CrossEntropyLoss`,
-`NLLLoss`) take `Tensor<int64>`. The library losses' knobs (`reduction`, `ignoreIndex`,
+`NLLLoss`) take `Tensor<int64>`. The loss may also be a `Scalar<float64>`, `Scalar<float16>` or
+`Scalar<bfloat16>`, and the rig reports it as a `float` all the same; a loss of any other element
+type (an integer, or the `bit` of a comparison) is refused at construction with `FW061`. The library losses' knobs (`reduction`, `ignoreIndex`,
 `labelSmoothing`, class `weight`/`posWeight`, SmoothL1 `beta`) live on extra
 `Reduced`/`PerElement` methods, not on the rig-bound `Inline`. To use them in a rig, write a
 2-input wrapper `[Module]` whose `Inline` calls `Reduced(...)` with the knobs baked; a class

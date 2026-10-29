@@ -943,7 +943,9 @@ namespace Shorokoo
         /// shape inference of the lowered training-step graph.
         /// </summary>
         /// <param name="modelGraph">The model's InternalComputationGraph (typically a source-generated module's static graph property)</param>
-        /// <param name="lossGraph">The loss function's computation graph (2 inputs: predictions, targets; 1 output: loss)</param>
+        /// <param name="lossGraph">The loss function's computation graph (2 inputs: predictions, targets; 1 output: loss).
+        /// The loss is float32, float64, float16 or bfloat16; one of any other element type is refused with
+        /// <see cref="ErrorCodes.FW061"/>.</param>
         /// <param name="optimizerGraph">The optimizer's computation graph (inputs: hyperparams + param + grad; outputs: updated_param). Optimizer state is created inside the module body via optimizer-owned [StateInitializer] Init calls and updated via Globals.StateUpdate — never declared in the signature.</param>
         /// <param name="sampleInputs">Sample model inputs, one per data input of the model graph in its
         /// declaration order, each bound to the input at its position — a <see cref="TensorData"/>, or an
@@ -1242,6 +1244,29 @@ namespace Shorokoo
         }
 
         /// <summary>
+        /// Refuses a loss whose value is not floating-point. A rig differentiates its loss and
+        /// reports it as a float, so the loss is float32, float64, float16 or bfloat16; any other
+        /// element type (an integer, or the bool of a comparison) has no gradient and no loss value
+        /// to report. Refused here, before anything is composed, rather than where autodiff or the
+        /// first step fails.
+        /// </summary>
+        /// <exception cref="ModelException"><see cref="ErrorCodes.FW061"/>: the loss's value is not
+        /// floating-point.</exception>
+        private static void RequireFloatingPointLoss(InternalComputationGraph loss)
+        {
+            if (loss.Outputs.Count == 0
+                || !Shorokoo.Core.Nodes.Processors.Fast.FastTensorInfoProcessor.TryGetTensorInfo(loss, loss.Outputs[0], out var info))
+                return;
+            var dtype = info!.DType;
+            if (dtype == DType.Float32 || dtype == DType.Float64 || dtype == DType.Float16
+                || dtype == DType.BFloat16 || dtype == DType.Invalid)
+                return;
+            throw new ModelException(ErrorCodes.FW061, "TrainingRig (loss constituent)",
+                $"the loss's value is {dtype}, and a training rig trains on a float32, float64, "
+                + "float16 or bfloat16 loss. Return the loss as one of those, e.g. with Cast<float32>().");
+        }
+
+        /// <summary>
         /// Refuses a model that takes a sequence, which a rig cannot feed: every stage of a rig past
         /// concretization -- the representative inputs its shape inference is seeded with among them
         /// -- knows a model input only as a tensor or an optional. Refused here, before anything is
@@ -1406,6 +1431,7 @@ namespace Shorokoo
             // it into the training graph and leaves it as it found it, and the initialization half
             // reads its target declaration back off it (see DeriveTargetExemplar).
             var lossGraph = c.Loss.ToInternal();
+            RequireFloatingPointLoss(lossGraph);
             rig.BuildTrainingStepPureGraph(
                 concreteArch, lossGraph, c.Optimizer.ToInternal(), c.Hyperparameters, c.Names,
                 progress);

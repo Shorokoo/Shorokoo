@@ -3586,8 +3586,13 @@ namespace Shorokoo
                 // The loss follows the state outputs, where the step left it, and is read from there
                 // through the rooted accessor, not a bare span. Everything past the state outputs is
                 // released below: the state is the resident run's to own or the checkpoint's to
-                // carry, the rest is a step's worth of outputs nobody keeps.
-                lossValue = results[stateOutputCount].ToTensorData<float32>().ValueAt<float>(0);
+                // carry, the rest is a step's worth of outputs nobody keeps. The loss is reported as a
+                // float whichever floating type the loss module computes it in.
+                var lossData = results[stateOutputCount].ToTensorData();
+                lossValue = lossData.DType == DType.Float64 ? (float)lossData.As<float64>().ValueAt<double>(0)
+                    : lossData.DType == DType.Float16 ? (float)lossData.As<float16>().ValueAt<Float16>(0)
+                    : lossData.DType == DType.BFloat16 ? (float)lossData.As<bfloat16>().ValueAt<BFloat16>(0)
+                    : lossData.As<float32>().ValueAt<float>(0);
                 // Graph outputs after the loss: one per scheduled hyperparameter, the value this step applied.
                 for (int j = 0; j < _scheduledHyperparameterOutputs.Length; j++)
                     applied[_scheduledHyperparameterOutputs[j]] =

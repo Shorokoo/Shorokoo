@@ -181,8 +181,7 @@ public class AutoGradElementwiseOpsCoverageTests
         Run<AutoGradMinTensorInputsCheck>(7f, 2f);
     }
 
-    // Shorokoo/Shorokoo#551: the backward pass is seeded with a float32 one whatever the loss's type.
-    [Fact(Skip = "Shorokoo/Shorokoo#551: a loss's gradient is seeded as float32 whatever the loss's type")]
+    [Fact]
     public void TestAutoGradOfAFloat64OrFloat16Loss()
     {
         float[] x = [0.5f, -1f, 2f, 0.25f, 1.5f, 3f, -2f, 0f, -0.75f, 1f, 2.5f, -1.5f];

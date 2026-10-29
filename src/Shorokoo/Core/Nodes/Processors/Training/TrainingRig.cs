@@ -3358,7 +3358,7 @@ namespace Shorokoo
         /// collection is decided on it, so each step decides at the point its caller has had the
         /// chance to release what it superseded. A <c>TrainStep</c> decides once it has accepted its
         /// arguments and before it runs, on what the steps before it counted — so a step refused
-        /// over its arguments makes no collection — and counts what it supersedes as it returns: the checkpoint
+        /// over its checkpoint, or over the shape of its batch or its hyperparameters, makes no collection — and counts what it supersedes as it returns: the checkpoint
         /// it was fed <c>.Shared()</c> is still its caller's argument until then, and the caller
         /// releasing it straight after —
         /// <c>var next = rig.TrainStep(cp.Shared(), …); cp.Save(…); cp.Dispose();</c> — takes it
@@ -4284,10 +4284,11 @@ namespace Shorokoo
             Action<TrainingStepReport>? onStep,
             CancellationToken cancellationToken)
         {
-            // Before the loader is repositioned: a refused fit leaves it where it was.
+            // Before the loader is repositioned: a refused fit leaves it where it was. The checkpoint
+            // first, then the hyperparameters, as a loader TrainStep checks them.
+            initialCheckpoint?.RequireWhole();
             RequireNoRuntimeHyperparameters();
             var checkpoint = initialCheckpoint ?? CreateInitialCheckpoint();
-            checkpoint.RequireWhole();
 
             // Resume: point the loader at the next batch to train. A checkpoint's epoch / batch names
             // the batch that was USED, so a resuming run advances one past it via RestoreAfter (the loader
@@ -4326,7 +4327,9 @@ namespace Shorokoo
                 // last batch trained, and the state between two steps is whole.
                 if (cancellationToken.IsCancellationRequested) { stop = TrainingStopReason.Cancelled; break; }
                 long batchEpoch = loader.Position.Epoch;   // the epoch of the batch about to be drawn
-                float loss = run.Step(loader.Next());
+                // Refused before the draw, so a callback that left the run's state unusable leaves
+                // the loader right after the last batch trained.
+                float loss = run.Step(loader);
 
                 // Group per-epoch mean loss by the epoch the batch belonged to.
                 if (batchEpoch != runningEpoch)

@@ -350,13 +350,14 @@ namespace Shorokoo
 
         /// <summary>
         /// Throws unless a step on a batch drawn from a loader can run: the run can still step, the
-        /// rig needs no runtime hyperparameter values, and the state the run trains from is whole.
-        /// Before the draw, so a refused step leaves the loader at the batch it would have trained.
+        /// state it trains from is whole, and the rig needs no runtime hyperparameter values — the
+        /// run's own state first, so a disposed or lost run says so whatever the rig. Before the
+        /// draw, so a refused step leaves the loader at the batch it would have trained.
         /// </summary>
         private void RequireCanDraw()
         {
-            _rig.RequireNoRuntimeHyperparameters();
             Current.RequireWhole();
+            _rig.RequireNoRuntimeHyperparameters();
         }
 
         /// <summary>Throws unless the run can still step: it is not disposed, and no step has
@@ -464,8 +465,8 @@ namespace Shorokoo
                + "step takes the state it trains from when it starts, and one that fails cannot give it "
                + "back, so there is nothing left to train from. "
                + (_tookOver
-                   ? "The run held that state alone: the checkpoints over the state it took over were "
-                     + "released, and with no other checkpoint holding any of it, the run took it over. "
+                   ? "The run held that state alone: the checkpoints that held any of it were "
+                     + "released, so the step consumed it. "
                      + "Begin a new run from a checkpoint you still hold, or from one you saved."
                    : _handedOut
                    ? "Begin a new run from the last checkpoint you took with TakeCheckpoint() or StepToCheckpoint(...); the "

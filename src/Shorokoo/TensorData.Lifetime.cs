@@ -53,6 +53,8 @@ namespace Shorokoo
 
         /// <summary>Takes this tensor, dying, off every count of superseded checkpoint state it sits
         /// in — whatever ended it: a release, a deletion, or a run consuming it.</summary>
+        // A full-fence read, not Volatile.Read: it pairs with the CAS that creates the marks lazily as
+        // a store-load (Dekker) pair, so a mark made as the tensor dies is seen by one side or the other.
         void ILifetimeOwner.Died() => Interlocked.CompareExchange(ref _supersededMarks, null, null)?.Release();
 
         /// <summary>

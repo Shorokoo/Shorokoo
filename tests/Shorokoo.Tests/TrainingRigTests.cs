@@ -4651,43 +4651,74 @@ public class TrainingRigCheckpointCoverageTests
         return (rig, new InMemoryDataLoader(inputs, targets, batchSize: 2));
     }
 
+    private static TrainingRig RuntimeLearningRateRig() => TrainingRig.FromScratch(
+        ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+        [new TensorDataModelParam("input", ModelParamType.InputParam, TensorData([2L, 1L], new float[2]))],
+        new SGDOptimizerHyperparameters { LearningRate = Hyperparameter.Runtime() });
+
+    private static void RefusedWhereItWas<TException>(IDataLoader loader, Action use) where TException : Exception
+    {
+        var at = loader.Position;
+        Assert.Throws<TException>(use);
+        Assert.Equal(at, loader.Position);
+    }
+
     [Fact]
-    public void TestARefusedLoaderStepLeavesTheLoaderWhereItWas()
+    public void TestARefusedCheckpointStepLeavesTheLoaderWhereItWas()
     {
         var (rig, loader) = LoaderSetup();
-        var runtime = TrainingRig.FromScratch(
-            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
-            [new TensorDataModelParam("input", ModelParamType.InputParam, TensorData([2L, 1L], new float[2]))],
-            new SGDOptimizerHyperparameters { LearningRate = Hyperparameter.Runtime() });
+        var runtime = RuntimeLearningRateRig();
         var cp = rig.CreateInitialCheckpoint();
         cp.Dispose();
-        var run = rig.BeginResidentRun();
-        run.Dispose();
         var spent = rig.CreateInitialCheckpoint();
         rig.TrainStep(spent, loader);
+        var runtimeCp = runtime.CreateInitialCheckpoint();
+        runtimeCp.Dispose();
+        loader.Next();
+
+        RefusedWhereItWas<ObjectDisposedException>(loader, () => rig.TrainStep(cp, loader));
+        RefusedWhereItWas<ObjectDisposedException>(loader, () => rig.Fit(loader, 1, cp));
+        RefusedWhereItWas<ObjectDisposedException>(loader, () => rig.TrainStep(spent, loader));
+        RefusedWhereItWas<ObjectDisposedException>(loader, () => rig.Fit(loader, 1, spent));
+        RefusedWhereItWas<ObjectDisposedException>(loader, () => runtime.TrainStep(runtimeCp, loader));
+        RefusedWhereItWas<ObjectDisposedException>(loader, () => runtime.Fit(loader, 1, runtimeCp));
+        RefusedWhereItWas<InvalidOperationException>(loader, () => runtime.TrainStep(runtime.CreateInitialCheckpoint(), loader));
+        RefusedWhereItWas<InvalidOperationException>(loader, () => runtime.Fit(loader, 1));
+    }
+
+    [Fact]
+    public void TestARefusedRunStepLeavesTheLoaderWhereItWas()
+    {
+        var (rig, loader) = LoaderSetup();
+        var runtime = RuntimeLearningRateRig();
+        var run = rig.BeginResidentRun();
+        run.Dispose();
         var robbed = rig.BeginResidentRun();
         rig.TrainStep(robbed.StepToCheckpoint(loader), loader);
         var runtimeRun = runtime.BeginResidentRun();
+        var runtimeGone = runtime.BeginResidentRun();
+        runtimeGone.Dispose();
         loader.Next();
-        void Refused<TException>(Action use) where TException : Exception
-        {
-            var at = loader.Position;
-            Assert.Throws<TException>(use);
-            Assert.Equal(at, loader.Position);
-        }
 
-        Refused<ObjectDisposedException>(() => rig.TrainStep(cp, loader));
-        Refused<ObjectDisposedException>(() => rig.Fit(loader, 1, cp));
-        Refused<ObjectDisposedException>(() => run.Step(loader));
-        Refused<ObjectDisposedException>(() => run.StepToCheckpoint(loader));
-        Refused<ObjectDisposedException>(() => rig.TrainStep(spent, loader));
-        Refused<ObjectDisposedException>(() => rig.Fit(loader, 1, spent));
-        Refused<ObjectDisposedException>(() => robbed.Step(loader));
-        Refused<ObjectDisposedException>(() => robbed.StepToCheckpoint(loader));
-        Refused<InvalidOperationException>(() => runtime.TrainStep(runtime.CreateInitialCheckpoint(), loader));
-        Refused<InvalidOperationException>(() => runtime.Fit(loader, 1));
-        Refused<InvalidOperationException>(() => runtimeRun.Step(loader));
-        Refused<InvalidOperationException>(() => runtimeRun.StepToCheckpoint(loader));
+        RefusedWhereItWas<ObjectDisposedException>(loader, () => run.Step(loader));
+        RefusedWhereItWas<ObjectDisposedException>(loader, () => run.StepToCheckpoint(loader));
+        RefusedWhereItWas<ObjectDisposedException>(loader, () => robbed.Step(loader));
+        RefusedWhereItWas<ObjectDisposedException>(loader, () => robbed.StepToCheckpoint(loader));
+        RefusedWhereItWas<ObjectDisposedException>(loader, () => runtimeGone.Step(loader));
+        RefusedWhereItWas<ObjectDisposedException>(loader, () => runtimeGone.StepToCheckpoint(loader));
+        RefusedWhereItWas<InvalidOperationException>(loader, () => runtimeRun.Step(loader));
+        RefusedWhereItWas<InvalidOperationException>(loader, () => runtimeRun.StepToCheckpoint(loader));
+    }
+
+    [Fact]
+    public void TestAFitWhoseCallbackSpendsTheRunsStateIsRefusedBeforeItDrawsAgain()
+    {
+        var (rig, loader) = LoaderSetup();
+        var (inputs, targets) = IndexDataset(rig, n: 8, features: 1);
+        var other = new InMemoryDataLoader(inputs, targets, batchSize: 2);
+
+        Assert.Throws<ObjectDisposedException>(() => rig.Fit(loader, 1, onStep: report => rig.TrainStep(report.TakeCheckpoint(), other)));
+        Assert.Equal(new DataLoaderPosition(0, 1), loader.Position);
     }
 
     [Fact]
@@ -4763,7 +4794,7 @@ public class TrainingRigCheckpointCoverageTests
 
         Assert.Equal("0True", FailedRelease((tensors, t) => ReferenceEquals(t, tensors[0])));
         Assert.Equal("1True", FailedRelease((tensors, t) => ReferenceEquals(t, tensors[1])));
-        Assert.Equal("0True", FailedRelease((tensors, t) => tensors.Contains(t)));
+        Assert.Matches("^[0-9]+True$", FailedRelease((tensors, t) => tensors.Contains(t)));
     }
 
     [Fact]

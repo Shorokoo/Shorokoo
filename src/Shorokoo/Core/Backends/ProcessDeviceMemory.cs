@@ -264,28 +264,27 @@ internal static unsafe class ProcessDeviceMemory
             }
             var opened = adapters.AsSpan(0, (int)Math.Min(list.NumAdapters, (uint)adapters.Length));
 
-            uint? match = null;
-            bool ambiguous = false;
-            foreach (var adapter in opened)
+            var addresses = new (uint Bus, uint Device, uint Function)?[opened.Length];
+            for (int i = 0; i < opened.Length; i++)
             {
                 Address address = default;
                 var query = new QueryAdapterInfo
                 {
-                    Adapter = adapter.Adapter,
+                    Adapter = opened[i].Adapter,
                     Type = AdapterAddress,
                     PrivateDriverData = &address,
                     PrivateDriverDataSize = (uint)sizeof(Address),
                 };
-                if (info(&query) != 0 || (address.BusNumber, address.DeviceNumber, address.FunctionNumber) != wanted) continue;
-                ambiguous |= match is not null;
-                match = adapter.Adapter;
+                if (info(&query) == 0) addresses[i] = (address.BusNumber, address.DeviceNumber, address.FunctionNumber);
             }
-            foreach (var adapter in opened)
+            var match = UniqueMatch(addresses, wanted);
+            for (int i = 0; i < opened.Length; i++)
             {
-                uint handle = adapter.Adapter;
-                if (ambiguous || handle != match) close(&handle);
+                uint handle = opened[i].Adapter;
+                if (i != match) close(&handle);
             }
-            if (ambiguous || match is not { } matched) return null;
+            if (match is not { } index) return null;
+            uint matched = opened[index].Adapter;
 
             var bound = new DxCore(matched, (delegate* unmanaged<VideoMemoryInfo*, int>)queryExport);
             if (bound.Read() is null)
@@ -303,20 +302,40 @@ internal static unsafe class ProcessDeviceMemory
             return _query(&info) == 0 ? (long)info.CurrentUsage : null;
         }
 
-        /// <summary>
-        /// The bus, device and function of CUDA device <paramref name="device"/>, from its PCI bus id
-        /// (<c>domain:bus:device.function</c>, in hexadecimal).
-        /// </summary>
+        /// <summary>The bus, device and function of CUDA device <paramref name="device"/>.</summary>
         private static (uint Bus, uint Device, uint Function)? PciAddress(int device)
+            => CudaRuntime.TryGetPciBusId(device) is { } busId ? ParsePciBusId(busId) : null;
+    }
+
+    /// <summary>
+    /// The bus, device and function a PCI bus id (<c>domain:bus:device.function</c>, in
+    /// hexadecimal) names, or <c>null</c> for a string of another shape.
+    /// </summary>
+    internal static (uint Bus, uint Device, uint Function)? ParsePciBusId(string busId)
+    {
+        var parts = busId.Split(':', '.');
+        if (parts.Length != 4) return null;
+        uint[] numbers = [0, 0, 0];
+        for (int i = 0; i < 3; i++)
+            if (!uint.TryParse(parts[i + 1], System.Globalization.NumberStyles.HexNumber, null, out numbers[i])) return null;
+        return (numbers[0], numbers[1], numbers[2]);
+    }
+
+    /// <summary>
+    /// The index of the one entry of <paramref name="addresses"/> equal to <paramref name="wanted"/>,
+    /// or <c>null</c> when none is, or more than one. A <c>null</c> entry is an adapter that did not
+    /// report its address, and matches nothing.
+    /// </summary>
+    internal static int? UniqueMatch(ReadOnlySpan<(uint Bus, uint Device, uint Function)?> addresses, (uint Bus, uint Device, uint Function) wanted)
+    {
+        int? match = null;
+        for (int i = 0; i < addresses.Length; i++)
         {
-            if (CudaRuntime.TryGetPciBusId(device) is not { } busId) return null;
-            var parts = busId.Split(':', '.');
-            if (parts.Length != 4) return null;
-            uint[] numbers = [0, 0, 0];
-            for (int i = 0; i < 3; i++)
-                if (!uint.TryParse(parts[i + 1], System.Globalization.NumberStyles.HexNumber, null, out numbers[i])) return null;
-            return (numbers[0], numbers[1], numbers[2]);
+            if (addresses[i] != wanted) continue;
+            if (match is not null) return null;
+            match = i;
         }
+        return match;
     }
 
     /// <summary>The NVML route: the device with the CUDA device's PCI bus id.</summary>

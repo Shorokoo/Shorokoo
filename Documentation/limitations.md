@@ -326,11 +326,13 @@ ONNX Runtime's `Optional` kernel shares its input's buffer with its output and t
 copies the one onto the other, which the CUDA provider's copy refuses for a buffer on
 the card. A CUDA session therefore writes an `OptionalGetElement` or
 `OptionalHasElement` of the `Optional` of a tensor without the `Optional`, and builds
-every other `Optional` of a tensor inside an `If` on a constant `true`, over the tensor
-read from outside its branches, where the session gives it a buffer of its own
-([debugging.md](debugging.md#the-cuda-set),
+every other `Optional` of a tensor that something besides the model's outputs reads
+inside an `If`, over the tensor read from outside its branches, where the session gives
+it a buffer of its own ([debugging.md](debugging.md#the-cuda-set),
 [#540](https://github.com/Shorokoo/Shorokoo/issues/540)), so each such `Optional`
-runs as the branch of an `If`.
+runs as the branch of an `If`. The `If`'s condition is `true` computed on the card when
+the model runs, which the session's optimizations do not fold away, so the rewrite holds
+at every optimization level.
 
 ### Device-memory readings are process-wide, and device 0's
 

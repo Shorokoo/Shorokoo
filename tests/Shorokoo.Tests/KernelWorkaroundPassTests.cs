@@ -403,12 +403,18 @@ public class KernelWorkaroundPassTests
         var none = OnnxOp.Optional(null, DataStructure.Tensor, DType.Float32);
         var positive = ((Tensor<bit>)OnnxOp.Greater(OnnxOp.ReduceSum(x, null, false, null), Scalar(0f))).Scalar();
         var sum = OnnxOp.Add(x, x);
-        Assert.True(OptionalNested(new([x], [OnnxOp.OptionalGetElement(Opt(OnnxOp.Neg(x))), Opt(OnnxOp.Neg(x))]), 1, xs));
+        Variable looped = sum;
+        foreach (var _ in LoopAPI.Iterate(Scalar(2L)))
+            looped = OnnxOp.OptionalGetElement(OnnxOp.Identity(Opt(OnnxOp.Add(looped, x)), null));
         Assert.True(OptionalNested(Graph(x, OnnxOp.OptionalGetElement(OnnxOp.Identity(Opt(sum), null))), 1, xs));
+        Assert.True(OptionalNested(Graph(x, looped), 1, xs));
+        Assert.True(OptionalNested(new([x], [Opt(OnnxOp.Neg(x)), OnnxOp.OptionalGetElement(OnnxOp.Identity(Opt(sum), null))]), 1, xs));
         Assert.True(OptionalNested(Graph(x, OnnxOp.Mul(OnnxOp.OptionalGetElement(OnnxOp.Identity(Opt(sum), null)), sum)), 1, xs));
         Assert.True(OptionalNested(Graph(x, OnnxOp.OptionalGetElement(Shorokoo.Core.Nodes.Ops.IfElse(positive, Opt(OnnxOp.Add(x, x)), none))), 1, xs));
         Assert.True(OptionalNested(Graph(x, OnnxOp.OptionalHasElement(OnnxOp.Identity(none, null))), 0, xs));
         Assert.True(OptionalNested(Graph(x, OnnxOp.OptionalGetElement(Opt(sum))), 0, xs));
+        Assert.True(OptionalNested(new([x], [OnnxOp.OptionalGetElement(Opt(OnnxOp.Neg(x))), Opt(OnnxOp.Neg(x))]), 0, xs));
+        Assert.True(OptionalNested(new([x], [sum, Opt(sum)]), 0, xs));
     }
 
     [Fact]
@@ -1190,7 +1196,7 @@ public class KernelWorkaroundPassTests
         var (host, cuda) = (Session(g, KernelWorkaroundRegistry.OnnxRuntime), Session(g, KernelWorkaroundRegistry.OnnxRuntimeCuda));
         static bool OfATensor(NodeProto n) => n.OpType == OPTIONAL && n.Inputs.Count > 0 && n.Inputs[0].Length > 0;
         return AllNodes(cuda).Count(n => n.OpType == IF && n.Attributes.Where(a => a.G is not null).All(a => OfATensor(a.G!.Nodes[0]) && a.G.Nodes.Skip(1).All(n => n.OpType == IDENTITY))) == ifs
-            && AllNodes(cuda).Count(OfATensor) == 2 * ifs
+            && AllNodes(cuda).Count(n => n.OpType == EQUAL) - AllNodes(host).Count(n => n.OpType == EQUAL) == ifs
             && ShapedRun(g, host, x).SequenceEqual(ShapedRun(g, cuda, x));
     }
 

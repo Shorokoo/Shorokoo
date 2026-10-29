@@ -1438,8 +1438,7 @@ public class GpuExecutionTests
         Assert.Equal([1f, 1f], OnTheCard(f, f.Reduce(ReduceKind.Prod, Vector(1L)), TensorData(DType.Float32, [2L, 0L], Array.Empty<object>())).CopyMemory<float>());
     }
 
-    // Shorokoo/Shorokoo#537: the CUDA reduction kernels pass the input through when no axis is reduced.
-    [CudaFact(Skip = "Shorokoo/Shorokoo#537")]
+    [CudaFact]
     public void CudaProvider_ANoopReductionComputesEachElementsOwnGroupOnTheCard()
     {
         var x = InputTensor<float32>("x", rank: 1);
@@ -1451,22 +1450,35 @@ public class GpuExecutionTests
         Assert.Equal([0f, MathF.Log(3f)], OnTheCard(x, Noop(ReduceKind.LogSum), TensorData([2L], [1f, 3f])).CopyMemory<float>());
     }
 
-    // Shorokoo/Shorokoo#538: building the session crashes the process.
-    [CudaFact(Skip = "Shorokoo/Shorokoo#538")]
+    [CudaFact]
     public void CudaProvider_ACropAndResizeWithAnAspectRatioPolicyBuildsItsSessionOnTheCard()
     {
         var x = InputTensor<float32>("x", rank: 4);
-        Variable Crop(ResizeMode mode) => OnnxOp.Resize(x, roi: Vector(-0.2f, 0.05f, 1.1f, 0.95f), scales: null, sizes: Vector(3L, 4L),
+        InternalComputationGraph Crop(ResizeMode mode) => new([x], [OnnxOp.Resize(x, roi: Vector(-0.2f, 0.05f, 1.1f, 0.95f), scales: null, sizes: Vector(3L, 4L),
             antialias: null, axes: [1L, 2L], coordinateTransformationMode: CoordinateTransformationMode.Tf_crop_and_resize,
             cubicCoeffA: null, excludeOutside: null, extrapolationValue: -1f,
-            keepAspectRatioPolicy: KeepAspectRatioPolicy.not_larger, mode: mode, nearestMode: null);
+            keepAspectRatioPolicy: KeepAspectRatioPolicy.not_larger, mode: mode, nearestMode: null)]);
+        var beside = new InternalComputationGraph([x], [
+            OnnxOp.Resize(x, null, null, Vector(3L, 14L), null, [2L, 3L], CoordinateTransformationMode.Half_pixel_symmetric, null, null, null, KeepAspectRatioPolicy.not_smaller, ResizeMode.Cubic, null),
+            OnnxOp.Resize(x, Vector(0f, 0f, 0.1f, -0.2f, 1f, 1f, 0.8f, 1.3f), Vector(1f, 1f, 1.4f, 0.6f), null, null, null, CoordinateTransformationMode.Tf_crop_and_resize, null, null, -5f, null, ResizeMode.Nearest, null)]);
         var data = TensorData([1L, 4L, 6L, 2L], [.. Enumerable.Range(0, 48).Select(i => (float)(i % 7))]);
-        Assert.Equal([1L, 3L, 4L, 2L], OnTheCard(x, Crop(ResizeMode.Linear), data).Shape.Dims);
-        Assert.Equal([1L, 3L, 4L, 2L], OnTheCard(x, Crop(ResizeMode.Cubic), data).Shape.Dims);
+        var wave = TensorData([1L, 2L, 5L, 7L], [.. Enumerable.Range(0, 70).Select(i => (float)(i % 9))]);
+        Assert.Equal([[1L, 3L, 4L, 2L]], ShapesOnTheCard(Crop(ResizeMode.Linear), data, ShorokooGraphOptimization.EnableAll));
+        Assert.Equal([[1L, 3L, 4L, 2L]], ShapesOnTheCard(Crop(ResizeMode.Cubic), data, ShorokooGraphOptimization.EnableAll));
+        Assert.Equal([[1L, 3L, 4L, 2L]], ShapesOnTheCard(Crop(ResizeMode.Linear), data, ShorokooGraphOptimization.DisableAll));
+        Assert.Equal([[1L, 3L, 4L, 2L]], ShapesOnTheCard(Crop(ResizeMode.Cubic), data, ShorokooGraphOptimization.DisableAll));
+        Assert.Equal([[1L, 2L, 10L, 14L], [1L, 2L, 7L, 4L]], ShapesOnTheCard(beside, wave, ShorokooGraphOptimization.EnableAll));
+        Assert.Equal([[1L, 2L, 10L, 14L], [1L, 2L, 7L, 4L]], ShapesOnTheCard(beside, wave, ShorokooGraphOptimization.DisableAll));
     }
 
-    // Shorokoo/Shorokoo#539: the CUDA Resize kernel returns zeros for tf_crop_and_resize.
-    [CudaFact(Skip = "Shorokoo/Shorokoo#539")]
+    private static long[][] ShapesOnTheCard(InternalComputationGraph g, TensorData data, ShorokooGraphOptimization optimization)
+    {
+        using var context = new ComputeContext();
+        using var compiled = context.Compile(g, optimization);
+        return [.. compiled.Execute(data.Shared()).Select(o => o.ToTensorData().Shape.Dims)];
+    }
+
+    [CudaFact]
     public void CudaProvider_ACropAndResizeCropsToItsRoiOnTheCard()
     {
         var x = InputTensor<float32>("x", rank: 4);
@@ -1477,6 +1489,16 @@ public class GpuExecutionTests
             TensorData([1L, 1L, 1L, 5L], [0f, 1f, 2f, 3f, 4f])).CopyMemory<float>());
         Assert.Equal([2f, 4f, -1f], OnTheCard(x, Crop(Vector(0f, 0f, 0f, 0.5f, 1f, 1f, 1f, 1.5f), Vector(1f, 1f, 1f, 0.6f)),
             TensorData([1L, 1L, 1L, 5L], [0f, 1f, 2f, 3f, 4f])).CopyMemory<float>());
+    }
+
+    [CudaFact]
+    public void CudaProvider_ARangeReturnedBesideTheGatherItDrivesIsRefusedAsOnTheHost()
+    {
+        var x = InputTensor<float32>("x", rank: 2);
+        var r = OnnxOp.Range(Scalar(0L), OnnxOp.Gather(OnnxOp.Shape(x), Scalar(0L), axis: 0), Scalar(1L));
+        using var context = new ComputeContext();
+        Assert.Equal(ErrorCodes.OU002, Assert.Throws<UnsupportedDTypeException>(() => context.Execute(
+            new InternalComputationGraph([x], [r, OnnxOp.Gather(x, r, axis: 0)]), TensorData([3L, 2L], [0f, 1f, 2f, 3f, 4f, 5f]).Shared())).ErrorCode);
     }
 
     [CudaFact]
@@ -1508,6 +1530,34 @@ public class GpuExecutionTests
         Assert.Equal([1f, 7f, 3.5f, 4f], OnTheCard(f, OnnxOp.Cast(OnnxOp.ScatterND(OnnxOp.Cast(f, null, DType.BFloat16), Vector(0L, 1L, 1L, 0L).Reshape(Vector(2L, 2L)),
             OnnxOp.Cast(Vector(5f, 0.5f), null, DType.BFloat16), ScatterNDReduction.Add), null, DType.Float32), TensorData([2L, 2L], [1f, 2f, 3f, 4f])).CopyMemory<float>());
         Assert.Equal([1, -3, 2, 40, 0, 15, -25, 0], OnTheCard(f, OnnxOp.Cast(OnnxOp.QuantizeLinear(f, blocks, null, axis: 1, blockSize: 2, outputDatatype: DType.Int16), null, DType.Int32), data).CopyMemory<int>());
+    }
+
+    [CudaFact]
+    public void CudaProvider_ALinearResizeOfUInt8ComputesWhatTheHostDoes()
+    {
+        var x = InputTensor<uint8>("x", rank: 4);
+        byte[] row = [0, 255, 255, 0, 0, 255, 0, 0];
+        var data = TensorData([1L, 1L, 1L, 8L], row);
+        Variable Linear(float scale) => OnnxOp.Resize(x, null, Vector(1f, 1f, 1f, scale), null, null, null, null, null, null, null, null, ResizeMode.Linear, null);
+        Assert.Equal([0, 97, 247, 255, 217, 67, 0, 0, 127, 232, 82, 0, 0], OnTheCard(x, Linear(1.7f), data).CopyMemory<byte>());
+        Assert.Equal([84, 255, 0, 170], OnTheCard(x, Linear(0.6f), data).CopyMemory<byte>());
+        Variable Sized(Variable sizes) => OnnxOp.Resize(x, null, null, sizes, null, null, null, null, null, null, null, ResizeMode.Linear, null);
+        byte[] OnTheHost(Variable resized) => QeeAuditOnBackend.Reference.Execute(new InternalComputationGraph([x], [resized]), data.Shared())[0].ToTensorData().CopyMemory<byte>();
+        foreach (var resized in (Variable[])[Sized(Vector(1L, 1L, 1L, 16L)), Sized(OnnxOp.Shape(x)), Sized(OnnxOp.Mul(OnnxOp.Shape(x), Vector(1L, 1L, 1L, 2L)))])
+            Assert.Equal(OnTheHost(resized), OnTheCard(x, resized, data).CopyMemory<byte>());
+    }
+
+    [CudaFact]
+    public void CudaProvider_ACallKeptOnTheHostOverAShapeBuildsItsSessionOnTheCard()
+    {
+        var x = InputTensor<float32>("x", rank: 2);
+        var data = TensorData([2L, 3L], [1f, 2f, 3f, 4f, 5f, 6f]);
+        Assert.Equal([7L, 3L], OnTheCard(x, OnnxOp.ScatterND(OnnxOp.Shape(x), Vector(0L).Reshape(Vector(1L, 1L)), Vector(5L), ScatterNDReduction.Add), data).CopyMemory<long>());
+        Assert.Equal([4L, 9L], OnTheCard(x, OnnxOp.ScatterND(OnnxOp.Mul(OnnxOp.Shape(x), Scalar(3L)), Vector(0L).Reshape(Vector(1L, 1L)), Vector(4L), ScatterNDReduction.Min), data).CopyMemory<long>());
+        var k = InputTensor<int64>("k", rank: 0);
+        using var context = new ComputeContext();
+        Assert.Equal([10L, 9L], context.Execute(new InternalComputationGraph([x, k], [OnnxOp.ScatterND(OnnxOp.Mul(OnnxOp.Shape(x), k), Vector(0L).Reshape(Vector(1L, 1L)), Vector(4L), ScatterNDReduction.Add)]),
+            data.Shared(), TensorData([], 3L).Shared())[0].ToTensorData().CopyMemory<long>());
     }
 
     [CudaFact]

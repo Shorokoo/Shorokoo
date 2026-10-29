@@ -243,9 +243,13 @@ internal sealed class CubicResizeMiddleAxesWorkaround : ResizeMiddleAxesWorkarou
 /// the spec does. Part of the CUDA set only
 /// (<see cref="Shorokoo.Core.Backends.KernelWorkaroundSets.OnnxRuntimeCuda"/>): the CPU provider
 /// computes the call as written.</para>
+///
+/// <para>A linear uint8 call without <c>antialias</c> is left as it stands: the CUDA set keeps it on
+/// the host (<see cref="CudaUInt8LinearResizeOnHostWorkaround"/>), where the CPU provider computes
+/// it.</para>
 /// </summary>
 internal sealed class CudaResizeMiddleAxesWorkaround : ResizeMiddleAxesWorkaround
 {
     protected override bool Takes(WorkaroundSite site, ResizeMode? mode, CoordinateTransformationMode? transformation)
-        => mode is ResizeMode.Linear or ResizeMode.Cubic;
+        => mode is ResizeMode.Linear or ResizeMode.Cubic && !CudaUInt8LinearResizeOnHostWorkaround.Keeps(site);
 }

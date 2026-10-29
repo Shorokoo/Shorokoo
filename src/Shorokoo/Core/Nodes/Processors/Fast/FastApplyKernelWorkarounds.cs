@@ -39,7 +39,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     ///
     /// <para><b>Kept on the host.</b> A call of a workaround that
     /// <see cref="KernelWorkaround.KeepsOnHost">keeps it on the host</see> stays as it stands and
-    /// is marked <see cref="FastNode.RunsOnHost"/>; nothing is spliced for it.</para>
+    /// is marked <see cref="FastNode.RunsOnHost"/>; nothing is spliced for it. The shape arithmetic
+    /// it reads is marked too (<see cref="KeepShapeArithmeticOnHost"/>).</para>
     ///
     /// <para><b>Looked through.</b> A workaround that looks through a producer
     /// (<see cref="KernelWorkaround.LooksThrough"/>) is offered a call as a call over that
@@ -179,6 +180,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
                 graph.Nodes = newNodes;
                 if (lookedThrough.Count > 0) DropUnread(graph, lookedThrough, minted, gaps, ref leadingGap, tensorInfo);
+                if (workaround.KeepsOnHost) KeepShapeArithmeticOnHost(graph);
 
                 Debug.Assert(graph.TryValidateLinearOrder(out var orderError),
                     "graph.IsLinearOrderValid(): " + orderError);
@@ -186,6 +188,61 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             return tensorInfo is null
                 ? Splices.None
                 : new Splices(minted, hosts, [.. graph.Nodes.Select(n => n.Key)], gaps, leadingGap, tensorInfo);
+        }
+
+        /// <summary>
+        /// Marks <see cref="FastNode.RunsOnHost"/> the shape arithmetic a call kept on the host reads:
+        /// every <c>Shape</c> and <c>Size</c> whose result reaches an input of such a call, and every
+        /// node on the way, whose inputs all come from such arithmetic, a <c>Constant</c>, a parameter
+        /// or an input of the graph: the CPU provider reads each as it reads an initializer.
+        ///
+        /// <para>ONNX Runtime's CUDA execution provider computes a <c>Shape</c> or <c>Size</c> into
+        /// host memory; a session that assigns a node reading that result, directly or through such
+        /// arithmetic, to the CPU provider by its name stops the process while it is built (Shorokoo/Shorokoo#558). On the host, that arithmetic is computed where the
+        /// call reads it. A value the arithmetic does not reach — the data a call reads, say — stays where the
+        /// session places it.</para>
+        /// </summary>
+        private static void KeepShapeArithmeticOnHost(InternalComputationGraph graph)
+        {
+            var producers = graph.BuildProducerByOutputMap();
+            // Of a value: null where it is not such arithmetic, false where it is computed from
+            // constants, parameters and graph inputs alone, true where a Shape or Size reaches it.
+            var arithmetic = new Dictionary<FastTensorKey, bool?>();
+            bool? Of(FastTensorKey key)
+            {
+                if (arithmetic.TryGetValue(key, out var known)) return known;
+                arithmetic[key] = null;
+                bool? result = null;
+                if (producers.TryGetValue(key, out var producer))
+                {
+                    if (producer.OpCode is OpCodes.SHAPE or OpCodes.SIZE) result = true;
+                    else if (producer.OpCode == OpCodes.CONSTANT || producer.IsModelInput() || producer.IsModelParamData()) result = false;
+                    else if (!FastOpsetResolver.IsOpenOpCode(producer.OpCode) && !FastOpsetResolver.IsCloseOpCode(producer.OpCode)
+                             && producer.Inputs.Any(k => k is { IsEmpty: false }))
+                    {
+                        result = false;
+                        foreach (var input in producer.Inputs)
+                            if (input is { IsEmpty: false } k)
+                            {
+                                if (Of(k) is not { } shaped) { result = null; break; }
+                                result = result == true || shaped;
+                            }
+                    }
+                }
+                return arithmetic[key] = result;
+            }
+            bool Derived(FastTensorKey key) => Of(key) == true;
+            void Keep(FastTensorKey key)
+            {
+                var producer = producers[key];
+                if (producer.RunsOnHost) return;
+                producer.RunsOnHost = true;
+                foreach (var input in producer.Inputs)
+                    if (input is { IsEmpty: false } k && Derived(k)) Keep(k);
+            }
+            foreach (var node in graph.Nodes.Where(n => n.RunsOnHost).ToList())
+                foreach (var input in node.Inputs)
+                    if (input is { IsEmpty: false } key && Derived(key)) Keep(key);
         }
 
         /// <summary>

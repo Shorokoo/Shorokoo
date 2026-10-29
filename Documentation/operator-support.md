@@ -230,6 +230,14 @@ shape and type.
      axis of extent 0. The call reduces with `keepdims` 1 and a `Squeeze` removes the
      reduced axes, which gives the empty group's identity as on the host
      ([#536](https://github.com/Shorokoo/Shorokoo/issues/536)).
+   - On a card, `ReduceL1`, `ReduceL2`, `ReduceSumSquare` and `ReduceLogSum` with
+     `noop_with_empty_axes` set and no axes, or axes that are empty: the CUDA
+     provider passes the input through unchanged. Over every input, the call
+     reduces the input viewed with a trailing axis of one over that axis — with
+     axes the run computes, over those axes and the trailing one, which is there
+     only when they are empty — and the trailing axis is dropped again by a
+     `Squeeze` or `Reshape`: no branch and no copy
+     ([#537](https://github.com/Shorokoo/Shorokoo/issues/537)).
 6. Over an integer input, Shorokoo's folding and QEE compute the sum, mean, product,
    L1 norm and sum of squares in the declared width, wrapping as two's complement:
    int32 `ReduceSum([2147483647, 2147483647])` is −2, and the mean of the same pair is
@@ -327,8 +335,8 @@ shape and type.
 19. A model that returns a `Range` as an output beside a `Gather` the `Range`
     drives fails on ONNX Runtime: its graph optimization fuses the `Gather` and
     removes the `Range` although it is an output, and reading the model's outputs
-    throws `UnsupportedDTypeException` (`OU002`). Accepted as ONNX Runtime's
-    behaviour ([#432](https://github.com/Shorokoo/Shorokoo/issues/432)).
+    throws `UnsupportedDTypeException` (`OU002`), on the host and on a card alike.
+    Accepted as ONNX Runtime's behaviour ([#432](https://github.com/Shorokoo/Shorokoo/issues/432)).
     An int64 or int32 `Range` counts its elements exactly on every backend, a span
     `limit − start` beyond 2^53 or beyond its type included, except as below.
     ONNX Runtime's kernel takes `limit − start` in the input type, which wraps
@@ -606,6 +614,17 @@ shape and type.
       CUDA provider computes it wrongly. It is regrouped the same way, so the
       resize runs over its last two axes
       ([#555](https://github.com/Shorokoo/Shorokoo/issues/555)).
+    - On a card, `tf_crop_and_resize` with a `Constant` `roi`: the CUDA provider
+      returns zeros. The call reads the `roi` plus a zero the card computes from
+      the input, a value of the run rather than an initializer, which the kernel
+      crops to as the spec says ([#539](https://github.com/Shorokoo/Shorokoo/issues/539)).
+      The choice between the call and the `2L−1` sequence of the first case is a
+      `Where` over both rather than an `If`, whose branches crash the session
+      build with graph optimizations off
+      ([#538](https://github.com/Shorokoo/Shorokoo/issues/538)).
+    - On a card, a linear uint8 `Resize` without `antialias`: the CUDA provider
+      computes it wrongly. It runs on the host, whether it gives scales or sizes
+      ([#557](https://github.com/Shorokoo/Shorokoo/issues/557)).
     - A `Resize` with an `axes` attribute: ONNX Runtime's transpose optimizer
       moves a `Transpose` through it as though its `roi`, `scales` and `sizes`
       held one entry per input axis, so the session fails, or reorders them

@@ -260,6 +260,8 @@ public class KernelWorkaroundPassTests
         Assert.Same(KernelWorkaroundRegistry.OnnxRuntimeCuda, KernelWorkaroundRegistry.For(KernelWorkaroundSets.OnnxRuntimeCuda));
         Assert.Equal(KernelWorkaroundRegistry.OnnxRuntime.Workarounds.Select(w => w switch
             {
+                ReduceNoopEmptyAxesWorkaround => new CudaReduceNoopAxesWorkaround().Name,
+                CropAndResizeRoiWorkaround => new CudaCropAndResizeRoiWorkaround().Name,
                 CubicResizeMiddleAxesWorkaround => new CudaResizeMiddleAxesWorkaround().Name,
                 HalfScatterReductionWorkaround => new CudaBFloat16ScatterReductionWorkaround().Name,
                 _ => w.Name,
@@ -396,6 +398,94 @@ public class KernelWorkaroundPassTests
     }
 
     [Fact]
+    public void TestTheCudaSetKeepsOnTheHostTheShapeArithmeticACallKeptOnTheHostReads()
+    {
+        var f = InputTensor<float32>("f", rank: 2);
+        var data = TensorData(DType.Float32, [2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f);
+        var first = Vector(0L).Reshape(Vector(1L, 1L));
+        Assert.True(KeptOnHost(Graph(f, OnnxOp.ScatterND(OnnxOp.Shape(f), first, Vector(5L), ScatterNDReduction.Add)), [SHAPE, SCATTER_ND], data));
+        Assert.True(KeptOnHost(Graph(f, OnnxOp.ScatterND(OnnxOp.Mul(OnnxOp.Shape(f), Scalar(3L)), first, Vector(4L), ScatterNDReduction.Min)), [SHAPE, MUL, SCATTER_ND], data));
+        Assert.True(KeptOnHost(Graph(f, OnnxOp.ScatterND(OnnxOp.Shape(OnnxOp.Shape(f)), first, Vector(4L), ScatterNDReduction.Max)), [SHAPE, SHAPE, SCATTER_ND], data));
+        Assert.True(KeptOnHost(Graph(f, OnnxOp.ScatterND(OnnxOp.Cast(f, null, DType.Int64), OnnxOp.Reshape(Vector(0L, 1L), Vector(1L, 2L), false), Vector(5L), ScatterNDReduction.Add)), [SCATTER_ND], data));
+        var k = InputTensor<int64>("k", rank: 0);
+        Assert.True(KeptOnHost(new([f, k], [OnnxOp.ScatterND(OnnxOp.Mul(OnnxOp.Shape(f), k), first, Vector(5L), ScatterNDReduction.Add)]), [SHAPE, MUL, SCATTER_ND], data, TensorData([], 3L)));
+    }
+
+    [Fact]
+    public void TestTheCudaSetKeepsALinearResizeOfUInt8WithoutAntialiasOnTheHost()
+    {
+        var u = InputTensor<uint8>("u", rank: 4);
+        var f = InputTensor<float32>("f", rank: 4);
+        byte[] row = [0, 255, 255, 0, 0, 255, 0, 0];
+        var data = TensorData([1L, 1L, 1L, 8L], row);
+        Variable Resized(Variable x, ResizeMode mode, bool? antialias, float scale = 1.7f)
+            => OnnxOp.Resize(x, null, Vector(1f, 1f, 1f, scale), null, antialias, null, null, null, null, null, null, mode, null);
+        Assert.True(KeptOnHost(Graph(u, Resized(u, ResizeMode.Linear, null)), [RESIZE], data));
+        Assert.True(KeptOnHost(Graph(u, Resized(u, ResizeMode.Linear, false, 0.6f)), [RESIZE], data));
+        Variable Sized(Variable sizes) => OnnxOp.Resize(u, null, null, sizes, null, null, null, null, null, null, null, ResizeMode.Linear, null);
+        Assert.True(KeptOnHost(Graph(u, Sized(Vector(1L, 1L, 1L, 16L))), [RESIZE], data));
+        Assert.True(KeptOnHost(Graph(u, Sized(OnnxOp.Shape(u))), [SHAPE, RESIZE], data));
+        Assert.True(KeptOnHost(Graph(u, Sized(OnnxOp.Mul(OnnxOp.Shape(u), Vector(1L, 1L, 1L, 2L)))), [SHAPE, MUL, RESIZE], data));
+        Assert.Empty(HostKept(Graph(u, Resized(u, ResizeMode.Linear, true))));
+        Assert.Empty(HostKept(Graph(u, Resized(u, ResizeMode.Cubic, null))));
+        Assert.Empty(HostKept(Graph(f, Resized(f, ResizeMode.Linear, null))));
+    }
+
+    [Fact]
+    public void TestTheCudaSetViewsANoopL1L2SumSquareOrLogSumWithATrailingAxisWhateverItsInput()
+    {
+        var f = InputTensor<float32>("f", rank: 2);
+        var s = InputTensor<float32>("s", rank: 0);
+        var i = InputTensor<int64>("i", rank: 1);
+        var axes = InputTensor<int64>("axes", rank: 1);
+        var full = TensorData(DType.Float32, [2L, 3L], 1f, -2f, 3f, 4f, 5f, -6f);
+        var positive = TensorData(DType.Float32, [2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f);
+        var (none, second) = (TensorData(DType.Int64, [0L], Array.Empty<object>()), TensorData([1L], [1L]));
+        Variable Noop(ReduceKind kind, Variable x, Variable? a = null, bool keepDims = true) => kind switch
+        {
+            ReduceKind.L1 => OnnxOp.ReduceL1(x, a, keepDims, true),
+            ReduceKind.L2 => OnnxOp.ReduceL2(x, a, keepDims, true),
+            ReduceKind.LogSum => OnnxOp.ReduceLogSum(x, a, keepDims, true),
+            ReduceKind.SumSquare => OnnxOp.ReduceSumSquare(x, a, keepDims, true),
+            _ => OnnxOp.ReduceSum(x, a, keepDims, true),
+        };
+        Assert.True(NoopOnCuda(Graph(f, Noop(ReduceKind.SumSquare, f)), full));
+        Assert.True(NoopOnCuda(Graph(f, Noop(ReduceKind.L1, f, keepDims: false)), full));
+        Assert.True(NoopOnCuda(Graph(f, Noop(ReduceKind.L2, f, Vector(Array.Empty<long>()))), full));
+        Assert.True(NoopOnCuda(Graph(f, Noop(ReduceKind.LogSum, f)), positive));
+        Assert.True(NoopOnCuda(Graph(s, Noop(ReduceKind.SumSquare, s)), TensorData([], -3f)));
+        Assert.True(NoopOnCuda(Graph(i, Noop(ReduceKind.L1, i)), TensorData([3L], [-2L, 0L, 5L])));
+        Assert.True(NoopOnCuda(new([f, axes], [Noop(ReduceKind.SumSquare, f, axes)]), full, none));
+        Assert.True(NoopOnCuda(new([f, axes], [Noop(ReduceKind.L1, f, axes, keepDims: false)]), full, second));
+        Assert.True(NoopOnCuda(Graph(f, Noop(ReduceKind.SumSquare, Vector(-1f, 2f))), full));
+        Assert.True(NoopOnCuda(Graph(f, Noop(ReduceKind.Sum, f)), full));
+        Assert.True(CudaAsOnnxRuntime(Graph(f, Noop(ReduceKind.Sum, Vector(-1f, 2f)))));
+    }
+
+    [Fact]
+    public void TestTheCudaSetReadsTheConstantRoiOfACropAndResizeAsAValueItComputes()
+    {
+        var y = InputTensor<float32>("y", rank: 4);
+        var data = TensorData(DType.Float32, [1L, 3L, 4L, 5L], [.. Enumerable.Range(0, 60).Select(i => (float)(i % 7))]);
+        var computed = OnnxOp.Add(Vector(1f, 2f, 1.5f, 1f), OnnxOp.Mul(OnnxOp.Cast(OnnxOp.Shape(y), null, DType.Float32), Scalar(0f)));
+        InternalComputationGraph Crop(Variable? scales, Variable? sizes, ResizeMode mode, long[]? axes = null, KeepAspectRatioPolicy? policy = null, Variable? roi = null)
+            => Graph(y, OnnxOp.Resize(y, roi ?? (axes is null ? Vector(0f, 0.1f, -0.2f, 0f, 1f, 0.9f, 1.2f, 1f) : Vector(0.1f, -0.2f, 0.9f, 1.2f)), scales, sizes,
+                null, axes, CoordinateTransformationMode.Tf_crop_and_resize, null, null, -1f, policy, mode, null));
+        Assert.True(CroppedOnCuda(Crop(Vector(1f, 2f, 1.5f, 1f), null, ResizeMode.Linear), data));
+        Assert.True(CroppedOnCuda(Crop(Vector(1f, 1f, 1f, 1f), null, ResizeMode.Nearest), data));
+        Assert.True(CroppedOnCuda(Crop(computed, null, ResizeMode.Cubic), data));
+        Assert.True(CroppedOnCuda(Crop(null, Vector(3L, 4L), ResizeMode.Linear, [1L, 2L], KeepAspectRatioPolicy.not_larger), data));
+        Assert.True(CroppedOnCuda(Crop(null, Vector(1L, 3L, 4L, 5L), ResizeMode.Cubic), data));
+        Assert.True(CroppedOnCuda(Crop(Vector(2f, 2f), null, ResizeMode.Linear, [1L, 2L]), data));
+        Assert.True(CroppedOnCuda(Crop(OnnxOp.Cast(Vector(1f, 2f, 1.5f, 1f), null, DType.Float32), null, ResizeMode.Linear,
+            roi: OnnxOp.Add(Vector(0f, 0.1f, -0.2f, 0f, 1f, 0.9f, 1.2f, 1f), OnnxOp.Cast(OnnxOp.Mul(OnnxOp.Size(y), Scalar(0L)), null, DType.Float32))), data));
+        Assert.Equal(1, CudaIfs(Crop(computed, null, ResizeMode.Linear)));
+        Assert.Equal(-1, CudaIfs(Crop(null, Vector(3L, 4L), ResizeMode.Nearest, [1L, 2L], KeepAspectRatioPolicy.not_larger)));
+        Assert.Equal(Bytes(Session(Graph(y, OnnxOp.Resize(y, null, Vector(1f, 2f, 2f, 1f), null, null, null, null, null, null, null, null, ResizeMode.Nearest, null)), KernelWorkaroundRegistry.OnnxRuntime)),
+            Bytes(Session(Graph(y, OnnxOp.Resize(y, null, Vector(1f, 2f, 2f, 1f), null, null, null, null, null, null, null, null, ResizeMode.Nearest, null)), KernelWorkaroundRegistry.OnnxRuntimeCuda)));
+    }
+
+    [Fact]
     public void TestAFloat16OrBFloat16ReducingScatterNDScattersAsFloat32AndCastsBack()
     {
         var f = InputTensor<float32>("f", rank: 2);
@@ -462,7 +552,7 @@ public class KernelWorkaroundPassTests
             null, null, null, CoordinateTransformationMode.Tf_crop_and_resize, null, null, -1f, null, ResizeMode.Cubic, null));
         InternalComputationGraph Sized(Variable sizes) => Graph(y, OnnxOp.Resize(y, null, null, sizes, null, null, null, null, null, null, null, ResizeMode.Linear, null));
         Assert.Equal(0, CudaIfs(Crop(Vector(1f, 2f, 2f, 1f))));
-        Assert.Equal(0, CudaIfs(Crop(computed)));
+        Assert.Equal(-1, CudaIfs(Crop(computed)));
         Assert.Equal(0, CudaIfs(Sized(OnnxOp.Concat([OnnxOp.Shape(y, end: 2), Vector(8L, 10L)], 0L)), [1L, 3L, 4L, 5L]));
         Assert.True(StatedRegroupedOnCuda(Sized(OnnxOp.Concat([OnnxOp.Shape(y, end: 1), Vector(6L, 8L), OnnxOp.Shape(y, start: 3)], 0L)), data));
     }
@@ -997,6 +1087,26 @@ public class KernelWorkaroundPassTests
         return Bytes(Built(KernelWorkaroundRegistry.OnnxRuntime)).SequenceEqual(Bytes(Built(KernelWorkaroundRegistry.OnnxRuntimeCuda)));
     }
 
+    private static bool NoopOnCuda(InternalComputationGraph g, params TensorData[] x)
+    {
+        var rewritten = Session(g, KernelWorkaroundRegistry.OnnxRuntimeCuda);
+        var stated = FastOnnxModelBuilder.BuildInternalOnnxModel(g, prepForOnnx: true, inputDims: [.. x.Select(t => t.Shape.Dims)], workarounds: KernelWorkaroundRegistry.OnnxRuntimeCuda);
+        var expected = ShapedRun(g, Session(g, KernelWorkaroundRegistry.OnnxRuntime), x);
+        return AllNodes(rewritten).Where(n => n.Attributes.Any(a => a.Name == "noop_with_empty_axes" && a.I == 1)).All(n => n.Inputs.Count > 1 && n.Inputs[1].Length > 0)
+            && AllNodes(rewritten).Count(n => n.OpType == UNSQUEEZE) > AllNodes(Session(g, null)).Count(n => n.OpType == UNSQUEEZE)
+            && expected.SequenceEqual(ShapedRun(g, rewritten, x)) && expected.SequenceEqual(ShapedRun(g, stated, x));
+    }
+
+    private static bool CroppedOnCuda(InternalComputationGraph g, TensorData x)
+    {
+        var rewritten = Session(g, KernelWorkaroundRegistry.OnnxRuntimeCuda);
+        var constants = AllNodes(rewritten).Where(n => n.OpType == CONSTANT).SelectMany(n => n.Outputs).ToHashSet();
+        var expected = ShapedRun(g, Session(g, KernelWorkaroundRegistry.OnnxRuntime), [x]);
+        return AllNodes(rewritten).Where(n => n.OpType == RESIZE).All(n => !constants.Contains(n.Inputs[1]))
+            && expected.SequenceEqual(ShapedRun(g, rewritten, [x]))
+            && expected.SequenceEqual(ShapedRun(g, FastOnnxModelBuilder.BuildInternalOnnxModel(g, prepForOnnx: true, inputDims: [x.Shape.Dims], workarounds: KernelWorkaroundRegistry.OnnxRuntimeCuda), [x]));
+    }
+
     private static int CudaTransposes(InternalComputationGraph g)
         => AllNodes(Session(g, KernelWorkaroundRegistry.OnnxRuntimeCuda)).Count(n => n.OpType == TRANSPOSE)
          - AllNodes(Session(g, KernelWorkaroundRegistry.OnnxRuntime)).Count(n => n.OpType == TRANSPOSE);
@@ -1042,6 +1152,10 @@ public class KernelWorkaroundPassTests
 
     private static bool KeptOnHost(InternalComputationGraph g, string opType, params TensorData[] x)
         => HostKept(g).SequenceEqual([opType])
+           && ShapedRun(g, Session(g, KernelWorkaroundRegistry.OnnxRuntime), x).SequenceEqual(ShapedRun(g, Session(g, KernelWorkaroundRegistry.OnnxRuntimeCuda), x));
+
+    private static bool KeptOnHost(InternalComputationGraph g, string[] opTypes, params TensorData[] x)
+        => HostKept(g).SequenceEqual(opTypes)
            && ShapedRun(g, Session(g, KernelWorkaroundRegistry.OnnxRuntime), x).SequenceEqual(ShapedRun(g, Session(g, KernelWorkaroundRegistry.OnnxRuntimeCuda), x));
 
     private static IEnumerable<string> ShapedRun(InternalComputationGraph g, ModelProto model, TensorData[] x)

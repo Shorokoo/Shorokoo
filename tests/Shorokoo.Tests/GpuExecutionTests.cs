@@ -1525,6 +1525,45 @@ public class GpuExecutionTests
     }
 
     [CudaFact]
+    public void CudaProvider_AnOptionalOfAComputedTensorRunsOnTheCardAtEveryOptimization()
+    {
+        var x = InputTensor<float32>("x", rank: 1);
+        Variable Opt(Variable v) => OnnxOp.Optional(v, DataStructure.Tensor, DType.Float32);
+        Variable Read(Variable v) => OnnxOp.OptionalGetElement(OnnxOp.Identity(Opt(v), null));
+        var sum = OnnxOp.Add(x, x);
+        Variable looped = sum;
+        foreach (var _ in LoopAPI.Iterate(Scalar(2L)))
+            looped = Read(OnnxOp.Add(looped, x));
+        var none = OnnxOp.Optional(null, DataStructure.Tensor, DType.Float32);
+        var positive = ((Tensor<bit>)OnnxOp.Greater(OnnxOp.ReduceSum(x, null, false, null), Scalar(0f))).Scalar();
+        var open = OnnxOp.IfOpen(positive);
+        var returned = OnnxOp.OptionalGetElement(OnnxOp.IfClose([Opt(OnnxOp.Add(x, x))], [none], open)[0]);
+        float[][] Four(params float[] e) => [e, e, e, e];
+        Assert.Equal(Four(2f, 4f, 6f), AtEveryOptimization(new([x], [Read(sum)])));
+        Assert.Equal(Four(4f, 16f, 36f), AtEveryOptimization(new([x], [OnnxOp.Mul(Read(sum), sum)])));
+        Assert.Equal(Four(4f, 8f, 12f), AtEveryOptimization(new([x], [looped])));
+        Assert.Equal(Four(2f, 4f, 6f), AtEveryOptimization(new([x], [Opt(OnnxOp.Neg(x)), Read(sum)])));
+        Assert.Equal(Four(-1f, -2f, -3f), AtEveryOptimization(new([x], [OnnxOp.Neg(x), OnnxOp.OptionalGetElement(Opt(OnnxOp.Neg(x)))])));
+        Assert.Equal(Four(2f, 4f, 6f), AtEveryOptimization(new([x], [returned])));
+        Assert.Equal(Four(2f, 4f, 6f), AtEveryOptimization(new([x], [OnnxOp.OptionalGetElement(Shorokoo.Core.Nodes.Ops.IfElse(positive, Opt(OnnxOp.Add(x, x)), none))])));
+        Assert.Equal(Four(), AtEveryOptimization(new([x], [sum, Opt(sum)])));
+        Assert.Equal(Four(), AtEveryOptimization(new([x], [Opt(sum)])));
+    }
+
+    private static float[][] AtEveryOptimization(InternalComputationGraph g)
+    {
+        ShorokooGraphOptimization[] levels = [ShorokooGraphOptimization.DisableAll, ShorokooGraphOptimization.EnableBasic,
+            ShorokooGraphOptimization.EnableAll, ShorokooGraphOptimization.TrainingStep];
+        using var context = new ComputeContext();
+        return [.. levels.Select(level =>
+        {
+            using var compiled = context.Compile(g, level);
+            var outputs = compiled.Execute(TensorData([3L], [1f, 2f, 3f]).Shared());
+            return outputs[^1].Structure == DataStructure.Tensor ? outputs[^1].ToTensorData().CopyMemory<float>() : [];
+        })];
+    }
+
+    [CudaFact]
     public void CudaProvider_AnOperatorTheCardHasNoKernelForItsTypeOrFormRunsOnTheCard()
     {
         var f = InputTensor<float32>("f", rank: 2);

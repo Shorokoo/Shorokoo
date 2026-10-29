@@ -2463,6 +2463,61 @@ public partial class Int32TargetNLLLoss
             weight: null, ignoreIndex: null, reduction: "mean").Scalar();
 }
 
+/// <summary>The mean squared error of a <c>float32</c> model's predictions, taken in <c>float64</c>.</summary>
+[Module]
+public partial class Float64L2Loss
+{
+    public static Scalar<float64> Inline(Tensor<float32> predictions, Tensor<float32> targets)
+    {
+        var diff = (predictions - targets).Cast<float64>();
+        return (diff * diff).Reduce(ReduceKind.Mean, keepDims: false).Scalar();
+    }
+}
+
+/// <summary>The mean squared error of a <c>float32</c> model's predictions, taken in <c>float16</c>.</summary>
+[Module]
+public partial class Float16L2Loss
+{
+    public static Scalar<float16> Inline(Tensor<float32> predictions, Tensor<float32> targets)
+    {
+        var diff = (predictions - targets).Cast<float16>();
+        return (diff * diff).Reduce(ReduceKind.Mean, keepDims: false).Scalar();
+    }
+}
+
+/// <summary>The mean squared error of a <c>float32</c> model's predictions, returned as <c>bfloat16</c>.</summary>
+[Module]
+public partial class BFloat16L2Loss
+{
+    public static Scalar<bfloat16> Inline(Tensor<float32> predictions, Tensor<float32> targets)
+    {
+        var diff = predictions - targets;
+        return (diff * diff).Reduce(ReduceKind.Mean, keepDims: false).Cast<bfloat16>().Scalar();
+    }
+}
+
+/// <summary>The mean squared error of a <c>float32</c> model's predictions, returned as <c>int32</c>.</summary>
+[Module]
+public partial class Int32L2Loss
+{
+    public static Scalar<int32> Inline(Tensor<float32> predictions, Tensor<float32> targets)
+    {
+        var diff = predictions - targets;
+        return (diff * diff).Reduce(ReduceKind.Mean, keepDims: false).Cast<int32>().Scalar();
+    }
+}
+
+/// <summary>Whether a <c>float32</c> model's predictions miss their targets at all.</summary>
+[Module]
+public partial class BoolL2Loss
+{
+    public static Scalar<bit> Inline(Tensor<float32> predictions, Tensor<float32> targets)
+    {
+        var diff = predictions - targets;
+        return (diff * diff).Reduce(ReduceKind.Mean, keepDims: false).Scalar() > Scalar(0f);
+    }
+}
+
 /// <summary>
 /// A model whose forward pass <b>reads</b> its module-owned state, not merely updates it — so a
 /// checkpoint whose state has moved off its initial value produces a different output, and binding

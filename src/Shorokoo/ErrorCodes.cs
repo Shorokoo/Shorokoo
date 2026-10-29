@@ -525,7 +525,7 @@ namespace Shorokoo
 
         #endregion
 
-        #region Framework Error Codes (FW001-FW059)
+        #region Framework Error Codes (FW001-FW061)
         
         /// <summary>Loop operation not implemented</summary>
         public const string FW001 = "FW001";
@@ -728,6 +728,11 @@ namespace Shorokoo
         /// reaching emission — is an operator, or carries an attribute, that ONNX introduced after
         /// opset 21 (the message names the node, the operator or attribute and its opset)</summary>
         public const string FW060 = "FW060";
+
+        /// <summary>A training rig's loss module returns a value whose element type is not
+        /// floating-point: the loss a rig differentiates and reports is float32, float64, float16
+        /// or bfloat16 (the message names the dtype found)</summary>
+        public const string FW061 = "FW061";
 
         #endregion
 

@@ -30,10 +30,9 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
     /// <para>
     /// No <c>[AutoDiff]</c> method needs to change. Built on the assumption that:
     /// <list type="bullet">
-    ///   <item>Loss dtype is float32 (hardcoded; revisit when needed).</item>
-    ///   <item>Per-tensor dtype is stripped during Fast conversion, so dtype mismatches
-    ///         between the all-float32 Variable gradient subgraph and the host Fast graph
-    ///         wash out at the splice boundary.</item>
+    ///   <item>The loss is a floating scalar, and the backward pass is seeded with a 1 of its
+    ///         element type; each stand-in input takes its host tensor's dtype where the
+    ///         gradient method's signature does not pin one.</item>
     ///   <item>Functions are pre-inlined. <c>IF</c> pairs are differentiable via the
     ///         <c>IF_CLOSE</c> gradient; dynamic <c>LOOP</c> control flow has no backward
     ///         pass — when a loss→param path runs through one, lowering throws
@@ -179,9 +178,13 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
             var gradByKey = new Dictionary<FastTensorKey, Variable>();
             var freshInputBacking = new Dictionary<Variable, FastTensorKey>();
 
-            // Initialize loss gradient: a Scalar<float32> = 1.0. We hardcode float32 here;
-            // see class doc for the rationale.
-            gradByKey[lossKey] = (Variable)Globals.Scalar(1.0f);
+            // Initialize loss gradient: a scalar 1 of the loss's own element type, so the first
+            // gradient rule combines it with values of that type.
+            var lossDType = tensorInfo.TryGetValue(lossKey, out var lossInfo) ? lossInfo.DType : DType.Float32;
+            gradByKey[lossKey] = lossDType == DType.Float64 ? Globals.Scalar(1.0)
+                : lossDType == DType.Float16 ? Globals.Scalar(Core.Backends.Float16.One)
+                : lossDType == DType.BFloat16 ? Globals.Scalar(Core.Backends.BFloat16.One)
+                : (Variable)Globals.Scalar(1.0f);
 
             // Which IfElse arm each forward node belongs to, so a gradient leaving one can be
             // zeroed when that arm did not run.
@@ -338,9 +341,9 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
             }
 
             // Zeros of the gradient's shape and dtype, and of the rank of what that shape is read
-            // off. A gradient is float32 as the loss seeds it, but a Cast hands its operand's dtype
-            // back, so one reaching a comparison is boolean, and both sides of a gate carry one
-            // dtype. Sub(g, g) would carry the NaN through.
+            // off. A gradient carries the loss's dtype as the loss seeds it, but a Cast hands its
+            // operand's dtype back, so one reaching a comparison is boolean, and both sides of a
+            // gate carry one dtype. Sub(g, g) would carry the NaN through.
             var rank = shapeOf.Rank;
             var zeroDType = gated.Type.ToNonGenericType();
             int zeroBits = TensorData.StorageBits(zeroDType);
@@ -471,7 +474,7 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
 
         // ------------------------------------------------------------------------------------
         // Per-node gradient computation: invoke the [AutoDiff] gradient method with fresh
-        // Tensor<float32> stand-in inputs and the already-accumulated output gradients.
+        // stand-in inputs and the already-accumulated output gradients.
         // ------------------------------------------------------------------------------------
 
         private static void ProcessNode(
@@ -521,8 +524,8 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
 
             // Build fresh stand-in IValues for each input slot. We pick the dtype from the
             // gradient method's parameter type when it's a concrete Variable subtype (e.g.
-            // Tensor<int64> for shape/axes/indices); generic Tensor<T> parameters default to
-            // float32, in line with the loss-grad-is-float32 assumption.
+            // Tensor<int64> for shape/axes/indices); generic Tensor<T> parameters take the
+            // host tensor's dtype, or float32 where that is unknown.
             //
             // For IF_CLOSE, the gradient (IfCloseGradient) expects inputs[0] = condition from
             // the paired IF_OPEN node. The Fast IF_CLOSE node carries only the branch tensors
@@ -707,13 +710,13 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
         {
             // Mirror DType's known concrete dtypes back to their IVarType class. The set must
             // cover anything an [AutoDiff] method might declare as a concrete generic argument.
-            var dtypes = new[]
-            {
+            DType[] dtypes =
+            [
                 DType.BFloat16, DType.Float16, DType.Float32, DType.Float64,
                 DType.Int8, DType.Int16, DType.Int32, DType.Int64,
                 DType.UInt8, DType.UInt16, DType.UInt32, DType.UInt64,
                 DType.Bool,
-            };
+            ];
             var map = new Dictionary<Type, DType>();
             foreach (var d in dtypes)
             {
@@ -731,8 +734,9 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
         /// matching rank (0 for Scalar, 1 for Vector, null for Tensor) so
         /// <see cref="Node.MakeOutput"/> picks the same concrete Variable subtype the gradient
         /// method declares — otherwise the eventual reflection invoke fails with a cast error.
-        /// Defaults to (<see cref="DType.Float32"/>, null) when the parameter is generic or
-        /// untyped.
+        /// Returns <c>(null, null)</c> when the parameter is generic or untyped, or when there is
+        /// no parameter at that index; the caller then takes the dtype and rank of the host-graph
+        /// tensor the slot stands for, with <see cref="DType.Float32"/> where that dtype is unknown.
         /// </summary>
         private static (DType? Dtype, int? Rank) ResolveSlotDtype(ParameterInfo[]? methodParams, int slotIdx)
         {

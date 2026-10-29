@@ -212,7 +212,7 @@ public static class TrainingGraphBuilder
             modelInputFieldKeys[i] = new FastTensorKey(getField.Key, 0);
         }
 
-        // Step 7 (was step 6): Rewire model-input and state-param nodes through the new
+        // Step 7: Rewire model-input and state-param nodes through the new
         // struct inputs. Mutates fastGraph in place; struct inputs replace the original
         // model inputs in fastGraph.Inputs.
         var fastRebuildResult = Nodes.Processors.Training.FastRebuildModelInputsForTrainingProcessor.Process(
@@ -232,7 +232,7 @@ public static class TrainingGraphBuilder
         var rebuiltTrainableParamStructInput = fastRebuildResult.RebuiltTrainableParamStructInput;
         var stateUpdateOutputs = fastRebuildResult.StateUpdateOutputs;
 
-        // Step 8 (was step 7): create target input.
+        // Step 8: create target input.
         var (lossTargetType, lossTargetRank, lossTargetName) = ResolveFastInputDef(lossGraph, 1);
         var targetInputNode = Nodes.Processors.Fast.FastInternalOp.RuntimeInput(
             lossTargetType, lossTargetRank, lossTargetName ?? "targets");
@@ -241,32 +241,32 @@ public static class TrainingGraphBuilder
         fastGraph.AddInput(targetInputNode);
         var targetInputKey = new FastTensorKey(targetInputNode.Key, 0);
 
-        // Step 9 (was step 8): replay the loss graph into fastGraph with [prediction, target]
+        // Step 9: replay the loss graph into fastGraph with [prediction, target]
         // as the two source inputs.
         var lossReplayOutputs = Nodes.Processors.Fast.FastReplay.ReplayInto(
             fastGraph, lossGraph,
             mappedInputs: new[] { rebuiltModelOutput, targetInputKey });
         var lossOutputKey = lossReplayOutputs[0];
 
-        // Step 10 (was step 9): emit AUTO_GRAD node.
+        // Step 10: emit AUTO_GRAD node.
         var autoGradNode = Nodes.Processors.Fast.FastInternalOp.AutoGrad(lossOutputKey, rebuiltParamFieldKeys);
         fastGraph.InsertAtBodyEnd(autoGradNode);
         var gradientKeys = new FastTensorKey[rebuiltParamFieldKeys.Length];
         for (int i = 0; i < rebuiltParamFieldKeys.Length; i++)
             gradientKeys[i] = new FastTensorKey(autoGradNode.Key, i);
 
-        // Step 11 (was step 10): pack gradients into a TensorStruct.
+        // Step 11: pack gradients into a TensorStruct.
         var gradientStructKey = Nodes.Processors.Fast.FastStructGradientPacker.PackGradients(
             fastGraph, trainableParamStructDef, gradientKeys);
 
-        // Step 12 (was step 11): pack updated state into a struct (empty if no state).
+        // Step 12: pack updated state into a struct (empty if no state).
         var stateOutputDType = DType.GetOrCreateForTensorStruct(stateStructDef);
         var updatedStateStructNode = Nodes.Processors.Fast.FastInternalOp.TensorStructCreate(
             stateOutputDType, stateUpdateOutputs);
         fastGraph.InsertAtBodyEnd(updatedStateStructNode);
         var updatedStateStructKey = new FastTensorKey(updatedStateStructNode.Key, 0);
 
-        // Step 13 (was step 12): finalize fastGraph's inputs and outputs.
+        // Step 13: finalize fastGraph's inputs and outputs.
         // Desired input order: [model_inputs_struct, targets, param_struct, state_struct?]
         // After Step 7 fastGraph.Inputs is [model_inputs_struct, state_struct?, param_struct].
         List<FastTensorKey> finalInputs = [modelInputStructInputKey, targetInputKey, rebuiltTrainableParamStructInput];

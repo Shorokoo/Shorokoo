@@ -112,7 +112,11 @@ TrainingCheckpoint checkpoint = run.StepToCheckpoint(rig.InputDef.FromOrderedDat
                                                      rig.TargetDef.FromOrderedData(ly));
 run.Dispose();
 Persistence.SaveTrainingCheckpointToSkpt(checkpoint, "run.skpt");
+checkpoint.Dispose();   // its state's memory is released here, not at a later collection
 ```
+
+Once saved, the checkpoint is released: its state is freed at once, and reading it afterwards throws
+`ObjectDisposedException` ([Releasing a checkpoint](training.md#releasing-a-checkpoint)).
 
 The save is atomic ([skpt-checkpoints.md](skpt-checkpoints.md#facts)). What the file holds is in
 [Training checkpoints](skpt-checkpoints.md#training-checkpoints).

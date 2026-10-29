@@ -387,13 +387,28 @@ public class KernelWorkaroundPassTests
         Variable Opt(Variable v) => OnnxOp.Optional(v, DataStructure.Tensor, DType.Float32);
         var roundTrip = Graph(x, OnnxOp.Mul(OnnxOp.OptionalGetElement(Opt(OnnxOp.Add(x, x))), x));
         var both = new InternalComputationGraph([x], [OnnxOp.OptionalGetElement(Opt(OnnxOp.Neg(x))), OnnxOp.OptionalHasElement(Opt(OnnxOp.Neg(x)))]);
-        var kept = new InternalComputationGraph([x], [OnnxOp.OptionalGetElement(Opt(OnnxOp.Neg(x))), Opt(OnnxOp.Neg(x))]);
         Assert.True(OptionalWrittenOut(roundTrip, xs));
         Assert.True(OptionalWrittenOut(both, xs));
         Assert.True(OptionalWrittenOut(Graph(x, OnnxOp.OptionalHasElement(Opt(x))), xs));
-        Assert.Single(AllNodes(Session(kept, KernelWorkaroundRegistry.OnnxRuntimeCuda)), n => n.OpType == OPTIONAL);
         Assert.Contains(AllNodes(Session(roundTrip, KernelWorkaroundRegistry.OnnxRuntime)), n => n.OpType == OPTIONAL);
         Assert.Empty(AllNodes(Session(roundTrip, null)).Where(n => n.OpType is ADD or MUL).SelectMany(n => n.Outputs).Except(Values(Session(roundTrip, CudaOptionalSet))));
+    }
+
+    [Fact]
+    public void TestTheCudaSetBuildsEveryOtherOptionalOfATensorInAScopeOfItsOwn()
+    {
+        var x = InputTensor<float32>("x", rank: 1);
+        var xs = TensorData(DType.Float32, [3L], 1f, -2f, 4f);
+        Variable Opt(Variable v) => OnnxOp.Optional(v, DataStructure.Tensor, DType.Float32);
+        var none = OnnxOp.Optional(null, DataStructure.Tensor, DType.Float32);
+        var positive = ((Tensor<bit>)OnnxOp.Greater(OnnxOp.ReduceSum(x, null, false, null), Scalar(0f))).Scalar();
+        var sum = OnnxOp.Add(x, x);
+        Assert.True(OptionalNested(new([x], [OnnxOp.OptionalGetElement(Opt(OnnxOp.Neg(x))), Opt(OnnxOp.Neg(x))]), 1, xs));
+        Assert.True(OptionalNested(Graph(x, OnnxOp.OptionalGetElement(OnnxOp.Identity(Opt(sum), null))), 1, xs));
+        Assert.True(OptionalNested(Graph(x, OnnxOp.Mul(OnnxOp.OptionalGetElement(OnnxOp.Identity(Opt(sum), null)), sum)), 1, xs));
+        Assert.True(OptionalNested(Graph(x, OnnxOp.OptionalGetElement(Shorokoo.Core.Nodes.Ops.IfElse(positive, Opt(OnnxOp.Add(x, x)), none))), 1, xs));
+        Assert.True(OptionalNested(Graph(x, OnnxOp.OptionalHasElement(OnnxOp.Identity(none, null))), 0, xs));
+        Assert.True(OptionalNested(Graph(x, OnnxOp.OptionalGetElement(Opt(sum))), 0, xs));
     }
 
     [Fact]
@@ -1168,6 +1183,15 @@ public class KernelWorkaroundPassTests
         var rewritten = Session(g, KernelWorkaroundRegistry.OnnxRuntimeCuda);
         return !AllNodes(rewritten).Any(n => n.OpType is OPTIONAL or OPTIONAL_GET_ELEMENT or OPTIONAL_HAS_ELEMENT)
             && ShapedRun(g, Session(g, KernelWorkaroundRegistry.OnnxRuntime), x).SequenceEqual(ShapedRun(g, rewritten, x));
+    }
+
+    private static bool OptionalNested(InternalComputationGraph g, int ifs, params TensorData[] x)
+    {
+        var (host, cuda) = (Session(g, KernelWorkaroundRegistry.OnnxRuntime), Session(g, KernelWorkaroundRegistry.OnnxRuntimeCuda));
+        static bool OfATensor(NodeProto n) => n.OpType == OPTIONAL && n.Inputs.Count > 0 && n.Inputs[0].Length > 0;
+        return AllNodes(cuda).Count(n => n.OpType == IF && n.Attributes.Where(a => a.G is not null).All(a => OfATensor(a.G!.Nodes[0]) && a.G.Nodes.Skip(1).All(n => n.OpType == IDENTITY))) == ifs
+            && AllNodes(cuda).Count(OfATensor) == 2 * ifs
+            && ShapedRun(g, host, x).SequenceEqual(ShapedRun(g, cuda, x));
     }
 
     private static int AddedCasts(InternalComputationGraph g, KernelWorkaroundSet set)

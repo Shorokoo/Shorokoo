@@ -18,7 +18,9 @@ using static OpCodes;
 /// taken through a one-element sequence (<c>SequenceAt(SequenceConstruct(x), 0)</c>), which copies
 /// it once on the card. The sequence keeps what the round trip is there for where it is written as
 /// a barrier: ONNX Runtime's transpose optimizer moves no <c>Transpose</c> through it, as it moves
-/// none through the <c>Optional</c>. An <c>Optional</c> nothing else reads is dropped.</para>
+/// none through the <c>Optional</c>. An <c>Optional</c> nothing else reads is dropped; one that
+/// something else reads is built in a scope of its own by
+/// <see cref="CudaOptionalInNestedScopeWorkaround"/>, after this.</para>
 ///
 /// <para>Part of the CUDA set only (<see cref="Shorokoo.Core.Backends.KernelWorkaroundSets.OnnxRuntimeCuda"/>):
 /// the CPU provider's copy skips a buffer shared with itself.</para>

@@ -857,4 +857,24 @@ namespace Shorokoo.Tests.Modules
             return (grad - Scalar(3f)).Abs().Scalar() < Scalar(1e-6f);
         }
     }
+
+    /// <summary>
+    /// A training-mode <c>float64</c> Dropout with a <c>float32</c> ratio of 0.25 over 64 copies of
+    /// <c>a</c>: loss = a·count(mask)/(1 - 0.25), so dL/da = loss / a whichever elements the mask
+    /// keeps. The bounds on loss / a rule out a mask that keeps none or all of them.
+    /// </summary>
+    [Module]
+    public partial class AutoGradStructFloat64TrainingDropoutFloat32RatioCheck
+    {
+        public static Scalar<bit> Inline(Scalar<float32> a)
+        {
+            var aVec = (Tensor<float64>)OnnxOp.Expand(a.Cast<float64>(), Vector(64L));
+            var (output, _) = OnnxOp.Dropout(aVec, Scalar(0.25f), Scalar(true), seed: 3L);
+            var loss = ((Tensor<float64>)output).Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+            var grad = (Tensor<float32>)Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(a, loss);
+            var expected = loss.Cast<float32>() / a;
+            return (grad - expected).Abs().Scalar() < Scalar(1e-3f)
+                & expected > Scalar(1f) & expected < Scalar(85f);
+        }
+    }
 }

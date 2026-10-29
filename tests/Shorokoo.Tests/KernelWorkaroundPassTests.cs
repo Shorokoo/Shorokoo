@@ -358,6 +358,28 @@ public class KernelWorkaroundPassTests
     }
 
     [Fact]
+    public void TestTheCudaSetAveragesAHalfPrecisionLossInFloat32()
+    {
+        var x = InputTensor<float16>("x", rank: 2);
+        var t = InputTensor<int64>("t", rank: 1);
+        var w = OnnxOp.Cast(Vector(0.5f, 2f, 1f), null, DType.Float16);
+        var scores = TensorData(DType.Float16, [2L, 3L], [.. ((float[])[-0.5f, -2f, -4f, -1f, -0.25f, -8f]).Select(v => (object)(Float16)v)]);
+        var labels = TensorData([2L], [2L, 1L]);
+        var many = TensorData(DType.Float16, [70000L, 2L], [.. Enumerable.Repeat((object)(Float16)(-1f), 140000)]);
+        var manyLabels = TensorData([70000L], new long[70000]);
+        InternalComputationGraph Loss(Variable? weight, long? ignore, string? reduction) => new([x, t], [OnnxOp.NegativeLogLikelihoodLoss(x, t, weight, ignore, reduction)]);
+        var crossEntropy = new InternalComputationGraph([x, t], [OnnxOp.SoftmaxCrossEntropyLoss(x, t, null, -100L, "mean").output]);
+        Assert.True(AveragedInFloat32(Loss(null, null, null), false, scores, labels));
+        Assert.True(AveragedInFloat32(Loss(w, null, "mean"), true, scores, labels));
+        Assert.True(AveragedInFloat32(Loss(null, 1L, "mean"), true, scores, labels));
+        Assert.True(AveragedInFloat32(Loss(w, 1L, "mean"), false, scores, labels));
+        Assert.True(AveragedInFloat32(Loss(null, null, "mean"), true, many, manyLabels));
+        Assert.True(AveragedInFloat32(Loss(w, 0L, "mean"), true, many, manyLabels));
+        Assert.True(AveragedInFloat32(crossEntropy, true, many, manyLabels));
+        Assert.True(CudaAsOnnxRuntime(Loss(null, null, "sum"), [2L, 3L], [2L]));
+    }
+
+    [Fact]
     public void TestTheCudaSetReadsATensorStraightBackOutOfItsOptionalWithoutTheOptional()
     {
         var x = InputTensor<float32>("x", rank: 1);
@@ -1080,6 +1102,16 @@ public class KernelWorkaroundPassTests
         => AllNodes(Session(g, KernelWorkaroundRegistry.OnnxRuntimeCuda)).Where(n => n.OpType == NEGATIVE_LOG_LIKELIHOOD_LOSS)
                .All(n => n.Attributes.Any(a => a.Name == "reduction" && System.Text.Encoding.UTF8.GetString(a.S) == "none"))
            && ShapedRun(g, Session(g, KernelWorkaroundRegistry.OnnxRuntime), x).SequenceEqual(ShapedRun(g, Session(g, KernelWorkaroundRegistry.OnnxRuntimeCuda), x));
+
+    private static bool AveragedInFloat32(InternalComputationGraph g, bool stated, params TensorData[] x)
+    {
+        ModelProto Built(KernelWorkaroundSet set) => FastOnnxModelBuilder.BuildInternalOnnxModel(g, prepForOnnx: true, inputDims: stated ? [.. x.Select(d => d.Shape.Dims)] : null, workarounds: set);
+        var (host, cuda) = (Built(KernelWorkaroundRegistry.OnnxRuntime), Built(KernelWorkaroundRegistry.OnnxRuntimeCuda));
+        return AllNodes(cuda).Where(n => n.OpType == NEGATIVE_LOG_LIKELIHOOD_LOSS)
+                   .All(n => n.Attributes.Any(a => a.Name == "reduction" && System.Text.Encoding.UTF8.GetString(a.S) == "none"))
+               && AllNodes(cuda).Count(n => n.OpType == CAST) > AllNodes(host).Count(n => n.OpType == CAST)
+               && ShapedRun(g, host, x).SequenceEqual(ShapedRun(g, cuda, x));
+    }
 
     private static bool CudaAsOnnxRuntime(InternalComputationGraph g, params long[][] dims)
     {

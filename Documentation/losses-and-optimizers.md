@@ -79,11 +79,13 @@ Knobs are **build-time C# arguments** on two extra methods:
   target outside it is the backend's to handle: ONNX Runtime's CPU kernel raises its own error for
   one of `C` or above and reads a negative `t` as class `C + t`, and its CUDA kernel does not check
   and can count one of `C` or above as a zero loss ([#501](https://github.com/Shorokoo/Shorokoo/issues/501)).
-- **Half precision on CUDA** (CE, NLL over `float16` scores): ONNX Runtime's CUDA kernel divides a
-  `Mean` by the count of targets (or the sum of their weights) in `float16`, which counts only to
-  65504, so over more targets than that the loss comes out as `0` (CE) or `NaN` (NLL); the host
-  computes it, and the gradient is right on both
-  ([#553](https://github.com/Shorokoo/Shorokoo/issues/553)).
+- **Half precision on CUDA** (CE, NLL over `float16` scores): a CUDA session averages a `Mean`
+  loss in `float32` — the loss of each target cast up, summed and divided by the count of targets
+  (or the sum of their weights) in `float32`, and the mean cast back to `float16` — since
+  ONNX Runtime's CUDA kernel would divide in `float16`, which counts only to 65504
+  ([debugging.md](debugging.md#the-cuda-set),
+  [#553](https://github.com/Shorokoo/Shorokoo/issues/553)). The mean is right over any number of
+  targets, on the host and on a card, and so is its gradient.
 - **SmoothL1 ↔ Huber**: `SmoothL1(e; β) = HuberLoss(δ = β) / β`. Huber's `delta` is a
   live, schedulable `[Hyper]`; SmoothL1's `beta` is baked.
 - **PoissonNLL**: the Keras `Poisson` form is

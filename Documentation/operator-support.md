@@ -465,6 +465,9 @@ shape and type.
    CPU kernel raises its own error for one of `C` or above and reads a negative
    `t` as class `C + t`, and its CUDA kernel does not check and can count one of
    `C` or above as a zero loss ([#501](https://github.com/Shorokoo/Shorokoo/issues/501)).
+   On a card, a `mean` over `float16` scores is averaged in `float32` and cast
+   back, since the CUDA kernel's `float16` count of the targets ends at 65504
+   ([#553](https://github.com/Shorokoo/Shorokoo/issues/553)).
 
 ## MatMul & linear algebra
 

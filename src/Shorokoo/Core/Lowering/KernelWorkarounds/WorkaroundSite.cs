@@ -28,6 +28,7 @@ internal sealed class WorkaroundSite
     private readonly bool[] outsideBody;
     private readonly IReadOnlyDictionary<FastTensorKey, FastNode> producers;
     private readonly IReadOnlySet<FastTensorKey> read;
+    private readonly IReadOnlySet<FastTensorKey>? graphOutputsOnly;
     private readonly SortedDictionary<int, ConstantRead> constantsRead = [];
     private readonly bool shapesAreConcrete;
     private readonly bool inLoopBody;
@@ -42,10 +43,12 @@ internal sealed class WorkaroundSite
         bool[] outsideBody,
         IReadOnlyDictionary<FastTensorKey, FastNode> producers,
         IReadOnlySet<FastTensorKey> read,
+        IReadOnlySet<FastTensorKey>? graphOutputsOnly,
         bool shapesAreConcrete,
         bool inLoopBody,
         IReadOnlyDictionary<FastTensorKey, Shape>? shapes)
     {
+        this.graphOutputsOnly = graphOutputsOnly;
         this.outsideBody = outsideBody;
         this.shapesAreConcrete = shapesAreConcrete && !inLoopBody;
         this.inLoopBody = inLoopBody;
@@ -66,13 +69,16 @@ internal sealed class WorkaroundSite
     /// input's dimensions stated, <paramref name="inLoopBody"/> is <see cref="IsInLoopBody"/>, and
     /// <paramref name="outsideBody"/> tells, of an input, <see cref="IsFromOutsideBody"/>; without
     /// it, no input is. <paramref name="shapes"/> are the values whose dimensions follow from the
-    /// graph inputs' (<see cref="ShapeOf"/>).
+    /// graph inputs' (<see cref="ShapeOf"/>). <paramref name="graphOutputsOnly"/> are the values
+    /// the graph's outputs read and nothing else does (<see cref="IsOutputReadOnlyAsAGraphOutput"/>),
+    /// null in a function's body, whose outputs its caller reads.
     /// </summary>
     internal static WorkaroundSite? TryCreate(
         FastNode node,
         IReadOnlyDictionary<FastTensorKey, FastTensorInfo> tensorInfo,
         IReadOnlyDictionary<FastTensorKey, FastNode> producers,
         IReadOnlySet<FastTensorKey> read,
+        IReadOnlySet<FastTensorKey>? graphOutputsOnly = null,
         bool shapesAreConcrete = false,
         bool inLoopBody = false,
         Func<FastTensorKey, bool>? outsideBody = null,
@@ -97,7 +103,7 @@ internal sealed class WorkaroundSite
                 outputs[i] = (info.DType, info.Rank);
 
         bool[] outside = [.. inputKeys.Select(k => k is { } key && outsideBody is not null && outsideBody(key))];
-        return new WorkaroundSite(node, inputKeys, outputKeys, inputs, outputs, outside, producers, read, shapesAreConcrete, inLoopBody, shapes);
+        return new WorkaroundSite(node, inputKeys, outputKeys, inputs, outputs, outside, producers, read, graphOutputsOnly, shapesAreConcrete, inLoopBody, shapes);
     }
 
     /// <summary>
@@ -186,6 +192,11 @@ internal sealed class WorkaroundSite
 
     /// <summary>Whether anything in the graph reads output slot <paramref name="slot"/>.</summary>
     public bool IsOutputUsed(int slot) => slot < outputKeys.Length && outputKeys[slot] is { } key && read.Contains(key);
+
+    /// <summary>Whether output slot <paramref name="slot"/> is an output of the model's graph and
+    /// nothing else reads it. False in a function's body, whose outputs its caller reads.</summary>
+    public bool IsOutputReadOnlyAsAGraphOutput(int slot)
+        => slot < outputKeys.Length && outputKeys[slot] is { } key && graphOutputsOnly is not null && graphOutputsOnly.Contains(key);
 
     /// <summary>
     /// The value of input slot <paramref name="slot"/> when a <c>Constant</c> produces it; null

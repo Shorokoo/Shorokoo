@@ -100,6 +100,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 var producers = graph.BuildProducerByOutputMap();
                 var outsideBody = workaround.ReadsBodies ? OutsideBody(graph, producers, tensorInfo, isFunctionBody) : null;
                 var read = ReadKeys(graph);
+                var graphOutputsOnly = isFunctionBody ? null : ReadOnlyAsGraphOutputs(graph);
                 var plans = new Dictionary<string, List<CachedPlan>>(StringComparer.Ordinal);
                 var rewired = new Dictionary<FastTensorKey, FastTensorKey>();
                 var newNodes = new List<FastNode>(graph.Nodes.Count);
@@ -125,7 +126,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
                     var looked = workaround.OpCodes.Contains(node.OpCode) ? LookedAt(workaround, node, producers) : null;
                     if (looked is null
-                        || WorkaroundSite.TryCreate(looked, tensorInfo, producers, read, shapesAreConcrete, inLoopBody: loops > 0, outsideBody: outsideBody?.Invoke(node), shapes: workaround.ReadsShapes ? shapes : null) is not { } site
+                        || WorkaroundSite.TryCreate(looked, tensorInfo, producers, read, graphOutputsOnly, shapesAreConcrete, inLoopBody: loops > 0, outsideBody: outsideBody?.Invoke(node), shapes: workaround.ReadsShapes ? shapes : null) is not { } site
                         || !Applies(workaround, site, node))
                     {
                         newNodes.Add(node);
@@ -612,6 +613,19 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
             built[0] = OnnxOp.Identity(built[0], null);
             return new WorkaroundPlan(FastSplice.Build(standIns, [.. built], typed: true)!, slots);
+        }
+
+        /// <summary>The values the graph's outputs read and no other node does.</summary>
+        private static HashSet<FastTensorKey> ReadOnlyAsGraphOutputs(InternalComputationGraph graph)
+        {
+            var outputs = new HashSet<FastTensorKey>();
+            var elsewhere = new HashSet<FastTensorKey>();
+            foreach (var node in graph.Nodes)
+                foreach (var group in node.FullInputs.Values)
+                    foreach (var key in group)
+                        if (key is { IsEmpty: false } k) (InternalOpCodes.IsGraphOutputOp(node.OpCode) ? outputs : elsewhere).Add(k);
+            outputs.ExceptWith(elsewhere);
+            return outputs;
         }
 
         /// <summary>Every tensor key some node of <paramref name="graph"/> reads.</summary>

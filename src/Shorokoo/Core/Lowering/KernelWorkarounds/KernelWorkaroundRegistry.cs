@@ -41,7 +41,8 @@ internal static class KernelWorkaroundRegistry
     /// bfloat16 reducing scatters narrowed to the bfloat16 <c>ScatterND</c> the provider has no
     /// kernel for, in their place, so the float32 call it builds runs on the card. Then the calls
     /// the provider runs on the CPU over values from outside their body, which covers such calls
-    /// the earlier rewrites build too; then a tensor read straight back out of its <c>Optional</c>, which the provider cannot run; then
+    /// the earlier rewrites build too; then a tensor read straight back out of its <c>Optional</c>, which the provider cannot run, and every
+    /// other <c>Optional</c> of a tensor built in a scope of its own; then
     /// the summed or averaged losses written out as the reductions they are; then the reductions
     /// with <c>keepdims</c> 0 over an input that may be empty, after every rewrite that builds a
     /// reduction; then the calls the provider takes and has no kernel for, kept on
@@ -65,6 +66,7 @@ internal static class KernelWorkaroundRegistry
     [
         new CudaHostFallbackBodyInputWorkaround(),
         new CudaOptionalRoundTripWorkaround(),
+        new CudaOptionalInNestedScopeWorkaround(),
         new CudaLossReductionWorkaround(),
         new CudaReduceEmptyAxisWorkaround(),
         new CudaNoKernelFormOnHostWorkaround(),

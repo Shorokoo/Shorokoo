@@ -465,6 +465,9 @@ shape and type.
    CPU kernel raises its own error for one of `C` or above and reads a negative
    `t` as class `C + t`, and its CUDA kernel does not check and can count one of
    `C` or above as a zero loss ([#501](https://github.com/Shorokoo/Shorokoo/issues/501)).
+   On a card, a `mean` over `float16` scores is averaged in `float32` and cast
+   back, since the CUDA kernel's `float16` count of the targets ends at 65504
+   ([#553](https://github.com/Shorokoo/Shorokoo/issues/553)).
 
 ## MatMul & linear algebra
 
@@ -658,7 +661,7 @@ shape and type.
 | Op | Build & run | QEE | Gradient |
 |---|---|---|---|
 | ConcatFromSequence | ✅ | ✅ | ✅ |
-| Optional | ✅ | ✅ | ✅ |
+| Optional | ✅ [5] | ✅ | ✅ |
 | OptionalGetElement | 🟡 [1] | ✅ | ✅ |
 | OptionalHasElement | 🟡 [1] | ✅ | N/A (bool output) |
 | SequenceAt | ✅ | ✅ | ✅ |
@@ -677,6 +680,11 @@ shape and type.
 3. ONNX Runtime applies `keepdims` even when a `split` input is given (the spec
    ignores it then) and fails on chunk extents ≠ 1; QEE follows the spec.
 4. The `split` input is non-differentiable.
+5. ONNX admits no bfloat16 element in an optional or a sequence, so ONNX Runtime refuses
+   an `Optional` or a `SequenceConstruct` of a bfloat16 tensor as an invalid model, on the
+   host and on a card alike; on a card the refusal can name `SequenceConstruct`, which the
+   CUDA set reads an element straight back out of its `Optional` through
+   ([limitations.md](limitations.md#on-a-card-an-optional-of-a-computed-tensor-is-rewritten)).
 
 ## Strings & text
 

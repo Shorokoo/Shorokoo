@@ -1020,7 +1020,7 @@ public class GpuExecutionTests
     // A resident AdamW run of WideLinearModel, shrinking as under a budget: the plain step holds the
     // new state beside the consumed one, two of its three parameter-sized values at once on the card
     // (the third is written after a temporary goes).
-    [CudaFact(needsProcessFigure: true)]
+    [CudaFact]
     public void CudaProvider_WritingAStepsStateOverWhatItConsumedTakesMostOfTheStateOffTheCardsPeak()
     {
         DeviceMemory.ResetPeak();
@@ -1039,7 +1039,7 @@ public class GpuExecutionTests
         }
     }
 
-    [CudaFact(needsProcessFigure: true)]
+    [CudaFact]
     public void CudaProvider_PlacingAStepsStateOverWhatItConsumedTakesTheStateOffTheCardsPeakAsAliasingDoes()
     {
         DeviceMemory.ResetPeak();
@@ -1150,7 +1150,7 @@ public class GpuExecutionTests
     /// use its weights and each output's own bytes once a run that hands its memory back is over,
     /// nothing beyond what is in use, and its weights alone once the outputs are let go of.
     /// </summary>
-    [CudaFact(needsProcessFigure: true)]
+    [CudaFact]
     public void CudaProvider_AKeptOutputHoldsOnlyItsOwnBytesOnTheCardAndNothingOfItsSessionsArena()
     {
         const long MiB = 1024 * 1024;
@@ -1195,7 +1195,7 @@ public class GpuExecutionTests
     /// allocator holds exactly its bytes more while it is kept and nothing more once it is let go,
     /// and the card holds less than the output twice over for the run's every block.
     /// </summary>
-    [CudaFact(needsProcessFigure: true)]
+    [CudaFact]
     public void CudaProvider_AnOutputWhoseShapeTheRunLearnsIsOnTheCardOnceAsTheBlockItsSessionWroteItInto()
     {
         using var ctx = new ComputeContext();
@@ -1218,7 +1218,7 @@ public class GpuExecutionTests
     /// has, and hands them back to the card as a run that hands back its memory ends, or as the
     /// program asks.
     /// </summary>
-    [CudaFact(needsProcessFigure: true)]
+    [CudaFact]
     public void CudaProvider_TheCardsAllocatorHandsBackWhatNoTensorUsesAsARunThatHandsBackItsMemoryEndsOrTheProgramAsks()
     {
         const long MiB = 1024 * 1024;
@@ -1505,8 +1505,62 @@ public class GpuExecutionTests
     public void CudaProvider_AnOptionalOfAComputedTensorRunsOnTheCard()
     {
         var x = InputTensor<float32>("x", rank: 1);
-        Assert.Equal([2f, 4f, 6f], OnTheCard(x, OnnxOp.OptionalGetElement(OnnxOp.Optional(OnnxOp.Add(x, x), DataStructure.Tensor, DType.Float32)),
-            TensorData([3L], [1f, 2f, 3f])).CopyMemory<float>());
+        var data = TensorData([3L], [1f, 2f, 3f]);
+        Variable Opt(Variable v) => OnnxOp.Optional(v, DataStructure.Tensor, DType.Float32);
+        var none = OnnxOp.Optional(null, DataStructure.Tensor, DType.Float32);
+        var positive = ((Tensor<bit>)OnnxOp.Greater(OnnxOp.ReduceSum(x, null, false, null), Scalar(0f))).Scalar();
+        float[] Run(Variable output) => OnTheCard(x, output, data).CopyMemory<float>();
+        Variable InBranch(Func<Variable> optional)
+        {
+            var open = OnnxOp.IfOpen(positive);
+            return OnnxOp.OptionalGetElement(OnnxOp.IfClose([optional()], [none], open)[0]);
+        }
+        var sum = OnnxOp.Add(x, x);
+        Assert.Equal([2f, 4f, 6f], Run(OnnxOp.OptionalGetElement(Opt(sum))));
+        Assert.Equal([2f, 4f, 6f], Run(OnnxOp.OptionalGetElement(OnnxOp.Identity(Opt(sum), null))));
+        Assert.Equal([4f, 16f, 36f], Run(OnnxOp.Mul(OnnxOp.OptionalGetElement(OnnxOp.Identity(Opt(sum), null)), sum)));
+        Assert.Equal([2f, 4f, 6f], Run(InBranch(() => Opt(OnnxOp.Add(x, x)))));
+        Assert.Equal([2f, 4f, 6f], Run(OnnxOp.OptionalGetElement(Shorokoo.Core.Nodes.Ops.IfElse(positive, Opt(OnnxOp.Add(x, x)), none))));
+        Assert.Equal([2f, 4f, 6f], Run(InBranch(() => Opt(OnnxOp.SequenceAt(OnnxOp.SequenceConstruct(OnnxOp.Add(x, x)), Scalar(0L))))));
+    }
+
+    [CudaFact]
+    public void CudaProvider_AnOptionalOfAComputedTensorRunsOnTheCardAtEveryOptimization()
+    {
+        var x = InputTensor<float32>("x", rank: 1);
+        Variable Opt(Variable v) => OnnxOp.Optional(v, DataStructure.Tensor, DType.Float32);
+        Variable Read(Variable v) => OnnxOp.OptionalGetElement(OnnxOp.Identity(Opt(v), null));
+        var sum = OnnxOp.Add(x, x);
+        Variable looped = sum;
+        foreach (var _ in LoopAPI.Iterate(Scalar(2L)))
+            looped = Read(OnnxOp.Add(looped, x));
+        var none = OnnxOp.Optional(null, DataStructure.Tensor, DType.Float32);
+        var positive = ((Tensor<bit>)OnnxOp.Greater(OnnxOp.ReduceSum(x, null, false, null), Scalar(0f))).Scalar();
+        var open = OnnxOp.IfOpen(positive);
+        var returned = OnnxOp.OptionalGetElement(OnnxOp.IfClose([Opt(OnnxOp.Add(x, x))], [none], open)[0]);
+        float[][] Four(params float[] e) => [e, e, e, e];
+        Assert.Equal(Four(2f, 4f, 6f), AtEveryOptimization(new([x], [Read(sum)])));
+        Assert.Equal(Four(4f, 16f, 36f), AtEveryOptimization(new([x], [OnnxOp.Mul(Read(sum), sum)])));
+        Assert.Equal(Four(4f, 8f, 12f), AtEveryOptimization(new([x], [looped])));
+        Assert.Equal(Four(2f, 4f, 6f), AtEveryOptimization(new([x], [Opt(OnnxOp.Neg(x)), Read(sum)])));
+        Assert.Equal(Four(-1f, -2f, -3f), AtEveryOptimization(new([x], [OnnxOp.Neg(x), OnnxOp.OptionalGetElement(Opt(OnnxOp.Neg(x)))])));
+        Assert.Equal(Four(2f, 4f, 6f), AtEveryOptimization(new([x], [returned])));
+        Assert.Equal(Four(2f, 4f, 6f), AtEveryOptimization(new([x], [OnnxOp.OptionalGetElement(Shorokoo.Core.Nodes.Ops.IfElse(positive, Opt(OnnxOp.Add(x, x)), none))])));
+        Assert.Equal(Four(2f, 4f, 6f), AtEveryOptimization(new([x], [sum, Opt(sum)])));
+        Assert.Equal(Four(2f, 4f, 6f), AtEveryOptimization(new([x], [Opt(sum)])));
+    }
+
+    private static float[][] AtEveryOptimization(InternalComputationGraph g)
+    {
+        ShorokooGraphOptimization[] levels = [ShorokooGraphOptimization.DisableAll, ShorokooGraphOptimization.EnableBasic,
+            ShorokooGraphOptimization.EnableAll, ShorokooGraphOptimization.TrainingStep];
+        using var context = new ComputeContext();
+        return [.. levels.Select(level =>
+        {
+            using var compiled = context.Compile(g, level);
+            var outputs = compiled.Execute(TensorData([3L], [1f, 2f, 3f]).Shared());
+            return outputs[^1].ToTensorData().CopyMemory<float>();
+        })];
     }
 
     [CudaFact]
@@ -1613,8 +1667,7 @@ public class GpuExecutionTests
         Assert.InRange(logSoftmaxError, 1e-12, 1e-7);
     }
 
-    // Shorokoo/Shorokoo#553: the card divides a half-precision mean by a count that overflows float16.
-    [CudaFact(Skip = "Shorokoo/Shorokoo#553")]
+    [CudaFact]
     public void CudaProvider_AHalfPrecisionMeanLossOverMoreSamplesThanFloat16CountsToIsTheMeanOnTheCard()
     {
         var scores = TensorData(DType.Float16, [70000L, 2L], [.. Enumerable.Repeat((object)(Shorokoo.Core.Backends.Float16)(-1f), 140000)]);
@@ -1815,7 +1868,7 @@ public class GpuExecutionTests
     /// The card's figure for this process alone, which #406 asked for: a gigabyte held on the card
     /// is in it, and it is a part of what the card reports across every process.
     /// </summary>
-    [CudaFact(needsProcessFigure: true)]
+    [CudaFact]
     public void CudaProvider_TheProcessFigureHoldsWhatThisProcessPutOnTheCard()
     {
         using var ctx = new ComputeContext();

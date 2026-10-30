@@ -1154,6 +1154,25 @@ public class CoreUtilsCoverageTests
         Assert.Equal((0L, 0L), (DeviceMemory.PeakUsedBytes, DeviceMemory.PeakProcessBytes));
     }
 
+    [Fact]
+    public void TestProcessDeviceMemoryParsesAPciBusIdAndMatchesExactlyOneAdapter()
+    {
+        Assert.Equal((1u, 0u, 0u), ProcessDeviceMemory.ParsePciBusId("0000:01:00.0"));
+        Assert.Equal((0x0Au, 0x1Fu, 7u), ProcessDeviceMemory.ParsePciBusId("00000000:0A:1F.7"));
+        Assert.Equal((0xC1u, 2u, 1u), ProcessDeviceMemory.ParsePciBusId("0001:c1:02.1"));
+        Assert.Null(ProcessDeviceMemory.ParsePciBusId("01:00.0"));
+        Assert.Null(ProcessDeviceMemory.ParsePciBusId("0000:01:00"));
+        Assert.Null(ProcessDeviceMemory.ParsePciBusId("0000:0G:00.0"));
+        Assert.Null(ProcessDeviceMemory.ParsePciBusId("0000:01::0"));
+        Assert.Null(ProcessDeviceMemory.ParsePciBusId(""));
+
+        (uint, uint, uint)? card = (1, 0, 0), other = (1, 0, 1), silent = null;
+        Assert.Equal(1, ProcessDeviceMemory.UniqueMatch([other, card, silent], (1, 0, 0)));
+        Assert.Null(ProcessDeviceMemory.UniqueMatch([other, silent], (1, 0, 0)));
+        Assert.Null(ProcessDeviceMemory.UniqueMatch([card, other, card], (1, 0, 0)));
+        Assert.Null(ProcessDeviceMemory.UniqueMatch([], (1, 0, 0)));
+    }
+
     private static byte[] DoublingModel()
     {
         var x = InputTensor<float32>("x", rank: 1);
